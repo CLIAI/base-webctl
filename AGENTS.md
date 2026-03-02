@@ -1,1 +1,2 @@
 * `ls ai-docs/` check `ai-docs/` to know what documents you may want to read when needed or were to add documents, instructions for the future
+    * ai-docs/ files should be concise information dense assuming super literate reader so maximally optimized compressed language, symbols, code, etc, with descriptive titles so one can identify if wants to read it, i.e. if content is applicable to their goals, based on title.
