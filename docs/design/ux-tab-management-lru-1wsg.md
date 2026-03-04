@@ -135,11 +135,13 @@ same tab (barring external interference).
 When multiple tabs correspond to the same canonical resource, the safest
 strategy is:
 
-1. Close **all** matching tabs.
-2. Open **one** fresh tab at the canonical URL.
+1. Open **one** fresh tab at the canonical URL.
+2. Close **all** previously matching tabs.
 
-This avoids the complexity of choosing which duplicate has the "best" state
-(some may have stale DOM, pending navigations, or detached frames).
+The fresh tab is opened **before** closing duplicates to guarantee at least one
+tab remains open at all times (see §7 Safe Close Invariant). This avoids the
+complexity of choosing which duplicate has the "best" state (some may have
+stale DOM, pending navigations, or detached frames).
 
 ```python
 async def deduplicate_tabs(
@@ -147,13 +149,21 @@ async def deduplicate_tabs(
     matches: list[TargetInfo],
     canonical_url: str,
 ) -> TargetInfo:
-    """Close all duplicates and open a single fresh tab."""
+    """Close all duplicates and open a single fresh tab.
+
+    Opens the fresh tab BEFORE closing duplicates to guarantee at least
+    one tab remains open at all times (see §7 Safe Close Invariant).
+    """
+    # Open fresh tab first — ensures we never hit the last-tab invariant
+    result = await cdp.send("Target.createTarget", {"url": canonical_url})
+    new_target = await get_target_info(cdp, result["targetId"])
+    touch_activity(result["targetId"])
+
+    # Now safe to close all duplicates
     for m in matches:
         await safe_close_tab(cdp, m["targetId"])
 
-    result = await cdp.send("Target.createTarget", {"url": canonical_url})
-    touch_activity(result["targetId"])
-    return await get_target_info(cdp, result["targetId"])
+    return new_target
 ```
 
 ### When "pick best" is acceptable
@@ -306,35 +316,50 @@ Key properties:
 
 ---
 
-## 5. Count-Based + Time-Based LRU Cleanup
+## 5. Tiered LRU Cleanup
 
 Cleanup runs automatically after each command unless suppressed by `--force`
-(see section 7). Two eviction criteria work together:
+(see section 7). Eviction uses a **tiered age-count policy**: a list of
+`(max_age, max_count)` pairs that form a decay curve. More tabs are allowed
+if they are fresh; fewer are tolerated as they age.
 
-### Count-based eviction
+### Tiered policy
 
-When the number of automation-managed tabs exceeds `MAX_TABS` (default: 10),
-evict the least-recently-used tabs until the count is at or below the limit.
+The policy is a list of `(age_threshold, max_tabs)` pairs, sorted by age
+ascending. Each tier says: "tabs older than `age_threshold` seconds are
+allowed up to `max_tabs` count." Tabs exceeding any tier's limit are evicted
+oldest-first.
 
-### Time-based eviction
+Default tiers:
 
-Any tab whose `last_active` timestamp is older than `MAX_AGE` (default: 4
-hours) is eligible for eviction regardless of count.
+| Age threshold | Max tabs | Meaning                              |
+|---------------|----------|--------------------------------------|
+| 10 min        | 15       | Up to 15 tabs younger than 10 min    |
+| 30 min        | 10       | Up to 10 tabs younger than 30 min    |
+| 2 hours       | 5        | Up to 5 tabs younger than 2 hours    |
+| 8 hours       | 2        | Up to 2 tabs younger than 8 hours    |
+| ∞ (fallback)  | 0        | Everything older than 8h is evicted  |
 
-### Combined algorithm
+This means a burst of 15 fresh tabs is fine, but they must decay to 10 within
+30 minutes, 5 within 2 hours, etc.
+
+### Algorithm
 
 ```python
 import time
 
-DEFAULT_MAX_TABS = 10
-DEFAULT_MAX_AGE_SECONDS = 4 * 3600  # 4 hours
+DEFAULT_TIERS = [
+    (10 * 60,    15),   # 10 min → max 15
+    (30 * 60,    10),   # 30 min → max 10
+    (2 * 3600,    5),   # 2h     → max 5
+    (8 * 3600,    2),   # 8h     → max 2
+]
 
 async def lru_cleanup(
     cdp: CDPSession,
-    max_tabs: int = DEFAULT_MAX_TABS,
-    max_age: int = DEFAULT_MAX_AGE_SECONDS,
+    tiers: list[tuple[int, int]] = DEFAULT_TIERS,
 ) -> int:
-    """Evict stale and excess tabs. Returns count of closed tabs."""
+    """Evict tabs using tiered age-count policy. Returns count closed."""
     ledger = load_activity_ledger()
     now = int(time.time())
     tabs = ledger.get("tabs", {})
@@ -344,29 +369,52 @@ async def lru_cleanup(
     for tid, info in tabs.items():
         if is_protected(tid, info):
             continue
-        evictable.append((tid, info))
+        age = now - info.get("last_active", 0)
+        evictable.append((tid, info, age))
+
+    # Sort by age descending (oldest first = evict first)
+    evictable.sort(key=lambda x: x[2], reverse=True)
+
+    to_close = set()
+
+    # Apply each tier: count tabs within that age band
+    for max_age, max_count in sorted(tiers, key=lambda t: t[0]):
+        within_tier = [
+            (tid, info, age) for tid, info, age in evictable
+            if age <= max_age and tid not in to_close
+        ]
+        # All tabs older than this tier's threshold that haven't been
+        # claimed by a tighter tier are candidates for eviction
+        older_than_tier = [
+            (tid, info, age) for tid, info, age in evictable
+            if age > max_age and tid not in to_close
+        ]
+        for tid, info, age in older_than_tier:
+            to_close.add(tid)
+
+    # Fallback: evict anything not covered by any tier
+    max_tier_age = max(t[0] for t in tiers) if tiers else 0
+    for tid, info, age in evictable:
+        if age > max_tier_age:
+            to_close.add(tid)
+
+    # Within each tier, if count exceeds max, evict oldest
+    for max_age, max_count in sorted(tiers, key=lambda t: t[0]):
+        within = [
+            (tid, info, age) for tid, info, age in evictable
+            if age <= max_age and tid not in to_close
+        ]
+        if len(within) > max_count:
+            # Sort oldest first within this tier
+            within.sort(key=lambda x: x[2], reverse=True)
+            for tid, info, age in within[: len(within) - max_count]:
+                to_close.add(tid)
 
     closed = 0
-
-    # Phase 1: Time-based — close anything older than max_age
-    time_expired = [
-        (tid, info) for tid, info in evictable
-        if (now - info.get("last_active", 0)) > max_age
-    ]
-    for tid, info in time_expired:
+    for tid in to_close:
         await safe_close_tab(cdp, tid)
         tabs.pop(tid, None)
-        evictable = [(t, i) for t, i in evictable if t != tid]
         closed += 1
-
-    # Phase 2: Count-based — if still over limit, evict oldest first
-    if len(evictable) > max_tabs:
-        evictable.sort(key=lambda x: x[1].get("last_active", 0))
-        excess = len(evictable) - max_tabs
-        for tid, info in evictable[:excess]:
-            await safe_close_tab(cdp, tid)
-            tabs.pop(tid, None)
-            closed += 1
 
     save_ledger(ledger)
     return closed
@@ -374,15 +422,18 @@ async def lru_cleanup(
 
 ### Configuration
 
-Limits are configurable via environment variables and CLI flags:
+Tiers are configurable via environment variable (JSON) or CLI flag:
 
 ```bash
-# Environment variables
-export WEBCTL_MAX_TABS=15
-export WEBCTL_MAX_AGE=7200    # 2 hours in seconds
+# Environment variable — JSON array of [age_seconds, max_count] pairs
+export WEBCTL_LRU_TIERS='[[600,15],[1800,10],[7200,5],[28800,2]]'
 
-# CLI flags (per-invocation override)
-webctl read --max-tabs 20 --max-age 1h "https://example.com/page"
+# CLI flag (per-invocation override)
+webctl read --lru-tiers '[[300,20],[3600,10]]' "https://example.com/page"
+
+# Or use simple max-tabs / max-age for single-tier behavior
+export WEBCTL_MAX_TABS=10
+export WEBCTL_MAX_AGE=7200
 ```
 
 ---
@@ -419,6 +470,13 @@ def is_protected(target_id: str, info: dict) -> bool:
 
 Tabs not present in the ledger are assumed user-owned and are **never touched**
 by any cleanup or deduplication logic.
+
+**Important**: This protection extends to `ensureCorrectTab()` deduplication.
+When the 4-path flow discovers multiple tabs matching a canonical ID, it must
+filter out tabs absent from the activity ledger before closing duplicates.
+A user who manually opened a matching URL must not have their tab closed by
+automation. The dedup logic should only close tabs it owns (i.e., those
+present in the ledger).
 
 ---
 
@@ -551,10 +609,13 @@ The CLI may be killed at any time (user Ctrl-C, OOM killer, system shutdown).
 A corrupted ledger would break all subsequent invocations. The
 write-to-temp + rename pattern eliminates this risk at near-zero cost.
 
-**Why count + time eviction instead of just one?**
-Count-only eviction allows ancient tabs to persist if the count is under the
-limit. Time-only eviction allows unbounded tab accumulation during a burst of
-commands. The combination handles both steady-state and burst workloads.
+**Why a tiered age-count policy instead of a single threshold?**
+A single `MAX_TABS` allows ancient tabs to persist if the count is low. A
+single `MAX_AGE` allows unbounded accumulation during a burst. Tiered policies
+`[(age, count), ...]` form a decay curve: fresh bursts are tolerated (15 tabs
+under 10 min), but must decay over time (5 tabs after 2 hours). This matches
+real usage patterns where active sessions produce many tabs briefly, while
+long-idle tabs are safe to reclaim.
 
 **Why never close user-owned tabs?**
 The CLI operates as a guest in the user's browser. Closing tabs the user
