@@ -23,11 +23,12 @@ Modern JavaScript tooling relies on deep dependency trees. A single `npm install
 can pull hundreds of transitive packages, each one a potential vector for supply
 chain attacks, license conflicts, version drift, and build breakage. For a CLI
 tool that operates on sensitive data (browser sessions, credentials, page
-content), every external dependency widens the attack surface and adds
-operational friction.
+content), every external dependency widens the attack surface, reduces
+portability, and adds operational friction.
 
-The zero-dependency philosophy eliminates this entire class of risk by building
-exclusively on the Node.js standard library.
+The zero-dependency philosophy eliminates these risks — security, portability,
+and operational complexity — by building exclusively on the Node.js standard
+library.
 
 ## Core Principle
 
@@ -38,6 +39,12 @@ and other standard library modules.
 
 The result is a tool that is immediately runnable on any machine with Node.js
 installed. There is no `package-lock.json`, no `node_modules/`, no install step.
+
+> **Note on TypeScript:** The "no transpilation" stance reflects the current
+> design. If TypeScript were adopted in the future, it would introduce a build
+> step (`tsc`) but no runtime dependencies — the zero-dependency principle at
+> runtime would still hold. This remains an open question; any adoption would
+> require a separate design decision documenting the trade-offs.
 
 ## Rationale
 
@@ -80,21 +87,29 @@ The entire codebase is self-contained. A security reviewer can audit every line
 of code that executes, without tracing into external packages. The attack
 surface is bounded by the repository itself.
 
+* **Trivial SBOM** — The software bill of materials is the repository contents
+  plus the Node.js version. No transitive dependency graph to enumerate.
+* **Reproducible from source** — Cloning the repository is sufficient to
+  reproduce the exact runtime artifact. No registry state to capture.
+* **Diff-friendly reviews** — All behavioral changes appear in the project's
+  own diff history, never hidden behind a version bump in `package.json`.
+
 ## Inventory of Hand-Implemented Utilities
 
 Rather than pulling in npm packages, the following utilities are implemented
-directly using standard library primitives.
+directly using standard library primitives. See [Implementation
+Guidance](#implementation-guidance) for the planned file layout.
 
-| Utility               | Replaces (typical npm package) | Implementation Approach                     |
-|-----------------------|-------------------------------|---------------------------------------------|
-| WebSocket CDP client  | `ws`                          | Hand-coded RFC 6455 framing over `node:net` / `node:crypto` for masking |
-| HTTP client           | `axios`, `node-fetch`         | Built-in `node:http` / `node:https` modules with redirect following |
-| Dotenv parser         | `dotenv`                      | Line-by-line parser handling quotes, escapes, comments, and export prefixes |
-| XML/Atom parser       | `fast-xml-parser`             | Regex-based extraction for predictable feed structures |
-| YAML serializer       | `js-yaml`                     | Lightweight custom serializer for configuration output |
-| JSONC parser          | `jsonc-parser`                | Comment stripper (line and block comments) followed by `JSON.parse()` |
-| HTML-to-Markdown      | `turndown`                    | Browser-side recursive DOM walker producing Markdown output |
-| Test runner           | `jest`, `mocha`               | Built-in `node:test` module (available since Node.js 18) |
+| Utility               | Replaces (typical npm package) | Planned File          | Implementation Approach                     |
+|-----------------------|-------------------------------|-----------------------|---------------------------------------------|
+| WebSocket CDP client  | `ws`                          | `lib/ws-client.js`    | Hand-coded RFC 6455 framing over `node:net` / `node:crypto` for masking |
+| HTTP client           | `axios`, `node-fetch`         | `lib/http-client.js`  | Built-in `node:http` / `node:https` modules with redirect following |
+| Dotenv parser         | `dotenv`                      | `lib/dotenv.js`       | Line-by-line parser handling quotes, escapes, comments, and export prefixes |
+| XML/Atom parser       | `fast-xml-parser`             | `lib/xml-parser.js`   | Regex-based extraction for predictable feed structures |
+| YAML serializer       | `js-yaml`                     | `lib/yaml-serializer.js` | Lightweight custom serializer for configuration output |
+| JSONC parser          | `jsonc-parser`                | `lib/jsonc.js`        | Comment stripper (line and block comments) followed by `JSON.parse()` |
+| HTML-to-Markdown      | `turndown`                    | `lib/html-to-md.js`   | Browser-side recursive DOM walker producing Markdown output |
+| Test runner           | `jest`, `mocha`               | (built-in)            | Built-in `node:test` module (available since Node.js 18) |
 
 ### WebSocket CDP Client
 
@@ -135,14 +150,24 @@ The parser handles:
 ### JSONC Parser
 
 Configuration files use JSON with Comments (JSONC), which standard
-`JSON.parse()` rejects. The comment stripper removes:
+`JSON.parse()` rejects. The comment stripper must correctly handle:
 
 * Line comments (`// ...`).
 * Block comments (`/* ... */`).
-* Preserves strings containing comment-like sequences (e.g.,
-  `"url": "https://example.com"`).
+* **String preservation** — comment-like sequences inside strings must not be
+  stripped (e.g., `"url": "https://example.com"` contains `//` but is not a
+  comment).
 
-After stripping, standard `JSON.parse()` handles the rest.
+**Implementation approach:** A character-by-character scan with string-tracking
+state is required. Naive regex replacement will break on URLs, escaped quotes,
+and nested patterns. The scanner tracks whether the current position is inside
+a double-quoted string (respecting `\"` escapes) and only recognizes comment
+start sequences (`//` or `/*`) when outside strings. This is a small state
+machine (~30-50 lines), not a regex.
+
+After stripping, standard `JSON.parse()` handles the rest. The stripper should
+produce output with the same line count as the input (replacing comments with
+whitespace) so that `JSON.parse()` error positions remain accurate.
 
 ### XML/Atom Parser
 
@@ -204,6 +229,10 @@ edge cases. Mitigation strategies:
 * Conservative implementations that handle known use cases rather than
   attempting full spec compliance.
 * Clear documentation of known limitations.
+
+The counterpoint: when a vulnerability is found in an npm dependency, you are
+dependent on the maintainer's response time and release cadence. In-house code
+can be patched and deployed immediately.
 
 ## When Exceptions Are Acceptable
 
@@ -310,6 +339,10 @@ issues without the stack traces of third-party code:
 * Parse errors should include the line number and character position.
 * Network errors should include the URL, method, and status code.
 * Protocol errors (WebSocket) should include the frame details.
+* **Sensitive data redaction** — Error messages must not leak authentication
+  tokens, cookie values, or other credentials. Redact `Authorization` headers,
+  session tokens in URLs, and similar sensitive fields before including them in
+  error output.
 
 ### Performance Considerations
 
