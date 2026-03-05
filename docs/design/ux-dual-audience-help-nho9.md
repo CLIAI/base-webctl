@@ -197,7 +197,7 @@ Design rules for the human renderer:
 * Show defaults inline with `[default: ...]`.
 * Omit agent-only metadata entirely.
 
-### `--for-agents` (Agent Renderer)
+### `--help-for-agents` (Agent Renderer)
 
 Produces a structured, information-dense block optimized for LLM consumption.
 Output format is valid YAML (chosen over JSON for readability in LLM context
@@ -271,24 +271,29 @@ experience. Printing "Active browser session required" in `--help` is
 redundant for a human who just ran `webctl session start`, but an agent
 planning a multi-step workflow needs this explicitly.
 
-## `reference-md`: Full CLI Surface Dump
+## `--help-reference-md`: Recursive CLI Reference Dump
 
-For documentation generation and comprehensive agent ingestion, every binary
-supports:
+The `--help-reference-md` flag produces a Markdown document containing structured
+agent metadata, recursively aggregated from the current scope downward.
 
-```
-webctl reference-md
-```
+### Recursive Concatenation Behavior
 
-This emits a single Markdown document containing the `--for-agents` output of
-every subcommand, concatenated under headings. The output is designed to be:
+The flag operates at whatever level it is invoked and concatenates downward:
 
-* Committed to a repository as `docs/cli-reference.md` for version-controlled
-  documentation.
-* Fed wholesale into an agent's context window as a complete capability map.
-* Diffed between versions to detect CLI surface changes.
+* **On a subcommand** (e.g., `webctl upload --help-reference-md`): Emits the
+  `--help-for-agents` output for that subcommand, including metadata for each of
+  its flags.
+* **On a command** (e.g., `webctl session --help-reference-md`): Emits the
+  command's own reference, then recursively appends the `--help-reference-md`
+  output of each of its subcommands.
+* **On the binary itself** (e.g., `webctl --help-reference-md`): Emits the
+  binary-level metadata, then recursively appends the `--help-reference-md`
+  output of every command (which in turn includes their subcommands).
 
-Structure of the output:
+This recursive design means a single invocation at any level produces a
+complete view of everything below it — no separate aggregation step needed.
+
+### Output Structure
 
 ```markdown
 # webctl CLI Reference
@@ -301,7 +306,7 @@ Version: 0.4.1
 \```yaml
 command: upload
 summary: Upload a file to the current conversation
-... (full --for-agents output)
+... (full --help-for-agents output)
 \```
 
 ## send
@@ -313,6 +318,13 @@ summary: Send a text message in the current conversation
 \```
 ```
 
+The output is designed to be:
+
+* Committed to a repository as `docs/cli-reference.md` for version-controlled
+  documentation.
+* Fed wholesale into an agent's context window as a complete capability map.
+* Diffed between versions to detect CLI surface changes.
+
 ### Usage Patterns
 
 * **CI/CD**: Generate on every release, commit to docs, detect breaking changes
@@ -320,6 +332,8 @@ summary: Send a text message in the current conversation
 * **Agent bootstrapping**: Agent reads the full reference once at session start,
   gaining complete knowledge of the CLI surface.
 * **Documentation sites**: Convert to HTML/PDF with standard Markdown tooling.
+* **Scoped exploration**: An agent can request `--help-reference-md` on a specific
+  command subtree rather than ingesting the entire binary surface.
 
 ## Self-Advertising to AI Agents
 
@@ -338,24 +352,24 @@ webctl --help-oneliner
 Output:
 
 ```
-webctl: Browser-automation CLI for web platform interactions (send, upload, extract, monitor). Use --for-agents for structured capability metadata.
+webctl: Browser-automation CLI for web platform interactions (send, upload, extract, monitor). Use --help-for-agents for structured capability metadata.
 ```
 
 Properties of the oneliner:
 
 * Exactly one line, no trailing newline, no ANSI.
-* Format: `<binary-name>: <description>. Use --for-agents for structured capability metadata.`
+* Format: `<binary-name>: <description>. Use --help-for-agents for structured capability metadata.`
 * The trailing sentence is the **self-advertisement**: it tells the agent that
   richer metadata is available and how to get it.
 * Maximum 200 characters for the description portion.
 
 ### Multi-Binary Aggregation
 
-In a toolchain with multiple binaries (e.g., `webctl`, `webctl-monitor`,
-`webctl-extract`), an agent can quickly survey available capabilities:
+In a toolchain with multiple binaries (e.g., `webctl`, `monitor-webctl`,
+`extract-webctl`), an agent can quickly survey available capabilities:
 
 ```bash
-for bin in webctl webctl-monitor webctl-extract; do
+for bin in webctl monitor-webctl extract-webctl; do
     $bin --help-oneliner 2>/dev/null
 done
 ```
@@ -363,13 +377,13 @@ done
 Output:
 
 ```
-webctl: Browser-automation CLI for web platform interactions. Use --for-agents for structured capability metadata.
-webctl-monitor: Long-running watcher for conversation events. Use --for-agents for structured capability metadata.
-webctl-extract: Content extraction and data export from web pages. Use --for-agents for structured capability metadata.
+webctl: Browser-automation CLI for web platform interactions. Use --help-for-agents for structured capability metadata.
+monitor-webctl: Long-running watcher for conversation events. Use --help-for-agents for structured capability metadata.
+extract-webctl: Content extraction and data export from web pages. Use --help-for-agents for structured capability metadata.
 ```
 
 An agent can parse these lines to decide which binaries to query further with
-`--for-agents`, minimizing unnecessary context window usage.
+`--help-for-agents`, minimizing unnecessary context window usage.
 
 ### Discovery Protocol
 
@@ -378,9 +392,9 @@ The recommended agent discovery flow:
 1. **Scan**: Run `--help-oneliner` on all binaries in PATH matching a known
    prefix pattern. Cost: 1 line per binary.
 2. **Select**: Identify relevant binaries based on oneliner descriptions.
-3. **Detail**: Run `--for-agents` on selected binaries only. Cost: ~50-100
+3. **Detail**: Run `--help-for-agents` on selected binaries only. Cost: ~50-100
    lines per subcommand.
-4. **Full reference**: Optionally run `reference-md` if the agent needs the
+4. **Full reference**: Optionally run `--help-reference-md` if the agent needs the
    complete surface for planning multi-step workflows.
 
 This graduated approach keeps context window usage proportional to actual need.
@@ -389,13 +403,13 @@ This graduated approach keeps context window usage proportional to actual need.
 
 ### Flag Conflicts and Precedence
 
-* `--help` and `--for-agents` are mutually exclusive. If both are passed,
-  `--for-agents` wins (the more specific request takes precedence).
+* `--help` and `--help-for-agents` are mutually exclusive. If both are passed,
+  `--help-for-agents` wins (the more specific request takes precedence).
 * `--help-oneliner` suppresses all other output, including `--help`.
-* `--for-agents` on a parent command (e.g., `webctl --for-agents`) emits a
+* `--help-for-agents` on a parent command (e.g., `webctl --help-for-agents`) emits a
   summary of all subcommands with their capability tags, not the full detail
-  of each. Use `webctl <subcommand> --for-agents` for per-command detail, or
-  `webctl reference-md` for everything.
+  of each. Use `webctl <subcommand> --help-for-agents` for per-command detail, or
+  `webctl --help-reference-md` for a recursive dump of everything.
 
 ### Keeping `HELP_DATA` Honest
 
@@ -412,15 +426,15 @@ agent compute. Mitigation strategies:
 
 ### Output Format Stability
 
-The `--for-agents` YAML schema is versioned. A top-level `schema_version` field
+The `--help-for-agents` YAML schema is versioned. A top-level `schema_version` field
 (e.g., `schema_version: 1`) allows agents to detect and adapt to format
 changes. Breaking changes increment the major version.
 
 ## Summary of Flags
 
-| Flag              | Audience | Output               | Scope               |
-|-------------------|----------|----------------------|----------------------|
-| `--help`          | Human    | Formatted text       | Current command      |
-| `--for-agents`    | Agent    | YAML with full metadata | Current command   |
-| `--help-oneliner` | Agent    | Single description line | Binary-level      |
-| `reference-md`    | Both     | Markdown with YAML blocks | All subcommands  |
+| Flag              | Audience | Output               | Scope                          |
+|-------------------|----------|----------------------|--------------------------------|
+| `--help`          | Human    | Formatted text       | Current command                |
+| `--help-for-agents`    | Agent    | YAML with full metadata | Current command             |
+| `--help-oneliner` | Agent    | Single description line | Binary-level                |
+| `--help-reference-md`  | Both     | Markdown with YAML blocks | Recursive from current scope |
