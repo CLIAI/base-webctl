@@ -5,7 +5,7 @@ category: safety
 created: "2026-03-03"
 updated: "2026-03-03"
 status: draft
-tags: [mutex, concurrency, filesystem-lock, atomic-mkdir, pid-detection, shared-resource]
+tags: [mutex, concurrency, flock, filesystem-lock, atomic-mkdir, pid-detection, shared-resource]
 tech: []
 relates_to: []
 depends_on: []
@@ -34,73 +34,115 @@ The lock mechanism must satisfy these constraints:
 * **Observability** -- operators can determine who holds a lock, for how long,
   and on what resource.
 
-## Why `mkdir` Over Alternatives
+## Locking Strategy: `flock` Primary, `mkdir` Fallback
 
-Several locking primitives exist. `mkdir` (directory creation) is the preferred
-approach for CLI process-level mutual exclusion.
+Several locking primitives exist. `flock` (advisory file locking) is the
+preferred approach for CLI process-level mutual exclusion on Linux and macOS,
+with `mkdir` as a fallback for environments where `flock` is unavailable.
 
 ### Comparison of Locking Strategies
 
 | Strategy | Atomicity | Cross-Platform | Zero Deps | Stale Recovery | Notes |
 |----------|-----------|----------------|-----------|----------------|-------|
-| `mkdir` | Atomic (EEXIST) | All POSIX + most OS | Yes | Via PID check | Preferred |
-| `flock` / advisory locks | Kernel-level | POSIX only | Yes | Auto on close | Not portable to all OS; NFS-unsafe |
+| `flock` / advisory locks | Kernel-level | Linux, macOS, BSDs | Yes | **Auto on close/crash** | **Preferred** |
+| `mkdir` | Atomic (EEXIST) | All POSIX + most OS | Yes | Via PID check | Fallback for NFS or unsupported OS |
 | PID file (write) | NOT atomic | All | Yes | Via PID check | Race window between check-and-write |
 | Named socket | Kernel-level | POSIX only | Yes | Auto on close | Requires socket API; overkill |
 | External lock service | N/A | Any | No | Configurable | Heavy dependency; network required |
 
-The key advantage of `mkdir` is that the operating system kernel guarantees
-exactly one caller succeeds when two processes race to create the same directory
-path. The loser receives `EEXIST` (or equivalent) without any partial state.
-This is simpler, more portable, and lower-overhead than any alternative.
+The key advantage of `flock` is **automatic cleanup**: when a process crashes,
+is killed, or exits abnormally, the kernel releases the advisory lock
+immediately. This eliminates the entire class of stale-lock problems that
+plague PID-file and `mkdir`-based approaches. No signal handlers are needed
+for lock cleanup, and no stale-lock detection logic is required.
+
+`mkdir` remains available as a fallback for environments where `flock` is
+unavailable (e.g., certain networked filesystems, exotic OS targets). When
+`mkdir` is used, the stale-lock detection and signal-handler mechanisms
+described in later sections apply.
 
 ## Architecture
 
-### Lock Directory Layout
+### Lock File Layout
 
 ```
-{cache_root}/locks/port-{PORT}.lock/
-  pid          # text file: PID of the lock holder
-  meta.json    # optional: structured metadata for debugging
+{cache_root}/locks/port-{PORT}.lock       # flock target file
+{cache_root}/locks/port-{PORT}.meta.json  # optional: structured metadata
 ```
 
 **Per-port isolation**: each controllable instance (identified by its
-communication port) gets an independent lock directory. This allows parallel
+communication port) gets an independent lock file. This allows parallel
 operation across distinct instances while serializing access within a single
 instance.
 
-### Lock Lifecycle
+### Lock Lifecycle (flock-based)
 
 ```
   ┌────────────┐
   │  Acquire   │
-  │  mkdir()   │
+  │  open()    │
+  │  flock()   │
   ├────────────┤
-  │ EEXIST?    │──yes──► Read PID ──► Process alive? ──yes──► Wait / Timeout
-  │            │                                       │
-  │            │                                       no
-  │            │                                       │
-  │            │                      ┌────────────────▼───────────┐
-  │            │                      │  Stale lock detected       │
-  │            │                      │  rmdir + retry mkdir       │
-  │            │                      └────────────────────────────┘
+  │ WOULDBLOCK?│──yes──► Wait / Timeout (flock with timeout or poll)
   │            │
-  │ success    │──► Write PID file ──► Write metadata ──► Execute command
+  │ success    │──► Write metadata ──► Execute command
   │            │
   └────────────┘
         │
-        ▼ (on exit, signal, or error)
+        ▼ (on exit, signal, crash, or error)
   ┌────────────┐
   │  Release   │
-  │  rm pid    │
-  │  rmdir()   │
+  │  close(fd) │  ◄── automatic on process exit/crash
   └────────────┘
 ```
 
-### Acquisition Algorithm
+### Acquisition Algorithm (flock)
 
 ```
-function acquireLock(lockDir, timeout):
+function acquireLock(lockFile, timeout):
+    fd = open(lockFile, O_CREAT | O_RDWR, 0600)
+    deadline = now() + timeout
+
+    while now() < deadline:
+        result = flock(fd, LOCK_EX | LOCK_NB)   # non-blocking exclusive lock
+        if result == SUCCESS:
+            writeFile(lockFile + ".meta.json", {
+                pid: currentPID, command, target, startedAt
+            })
+            return fd                            # caller closes fd to release
+
+        if waitElapsed % 5s == 0:
+            meta = readMetadata(lockFile)
+            log("Waiting for lock held by PID {meta.pid} ({elapsed}s)")
+        if waitElapsed >= 600s:
+            log("WARNING: lock held for over 10 minutes")
+
+        sleep(retryInterval)
+
+    close(fd)
+    return LOCK_TIMEOUT                          # dedicated exit code
+```
+
+### Release
+
+With `flock`, release is automatic: closing the file descriptor releases the
+lock. This happens on:
+
+* Normal command completion (fd closed explicitly or via scope exit)
+* Uncaught exception / fatal error (process exits, kernel closes all fds)
+* Signals: SIGINT, SIGTERM, SIGHUP, SIGKILL (kernel closes all fds)
+* Process crash (kernel closes all fds)
+
+No signal handlers are needed for lock cleanup. This eliminates the primary
+source of stale locks.
+
+### Fallback: mkdir-based Locking
+
+When `flock` is unavailable (detected at startup), the implementation falls
+back to `mkdir`-based locking with PID-file stale detection:
+
+```
+function acquireLockMkdir(lockDir, timeout):
     deadline = now() + timeout
 
     while now() < deadline:
@@ -110,7 +152,7 @@ function acquireLock(lockDir, timeout):
             writeFile(lockDir/meta.json, {
                 command, target, startedAt
             })
-            registerSignalHandlers(releaseLock)
+            registerSignalHandlers(releaseLockMkdir)
             return SUCCESS
         catch EEXIST:
             holderPID = readFile(lockDir/pid)
@@ -120,35 +162,17 @@ function acquireLock(lockDir, timeout):
                 removeLockDir(lockDir)        # rm contents + rmdir
                 continue                      # retry immediately
 
-            if waitElapsed % 5s == 0:
-                log("Waiting for lock held by PID {holderPID} ({elapsed}s)")
-            if waitElapsed >= 600s:
-                log("WARNING: lock held for over 10 minutes")
-
             sleep(retryInterval)
 
-    return LOCK_TIMEOUT                       # dedicated exit code
+    return LOCK_TIMEOUT
 ```
 
-### Release Algorithm
+Signal handlers for `releaseLockMkdir` are only needed in this fallback path.
 
-```
-function releaseLock(lockDir):
-    try:
-        removeFile(lockDir/pid)
-        removeFile(lockDir/meta.json)         # if present
-        rmdir(lockDir)
-    catch:
-        log("Warning: lock cleanup failed for {lockDir}")
-```
+## Stale Lock Detection (mkdir fallback only)
 
-Release must be registered for all exit paths:
-
-* Normal command completion
-* Uncaught exception / fatal error
-* Signal handlers: SIGINT, SIGTERM, SIGHUP
-
-## Stale Lock Detection
+With `flock`, stale locks cannot occur -- the kernel releases advisory locks
+automatically. This section applies only to the `mkdir` fallback path.
 
 A lock is **stale** when the PID recorded in the lock directory no longer
 corresponds to a running process. Detection uses the zero-signal technique:
@@ -214,32 +238,31 @@ start time) so the operator can decide whether to wait or intervene.
 
 ## Operation Classification
 
-Not all commands require exclusive access. Commands should be classified:
+Any command that interacts with the browser resource requires the exclusive
+lock. Even read-only CDP operations (status checks, DOM queries) can interfere
+with in-progress mutations by altering timing or triggering side effects.
 
 | Classification | Requires Lock | Examples |
 |----------------|---------------|----------|
-| **Mutating** | Yes | click, type, navigate, upload, execute-script |
-| **Read-only introspection** | No | status, health-check, version |
-| **Configuration** | No | config, set-option, help |
+| **Browser-interacting** | Yes | click, type, navigate, status, screenshot, health-check |
+| **Local-only / offline** | No | help, version, config, set-option |
+| **Cache-only** | No | Any command with `--cache-only` (reads cached data, no browser) |
 | **Explicit opt-out** | No | Any command with `--no-lock` flag |
 
 The `--no-lock` flag provides an escape hatch for advanced users who understand
-the concurrency risks (e.g., running a read-only screenshot while another
-command is executing).
+the concurrency risks. The `--cache-only` flag is inherently lock-free since it
+does not touch the browser resource.
 
 ## Configuration Parameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `lock_timeout` | 30s | Maximum wait before returning timeout exit code |
-| `retry_interval` | 200ms | Polling interval when lock is held |
-| `lock_base_dir` | `$XDG_CACHE_HOME/{tool}/locks/` | Base directory for lock files |
-| `lock_metadata` | true | Whether to write `meta.json` in lock dir |
-| `progress_interval` | 5s | How often to log wait-progress messages |
-| `stale_warning_threshold` | 600s | Elapsed time before emitting "possibly stuck" warning |
-
-All parameters should be overridable via environment variables with a
-project-specific prefix (e.g., `WEBCTL_LOCK_TIMEOUT=60`).
+| Parameter | Environment Variable | Default | Description |
+|-----------|---------------------|---------|-------------|
+| `lock_timeout` | `WEBCTL_LOCK_TIMEOUT` | 30s | Maximum wait before returning timeout exit code |
+| `retry_interval` | `WEBCTL_LOCK_RETRY_INTERVAL` | 200ms | Polling interval when lock is held |
+| `lock_base_dir` | `WEBCTL_LOCK_BASE_DIR` | `$XDG_CACHE_HOME/webctl/locks/` | Base directory for lock files |
+| `lock_metadata` | `WEBCTL_LOCK_METADATA` | true | Whether to write `.meta.json` alongside lock |
+| `progress_interval` | `WEBCTL_LOCK_PROGRESS_INTERVAL` | 5s | How often to log wait-progress messages |
+| `long_wait_threshold` | `WEBCTL_LOCK_LONG_WAIT_THRESHOLD` | 600s | Elapsed time before emitting "possibly stuck" warning |
 
 ## Exit Codes
 
@@ -258,13 +281,21 @@ signal-based exits (128+N).
 
 ## Signal Handler Registration
 
-Lock cleanup on process termination is critical to avoid stale locks. Register
-handlers for:
+With `flock`, signal handlers are **not required for lock cleanup** -- the
+kernel releases advisory locks when the process exits for any reason, including
+signals. This is a major simplification over `mkdir`-based locking.
+
+Signal handlers may still be registered for other purposes (e.g., graceful
+shutdown of the browser session), but lock release is not among them.
+
+### mkdir fallback only
+
+When using the `mkdir` fallback, register handlers for lock cleanup:
 
 ```
-SIGINT   (Ctrl+C)        -> releaseLock() then exit(130)
-SIGTERM  (kill default)   -> releaseLock() then exit(143)
-SIGHUP   (terminal close) -> releaseLock() then exit(129)
+SIGINT   (Ctrl+C)        -> releaseLockMkdir() then exit(130)
+SIGTERM  (kill default)   -> releaseLockMkdir() then exit(143)
+SIGHUP   (terminal close) -> releaseLockMkdir() then exit(129)
 ```
 
 Handlers should:
@@ -275,11 +306,13 @@ Handlers should:
 
 ## Implementation Checklist
 
-* [ ] Define lock directory path convention with per-port isolation
-* [ ] Implement atomic `mkdir`-based acquisition with EEXIST handling
-* [ ] Write PID file immediately after successful `mkdir`
-* [ ] Implement stale lock detection via zero-signal (`kill(pid, 0)`)
-* [ ] Register SIGINT/SIGTERM/SIGHUP handlers for cleanup
+* [ ] Define lock file path convention with per-port isolation
+* [ ] Implement `flock`-based acquisition with non-blocking retry loop
+* [ ] Detect `flock` availability at startup; fall back to `mkdir` if unavailable
+* [ ] (mkdir fallback) Implement atomic `mkdir`-based acquisition with EEXIST handling
+* [ ] (mkdir fallback) Write PID file immediately after successful `mkdir`
+* [ ] (mkdir fallback) Implement stale lock detection via zero-signal (`kill(pid, 0)`)
+* [ ] (mkdir fallback) Register SIGINT/SIGTERM/SIGHUP handlers for cleanup
 * [ ] Add configurable timeout with dedicated exit code
 * [ ] Implement wait-progress logging (every 5s, 10-min warning)
 * [ ] Classify commands into lock-required vs lock-free categories
