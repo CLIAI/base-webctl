@@ -60,11 +60,11 @@ purpose, type, and default:
 ```bash
 # Port for the browser bridge server.
 # Type: integer  Default: 4327
-# CLIAI_MYTOOL_PORT=4327
+# CTLAI_WEBCTL_PORT=4327
 
 # Browser profile directory.
-# Type: path  Default: ~/.config/org/mytool/profile
-# CLIAI_MYTOOL_PROFILE_DIR=
+# Type: path  Default: ~/.config/ctlai/webctl/profile
+# CTLAI_WEBCTL_PROFILE_DIR=
 ```
 
 ### Environment Variable Prefix
@@ -79,9 +79,9 @@ All environment variables follow a three-segment prefix:
 * **TOOLNAME** -- the specific tool (uppercase, underscores for multi-word).
 * **SETTING** -- the individual knob (uppercase).
 
-Example: `CLIAI_WEBCTL_PORT`, `CLIAI_WEBCTL_HEADLESS`.
+Example: `CTLAI_WEBCTL_PORT`, `CTLAI_WEBCTL_HEADLESS`.
 
-This prevents collisions across tools and makes `env | grep CLIAI_` a quick
+This prevents collisions across tools and makes `env | grep CTLAI_` a quick
 debugging aid.
 
 ## Discovery Locations
@@ -101,14 +101,16 @@ Priority (highest first):
 ### Ambiguity Detection
 
 If **both** global locations (XDG-style and home shorthand) exist
-simultaneously, the loader emits a **hard error** and refuses to start. This
-prevents silent precedence surprises when an operator forgets which file is
-active.
+simultaneously, the loader prefers the XDG-style path and emits a **warning**:
 
 ```
-ERROR: Found .env.mytool in both ~/.config/org/mytool/ and ~/
-       Remove one to resolve ambiguity.
+WARN: Found .env.webctl in both ~/.config/ctlai/webctl/ and ~/
+      Using ~/.config/ctlai/webctl/.env.webctl (XDG-style).
+      Remove ~/.env.webctl to silence this warning.
 ```
+
+XDG is preferred because it is the standard, and the home-directory shorthand
+exists only as a convenience for quick setups.
 
 ### Missing Dotenv Behavior
 
@@ -117,7 +119,7 @@ using built-in defaults and any values supplied via environment variables or CLI
 flags. At verbose log level, an INFO message notes the absence:
 
 ```
-INFO: No .env.mytool found; using defaults. Copy dotenv.mytool.example to get started.
+INFO: No .env.webctl found; using defaults. Copy dotenv.webctl.example to get started.
 ```
 
 This is intentional -- the dotenv file is a convenience, not a requirement.
@@ -128,9 +130,10 @@ The recommended resolution order, from lowest to highest priority:
 
 ```
 1. Built-in defaults        (code constants)
-2. Dotenv file               (.env.{tool})
-3. Environment variables     (exported in shell)
-4. CLI flags                 (--port=4999)
+2. Legacy environment vars   (WEBCTL_PORT, BROWSER_PORT -- deprecated)
+3. Dotenv file               (.env.{tool})
+4. Environment variables     (exported CTLAI_WEBCTL_* in shell)
+5. CLI flags                 (--port=4999)
 ```
 
 ### Rationale
@@ -174,10 +177,13 @@ differences across dotenv library versions.
    literal text. This avoids a class of injection bugs and keeps the parser
    trivial.
 6. **No multi-line values** -- each key-value pair occupies exactly one line.
-7. **No export prefix** -- lines starting with `export ` are not special;
-   `export` would be treated as part of the key name (and thus not match
-   any expected variable).
-8. **Duplicate keys** -- the last occurrence wins. A warning is logged at
+7. **Export prefix** -- if a line starts with `export `, the prefix is
+   stripped before parsing. This allows operators to paste lines from their
+   shell configuration without modification.
+8. **Unmatched quotes** -- if a value starts with `'` or `"` but does not
+   end with the matching quote, the value is kept as-is (including the
+   opening quote) and a WARN is logged. No multi-line semantics.
+9. **Duplicate keys** -- the last occurrence wins. A warning is logged at
    debug level.
 
 ### Pseudocode
@@ -189,6 +195,8 @@ function parse_dotenv(path):
         stripped = line.strip()
         if stripped == "" or stripped[0] == '#':
             continue
+        if stripped starts with "export ":
+            stripped = stripped[7:]
         idx = stripped.index_of('=')
         if idx < 0:
             warn("malformed line, skipping")
@@ -198,6 +206,8 @@ function parse_dotenv(path):
         if (val starts with '"' and ends with '"') or
            (val starts with "'" and ends with "'"):
             val = val[1:-1]
+        else if val starts with '"' or val starts with "'":
+            warn("unmatched quote, treating as literal")
         result[key] = val
     return result
 ```
@@ -227,14 +237,19 @@ instances without lock contention on a shared profile.
 
 ### Legacy Environment Variable Support
 
-Some tools historically used unprefixed variable names (e.g., `BROWSER_PORT`).
-These are supported at the **lowest priority** in the precedence chain -- below
-even built-in defaults -- to avoid silently overriding the new namespaced
-variables. A deprecation warning is emitted when a legacy variable is detected:
+Some tools historically used shorter prefixes (e.g., `WEBCTL_PORT`) or
+unprefixed names (e.g., `BROWSER_PORT`). These are supported **above built-in defaults but below the dotenv file** in the
+precedence chain, allowing existing setups to keep working while encouraging
+migration to the canonical names. A deprecation warning is
+emitted when a legacy variable is detected:
 
 ```
-WARN: BROWSER_PORT is deprecated. Use CLIAI_MYTOOL_PORT instead.
+WARN: WEBCTL_PORT is deprecated. Use CTLAI_WEBCTL_PORT instead.
+WARN: BROWSER_PORT is deprecated. Use CTLAI_WEBCTL_PORT instead.
 ```
+
+The migration path: `BROWSER_PORT` → `WEBCTL_PORT` → `CTLAI_WEBCTL_PORT`.
+Only the fully-qualified form is considered canonical going forward.
 
 ## Error Handling
 
@@ -242,10 +257,13 @@ WARN: BROWSER_PORT is deprecated. Use CLIAI_MYTOOL_PORT instead.
 |-----------|----------|
 | Dotenv file not found | Continue with defaults; INFO at verbose level |
 | Dotenv parse error (malformed line) | Skip line, WARN with line number |
-| Ambiguous global locations | Hard error, refuse to start |
+| Ambiguous global locations | WARN, prefer XDG-style path |
 | Unknown variable in dotenv | Silently ignored (forward compatibility) |
 | Invalid value type (e.g., non-integer port) | Hard error with message naming the variable and expected type |
 | Duplicate key in dotenv | Last value wins, DEBUG warning |
+| Unmatched quote in value | Keep as literal, WARN with line number |
+| `export ` prefix on line | Silently stripped before parsing |
+| Legacy env var detected | Used (above defaults), WARN with canonical name |
 
 ## Operator Workflow
 
@@ -253,32 +271,32 @@ WARN: BROWSER_PORT is deprecated. Use CLIAI_MYTOOL_PORT instead.
 
 ```bash
 # Copy the example template
-cp dotenv.mytool.example .env.mytool
+cp dotenv.webctl.example .env.webctl
 
 # Edit to taste
-$EDITOR .env.mytool
+$EDITOR .env.webctl
 
-# Run the tool -- it picks up .env.mytool automatically
-mytool serve
+# Run the tool -- it picks up .env.webctl automatically
+webctl serve
 ```
 
 ### Per-Project Override
 
 ```bash
 # In a specific project directory
-cp /path/to/dotenv.mytool.example .env.mytool
+cp /path/to/dotenv.webctl.example .env.webctl
 # Customize port to avoid collision with global instance
-echo "CLIAI_MYTOOL_PORT=5100" >> .env.mytool
+echo "CTLAI_WEBCTL_PORT=5100" >> .env.webctl
 ```
 
 ### One-Off Override
 
 ```bash
 # CLI flag beats everything
-mytool serve --port=9999
+webctl serve --port=9999
 
 # Or via environment variable
-CLIAI_MYTOOL_PORT=9999 mytool serve
+CTLAI_WEBCTL_PORT=9999 webctl serve
 ```
 
 ## Implementation Checklist
