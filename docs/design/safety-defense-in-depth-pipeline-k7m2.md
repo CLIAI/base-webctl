@@ -75,9 +75,18 @@ Before any connection attempt, the CLI checks:
   state. The CLI refuses to continue until the lock is cleared.
 * **Flag validation.** Required flags (target identifiers, assertion flags)
   are checked for presence and format before any network activity.
+* **Invariant requirements.** The caller must provide a `--required
+  '{invariants...}'` specification declaring assumptions about the current
+  state (e.g., expected last message, expected model selection). If
+  invariants are not provided, the CLI refuses to proceed for any
+  state-mutating command. The specific required invariants may vary by
+  command/subcommand. A `--force` (`-f`) flag exists **only** for human
+  operators who are actively observing the browser in headed mode and can
+  visually confirm state -- it must never be used by automated callers.
 
 **Prevents:** sending commands to a browser in a known-bad state; catching
-missing arguments early rather than after partial execution.
+missing arguments early rather than after partial execution; proceeding
+without explicit caller assumptions about expected state.
 
 ### Phase 2 -- Connection and Routing
 
@@ -102,13 +111,13 @@ assertions:
 
 * **Target identity assertion.** The current page URL, title, or
   application-specific identifier (e.g., a conversation ID, post slug, or
-  document key) is checked against the value the user specified via a flag
-  such as `--assert-target`. This is the strongest guard against
-  operating on the wrong target.
-* **Precondition assertions.** Additional `--assert-*` flags or a
-  structured precondition specification (e.g., `--required '{"model":
-  "X"}'`) allow the user to declare expected state. The CLI evaluates each
-  assertion against the live DOM or application state.
+  document key) is checked against the `"target"` key from the
+  `--required` invariant specification. This is the strongest guard
+  against operating on the wrong target.
+* **Precondition assertions.** Additional keys in the `--required` JSON
+  specification (e.g., `--required '{"target": "conv-123", "model":
+  "X"}'`) declare expected application state. The CLI evaluates each
+  invariant key against the live DOM or application state.
 * **UI state hygiene.** The CLI scans for and dismisses unexpected modal
   dialogs, cookie banners, or notification popups that could intercept
   subsequent input. Download dialog suppression (via protocol-level
@@ -120,7 +129,7 @@ losing input to an intercepting dialog.
 
 ### Phase 4 -- Command Dispatch
 
-The actual browser interaction executes. By this point, six layers of
+The actual browser interaction executes. By this point, seven layers of
 verification have confirmed:
 
 1. The command needs a browser connection.
@@ -168,6 +177,7 @@ approaches.
 |----------------------------|----------------------------------------|--------------------|-----------------|
 | Blocked-state lock         | Commands during known-bad state        | --                 | Yes             |
 | Flag/argument validation   | Missing or malformed required inputs   | Implicit           | Explicit        |
+| Invariant requirements     | Proceeding without caller state assumptions | --            | Yes (mandatory) |
 | Process mutex              | Concurrent CLI instances               | Yes                | Yes             |
 | Target identity assertion  | Wrong page/document/conversation       | Yes                | Yes             |
 | Precondition assertions    | Unexpected application configuration   | Partial            | Yes             |
@@ -218,10 +228,11 @@ On release: remove the directory in a cleanup trap (`trap ... EXIT`).
 
 ### 6.2 Target Identity Assertion
 
-Accept a `--assert-target <value>` flag. After connecting and routing to
-the correct tab, evaluate a DOM query or URL check to extract the
-current target identifier. Compare it to the asserted value. Abort with
-a diagnostic message if they differ.
+The `"target"` key in `--required` serves as the identity assertion.
+After connecting and routing to the correct tab, evaluate a DOM query or
+URL check to extract the current target identifier. Compare it to the
+`"target"` value from the invariant specification. Abort with a
+diagnostic message if they differ.
 
 This is the single most important safety layer. It catches configuration
 drift, tab reuse, and stale bookmarks.
@@ -256,6 +267,37 @@ After dispatch, query the current URL and/or DOM markers to determine
 whether the view changed to a known-sensitive state (e.g., account
 settings, billing, admin panels). If so, set the blocked-state lock.
 
+### 6.6 Invariant Specification (`--required`)
+
+Accept a `--required <json>` flag containing a JSON object of key-value
+pairs representing caller assumptions about current state.
+
+**Parsing:** The JSON is parsed at Phase 1 (flag validation). Malformed
+JSON is rejected immediately with a diagnostic message.
+
+**Per-command key schemas:** Each command/subcommand defines which
+invariant keys it supports and which are mandatory. For example:
+
+* `send-message`: requires `"target"` (conversation ID); optional
+  `"model"`, `"last_message"`.
+* `click`: requires `"target"` (page identifier); optional `"selector"`.
+* `extract`: requires `"target"`; no additional keys.
+
+Unknown keys are rejected to prevent typos from silently passing
+validation.
+
+**Evaluation:** At Phase 3, each key is evaluated against the live DOM
+or application state. All invariants must match for the command to
+proceed. On mismatch, the CLI exits with a structured error identifying
+which invariant failed, the expected value, and the actual value found.
+
+**`--force` (`-f`) bypass:** When `--force` is set, invariant
+requirements are skipped. This flag is intended **exclusively** for
+human operators actively observing the browser in headed mode. Automated
+callers (scripts, CI, agent loops) must never use `--force`. The CLI
+emits a warning to stderr when `--force` is used, to discourage routine
+reliance.
+
 ## 7. Design Rationale
 
 ### Why phases rather than ad-hoc checks?
@@ -280,6 +322,18 @@ instance could connect. The mutex ensures CLI-level serialization.
 It does not prevent manual interference, but it eliminates the most
 common source of concurrent-mutation bugs.
 
+### Why mandatory invariants rather than optional assertions?
+
+Optional safety checks get skipped. When assertions are opt-in, callers
+under time pressure or unfamiliar with the tool omit them, and failures
+occur silently on wrong targets. Making `--required` mandatory forces
+every caller to explicitly state what state they expect, creating a
+contract between the caller and the tool. If the contract cannot be
+satisfied, the tool fails loudly rather than acting on stale assumptions.
+The `--force` escape hatch exists only for the narrow case of a human
+operator who can visually verify state -- it is deliberately inconvenient
+for automated use to prevent normalization of skipped checks.
+
 ## 8. Failure Mode Summary
 
 | Scenario                             | Layer(s) that catch it               |
@@ -289,7 +343,7 @@ common source of concurrent-mutation bugs.
 | Cookie consent banner over input     | UI hygiene (P3)                      |
 | Download dialog blocks session       | Download suppression (P3)            |
 | Command navigates to settings page   | Post-command view detection (P5)     |
-| Missing `--assert-target` flag       | Flag validation (P1)                 |
+| Missing `--required` invariants      | Flag validation (P1)                 |
 | Previous command left blocked state  | Blocked-state lock (P1)              |
 | Stale mutex from crashed process     | PID liveness check (P2)             |
 
