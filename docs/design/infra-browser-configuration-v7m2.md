@@ -43,10 +43,20 @@ debuggable browser instance:
 no programmatic control is possible. The port must be unique per running
 instance to avoid collisions (see [Port Isolation](#port-isolation) below).
 
-**`--user-data-dir=PATH`** forces a fresh profile directory. Without it,
+**`--user-data-dir=PATH`** forces a specific profile directory. Without it,
 Chromium may attach to an already-running instance that owns the default
-profile, silently ignoring the requested debugging port. Always use a
-tool-specific, ephemeral directory (e.g., `/tmp/tool-profile-<pid>/`).
+profile, silently ignoring the requested debugging port.
+
+Two usage modes exist:
+
+* **Ephemeral profiles** -- for stateless automation runs, use a temporary
+  directory (e.g., `/tmp/tool-profile-<pid>/`). Each invocation starts clean
+  with no cookies, storage, or cached state.
+* **Persistent profiles** -- for workflows that must retain cookies, local
+  storage, and session data across invocations, use a fixed directory. The path
+  to this directory should be stored in the tool's configuration file (resolved
+  via the standard config-file lookup hierarchy) so the tool can locate it
+  regardless of the caller's working directory.
 
 ## Anti-Throttling Flags
 
@@ -55,7 +65,8 @@ save resources. For automation this is destructive -- timers fire late,
 animations pause, and network polling stalls.
 
 The following flags, sourced from Google's official `chrome-flags-for-tools.md`
-reference, disable these optimizations:
+reference (see `chromium/src/docs/chrome-flags-for-tools.md` in the Chromium
+source tree), disable these optimizations:
 
 ```
 --disable-backgrounding-occluded-windows
@@ -103,7 +114,11 @@ processes are killed rather than gracefully closed.
 
 A predefined catalog of standard resolutions allows tools to pick the largest
 window that fits the current display. Both landscape and portrait orientations
-should be supported:
+should be supported.
+
+When an explicit width/height is provided via CLI flag or configuration file,
+it overrides the catalog entirely. The catalog serves as a fallback for an
+"auto" sizing mode where the tool selects the best fit for the current display:
 
 **Landscape (width >= height):**
 
@@ -180,6 +195,11 @@ Read `XDG_SESSION_TYPE` and map accordingly:
 This detection should happen at launch time, not at build time or install time,
 because users may switch between X11 and Wayland sessions on the same machine.
 
+**XWayland caveat:** In XWayland sessions, `XDG_SESSION_TYPE` reports `wayland`
+but some Chromium versions work more reliably under `--ozone-platform=x11`. If
+the tool provides an explicit `--ozone-platform` override flag, users can force
+the platform when auto-detection picks the wrong backend.
+
 ## Port Isolation
 
 ### Convention
@@ -199,7 +219,9 @@ order:
 4. **Hardcoded default** -- fallback, must be a non-standard port
 
 This layered approach lets users override in CI, development, or production
-contexts without modifying code.
+contexts without modifying code. See
+[Dotenv Configuration System](infra-dotenv-configuration-r7m3.md) for the full
+configuration resolution specification.
 
 ## Browser Focus Behavior
 
@@ -230,7 +252,7 @@ Common failure modes when establishing CDP connections:
 |---------|-------------|-----|
 | Connection refused on port | Browser not launched, wrong port, or firewall | Verify process is running; check port with `lsof -i :PORT` |
 | WebSocket handshake fails | Connecting to wrong endpoint (page vs. browser) | Use `/json/version` for browser-level, `/json/list` for page targets |
-| "Target closed" immediately | Profile directory locked by another instance | Use unique `--user-data-dir` per instance |
+| "Target closed" immediately | Profile directory locked by another instance (ephemeral or persistent) | Use unique `--user-data-dir` per instance; for persistent profiles, ensure no two tool instances share the same directory concurrently |
 | Intermittent timeouts | Background throttling active | Apply all anti-throttling flags |
 | Window resize has no effect | Window is maximized | Apply two-step resize pattern |
 
@@ -240,7 +262,7 @@ Combining all categories, a minimal recommended flag set for automation:
 
 ```
 --remote-debugging-port=<UNIQUE_PORT>
---user-data-dir=<EPHEMERAL_PATH>
+--user-data-dir=<PROFILE_PATH>
 --disable-backgrounding-occluded-windows
 --disable-renderer-backgrounding
 --disable-background-timer-throttling
