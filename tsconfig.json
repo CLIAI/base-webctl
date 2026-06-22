@@ -1,0 +1,17 @@
+{
+  "//": "base CI only — type-checks JSDoc across lib/ with NO emit (sb7q substrate decision). The typescript devDependency never reaches consumers.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["lib/**/*.js"]
+}

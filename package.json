@@ -1,0 +1,30 @@
+{
+  "name": "@cliai/base-webctl",
+  "version": "0.1.0",
+  "description": "Shared zero-dependency ESM foundation for the *-webctl web-control tool family. Consumed by each tool as a git submodule pinned to a released commit.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./lib/*": "./lib/*"
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --checkJs --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CLIAI/base-webctl.git"
+  },
+  "license": "MIT",
+  "private": true,
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}
