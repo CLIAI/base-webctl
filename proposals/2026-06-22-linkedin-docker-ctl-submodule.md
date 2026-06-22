@@ -84,7 +84,7 @@ The full patch (shim + `.gitmodules` + submodule pointer) is archived at
 cd linkedin-webctl
 git checkout -b i-adopt-base-docker-ctl       # or your branch convention
 git submodule add git@github.com:CLIAI/base-webctl.git vendor/base-webctl
-git -C vendor/base-webctl checkout <RELEASED_BASE_SHA>   # the pinned commit
+git -C vendor/base-webctl checkout v0.2.0   # pinned release (docker-ctl is in v0.1.0+; v0.2.0 also adds 5 more)
 # replace lib/browser-location/docker-ctl.js with the shim above
 node test/docker-mode-test.js                  # expect 57 passed, 0 failed
 git add .gitmodules vendor/base-webctl lib/browser-location/docker-ctl.js
@@ -93,10 +93,10 @@ git commit   # separate, focused submodule-pin commit (sb7q §version-bump)
 
 ## Preconditions on base (owner: webctl:base)
 
-* The scratch proof pinned base via a **local path** for speed. The real bump
-  must pin the **github URL** at a released SHA:
-  * base must **push** `master` to `git@github.com:CLIAI/base-webctl.git`, and
-  * **tag** the release (proposed `v0.1.0`) so linkedin pins an immutable commit.
+* **DONE:** base is pushed to `git@github.com:CLIAI/base-webctl.git` and tagged
+  (`v0.1.0` = `3cbfe63`, `v0.2.0` = `5032279`). The scratch proof used a local
+  path for speed; adopt by pinning the github tag. Pin `v0.2.0` to also pick up
+  the 5 leaf modules in that release.
 * Engine floor: the shim relies on `require(esm)` → **Node ≥22.12**. linkedin's
   `package.json` currently declares `"engines": { "node": ">=18" }`. Adopting
   the submodule shim **raises that floor to ≥22.12** (or linkedin keeps `>=18`
