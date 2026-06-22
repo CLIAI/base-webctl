@@ -1,13 +1,13 @@
 ---
-id: k7m2
+id: dip7
 title: "Defense-in-Depth: Multi-Layer Safety Pipeline"
 category: safety
 created: "2026-03-03"
-updated: "2026-03-03"
+updated: "2026-06-22"
 status: draft
 tags: [defense-in-depth, safety-pipeline, layered-safety, phased-execution, invariants]
 tech: []
-relates_to: []
+relates_to: [k7m2]
 depends_on: []
 expands: []
 similar_to: []

@@ -3,11 +3,11 @@ id: k7m2
 title: "Blocked State Detection: Captcha, Challenge & Rate Limit Handling"
 category: safety
 created: "2026-03-03"
-updated: "2026-03-03"
+updated: "2026-06-22"
 status: draft
 tags: [captcha, challenge, rate-limit, fail-fast, blocked-state, human-in-the-loop]
 tech: []
-relates_to: []
+relates_to: [dip7]
 depends_on: []
 expands: []
 similar_to: []

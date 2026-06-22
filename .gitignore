@@ -1,1 +1,29 @@
+# base-webctl .gitignore
+# Canonical secret-free template — this is the SAME block base prescribes for all
+# *-webctl tools in docs/design/infra-directory-structure-f868.md ("Gitignore
+# Patterns"). base must follow its own spec: secrets/session-state NEVER enter git.
+
+# Configuration with secrets
+.env.*
+*.env
+credentials*
+cookies*
+
+# Track example templates (the only dotenv/config files that ARE committed)
+!dotenv.*.example
+
+# Runtime artifacts
 tmp/
+cache/
+screenshots/
+output/
+phenomena/
+debug.log
+
+# Dependencies and build
+node_modules/
+package-lock.json
+
+# IDE / tool state
+.claude/
+.worktrees/
