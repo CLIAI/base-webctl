@@ -33,7 +33,10 @@ two things at once:
   (checks required fields, unique 4-char IDs, category/filename match, cross-refs).
 * Current corpus (filename = `{category}-{slug}-{id}.md`; cross-ref by ID):
   * **arch** — `arch-shared-base-as-submodule-sb7q` (submodule model, substrate
-    decision, semver, secret modes, FUTURE_WORK), `arch-automatic-browser-lifecycle-8hw5`.
+    decision, semver, secret modes, FUTURE_WORK),
+    `arch-constants-injection-seam-sm2t` (how shared modules receive per-repo
+    constants without importing them — the `createX(C)` factory seam),
+    `arch-automatic-browser-lifecycle-8hw5`.
   * **test** — `test-cross-repo-consumer-loop-xrl4` (the `test-against-base.sh`
     contract + `consumers.jsonc` + the release gate).
   * **infra** — `infra-directory-structure-f868`, `infra-browser-configuration-v7m2`,
