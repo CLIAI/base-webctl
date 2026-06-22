@@ -1,7 +1,12 @@
-# FUTURE_WORK — linkedin Node floor raised by `require(esm)` shim
+# FUTURE_WORK — Node floor raised by `require(esm)` shim — RESOLVED
 
 * **Category:** migrate
 * **Created:** 2026-06-22
+* **Status:** **RESOLVED 2026-06-22** — Greg decided **Option A: adopt Node
+  `>=22.12` fleet-wide.** Codified as the consumption-floor policy in `sb7q`
+  (substrate section) + base `package.json` `engines`. linkedin merges PR #72
+  as-is; chatgpt/telegram inherit the same floor when they wire the submodule.
+  No per-consumer decision remains; kept for provenance.
 * **Concerns:** base `lib/browser-location/docker-ctl.js` (sb7q); consumer
   linkedin-webctl; `proposals/2026-06-22-linkedin-docker-ctl-submodule.md`.
 

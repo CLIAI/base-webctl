@@ -8,7 +8,7 @@ status: draft
 tags: [submodule, shared-library, versioning, semver, migration, esm, jsdoc, future-work, secret-topology]
 tech:
   - name: "Node.js"
-    version: ">=18"
+    version: ">=22.12"
   - name: "Git submodules"
     version: ""
 relates_to: [v8p3, f868, lf4f, v7m2, xrl4]
@@ -48,8 +48,28 @@ annotations** verified by `tsc --checkJs --noEmit` in **base's own CI only**.
   **no emitted build artifact** (nothing compiled is committed; honours the
   no-build-artifacts repo rule).
 * **ESM-first** — fetlife-webctl is already ESM and consumes base natively; the
-  CJS tools (linkedin/chatgpt/telegram) adopt base via incremental ESM moves
-  tracked as `FUTURE_WORK` (interim: `await import()` from CJS).
+  CJS tools (linkedin/chatgpt/telegram) consume base ESM **synchronously** via
+  Node's `require(esm)` (see the consumption-floor policy below), so no
+  `await import()` and no call-site rewrite is needed — a CJS file does
+  `module.exports = require('../vendor/base-webctl/lib/<module>.js')`.
+
+### Node consumption-floor policy (decided 2026-06-22, Greg)
+
+**The fleet-wide minimum runtime for consuming base is Node `>=22.12`.** That is
+the release line where `require()` of an ESM module (no top-level await) is
+stable and synchronous — the mechanism that lets the CJS tools adopt base with a
+thin re-export shim instead of an `await import()` refactor (proven in the
+v0.1.0 docker-ctl pilot + the v0.2.0 leaf modules).
+
+Consequences, binding on the whole family:
+
+* base's own `package.json` declares `"engines": { "node": ">=22.12" }` as the
+  **consumption floor** every consumer inherits; chatgpt/telegram adopt the same
+  floor when they wire the submodule.
+* **base modules MUST stay top-level-await-free** so `require(esm)` remains
+  synchronous. (A future CI assert can enforce this; today it is a review rule.)
+* A consumer on older Node hitting the submodule path gets a hard `require()`
+  throw — acceptable because the floor is now policy, not a silent assumption.
 
 Rejected alternatives, for the record:
 
