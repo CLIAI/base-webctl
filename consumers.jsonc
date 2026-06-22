@@ -1,0 +1,56 @@
+// consumers.jsonc — registry of repos that consume base-webctl as a pinned
+// git submodule (xrl4 §"The registry"). The release gate
+// (scripts/test-all-consumers.sh) loops this list; verify-no-byte-drift.sh
+// uses it to catch regression to byte-duplication. A NEW tool registers here
+// at creation so the gate picks it up automatically.
+//
+// Fields per entry:
+//   name           repo short name (and local dir name under $WEBCTL_CONSUMERS_DIR)
+//   repo           git remote (for fresh clones in CI)
+//   submodulePath  where the consumer mounts base (fleet-wide uniform)
+//   testCmd        the consumer contract entrypoint (xrl4 §"consumer contract")
+//   dockerOptIn    also expose --stack under {TOOL}_DOCKER_TESTS=1
+//   tier           full | cdp-client | contracts  (capability is opt-in)
+//   wired          true once the consumer's master actually mounts the
+//                  submodule. While false the gate reports SKIP (not FAIL) —
+//                  migration runs one small refactoring at a time (sb7q).
+{
+  "consumers": [
+    {
+      "name": "linkedin-webctl",
+      "repo": "git@github.com:CLIAI/linkedin-webctl.git",
+      "submodulePath": "vendor/base-webctl",
+      "testCmd": "./test-against-base.sh --offline",
+      "dockerOptIn": true,
+      "tier": "full",
+      "wired": false
+    },
+    {
+      "name": "chatgpt-webctl",
+      "repo": "git@github.com:CLIAI/chatgpt-webctl.git",
+      "submodulePath": "vendor/base-webctl",
+      "testCmd": "./test-against-base.sh --offline",
+      "dockerOptIn": true,
+      "tier": "full",
+      "wired": false
+    },
+    {
+      "name": "telegram-webctl",
+      "repo": "git@github.com:CLIAI/telegram-webctl.git",
+      "submodulePath": "vendor/base-webctl",
+      "testCmd": "./test-against-base.sh --offline",
+      "dockerOptIn": false,
+      "tier": "cdp-client",
+      "wired": false
+    },
+    {
+      "name": "fetlife-webctl",
+      "repo": "git@github.com:CLIAI/fetlife-webctl.git",
+      "submodulePath": "vendor/base-webctl",
+      "testCmd": "./test-against-base.sh --offline",
+      "dockerOptIn": false,
+      "tier": "contracts",
+      "wired": false
+    }
+  ]
+}
