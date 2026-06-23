@@ -132,7 +132,8 @@ test('HTTP proxy: 403 for an off-tailnet peer (CIDR pre-check before proxy)', as
   const up = await startHttpUpstream();
   const gw = createXpraHtml5Gateway(fakeC(), {
     upstreamPort: up.port, bindAddress: '127.0.0.1', listenPort: 0,
-    cidrAllowlist: ['100.64.0.0/10'], // loopback 127.0.0.1 is NOT in here
+    cidrAllowlist: ['100.64.0.0/10'],
+    peerOf: () => '8.8.8.8', // simulate a genuinely off-tailnet peer (test seam)
   });
   const { port } = await gw.start();
   try {
@@ -140,6 +141,23 @@ test('HTTP proxy: 403 for an off-tailnet peer (CIDR pre-check before proxy)', as
     assert.equal(r.status, 403);
     assert.match(r.body, /network not allowed/i);
     assert.equal(up.hits.length, 0, 'upstream never touched for a denied peer');
+  } finally {
+    await gw.stop();
+    await up.close();
+  }
+});
+
+test('localhost is always trusted (operator/CLI path) even when not in the CIDR allowlist', async () => {
+  const up = await startHttpUpstream();
+  const gw = createXpraHtml5Gateway(fakeC(), {
+    upstreamPort: up.port, bindAddress: '127.0.0.1', listenPort: 0,
+    cidrAllowlist: ['100.64.0.0/10'], // loopback NOT in here, but loopback is always trusted
+  });
+  const { port } = await gw.start();
+  try {
+    const r = await httpGet(port, '/');
+    assert.equal(r.status, 200, 'loopback proxied (localhost-always-trusted)');
+    assert.equal(r.body, 'UPSTREAM-OK /');
   } finally {
     await gw.stop();
     await up.close();
