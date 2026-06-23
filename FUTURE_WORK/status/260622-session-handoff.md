@@ -31,12 +31,19 @@ files (`260622-pilot.md`, `260622-v0.2.0.md`) + the design corpus to resume.
 * `proposals/2026-06-22-chatgpt-v0.2.0-five-modules.md`
 * The manager (webctl:mgr) is delivering these to webctl:linkedin / webctl:chatgpt.
 
-## PARKED pending Greg's review — DO NOT WIRE CONSUMERS
+## UPDATE 2026-06-23 — sm2t APPROVED + v0.3.0 SHIPPED
 
-* **`docs/design/arch-constants-injection-seam-sm2t.md`** (status: draft) — the
-  per-repo constants seam. Recommends **Option A: per-module factory `createX(C)`**
-  (consumer shim injects its own `client-config.constants`; base never imports
-  values). Goes mgr → Greg for sign-off BEFORE any cross-consumer implementation.
+* `sm2t` is **stable** (Greg approved Option A). **v0.3.0** (`4cc60d1`) shipped
+  the seam: `client-config.constants.template.js` + the 3 factories
+  (`createClientConfig`/`createChromiumPrefs`/`createProfileLock(C)`). Proven in
+  scratch (79+68+18 + 24/24). Proposals at `proposals/2026-06-23-*`. Current
+  status: `FUTURE_WORK/status/260623-v0.3.0.md`.
+* Next parked step below is now `mounts` reconcile → driver → registry/index.
+
+## (historical) PARKED pending Greg's review — superseded by the update above
+
+* **`docs/design/arch-constants-injection-seam-sm2t.md`** — Option A approved;
+  the seam is implemented in v0.3.0.
 * Blocked behind that sign-off (all in `FUTURE_WORK/migrate/`):
   * 3 SEAM modules — `chromium-prefs`, `client-config`, `profile-lock`
     (`260622-client-config-constants-seam.md`).
