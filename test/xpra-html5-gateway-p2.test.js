@@ -119,7 +119,7 @@ test('flow: viewer requests, operator approves, viewer gets proxied', async () =
 test('operator endpoints reject a non-loopback (tailnet) peer with 403', async () => {
   const h = await harness();
   try {
-    for (const p of ['/access/requests', '/access/grants']) {
+    for (const p of ['/access/requests', '/access/grants', '/access/status']) {
       const r = await req(h.port, { path: p, headers: VIEWER });
       assert.equal(r.status, 403, `${p} must be operator-only`);
       assert.match(r.json.error, /operator only/i);
