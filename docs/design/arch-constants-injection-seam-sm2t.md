@@ -3,8 +3,8 @@ id: sm2t
 title: "Per-Repo Constants Injection Seam for Shared Modules"
 category: arch
 created: "2026-06-22"
-updated: "2026-06-22"
-status: draft
+updated: "2026-06-23"
+status: stable
 tags: [seam, dependency-injection, constants, factory, esm, require-esm, migration, secret-topology, multi-tenant]
 tech:
   - name: "Node.js"
@@ -245,13 +245,16 @@ wires a consumer until its own suite is green on the new pin.
 * The consumer shim stays a thin drop-in: `const C = require('./client-config.constants');
   module.exports = createX(C);`.
 
-## Open questions for review
+## Open questions — RESOLVED (Greg, 2026-06-23)
 
-* **Template realness:** should `client-config.constants.template.js` ship
-  *throwing* placeholders, or a documented all-sentinel object? (Recommend
-  throwing getters so accidental use of the template in place of real constants
-  is impossible to miss.)
-* **`assertConstants` mandatory or opt-in?** Recommend the factories call it by
-  default (fail-fast) with an escape hatch for advanced callers.
-* **Driver `deps` injection shape** — confirm it mirrors the existing
-  `profile-lock` injection contract so tests stay uniform.
+* **Template realness** → `client-config.constants.template.js` ships **throwing
+  placeholders**, so accidental use of the template in place of real constants is
+  impossible to miss.
+* **`assertConstants` mandatory or opt-in?** → **default-on** (fail-fast), with an
+  escape hatch for advanced callers.
+* **Driver `deps` injection shape** → **mirrors the existing `profile-lock`
+  injection contract** so tests stay uniform.
+
+Option A approved; this doc is `stable`. Implementation proceeds per the
+migration order above (v0.3.0 = base support + the 3 function/closure-clean
+modules; `mounts`/driver/registry/index follow).

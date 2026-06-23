@@ -1,6 +1,6 @@
 {
   "name": "@cliai/base-webctl",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Shared zero-dependency ESM foundation for the *-webctl web-control tool family. Consumed by each tool as a git submodule pinned to a released commit.",
   "type": "module",
   "engines": {
