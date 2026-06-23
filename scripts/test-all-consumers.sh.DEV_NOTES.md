@@ -12,6 +12,15 @@
   a-time (sb7q). Until a consumer's master actually mounts the submodule, its
   registry entry has `"wired": false` and the gate reports `skip`. This lets the
   gate exist and stay green from day one, before any consumer is migrated.
+* **Two-stage adoption: `wired` ≠ contract-present.** `wired:true` means only that
+  the consumer's master mounts the submodule (linkedin: v0.3.0, 9 modules). A wired
+  consumer may not yet have adopted the `./test-against-base.sh` contract script. A
+  missing contract is reported as SKIP **"contract pending"**, NOT a FAIL — else a
+  truthful `wired:true` would false-RED the gate with exit 127. The gate extracts
+  the script path from `testCmd`'s first token and `-x`-checks it in the working
+  copy; the instant the consumer commits the contract, the entry auto-flips to a
+  real PASS/FAIL. (linkedin is in exactly this state as of 2026-06-23 — wired, with
+  the contract delivered as an adoption proposal, proven real-GREEN in a worktree.)
 * **JSONC parsing is delegated** to `read-consumers.mjs` (string-aware comment
   stripping) rather than `grep`/`sed`, so values containing `//` or `:` are
   never corrupted. Node is the runtime base already requires — zero extra dep.
@@ -34,7 +43,15 @@ behind `{TOOL}_DOCKER_TESTS=1`; it is not invoked by this loop's default path.
 
 ## Testing the gate itself
 
-With all consumers `"wired": false` (current state), the gate emits four `skip`
-envelopes and exits 0. To smoke-test the pass/fail mapping, point
-`WEBCTL_CONSUMERS_DIR` at a scratch tree with a stub `./test-against-base.sh`
-returning the code under test.
+Point `WEBCTL_CONSUMERS_DIR` at a scratch tree (e.g. a `git worktree` of the
+consumer) carrying `./test-against-base.sh`. Proven 2026-06-23 against a linkedin
+worktree (submodule v0.3.0):
+
+* **PASS** — script present, 24/24 offline suites green → `PASS linkedin-webctl`,
+  exit 0.
+* **SKIP (contract pending)** — against the real master (no script) → exit 0, no
+  false-fail.
+* **FAIL (teeth)** — inject a `throw` into a base module the consumer imports
+  (e.g. `vendor/base-webctl/lib/client-config.js`) → 12 suites FAIL →
+  `BLOCKED: linkedin-webctl failed` → exit 1. This is the proof the gate is real:
+  *base changes → one programmatic test catches a broken consumer.*

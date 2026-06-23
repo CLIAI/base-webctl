@@ -14,6 +14,10 @@
 //   wired          true once the consumer's master actually mounts the
 //                  submodule. While false the gate reports SKIP (not FAIL) —
 //                  migration runs one small refactoring at a time (sb7q).
+//                  A wired consumer that has not yet adopted the xrl4
+//                  ./test-against-base.sh contract also reports SKIP
+//                  ("contract pending"), never FAIL — the gate auto-flips to a
+//                  real PASS/FAIL the instant the contract lands.
 {
   "consumers": [
     {
@@ -23,7 +27,11 @@
       "testCmd": "./test-against-base.sh --offline",
       "dockerOptIn": true,
       "tier": "full",
-      "wired": false
+      // linkedin's master mounts vendor/base-webctl (v0.3.0, 9 modules adopted),
+      // so it is genuinely wired. Contract adoption (./test-against-base.sh) is
+      // pending — gate reports SKIP "contract pending" until it lands, then real
+      // PASS/FAIL. Proven real-GREEN in a worktree 2026-06-23 (24/24 suites).
+      "wired": true
     },
     {
       "name": "chatgpt-webctl",

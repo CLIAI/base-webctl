@@ -49,6 +49,18 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired; do
     skip=$((skip + 1)); continue
   fi
 
+  # A wired consumer may not have adopted the xrl4 `./test-against-base.sh`
+  # contract script yet. Absent script => SKIP "contract pending", NOT a FAIL:
+  # otherwise `wired:true` (honest — the submodule IS mounted) would false-RED
+  # the gate with exit 127. The instant the consumer commits the contract, this
+  # auto-flips to a real PASS/FAIL. (testCmd's first token is the script path.)
+  contract_script="${testCmd%% *}"
+  if [ ! -x "$repo_dir/$contract_script" ]; then
+    envelope "$name" "$tier" "skip"
+    echo "SKIP  $name ($tier) — contract '$contract_script' not present (xrl4 adoption pending)" >&2
+    skip=$((skip + 1)); continue
+  fi
+
   # Run the consumer contract headlessly. The contract owns exit-code mapping:
   #   0 pass | 1 fail | 2 blocked-needs-human (-> skip).
   echo "RUN   $name ($tier): $testCmd" >&2
