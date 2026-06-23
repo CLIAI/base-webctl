@@ -3,7 +3,7 @@ id: f868
 title: "Directory Structure & Naming Conventions"
 category: infra
 created: "2026-03-09"
-updated: "2026-03-09"
+updated: "2026-06-24"
 status: draft
 tags: [filesystem, xdg, paths, naming, conventions, layout]
 tech: []
@@ -73,6 +73,11 @@ For environment variable naming and legacy variable support, see
 
 ### Cache Namespace: Shared Strategy
 
+> **Superseded by `infra-storage-path-resolution` (v59v) §3.** In practice the
+> fleet fragmented and the **per-tool** `~/.cache/CLIAI/<CACHE_DIRNAME>/` namespace
+> (base mounts/locks/gateway-state) is now canonical; the shared `default/webctl`
+> below is legacy (chatgpt-only) to migrate. Retained here for history.
+
 All tools share `~/.cache/CLIAI/default/webctl/`. This enables:
 
 * Cross-tool port lock visibility (any tool can see all held locks)
@@ -90,6 +95,11 @@ specified. Named clients get their own parallel subtrees.
 | `$XDG_CACHE_HOME` | `~/.cache` | Locks, logs, tab activity, content cache, blocked state |
 
 **Not used:** `$XDG_DATA_HOME`, `$XDG_STATE_HOME` (logs under cache for simplicity).
+
+> **Updated by `infra-storage-path-resolution` (v59v) §4.** `$XDG_STATE_HOME` **is
+> now used** (the gateway grant store, f6rd, is XDG "state"), and `$XDG_RUNTIME_DIR`
+> is preferred for locks when set. v59v implements XDG resolution (this table was
+> aspirational; nothing implemented it).
 
 ### Local Filesystem Requirement
 
