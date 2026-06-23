@@ -58,6 +58,18 @@ new-tool scaffold ships pre-wired, **off by default**).
 * xpra multi-client means **attach-without-restart is already true at the xpra
   layer**; this design only adds the guarded remote path.
 
+> **P1 grounding correction (2026-06-24, live stack).** Against a *running*
+> docker+xpra session the xpra-html5 client + its WS are served on the **xpra TCP
+> port (`<xpraTcpPort>`)** — e.g. `127.0.0.1:14327` returned the
+> `xpra websockets client` page — while `<xpraTcpPort>+1` (the `XPRA_HTML5_BIND`
+> port, 14328) **did not answer HTTP**. So the gateway's `upstreamPort` must be
+> the port that actually serves html5, which is `<xpraTcpPort>`, NOT `+1`. P5
+> wiring (driver `inspect()` → gateway upstream) must target the serving port;
+> the `xpraHtml5Port = +1` assumption above is the *configured* bind, not where
+> xpra serves the client in this image build. (Seam surprise, dockerfilesDir/
+> version-class — flagged to the manager.) P1 takes `upstreamPort` explicitly, so
+> this does not block P1; it constrains P5 wiring + the driver `inspect()` contract.
+
 ```mermaid
 graph LR
     V["tailnet viewer<br/>(browser, 100.x.y.z)"] -->|"HTTP/WS over tailnet (WireGuard)"| G
