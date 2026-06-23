@@ -4,9 +4,12 @@
 * **Created:** 2026-06-23
 * **Concerns:** v0.4.0 step 1 (mounts reconcile-then-extract);
   `chromium-docker-xpra` driver chain; consumers linkedin-webctl + chatgpt-webctl.
-* **Status:** BLOCKER-SURFACED — needs a manager/Greg scope decision before the
-  mounts reconcile proceeds. (Manager asked to be pinged "sooner if mounts
-  surfaces anything unexpected" — this is that.)
+* **Status:** **RESOLVED — Greg chose Option A (2026-06-23):** decouple at base,
+  extract mounts NOW; `createMounts(C)` stays file-staging-AGNOSTIC
+  (`CONTAINER_UPLOAD_DIR='/cliai-uploads'` base-owned, upload mount gated on
+  `cfg.uploadHostPath`). Prove against BOTH consumers. The "linkedin gains
+  uploads" FEATURE is QUEUED separately (low-priority; no commitment) — see
+  `260623-linkedin-uploads-feature-queue.md`.
 
 ## The finding
 

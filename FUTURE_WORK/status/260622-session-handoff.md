@@ -31,6 +31,12 @@ files (`260622-pilot.md`, `260622-v0.2.0.md`) + the design corpus to resume.
 * `proposals/2026-06-22-chatgpt-v0.2.0-five-modules.md`
 * The manager (webctl:mgr) is delivering these to webctl:linkedin / webctl:chatgpt.
 
+## UPDATE 2026-06-23 (latest) — v0.4.0 IN PROGRESS
+
+**On resume, READ `FUTURE_WORK/status/260623-v0.4.0-plan.md` FIRST** — it is the
+concrete v0.4.0 checklist (Greg-approved Option A: decouple mounts at base, then
+driver → registry → browser-location/index). Then this file + `260623-v0.3.0.md`.
+
 ## UPDATE 2026-06-23 — sm2t APPROVED + v0.3.0 SHIPPED
 
 * `sm2t` is **stable** (Greg approved Option A). **v0.3.0** (`4cc60d1`) shipped
