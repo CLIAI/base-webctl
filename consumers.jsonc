@@ -59,6 +59,19 @@
       "dockerOptIn": false,
       "tier": "contracts",
       "wired": false
+    },
+    {
+      "name": "substack-webctl",
+      "repo": "git@github.com:gwwtests/lindseymackereth-substack.git",
+      "submodulePath": "vendor/base-webctl",
+      "testCmd": "./test-against-base.sh --offline",
+      "dockerOptIn": true,
+      "tier": "full",
+      // wired:false — SKIP (not FAIL) until substack's master mounts the
+      // submodule + lands the ./test-against-base.sh contract, then flips true.
+      // Registered via arbitrate/promote (ubertmux-adm) on webctl-mgr proposal #1;
+      // proof-of-recipe consumer for the new-webctl-from-base scaffold path.
+      "wired": false
     }
   ]
 }
