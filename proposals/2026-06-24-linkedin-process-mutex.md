@@ -1,3 +1,12 @@
+> ⚠ **GATED ON base v0.6.0 — not parked, and not actionable yet.**
+> `lib/process-mutex.js` landed in `eddad3f`, which is NOT an ancestor of
+> `v0.5.0` (verified by merge-base). Every wired consumer pins `v0.5.0`
+> exactly, so the module does not exist at their pin and no consumer can
+> adopt it however willing. This returns to the queue automatically when
+> v0.6.0 is tagged — "gated" names the unblocking event, where "parked"
+> would just invite a rediscovery. Do not pin a bare post-v0.5.0 commit to
+> route around it: pinning to a tag is what makes consumers reproducible.
+
 # Proposal — linkedin-webctl: adopt base `createProcessMutex` (de-monolith)
 
 * **For:** `webctl:linkedin@knot` + Greg — review & adopt at your pace.

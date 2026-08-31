@@ -3,7 +3,7 @@ id: sazn
 title: "Logging, Caching & Output Conventions"
 category: infra
 created: "2026-03-09"
-updated: "2026-03-09"
+updated: "2026-08-31"
 status: draft
 tags: [logging, cache, output, jsonl, verbosity, files]
 tech: []
@@ -54,6 +54,36 @@ When implemented:
 ```
 
 **Rotation defaults:** max 8 files, max 50 MB each.
+
+⚠ **CONSTRAINT — rotation prunes ONLY what it created.** Select by the
+per-invocation filename pattern (`<ISO-ts>-<pid>.jsonl`), never by extension.
+
+A `*.jsonl` filter is the obvious implementation and it is a data-loss bug. Log
+directories are shared: a tool's own append-only **audit ledgers** live there
+too, and their whole purpose is to still exist when somebody asks weeks later
+why an unattended job deleted something. A "keep the newest 8 `.jsonl`" rule
+silently eats them, and it eats the record of the deletion along with the
+deletion.
+
+This is not hypothetical, and it is not one tool's mistake. Measured 2026-08-31:
+one consumer's extension-filtered rotation had another consumer's live `ttl-gc`
+audit ledger (3114 bytes of real content) inside its deletion path. Nothing had
+been lost only because `t` happens to sort after a digit. Two independent
+consumers wrote the same bug.
+
+Two independent requirements, because either alone still loses data:
+
+* **Pattern-match what you delete.** A file that does not match the
+  per-invocation pattern is neither deleted NOR counted toward the cap —
+  counting a foreign file toward the cap silently shortens your own retention.
+* **Scope the directory per tool** (see `v59v`). The rotation filter is defence
+  in depth; a shared log directory is the underlying fault, and a filter is what
+  saves you on the day the scoping is wrong.
+
+> Contributed up by the chatgpt-webctl lane after the bug bit there; recorded
+> here rather than as a proposal because base has no logging module yet. This is
+> cheap as a line in a design doc and expensive as a retrofit across seven
+> consumers.
 
 **Configuration:**
 
