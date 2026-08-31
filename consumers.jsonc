@@ -40,7 +40,14 @@
       "testCmd": "./test-against-base.sh --offline",
       "dockerOptIn": true,
       "tier": "full",
-      "wired": false
+      // Flipped by webctl:base after INDEPENDENT verification (not on report):
+      // submodule mounted+pinned 5c3db07 == v0.5.0 exactly (same commit as
+      // substack); lib/xpra-presence.js is a one-line re-export shim, not a
+      // copy; ./test-against-base.sh --offline run here -> exit 0 (1263 unit
+      // tests through the shim); verify-no-byte-drift.sh clean. The adoption
+      // pilot (xpra-presence: packaging-only divergence) proved the
+      // submodule+shim+contract mechanism end to end.
+      "wired": true
     },
     {
       "name": "telegram-webctl",
