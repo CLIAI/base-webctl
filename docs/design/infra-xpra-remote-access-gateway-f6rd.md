@@ -3,7 +3,7 @@ id: f6rd
 title: "xpra-html5 Tailnet Remote-Access Gateway"
 category: infra
 created: "2026-06-24"
-updated: "2026-06-24"
+updated: "2026-08-31"
 status: review
 tags: [execution-mode, docker-xpra, reverse-proxy, websocket, tailnet, access-control, ttl-grants, remote-view, zero-dep]
 tech:
@@ -51,13 +51,30 @@ new-tool scaffold ships pre-wired, **off by default**).
 ## 2. Grounded current state
 
 * The docker+xpra driver (`chromium-docker-xpra.js`) publishes, on the host:
-  CDP at `127.0.0.1:<port>`, xpra-TCP at `<xpraTcpPort>`, and **xpra-html5 at
-  `<xpraHtml5Port>` = `xpraTcpPort + 1`** — all bound to `127.0.0.1` only.
+  CDP at `127.0.0.1:<port>` and xpra-TCP at `<xpraTcpPort>` — both bound to
+  `127.0.0.1` only. **The xpra-html5 client is served ON `<xpraTcpPort>`**, not
+  on a second port: xpra multiplexes html5 and its websocket onto the bind-tcp
+  listener. `<xpraHtml5Port>` is retained as a field and is *equal to*
+  `<xpraTcpPort>`, so existing readers stay correct.
 * The driver already exposes `<xpraHtml5Port>` (and the slug) via `inspect()` —
   a known seam the gateway reads to learn `slug → html5Port`.
 * xpra multi-client means **attach-without-restart is already true at the xpra
   layer**; this design only adds the guarded remote path.
 
+> **RESOLVED 2026-08-31 — the driver now matches this correction.** The `+1`
+> derivation, its published port, its pre-flight role and `XPRA_HTML5_BIND` were
+> removed from `chromium-docker-xpra.js`; `<xpraHtml5Port>` now equals
+> `<xpraTcpPort>` and `inspect()` additionally advertises `xpraHtml5Url`.
+> Acceptance is an **HTTP GET against the advertised URL**, not a port-equality
+> assertion — equality would still pass against a stack serving nothing, which
+> is the defect's whole signature. §2 above has been corrected; the note below is
+> kept as the grounding record of how it was found.
+>
+> ⚠ The CONSUMER half is a separate change owned by `webctl:mgr`: container
+> entrypoints must pass `--html=on`, never `--html=host:port` (rejected by xpra
+> ≥6). base ships no dockerfiles. A consumer taking base ≥v0.6.0 **without** that
+> entrypoint edit gets a correct base and a broken stack.
+>
 > **P1 grounding correction (2026-06-24, live stack).** Against a *running*
 > docker+xpra session the xpra-html5 client + its WS are served on the **xpra TCP
 > port (`<xpraTcpPort>`)** — e.g. `127.0.0.1:14327` returned the

@@ -144,17 +144,35 @@ test('createDriver: ports fall back to derived defaults (port+10000, +1)', () =>
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C) });
   const i = drv.createDriver({ ...HOSTCFG, port: 4327 }).inspect();
   assert.equal(i.xpraTcpPort, 14327);
-  assert.equal(i.xpraHtml5Port, 14328);
+  // COLLAPSED (was 14328). xpra serves html5 on the bind-tcp socket; the old
+  // +1 published a port that answered nothing. The field is kept, and correct.
+  assert.equal(i.xpraHtml5Port, 14327);
+  assert.equal(i.xpraHtml5Url, 'http://127.0.0.1:14327/');
 });
 
-test('createDriver: explicit xpra ports override; html5 derives from tcp+1', () => {
+test('createDriver: html5 port collapses onto the tcp port, never tcp+1', () => {
   const C = fakeC();
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C) });
-  const i1 = drv.createDriver({ ...HOSTCFG, xpraTcpPort: 20000, xpraHtml5Port: 20009 }).inspect();
-  assert.equal(i1.xpraTcpPort, 20000);
-  assert.equal(i1.xpraHtml5Port, 20009);
-  const i2 = drv.createDriver({ ...HOSTCFG, xpraTcpPort: 20000 }).inspect();
-  assert.equal(i2.xpraHtml5Port, 20001);
+  const i = drv.createDriver({ ...HOSTCFG, xpraTcpPort: 20000 }).inspect();
+  assert.equal(i.xpraTcpPort, 20000);
+  assert.equal(i.xpraHtml5Port, 20000, 'html5 must ride the tcp socket');
+  assert.notEqual(i.xpraHtml5Port, 20001, 'the +1 derivation must be gone');
+  assert.equal(i.xpraHtml5Url, 'http://127.0.0.1:20000/');
+});
+
+test('createDriver: an html5 port that differs from tcp is REFUSED, not ignored', () => {
+  // Silently ignoring an impossible override would recreate the original
+  // defect in a quieter form: config says one thing, the stack serves another.
+  const C = fakeC();
+  const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C) });
+  assert.throws(
+    () => drv.createDriver({ ...HOSTCFG, xpraTcpPort: 20000, xpraHtml5Port: 20009 }),
+    /xpraHtml5Port \(20009\) must equal xpraTcpPort \(20000\)/,
+  );
+  // An explicit value that AGREES is accepted (back-compatible for anyone who
+  // pinned the two together by hand).
+  const ok = drv.createDriver({ ...HOSTCFG, xpraTcpPort: 20000, xpraHtml5Port: 20000 }).inspect();
+  assert.equal(ok.xpraHtml5Port, 20000);
 });
 
 // ── the upload-staging seam (file-staging-agnostic gate) ───────────────────

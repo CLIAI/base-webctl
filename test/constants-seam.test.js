@@ -98,7 +98,16 @@ test('createClientConfig: deriveXpraPorts uses shared offsets (base-owned)', () 
   const cc = createClientConfig(fakeC());
   const r = cc.deriveXpraPorts(4999, {});
   assert.equal(r.xpraTcpPort, 14999);    // 4999 + PORT_OFFSET_XPRA_TCP(10000)
-  assert.equal(r.xpraHtml5Port, 15000);  // tcp + PORT_OFFSET_HTML5(1)
+  // COLLAPSED (was 15000 = tcp+1). html5 is served ON the bind-tcp socket.
+  assert.equal(r.xpraHtml5Port, 14999);
+  assert.match(r.sources.html5, /^derived/);
+
+  // An EXPLICIT override is still reported verbatim rather than collapsed here,
+  // so the driver can refuse a value it cannot serve. Collapsing it in the
+  // resolver would hide the mismatch and reintroduce the defect quietly.
+  const e = cc.deriveXpraPorts(4999, { xpraHtml5Port: 15000 });
+  assert.equal(e.xpraHtml5Port, 15000);
+  assert.equal(e.sources.html5, 'jsonc.xpraHtml5Port');
 });
 
 test('createClientConfig: exposes shared constants + CONSTANTS=C; parseJsonc pure', () => {

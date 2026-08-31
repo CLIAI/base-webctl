@@ -1,3 +1,10 @@
+> **RESOLVED 2026-08-31** — implemented in base: the `+1` derivation, the
+> published port, the pre-flight role and `XPRA_HTML5_BIND` are gone;
+> `xpraHtml5Port === xpraTcpPort` and `inspect()` advertises `xpraHtml5Url`.
+> Acceptance is an HTTP GET on the advertised URL (see
+> `test/xpra-html5-port-collapse.test.js`). The consumer-side entrypoint edit
+> to `--html=on` is coordinated by `webctl:mgr`. Kept as the grounding record.
+
 # FUTURE_WORK — xpra-html5 served on the TCP port; XPRA_HTML5_BIND (+1) is dead config
 
 * **Category:** migrate (driver port-model reconcile)
