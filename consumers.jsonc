@@ -11,6 +11,12 @@
 //   testCmd        the consumer contract entrypoint (xrl4 §"consumer contract")
 //   dockerOptIn    also expose --stack under {TOOL}_DOCKER_TESTS=1
 //   tier           full | cdp-client | contracts  (capability is opt-in)
+//   localDir       OPTIONAL. Absolute path (~ / $HOME allowed) to the local
+//                  working copy, when its directory name is NOT the registry
+//                  `name`. Omit for the normal case. Without it the gate looks
+//                  only at $WEBCTL_CONSUMERS_DIR/<name>, cannot find such a
+//                  repo, and reports SKIP forever while the summary still says
+//                  OK — a consumer invisible to the gate that looks wired.
 //   wired          true once the consumer's master actually mounts the
 //                  submodule. While false the gate reports SKIP (not FAIL) —
 //                  migration runs one small refactoring at a time (sb7q).
@@ -74,6 +80,13 @@
       "testCmd": "./test-against-base.sh --offline",
       "dockerOptIn": true,
       "tier": "full",
+      // Lives OUTSIDE $WEBCTL_CONSUMERS_DIR and under a different directory
+      // name than its registry name, so the gate needs localDir to see it at
+      // all. Until 2026-08-31 it did not have one: the gate resolved
+      // ~/github/CLIAI/substack-webctl, found nothing, and reported SKIP "repo
+      // not present" on every run — while the comment below claimed REAL-GREEN.
+      // Contract re-run at the real path on flip day: exit 0.
+      "localDir": "~/github/gwwtests/lindseymackereth-substack",
       // Registered + wired via arbitrate/promote (ubertmux-adm): proposal #1
       // (register) + #2 (this flip). FIRST family consumer to actually ship the
       // xrl4 contract: submodule mounted+pinned @v0.5.0 (5c3db07), and

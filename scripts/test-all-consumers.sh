@@ -27,7 +27,7 @@ envelope() {
 pass=0 fail=0 skip=0
 fails=()
 
-while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired; do
+while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localDir; do
   [ -n "$name" ] || continue
 
   if [ "$wired" != "true" ]; then
@@ -36,7 +36,22 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired; do
     skip=$((skip + 1)); continue
   fi
 
-  repo_dir="$CONSUMERS_DIR/$name"
+  # Resolve the consumer's working copy. Default is $CONSUMERS_DIR/<name>, but
+  # a consumer whose local directory name differs from its registry name sets
+  # `localDir` (may use ~ or $HOME). Without this the gate cannot find such a
+  # repo and reports SKIP indefinitely while looking green.
+  if [ -n "${localDir:-}" ]; then
+    # Expand a leading ~ or $HOME ONLY. Deliberately not `eval`: the registry is
+    # repo-controlled today, but a path is data and should never be executed,
+    # and this also keeps paths containing spaces intact.
+    case "$localDir" in
+      "~/"*)     repo_dir="$HOME/${localDir#\~/}" ;;
+      '$HOME/'*) repo_dir="$HOME/${localDir#\$HOME/}" ;;
+      *)         repo_dir="$localDir" ;;
+    esac
+  else
+    repo_dir="$CONSUMERS_DIR/$name"
+  fi
   if [ ! -d "$repo_dir" ]; then
     envelope "$name" "$tier" "skip"
     echo "SKIP  $name ($tier) — repo not present at $repo_dir" >&2

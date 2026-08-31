@@ -24,11 +24,26 @@ mapfile -t base_files < <(cd "$BASE_ROOT" && find lib -type f -name '*.js' | sor
 drift=0
 checked=0
 
-while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired; do
+while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localDir; do
   [ -n "$name" ] || continue
   [ "$wired" = "true" ] || { echo "skip  $name — not yet wired" >&2; continue; }
 
-  repo_dir="$CONSUMERS_DIR/$name"
+  # Resolve the consumer's working copy. Default is $CONSUMERS_DIR/<name>, but
+  # a consumer whose local directory name differs from its registry name sets
+  # `localDir` (may use ~ or $HOME). Without this the gate cannot find such a
+  # repo and reports SKIP indefinitely while looking green.
+  if [ -n "${localDir:-}" ]; then
+    # Expand a leading ~ or $HOME ONLY. Deliberately not `eval`: the registry is
+    # repo-controlled today, but a path is data and should never be executed,
+    # and this also keeps paths containing spaces intact.
+    case "$localDir" in
+      "~/"*)     repo_dir="$HOME/${localDir#\~/}" ;;
+      '$HOME/'*) repo_dir="$HOME/${localDir#\$HOME/}" ;;
+      *)         repo_dir="$localDir" ;;
+    esac
+  else
+    repo_dir="$CONSUMERS_DIR/$name"
+  fi
   [ -d "$repo_dir" ] || { echo "skip  $name — repo not present at $repo_dir" >&2; continue; }
 
   for rel in "${base_files[@]}"; do

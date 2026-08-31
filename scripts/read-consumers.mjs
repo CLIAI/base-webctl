@@ -4,7 +4,12 @@
 //
 // Usage: node scripts/read-consumers.mjs [path/to/consumers.jsonc]
 // Output (one row per consumer, tab-separated):
-//   name \t submodulePath \t testCmd \t tier \t dockerOptIn \t wired
+//   name \t submodulePath \t testCmd \t tier \t dockerOptIn \t wired \t localDir
+//
+// localDir is OPTIONAL and empty for most consumers, which then resolve to
+// $WEBCTL_CONSUMERS_DIR/<name>. It exists because a consumer's local directory
+// name need not equal its registry name — and when it does not, the gate
+// silently could not find the repo and reported SKIP forever.
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -46,5 +51,6 @@ for (const c of (data.consumers || [])) {
     c.name, c.submodulePath, c.testCmd, c.tier,
     c.dockerOptIn ? 'true' : 'false',
     c.wired ? 'true' : 'false',
+    c.localDir || '',
   ].join('\t') + '\n');
 }
