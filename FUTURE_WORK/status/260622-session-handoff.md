@@ -29,7 +29,7 @@ files (`260622-pilot.md`, `260622-v0.2.0.md`) + the design corpus to resume.
 * `proposals/2026-06-22-linkedin-docker-ctl-submodule.md`
 * `proposals/2026-06-22-linkedin-v0.2.0-five-modules.md`
 * `proposals/2026-06-22-chatgpt-v0.2.0-five-modules.md`
-* The manager (webctl:mgr) is delivering these to webctl:linkedin / webctl:chatgpt.
+* The manager (webctl:mgr) is delivering these to webctl:linkedin / cgwc:main.
 
 ## UPDATE 2026-06-23 (latest) — v0.4.0 IN PROGRESS
 

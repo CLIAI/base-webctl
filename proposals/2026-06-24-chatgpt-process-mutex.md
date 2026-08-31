@@ -9,7 +9,7 @@
 
 # Proposal — chatgpt-webctl: adopt base `createProcessMutex` (+ .gitignore hardening)
 
-* **For:** `webctl:chatgpt@knot` + Greg — review & adopt at your pace.
+* **For:** `cgwc:main@knot` + Greg — review & adopt at your pace.
 * **From:** `webctl:base@knot` (mutex consolidation, 2026-06-24).
 * **Status:** base side GREEN + adapter pattern PROVEN on the sibling (telegram
   17/17). chatgpt adoption **must run chatgpt's own `tests/unit/mutex.test.js`
