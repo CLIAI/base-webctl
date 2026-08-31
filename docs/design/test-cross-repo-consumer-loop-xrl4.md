@@ -140,6 +140,16 @@ of producing anything else.*
   indistinguishable from a control that passed. The check whose entire job is to
   prevent a false all-clear nearly recorded one.
 
+* **The release gate could not see the release it gates.** `test-all-consumers.sh`
+  computes `BASE_ROOT` and then never uses it: it invokes each consumer's
+  `./test-against-base.sh`, which resolves `vendor/base-webctl` — *the
+  consumer's own pin*. So a green gate proves every consumer works against the
+  commit it **already** pins, and says nothing whatsoever about the base commit
+  being released. `PASS against base v0.5.0` was routinely read as "base is
+  releasable" when it meant "the consumer still works against the version it
+  pinned last month". A defect introduced on master could not have been caught
+  by the gate at any point before or after tagging.
+
 ### Requirements
 
 These are normative for the gate, for every consumer contract, and for any
@@ -165,6 +175,11 @@ control used as evidence about either.
   non-recursive walk is the same bug with a smaller blast radius: one consumer's
   require()-ability check verified 7 of 16 modules and was silent about the 9 it
   skipped.
+* **A gate states what it VALIDATED AGAINST, in the line a human reads.** Not
+  "PASS" but "PASS against <the exact thing under test>" — and that thing must
+  be the artefact whose release is being decided, not whatever the runner
+  happened to resolve. The gap between "what was tested" and "what is being
+  approved" is invisible in a summary line and total in effect.
 * **Guard tests carry a negative control.** A guard that has never been observed
   to fail is indistinguishable from a guard that cannot fail. base's
   no-top-level-await guard ships a fixture that deliberately violates the
