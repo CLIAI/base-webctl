@@ -45,6 +45,15 @@ function stripJsonc(src) {
   return out;
 }
 
+// A consumer of this output may stop reading early (`awk '...{exit}'`, `head`),
+// which closes the pipe and makes the next write raise EPIPE. That is normal
+// shell behaviour, not an error worth a stack trace — and an unhandled one made
+// the drift script explode when it looked up a single consumer by name.
+process.stdout.on('error', (err) => {
+  if (err && /** @type {any} */ (err).code === 'EPIPE') process.exit(0);
+  throw err;
+});
+
 const data = JSON.parse(stripJsonc(readFileSync(file, 'utf8')));
 for (const c of (data.consumers || [])) {
   process.stdout.write([

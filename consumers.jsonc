@@ -82,6 +82,31 @@
       "wired": false
     },
     {
+      "name": "claude-chrome-extension-webctl",
+      // PRIVATE, in gwwtests rather than CLIAI: carries a browser profile
+      // authenticated as Greg. localDir is mandatory for that reason — under
+      // the old $CONSUMERS_DIR/<name> resolution this would have registered,
+      // reported SKIP "repo not present", and counted as green.
+      "repo": "git@github.com:gwwtests/claude-chrome-extension-webctl.git",
+      "submodulePath": "vendor/base-webctl",
+      "testCmd": "./test-against-base.sh --offline",
+      "dockerOptIn": true,
+      "tier": "full",
+      "localDir": "~/github/gwwtests/claude-chrome-extension-webctl",
+      "wired": false
+    },
+    {
+      "name": "comparis-ch-webctl",
+      // PRIVATE, gwwtests — same reason, same localDir requirement.
+      "repo": "git@github.com:gwwtests/comparis-ch-webctl.git",
+      "submodulePath": "vendor/base-webctl",
+      "testCmd": "./test-against-base.sh --offline",
+      "dockerOptIn": true,
+      "tier": "full",
+      "localDir": "~/github/gwwtests/comparis-ch-webctl",
+      "wired": false
+    },
+    {
       "name": "substack-webctl",
       "repo": "git@github.com:gwwtests/lindseymackereth-substack.git",
       "submodulePath": "vendor/base-webctl",
