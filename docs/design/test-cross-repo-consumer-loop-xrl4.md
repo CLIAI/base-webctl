@@ -3,9 +3,9 @@ id: xrl4
 title: "Cross-Repo Consumer Test Loop & test-against-base Contract"
 category: test
 created: "2026-06-22"
-updated: "2026-06-22"
+updated: "2026-08-31"
 status: draft
-tags: [cross-repo, ci, test-loop, contract, headless, exit-codes, jsonl, drift-canary, semver-gate]
+tags: [cross-repo, ci, test-loop, contract, headless, exit-codes, jsonl, drift-canary, semver-gate, gate-validity, vacuous-green, mutation-testing]
 tech:
   - name: "Node.js"
     version: ">=18"
@@ -103,6 +103,77 @@ For a candidate base commit:
 
 Pairs with `scripts/verify-no-byte-drift.sh`, which asserts no consumer has copied
 a base file back into its own `lib/` (catches regression to byte-duplication).
+
+## Gate validity: the green that means nothing
+
+**A gate must distinguish "ran and passed" from "was never reached." A summary
+line that renders those two identically is not a gate.** This is a stronger
+requirement than it sounds, and the loop violated it for months without anyone
+noticing, because everything downstream of the violation looked healthy.
+
+On 2026-08-31 this exact class was hit **three times in one day**, in three
+different repos, by three different agents working independently. All three have
+the same shape: *a reassuring zero produced by something structurally incapable
+of producing anything else.*
+
+* **The gate could not find a consumer, and said OK.** `consumers.jsonc`
+  resolved each working copy as `$WEBCTL_CONSUMERS_DIR/<name>`, but one
+  consumer's local directory name was not its registry name and lived outside
+  that directory entirely. The gate looked for a path that had never existed,
+  reported `skip` "repo not present" on every run since registration, and
+  summarised OK. Its registry entry meanwhile claimed the gate was REAL-GREEN on
+  it. The consumer was genuinely green — its contract exits 0 when run at its
+  real path — so nothing was wrong with the consumer; the gate simply never
+  reached it. Measured baseline at discovery: **`pass=0 skip=5`, summary "OK: no
+  consumer FAILed."** The gate would have approved any base release whatsoever.
+* **A contract's early bail masked the state it existed to detect.** A
+  consumer's `test-against-base.sh` checked "no base module was re-vendored as a
+  byte copy" *after* its "no adopted modules yet -> exit 2 (skip)" bail. So a
+  consumer that had re-vendored **everything** would report SKIP rather than
+  FAIL — silently removing itself from the gate, in precisely the scenario the
+  check was written to catch, while the gate stayed green.
+* **A mutation-based control that never mutated.** To prove a differential
+  harness could fail, a source line was mutated with `sed` in a scratch copy.
+  The pattern targeted `graceMisses >= 3`; the source said `graceMisses = 3` — a
+  default parameter, not a comparison. `sed` matched nothing, the file was never
+  touched, and the harness dutifully reported **0 mismatches** — a result
+  indistinguishable from a control that passed. The check whose entire job is to
+  prevent a false all-clear nearly recorded one.
+
+### Requirements
+
+These are normative for the gate, for every consumer contract, and for any
+control used as evidence about either.
+
+* **Report what was executed, not only what passed.** `pass=0` under an OK
+  summary MUST be visibly distinguishable from real coverage. A gate that cannot
+  say how many consumers it actually ran cannot support the claim it is making.
+* **Every skip names its cause AND the resolved thing it looked for** — the
+  expanded path, the command, the missing file. "repo not present" is useless;
+  "repo not present at `/home/u/github/CLIAI/substack-webctl`" is what makes a
+  path-resolution bug visible on sight rather than after an audit.
+* **Ordering inside a contract is load-bearing.** A check that can exit early
+  MUST come after the checks that detect the degenerate states it would
+  otherwise mask. Order the cheap bail last, not first.
+* **A mutation-based control MUST prove the mutation landed** — diff the mutated
+  copy, or assert the substitution count — *before* its result is admissible as
+  evidence of anything. An unproven mutation makes a passing control and a
+  broken control identical.
+* **Enumerate from disk, never from a hand-maintained list.** A hardcoded module
+  or consumer list silently narrows as the thing it enumerates grows; the
+  narrowing is invisible precisely because the check keeps passing. A
+  non-recursive walk is the same bug with a smaller blast radius: one consumer's
+  require()-ability check verified 7 of 16 modules and was silent about the 9 it
+  skipped.
+* **Guard tests carry a negative control.** A guard that has never been observed
+  to fail is indistinguishable from a guard that cannot fail. base's
+  no-top-level-await guard ships a fixture that deliberately violates the
+  guarantee for this reason.
+
+> The uncomfortable general lesson: all three failures were found by someone
+> verifying a *different* claim, not by the check itself. Trust in a green run
+> should be proportional to how recently that specific check was last seen to go
+> red.
 
 ## Programmatic end-to-end scope (be honest)
 
