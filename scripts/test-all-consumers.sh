@@ -159,7 +159,18 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
 
   echo "RUN   $name ($tier): $testCmd" >&2
   rc=0
-  ( cd "$repo_dir" && eval "$testCmd" ) || rc=$?
+  # WEBCTL_BASE_DIR — the candidate base this run is validating (agreed with
+  # cgwc:main and webctl:mgr). A consumer that honours it resolves base from
+  # here INSTEAD of its own vendor/base-webctl, which is what lets the gate
+  # point a consumer at a candidate without moving anything in its repo.
+  # Host-side and project-prefixed on purpose: a bare BASE_DIR is far too
+  # generic for a variable crossing a repo boundary. This is NOT a container:
+  # value and has nothing to do with the LWC_ wire contract.
+  #
+  # Exported in BOTH modes so the value is always truthful about what is being
+  # validated. The submodule swap above stays as the fallback for consumers
+  # that do not honour it yet; once they all do, the swap can go.
+  ( cd "$repo_dir" && WEBCTL_BASE_DIR="$BASE_ROOT" eval "$testCmd" ) || rc=$?
 
   if [ "$AGAINST_HEAD" = "1" ] && [ -n "$orig_sha" ]; then
     restore_submodule "$sub_abs" "$orig_sha"
