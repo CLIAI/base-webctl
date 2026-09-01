@@ -61,7 +61,17 @@
       "submodulePath": "vendor/base-webctl",
       "testCmd": "./test-against-base.sh --offline",
       "dockerOptIn": false,
+      // TIER NOTE: telegram is the ONLY consumer registered at cdp-client, and
+      // base ships no CDP client — so this tier is declared but unbacked. That
+      // makes telegram the FIRST adopter of the CDP-client extraction, not its
+      // last: its entire registered capability is the thing being extracted.
       "tier": "cdp-client",
+      // ⚠ engines.node is ">=18" here, but require(esm) — which every shim
+      // depends on — needs >=22.12. Bump it in the SAME commit as telegram's
+      // first shim, or the repo declares support for a runtime on which every
+      // shim throws. chatgpt had the identical gap; do not rediscover it.
+      // Also unfixed: lib/logging.js still rotates the shared log dir with the
+      // original blanket filter (sazn). Dormant is quiet, not safe.
       "wired": false
     },
     {
