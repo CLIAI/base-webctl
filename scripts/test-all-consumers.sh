@@ -67,13 +67,21 @@ echo "----- validating against: $VALIDATED_AGAINST -----" >&2
 swap_to_base_head() {
   sub_abs="$1"
   orig_sha="$(git -C "$sub_abs" rev-parse HEAD)"
+  # Trap INT/TERM/HUP as well as EXIT. An EXIT trap alone is NOT enough: bash
+  # does not run it when the shell is killed by a signal, so a `timeout`, a
+  # Ctrl-C, or a terminal closing leaves the consumer's submodule moved. That is
+  # not hypothetical — it happened here on 2026-09-01, when a 2-minute timeout
+  # killed this script mid-run and left a peer's repo pinned at base master.
+  # Re-raise after restoring so the caller still sees a signal death.
   # shellcheck disable=SC2064
   trap "git -C '$sub_abs' checkout --quiet --detach '$orig_sha' 2>/dev/null || true" EXIT
+  # shellcheck disable=SC2064
+  trap "git -C '$sub_abs' checkout --quiet --detach '$orig_sha' 2>/dev/null || true; trap - INT TERM HUP; kill -\$\$ 2>/dev/null" INT TERM HUP
   git -C "$sub_abs" fetch --quiet --no-tags "$BASE_ROOT" HEAD
   git -C "$sub_abs" checkout --quiet --detach FETCH_HEAD
 }
 restore_submodule() {
-  trap - EXIT
+  trap - EXIT INT TERM HUP
   git -C "$1" checkout --quiet --detach "$2" 2>/dev/null || true
 }
 
