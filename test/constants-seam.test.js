@@ -110,6 +110,35 @@ test('createClientConfig: deriveXpraPorts uses shared offsets (base-owned)', () 
   assert.equal(e.sources.html5, 'jsonc.xpraHtml5Port');
 });
 
+test('createClientConfig: deriveXpraPorts refuses to derive an out-of-range port', () => {
+  const cc = createClientConfig(fakeC());
+
+  // 65435 is the LAST CDP port that still derives a valid xpra-tcp port (65535).
+  assert.equal(cc.deriveXpraPorts(65435, {}).xpraTcpPort, 65535);
+
+  // 65436..65535 derive 65536..65635, which are not ports. Before the guard the
+  // resolver returned them with sources:{tcp:'derived'} and full confidence, so
+  // the caller could not distinguish a valid derivation from an impossible one.
+  for (const p of [65436, 65500, 65535]) {
+    assert.throws(
+      () => cc.deriveXpraPorts(p, {}),
+      /exceeds the maximum port 65535/,
+      `CDP ${p} must be refused, not silently returned as an invalid port`,
+    );
+  }
+
+  // The whole affected window, so the boundary can never drift unnoticed.
+  let refused = 0;
+  for (let p = 1024; p <= 65535; p++) {
+    try { cc.deriveXpraPorts(p, {}); } catch { refused++; }
+  }
+  assert.equal(refused, 100, 'exactly the 65436..65535 window must be refused');
+
+  // An EXPLICIT xpraTcpPort bypasses derivation entirely — a high CDP port is
+  // still usable, you just have to say which xpra port you want.
+  assert.equal(cc.deriveXpraPorts(65500, { xpraTcpPort: 20000 }).xpraTcpPort, 20000);
+});
+
 test('createClientConfig: exposes shared constants + CONSTANTS=C; parseJsonc pure', () => {
   const C = fakeC();
   const cc = createClientConfig(C);
