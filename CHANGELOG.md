@@ -88,9 +88,66 @@ applies if you are coming from v0.5.0.
 * `PORT_OFFSET_HTML5` is still deprecated and still **DO NOT USE**; removal
   remains targeted at a future release (see v0.7.0 for why it moved).
 
+## v0.9.0 — 2026-09-02
+
+**No migration required.** v0.6.0's `--html=on` entrypoint migration still
+applies if you are coming from v0.5.0.
+
+### Added
+
+* ⭐ **`lib/cdp-client.js` — the CDP command client.** base shipped the whole
+  browser-location chain and no command client, so four tools wrote their own
+  (three of them hand-rolling RFC6455). This stops it at four.
+  * The session/transport half is substack-webctl's, carried over rather than
+    rewritten — it runs in production. The target-discovery half is the
+    claude-chrome-extension lane's rewrite of it.
+  * `listPageTargets()` **preserves the existing per-site behaviour by name**,
+    so adopting consumers change nothing at their call sites. ⚠ The
+    implementation UNDER it was widened — if you rely on the page-only filter
+    anywhere other than through that wrapper, check those places.
+  * ⭐ `listTargetsViaBrowser()` is **authoritative**; `GET /json` is not. The
+    HTTP list's membership has varied across Chromium versions and it does not
+    reliably enumerate `service_worker` targets, so **asserting an absence on it
+    yields a result indistinguishable from "not running"**. Use the browser
+    endpoint whenever an absence would be read as a finding.
+  * `listTargetsCorroborated()` reads both and **warns by default** when they
+    disagree; silence requires explicitly passing `onDisagree: null`. An
+    unreadable HTTP list is reported as *disagreement*, never as agreement.
+  * **Deliberately NOT included:** an observer-only guard, per-axis target
+    vocabulary, and a credential-method deny-list. The last is scoped to one
+    repo's threat model and would break a wired consumer that legitimately reads
+    cookies. A test asserts all three are absent from the public surface.
+
+### ⚠ Consumer-side hazard worth acting on (base cannot fix this for you)
+
+**`LWC_CHROMIUM_PROFILE` is BASE-OWNED. Do not default it downstream.**
+
+base sets it on every run, so a downstream default is a **masked default** — a
+code path that has never executed, which arms the moment base stops setting the
+variable or changes its value. That is precisely how `XPRA_HTML5_BIND` behaved
+before v0.6.0.
+
+The failure mode is a **silently discarded login**: the browser writes its
+profile to a path nothing is mounted at, so the session looks fresh and the real
+one is still on disk, unreferenced. Nothing errors.
+
+Measured across the family on 2026-09-02 — the exposure is **layered**, and no
+single layer shows it:
+
+| consumer | bakes it as a Dockerfile `ENV` | entrypoint read |
+|---|---|---|
+| chatgpt-webctl | yes (3 Dockerfiles) | `require_env` (loud on absence) |
+| claude-chrome-extension-webctl | yes (2 Dockerfiles) | `os.environ.get(…, default)` — **silent fallback** |
+| linkedin-webctl | **no** (comment says deliberately not) | `require_env` |
+| substack-webctl | **no** (comment says deliberately not) | — |
+
+The extension lane is masked at **both** layers and is the one to fix first.
+Two consumers have already removed the bake and said why in a comment; copy
+that. *(Found by substack-webctl's masked-default sweep.)*
+
 ## Unreleased (on `master`, not yet tagged)
 
-*Nothing yet — v0.8.0 is current.*
+*Nothing yet — v0.9.0 is current.*
 
 <!-- released in v0.7.0:
 * **fix(ports): an out-of-range derived xpra-tcp port is refused, not returned.**
