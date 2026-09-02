@@ -3,7 +3,7 @@ id: sm2t
 title: "Per-Repo Constants Injection Seam for Shared Modules"
 category: arch
 created: "2026-06-22"
-updated: "2026-06-23"
+updated: "2026-09-02"
 status: stable
 tags: [seam, dependency-injection, constants, factory, esm, require-esm, migration, secret-topology, multi-tenant]
 tech:
@@ -234,6 +234,58 @@ orchestration top and migrate **last**, also as factories.
 
 Each step stays independently adoptable and test-before-bump (`xrl4`); nothing
 wires a consumer until its own suite is green on the new pin.
+
+## A seam classification is a CLAIM, and it can be wrong confidently
+
+Deciding "this module needs a constants factory" versus "this module needs a
+real merge" is not bookkeeping. It is a claim about where the product-specific
+logic lives, and — like any claim — it can be **confidently wrong**, in which
+case it is discovered only after consumers have adopted and a rollback is
+expensive.
+
+⚠ **The tell: a parameter that looks like a NOUN but is really a POLICY.**
+
+Worked example, 2026-09-02, caught before landing. A proposed shared
+`url-marking` module classified itself as `constants-factory` because the only
+apparent per-repo difference was a prose noun (`contentNoun`, default
+`'captured content'`). One of its functions walked `Object.values()` of whatever
+it was handed. That walk is not a detector with a configurable label — it is a
+**field-selection policy**, silently asserting *"every string anywhere in this
+structure is counterparty content."* The noun made branching logic look like a
+substitution.
+
+The consequences were not cosmetic, and differed per consumer:
+
+* one consumer got a **false positive** — an assistant turn with no links in its
+  prose reported as carrying a counterparty URL, because a sibling `images`
+  field was on the scanned object;
+* another would have got **signal destruction**: its object carries its own
+  canonical URL, an author profile URL, CDN images, and a map whose KEYS are the
+  URLs in question — so the warning fires on **100% of items**, dominated by
+  first-party URLs. A warning that always fires trains readers to ignore it,
+  which is the same failure as a warning that is wrong, at scale;
+* and the origin consumer already computed **two different answers** for the
+  same input on two code paths, one scanning objects and one scanning prose.
+
+### Requirements
+
+* **A shared module must not default to a whole-structure walk.** Field
+  selection is per-consumer policy: make it an explicit required argument (an
+  allowlist or a predicate). A scan-everything mode may exist, but it must be
+  *named* honestly rather than being what you get by not deciding.
+* **Interrogate any seam whose only claimed per-repo difference is a string.**
+  If substituting that string changes *which data is examined* rather than *how
+  it is described*, it is a merge wearing a factory's clothes.
+* **Classify by what varies, not by what is easy to parameterise.** The noun was
+  easy; the field policy was the actual variation and was invisible because it
+  had a default.
+* **Adversarial review whose default verdict is REFUTED.** This survived the
+  author's own review and a peer's, and improved under both. It took a pass
+  starting from "this is wrong, show me" to find the coupling. A review that
+  starts from "does this look right?" cannot find a defect that looks right.
+* **Prefer the false alarm to the miss** in any detector shared across
+  consumers, and check the module does not violate the asymmetry it documents.
+  A false negative causes the accept; a false positive only adds a header.
 
 ## Consequences
 
