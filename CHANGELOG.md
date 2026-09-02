@@ -8,6 +8,28 @@ they are safe on the strength of a headline.
 > ⚠ **A checkout of an older tag does not contain this file's later entries.**
 > Read it on `master` (or on GitHub), not from inside your pinned submodule.
 
+## ⛔ Before tagging: write down what the headline does NOT cover
+
+An accurate headline is not a sufficient one, and this has now happened **three
+times running** — each caught by a reader rather than by the author:
+
+* **v0.6.0** — "the html5 port collapse". True, and it fixed **1 of 101**
+  affected CDP ports; the other 100 needed v0.7.0.
+* **v0.9.0** — "the CDP command client". True, and it was the **enumeration
+  half only** — unable to replace the hand-rolled clients it was cut to retire.
+* the `LWC_CHROMIUM_PROFILE` hazard table — accurate per consumer and **carrying
+  no revision**, so it could not be checked and could not be wrong detectably.
+  It shipped ranking the most-exposed lane as safe.
+
+The pattern is not carelessness: a true headline reads as complete, so nobody —
+including its author — looks for the part it omits.
+
+⇒ **So the release step is: state the limit in the entry, before cutting.** What
+is in, what is deliberately NOT in, and what a consumer therefore still cannot do
+on this version. If a table describes other repos, **stamp each row with the
+commit it was observed at** — in a fleet where lanes are actively fixing, an
+unstamped observation is presented as a standing fact and rots within hours.
+
 ## v0.7.0 — 2026-09-02
 
 ⭐ **THIS IS THE RELEASE WHERE THE TCP PORT OVERFLOW IS FIXED.** The v0.6.0 entry
@@ -101,9 +123,17 @@ applies if you are coming from v0.5.0.
 
 ### Added
 
-* ⭐ **`lib/cdp-client.js` — the CDP command client.** base shipped the whole
-  browser-location chain and no command client, so four tools wrote their own
-  (three of them hand-rolling RFC6455). This stops it at four.
+* ⭐ **`lib/cdp-client.js` — the CDP command client.**
+  ⚠ **SCOPE CORRECTION: v0.9.0 shipped only the ENUMERATION half.** The entry
+  below said "the CDP command client", which reads as the whole thing. It is
+  accurate and partial: `openPage`, `closePage` and `navigate` are **NOT in
+  v0.9.0** — 68 of the 237 lines it was extracted from, including the
+  `/json/new` PUT-then-GET fallback, which appears four times in the original
+  and zero times here. ⇒ **A consumer on v0.9.0 cannot use this to replace a
+  hand-rolled client**; it must keep its own lifecycle code. Fixed in v0.10.0 —
+  take that instead. If you are already on v0.9.0, keep your local lifecycle
+  half and mark it NOT-YET-EXTRACTED rather than as a fork, so the next reader
+  does not "reconcile" it against base by deleting behaviour base never had.
   * The session/transport half is substack-webctl's, carried over rather than
     rewritten — it runs in production. The target-discovery half is the
     claude-chrome-extension lane's rewrite of it.
@@ -158,9 +188,28 @@ Dockerfiles, or only entrypoints, gives a clean bill either way. Check both.
 Three worked fixes now exist in the family; copy any of them. `require_base_owned`
 is the strongest form: it names the ownership in the function that reads it.
 
+## v0.10.0 — 2026-09-02
+
+### Added
+
+* ⭐ **The CDP client's PAGE-LIFECYCLE half** — `openPage`, `closePage`,
+  `navigate`. **v0.9.0 shipped only the enumeration half** (see its entry), which
+  meant the extraction could not actually replace a hand-rolled client. It can
+  now; the surface is a superset of the client it was extracted from.
+* Three behaviours in it are **environment knowledge, not style**, and a
+  reimplementation gets all three wrong by default:
+  * **reuse before minting** — an existing page target is reused; minting per
+    operation leaks a tab per page (measured over a 220-page run);
+  * **`/json/new` is a FALLBACK, tried PUT then GET** — ⭐ that endpoint is
+    **restricted or disabled in some chromium builds**, so a client that mints
+    first works on its author's machine and fails on someone else's;
+  * ⛔ **only close the tab you minted** — a reused tab is the browser's own,
+    frequently its only page, so closing it tears down the session the caller is
+    standing on. `close()` encodes this.
+
 ## Unreleased (on `master`, not yet tagged)
 
-*Nothing yet — v0.9.0 is current.*
+*Nothing yet — v0.10.0 is current.*
 
 <!-- released in v0.7.0:
 * **fix(ports): an out-of-range derived xpra-tcp port is refused, not returned.**
