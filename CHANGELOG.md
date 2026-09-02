@@ -53,9 +53,44 @@ caveat and no remedy.
 * `--against-head` announces swaps with a PID marker, so an in-flight swap reads
   as busy and an abandoned one reads as the incident it is.
 
+## v0.8.0 — 2026-09-02
+
+**No migration required.** v0.6.0's `--html=on` entrypoint migration still
+applies if you are coming from v0.5.0.
+
+### Added
+
+* **`cfg.containerEnv` — caller-controlled container env** on the docker-xpra
+  driver, as `{KEY: string|null}`. Absent means byte-unchanged. A string sets or
+  overrides; **`null` REMOVES** a key the driver would otherwise set.
+  * Deletion is in the contract for a reason: the container entrypoint adds
+    `--remote-debugging-port` only when `LWC_CDP_PORT` is **set**, so "no CDP" is
+    expressed by *absence*. An additive-only seam could never say it.
+  * `DISPLAY` and `LWC_CHROMIUM_PROFILE` are **refused** at construction. They
+    are correspondences with the netns/Xvfb wiring and the profile bind-mount
+    computed in the same function — overriding either does not error, it gives a
+    black screen or a browser writing where nothing is mounted.
+  * Scope is the **chromium** container only.
+* ⭐ **Portless mode** — a browser with no CDP, via
+  `containerEnv: { LWC_CDP_PORT: null }`. The image always supported it; the
+  driver set the variable unconditionally, so the branch had never been taken.
+  * Five places treated CDP-unreachable as a fault, which made "no CDP was
+    requested" and "CDP is down" the same observation. Bring-up, reuse and
+    `healthCheck()` now use chromium liveness when no port was requested.
+  * The CDP port is **not published and not pre-flight reserved**, and
+    `cdpHttpUrl` is `null` rather than an address for a port nobody opened.
+  * `inspect().cdpEnabled` states the mode explicitly.
+  * A portless stack whose chromium **exits still fails**, with a message saying
+    the failure is real rather than an unreachable port.
+
+### Fixed
+
+* `PORT_OFFSET_HTML5` is still deprecated and still **DO NOT USE**; removal
+  remains targeted at a future release (see v0.7.0 for why it moved).
+
 ## Unreleased (on `master`, not yet tagged)
 
-*Nothing yet — v0.7.0 is current.*
+*Nothing yet — v0.8.0 is current.*
 
 <!-- released in v0.7.0:
 * **fix(ports): an out-of-range derived xpra-tcp port is refused, not returned.**
