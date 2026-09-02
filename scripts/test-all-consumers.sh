@@ -62,6 +62,20 @@ else
 fi
 echo "----- validating against: $VALIDATED_AGAINST -----" >&2
 
+# ── swap-in-flight markers ───────────────────────────────────────────────────
+# The --against-head arm deliberately CREATES the dirty-pointer state the
+# assertion below treats as a failure. A single sample cannot tell "dirty
+# because a swap is in flight" from "dirty and abandoned" — so the arm announces
+# itself, and the assertion asks.
+#
+# The marker carries the swapping process's PID, so liveness answers the
+# question deterministically rather than by re-sampling and hoping:
+#   marker + live pid  -> a swap is in progress  -> SKIP (busy, not broken)
+#   marker + dead pid  -> a swap was ABANDONED   -> FAIL (that IS the incident)
+#   no marker          -> dirty from elsewhere   -> FAIL
+SWAP_MARKER_DIR="$BASE_ROOT/tmp/swap-in-flight"
+swap_marker() { printf '%s/%s' "$SWAP_MARKER_DIR" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_')"; }
+
 # Point a consumer's submodule at base HEAD, run $2, restore. Never leaves the
 # submodule moved: restore is registered as a trap before the checkout.
 swap_to_base_head() {
@@ -73,16 +87,21 @@ swap_to_base_head() {
   # not hypothetical — it happened here on 2026-09-01, when a 2-minute timeout
   # killed this script mid-run and left a peer's repo pinned at base master.
   # Re-raise after restoring so the caller still sees a signal death.
+  mkdir -p "$SWAP_MARKER_DIR"
+  marker="$(swap_marker "$2")"
+  printf '%s\n' "$$" > "$marker"
   # shellcheck disable=SC2064
-  trap "git -C '$sub_abs' checkout --quiet --detach '$orig_sha' 2>/dev/null || true" EXIT
+  trap "git -C '$sub_abs' checkout --quiet --detach '$orig_sha' 2>/dev/null || true; rm -f '$marker'" EXIT
   # shellcheck disable=SC2064
-  trap "git -C '$sub_abs' checkout --quiet --detach '$orig_sha' 2>/dev/null || true; trap - INT TERM HUP; kill -\$\$ 2>/dev/null" INT TERM HUP
+  trap "git -C '$sub_abs' checkout --quiet --detach '$orig_sha' 2>/dev/null || true; rm -f '$marker'; trap - INT TERM HUP; kill -\$\$ 2>/dev/null" INT TERM HUP
   git -C "$sub_abs" fetch --quiet --no-tags "$BASE_ROOT" HEAD
   git -C "$sub_abs" checkout --quiet --detach FETCH_HEAD
 }
 restore_submodule() {
   trap - EXIT INT TERM HUP
   git -C "$1" checkout --quiet --detach "$2" 2>/dev/null || true
+  [ -n "${3:-}" ] && rm -f "$(swap_marker "$3")"
+  return 0
 }
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -132,6 +151,12 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     skip=$((skip + 1)); continue
   fi
 
+  # ⚠ ORDER IS LOAD-BEARING — POINTER CHECK MUST COME FIRST.
+  # A dirty submodule pointer ALSO shows up in `git status --porcelain`, so the
+  # dirty-TREE skip below would swallow every mispin and report it as "busy".
+  # That silently downgrades a FAIL to a SKIP: the one finding this gate exists
+  # to surface, hidden by the check meant to reduce noise. Caught by a control
+  # on 2026-09-02, which is the only reason it is not still that way.
   # ⛔ DIRTY SUBMODULE POINTER -> FAIL, never SKIP.
   #
   # `git submodule status` prefixes a line with `+` when the CHECKED-OUT commit
@@ -155,6 +180,14 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # indistinguishable from a zero from a clean tree.
   dirty_ptr="$(git -C "$repo_dir" submodule status 2>/dev/null | grep -E '^[+U]' || true)"
   if [ -n "$dirty_ptr" ]; then
+    # Is this OUR OWN arm mid-swap? A live pid in the marker says a swap is in
+    # progress; a dead one says it was abandoned, which is the actual incident.
+    mk="$(swap_marker "$name")"
+    if [ -f "$mk" ] && kill -0 "$(cat "$mk" 2>/dev/null)" 2>/dev/null; then
+      envelope "$name" "$tier" "skip"
+      echo "SKIP  $name ($tier) — swap in flight by pid $(cat "$mk"); pointer is dirty BY DESIGN, not abandoned" >&2
+      skip=$((skip + 1)); continue
+    fi
     declared="$(git -C "$repo_dir" ls-files -s "$submodulePath" 2>/dev/null | awk '{print $2}')"
     actual="$(git -C "$repo_dir/$submodulePath" rev-parse HEAD 2>/dev/null || echo unknown)"
     envelope "$name" "$tier" "fail"
@@ -164,9 +197,28 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
       echo "        actual (HEAD):    ${actual}"
       echo "        raw: $dirty_ptr"
       echo "        Any result from this checkout would describe a base the repo does not declare."
+      [ -f "$mk" ] && echo "        NOTE: a stale swap marker exists (pid $(cat "$mk" 2>/dev/null) is gone) — an ABANDONED pre-release swap."
       echo "        Fix: git -C $repo_dir submodule update --init --recursive"
     } >&2
     fail=$((fail + 1)); fails+=("$name"); continue
+  fi
+
+  # ── DIRTY WORKING TREE -> SKIP, IN EVERY MODE ──────────────────────────────
+  # A gate reading a tree that is CHANGING UNDERNEATH IT produces a result about
+  # no particular state: clean on one run, exit 1 on the next, describing
+  # neither. Observed on an actively-edited consumer 2026-09-02.
+  #
+  # SKIP and not FAIL, because the consumer is not broken — it is BUSY, and
+  # those are different findings. But never SILENTLY: the reason names the file
+  # count, so the owning lane can see why it vanished from the gate rather than
+  # discovering it as an absence. (This also subsumes the --against-head-only
+  # refusal to move someone's submodule while they edit.)
+  dirty_files="$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "${dirty_files:-0}" -gt 0 ]; then
+    envelope "$name" "$tier" "skip"
+    echo "SKIP  $name ($tier) — working tree DIRTY ($dirty_files files) at $repo_dir;" >&2
+    echo "        a result would describe no particular state, and --against-head will not move a submodule someone is editing" >&2
+    skip=$((skip + 1)); continue
   fi
 
   # A wired consumer may not have adopted the xrl4 `./test-against-base.sh`
@@ -186,19 +238,12 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   sub_abs="$repo_dir/$submodulePath"
   orig_sha=""
   if [ "$AGAINST_HEAD" = "1" ]; then
-    # Never mutate a repo someone may be working in. A dirty consumer is a SKIP
-    # with a named cause, not a silent swap.
-    if [ -n "$(git -C "$repo_dir" status --porcelain 2>/dev/null)" ]; then
-      envelope "$name" "$tier" "skip"
-      echo "SKIP  $name ($tier) — working copy at $repo_dir is DIRTY; refusing to move its submodule" >&2
-      skip=$((skip + 1)); continue
-    fi
     orig_sha="$(git -C "$sub_abs" rev-parse HEAD)"
     if [ "$orig_sha" = "$BASE_HEAD" ]; then
       echo "NOTE  $name already pinned at base HEAD — no swap needed" >&2
     else
       echo "SWAP  $name: $submodulePath ${orig_sha:0:7} -> ${BASE_HEAD:0:7} (base HEAD)" >&2
-      swap_to_base_head "$sub_abs"
+      swap_to_base_head "$sub_abs" "$name"
     fi
   fi
 
@@ -218,7 +263,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   ( cd "$repo_dir" && WEBCTL_BASE_DIR="$BASE_ROOT" eval "$testCmd" ) || rc=$?
 
   if [ "$AGAINST_HEAD" = "1" ] && [ -n "$orig_sha" ]; then
-    restore_submodule "$sub_abs" "$orig_sha"
+    restore_submodule "$sub_abs" "$orig_sha" "$name"
   fi
   case "$rc" in
     0) envelope "$name" "$tier" "pass"; echo "PASS  $name" >&2; pass=$((pass + 1)) ;;
