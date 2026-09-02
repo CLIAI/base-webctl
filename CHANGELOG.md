@@ -90,6 +90,12 @@ applies if you are coming from v0.5.0.
 
 ## v0.9.0 — 2026-09-02
 
+> ⚠ **The copy of this file inside the `v0.9.0` TAG carries a WRONG version of
+> the hazard table below** — it swapped two consumers and marked the most-exposed
+> one as safe. Corrected here on `master`; the tag was not re-cut, because moving
+> a published tag trades a documentation error for two people holding the same
+> tag name with different content. **Read this table from `master`.**
+
 **No migration required.** v0.6.0's `--html=on` entrypoint migration still
 applies if you are coming from v0.5.0.
 
@@ -131,19 +137,26 @@ The failure mode is a **silently discarded login**: the browser writes its
 profile to a path nothing is mounted at, so the session looks fresh and the real
 one is still on disk, unreferenced. Nothing errors.
 
-Measured across the family on 2026-09-02 — the exposure is **layered**, and no
-single layer shows it:
+⚠ **Status below is a TIMESTAMPED OBSERVATION AT A NAMED COMMIT, not a standing
+fact.** Three of the four consumers fixed this within hours of it being
+reported — one of them *while this table was being written* — so an unstamped
+version of it would already be wrong. Re-check at your own HEAD before acting.
 
-| consumer | bakes it as a Dockerfile `ENV` | entrypoint read |
-|---|---|---|
-| chatgpt-webctl | yes (3 Dockerfiles) | `require_env` (loud on absence) |
-| claude-chrome-extension-webctl | yes (2 Dockerfiles) | `os.environ.get(…, default)` — **silent fallback** |
-| linkedin-webctl | **no** (comment says deliberately not) | `require_env` |
-| substack-webctl | **no** (comment says deliberately not) | — |
+Measured against each consumer's **HEAD**, 2026-09-02:
 
-The extension lane is masked at **both** layers and is the one to fix first.
-Two consumers have already removed the bake and said why in a comment; copy
-that. *(Found by substack-webctl's masked-default sweep.)*
+| consumer | at commit | bakes it as `ENV` | entrypoint read | status |
+|---|---|---|---|---|
+| claude-chrome-extension-webctl | `f38be2a` | **yes — 2 Dockerfiles** | `os.environ.get(…, default)` — **silent** | ⚠ **EXPOSED, both layers** |
+| linkedin-webctl | `febba4b` | no | `require_env` ×2 (loud) | fixed |
+| chatgpt-webctl | `686007a` | no | `require_env` (loud) | fixed |
+| substack-webctl | `940fd6d` | no | `require_base_owned` ×2 (loud) | fixed |
+
+Two independent layers can mask this — a baked `ENV` and a silent
+`environ.get` fallback — and **neither is visible from the other**. Auditing only
+Dockerfiles, or only entrypoints, gives a clean bill either way. Check both.
+
+Three worked fixes now exist in the family; copy any of them. `require_base_owned`
+is the strongest form: it names the ownership in the function that reads it.
 
 ## Unreleased (on `master`, not yet tagged)
 
