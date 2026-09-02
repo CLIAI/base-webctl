@@ -132,6 +132,43 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     skip=$((skip + 1)); continue
   fi
 
+  # ⛔ DIRTY SUBMODULE POINTER -> FAIL, never SKIP.
+  #
+  # `git submodule status` prefixes a line with `+` when the CHECKED-OUT commit
+  # differs from the one the repo's INDEX declares, and `U` on a conflict. Such
+  # a consumer is not "not ready to test": it is a consumer whose test result
+  # MEANS SOMETHING OTHER THAN WHAT IT SAYS — it exercised a base the repo does
+  # not declare. That is the one category this gate exists to distinguish, so it
+  # is red, not a skip.
+  #
+  # It is invisible without this check: top-level `git status` stays clean, the
+  # tests pass, the counts match. Three lanes have each had to remember it
+  # separately, which is the condition where a mechanism beats a discipline.
+  # Two real instances in two days — one from a killed shell skipping its EXIT
+  # trap, one from ordinary branch-switching without `git submodule update` and
+  # no crash at all. A signal trap catches the first and cannot catch the
+  # second; this catches the state however it arose.
+  #
+  # `-` (uninitialised) is deliberately NOT matched — that is the SKIP path
+  # handled above. Pattern positive-controlled against synthetic `+`/`U` lines
+  # before being trusted, because a zero from a broken pattern is
+  # indistinguishable from a zero from a clean tree.
+  dirty_ptr="$(git -C "$repo_dir" submodule status 2>/dev/null | grep -E '^[+U]' || true)"
+  if [ -n "$dirty_ptr" ]; then
+    declared="$(git -C "$repo_dir" ls-files -s "$submodulePath" 2>/dev/null | awk '{print $2}')"
+    actual="$(git -C "$repo_dir/$submodulePath" rev-parse HEAD 2>/dev/null || echo unknown)"
+    envelope "$name" "$tier" "fail"
+    {
+      echo "FAIL  $name ($tier) — DIRTY SUBMODULE POINTER: checkout disagrees with the index."
+      echo "        declared (index): ${declared:-unknown}"
+      echo "        actual (HEAD):    ${actual}"
+      echo "        raw: $dirty_ptr"
+      echo "        Any result from this checkout would describe a base the repo does not declare."
+      echo "        Fix: git -C $repo_dir submodule update --init --recursive"
+    } >&2
+    fail=$((fail + 1)); fails+=("$name"); continue
+  fi
+
   # A wired consumer may not have adopted the xrl4 `./test-against-base.sh`
   # contract script yet. Absent script => SKIP "contract pending", NOT a FAIL:
   # otherwise `wired:true` (honest — the submodule IS mounted) would false-RED
