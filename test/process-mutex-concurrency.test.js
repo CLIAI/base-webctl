@@ -77,9 +77,27 @@ test('no false contention: distinct ports proceed concurrently', async () => {
   const a = spawnWorker({ port: 9401, lockBaseDir, holdMs: 300, timeout: 2000 });
   const b = spawnWorker({ port: 9402, lockBaseDir, holdMs: 300, timeout: 2000 });
   const [ea, eb] = await Promise.all([a.acquired, b.acquired]);
-  // both acquired (neither blocked the other) and roughly concurrently
   assert.ok(ea && eb, 'both distinct-port workers acquired');
-  assert.ok(Math.abs(ea.t - eb.t) < 1500, 'acquired ~concurrently (no cross-port serialization)');
+
+  // ⭐ Assert the CAUSAL fact, not a wall-clock proxy for it. `sawBusy` is the
+  // worker reporting whether it actually had to wait on a held lock — which is
+  // precisely "did the other port's lock block me?". The previous assertion
+  // was `Math.abs(ea.t - eb.t) < 1500`, which measures scheduling luck: it
+  // failed spuriously on 2026-09-02 under parallel load (the gate and several
+  // suites running at once) while the mutex behaved perfectly. A red that means
+  // nothing erodes the signal exactly like a green that means nothing, and a
+  // flaky test is worse than no test because it trains people to re-run.
+  assert.equal(ea.sawBusy, false, 'worker A must not have waited on B — distinct ports');
+  assert.equal(eb.sawBusy, false, 'worker B must not have waited on A — distinct ports');
+
   const [ra, rb] = await Promise.all([a.exited, b.exited]);
   assert.equal(ra.code, 0); assert.equal(rb.code, 0);
+
+  // NOT asserted here: that the two hold windows overlap in wall-clock time. I
+  // tried it and it flakes for a reason worth recording — it LOOKS causal but
+  // is contaminated by PROCESS SPAWN SKEW. Worker A can acquire, hold 300ms and
+  // release before worker B's node process has finished starting, which
+  // produces disjoint windows with no serialization anywhere. Two different
+  // wall-clock proxies for the same causal fact, both flaky for two different
+  // reasons; `sawBusy` above is the fact itself.
 });
