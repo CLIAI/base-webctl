@@ -276,6 +276,9 @@ The consequences were not cosmetic, and differed per consumer:
 * **Interrogate any seam whose only claimed per-repo difference is a string.**
   If substituting that string changes *which data is examined* rather than *how
   it is described*, it is a merge wearing a factory's clothes.
+* **Check whether two constants in `C` are only coincidentally equal** before
+  keying anything on either — see `t2wf`. Config vs cache keying was exactly
+  this.
 * **Classify by what varies, not by what is easy to parameterise.** The noun was
   easy; the field policy was the actual variation and was invisible because it
   had a default.

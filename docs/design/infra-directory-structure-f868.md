@@ -7,7 +7,7 @@ updated: "2026-06-24"
 status: draft
 tags: [filesystem, xdg, paths, naming, conventions, layout]
 tech: []
-relates_to: [2fc5, sazn, lf4f, r7m3, v8m2, 1wsg, k7m2, v7m2]
+relates_to: [2fc5, sazn, lf4f, r7m3, v8m2, 1wsg, k7m2, v7m2, t2wf]
 depends_on: []
 expands: []
 similar_to: []

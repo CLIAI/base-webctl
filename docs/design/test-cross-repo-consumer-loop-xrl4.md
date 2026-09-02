@@ -169,6 +169,9 @@ control used as evidence about either.
   copy, or assert the substitution count — *before* its result is admissible as
   evidence of anything. An unproven mutation makes a passing control and a
   broken control identical.
+* **Two fields that agree today are one field** — see `t2wf`. The gate's
+  six-week false-green was exactly this: `consumers.jsonc` `name` served as both
+  registry identity and on-disk location, so no code could tell them apart.
 * **Enumerate from disk, never from a hand-maintained list.** A hardcoded module
   or consumer list silently narrows as the thing it enumerates grows; the
   narrowing is invisible precisely because the check keeps passing. A

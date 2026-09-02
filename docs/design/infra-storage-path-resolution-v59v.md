@@ -9,7 +9,7 @@ tags: [filesystem, xdg, paths, cacheroot, state, dotenv, constants-seam, scaffol
 tech:
   - name: "Node.js"
     version: ">=22.12"
-relates_to: [f868, lf4f, r7m3, sazn, v8m2, p06y, f6rd, sm2t, sb7q]
+relates_to: [f868, lf4f, r7m3, sazn, v8m2, p06y, f6rd, sm2t, sb7q, t2wf]
 depends_on: [f868, sm2t]
 expands: [f868]
 similar_to: []
