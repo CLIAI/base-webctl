@@ -230,6 +230,24 @@ somewhere world-readable is not the one.
 
 ## 8. Scaffold input + migration
 
+> ⭐ **THE BLAST RADIUS OF A `cacheRoot` MOVE IS INVERSE TO INTUITION — measured
+> 2026-09-02 from `docker inspect` on live containers, not assumed.**
+>
+> | consumer | live profile mount | size | exposed to a cacheRoot move? |
+> |---|---|---|---|
+> | chatgpt-webctl | `~/priv/chromium-…` (explicit `userDataDir` override) | 2.1G | **NO** — outside the cache root entirely |
+> | substack-webctl | `<cacheRoot>/profiles/default/chromium` | 131M | **YES** |
+>
+> The consumer carrying the most sensitive authenticated session is
+> **structurally immune**, because it already overrides `userDataDir`; the
+> exposed one is the ordinary consumer that took the defaults. Anyone planning
+> the deliberate XDG migration will reason the other way round by default — "be
+> careful with the important one" — and be careful with precisely the consumer
+> that cannot be affected, while the one that can be is the unremarkable one.
+>
+> Check the actual mounts before planning, rather than inferring exposure from
+> how much a consumer matters.
+
 * The **new-tool scaffold** stamps `createStoragePaths(C)` wiring + the `.gitignore`
   template, so every new tool inherits XDG-correct, per-tool storage with zero
   bespoke path code.

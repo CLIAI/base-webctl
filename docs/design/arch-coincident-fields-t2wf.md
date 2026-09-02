@@ -41,6 +41,22 @@ the pair uses. That converts an accident into a decision, at the cost of about
 four lines. Without it, "they agree" is load-bearing and nobody ever decided it
 should be.
 
+⚠ **AND THE REMEDY HAS THE SAME HOLE IF YOU DO NOT GUARD IT: A COMPARISON OF TWO
+VALUES MUST FIRST ESTABLISH THAT THERE ARE TWO VALUES.**
+
+"Write a test that disagrees them" fails silently when both sides can be
+`undefined` — two ABSENCES agree just as neatly as two values, and the assertion
+passes. Worse, it passes as *confirmation* rather than as an obvious blank, so
+nobody investigates.
+
+Measured instance, 2026-09-02: a check comparing the lock directory before and
+after a refactor read a field the module does not expose. It compared `undefined`
+to `undefined` and printed `IDENTICAL` — the coincident-fields bug occurring
+inside the check written to verify a coincident-fields fix. The guard is one
+line: assert both sides are truthy (or better, that each is a plausible value of
+its type) and ABORT before comparing, so "could not read it" can never render as
+"they match".
+
 The test is the whole remedy. Documenting the distinction is not enough — a
 comment saying "these are different fields" does not stop the next author from
 using whichever is in scope, because both produce a passing suite.
