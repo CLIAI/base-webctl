@@ -8,8 +8,56 @@ they are safe on the strength of a headline.
 > ⚠ **A checkout of an older tag does not contain this file's later entries.**
 > Read it on `master` (or on GitHub), not from inside your pinned submodule.
 
+## v0.7.0 — 2026-09-02
+
+⭐ **THIS IS THE RELEASE WHERE THE TCP PORT OVERFLOW IS FIXED.** The v0.6.0 entry
+below says the html5 collapse addressed **one** of the 101 affected CDP ports; the
+other **100** (`65436..65535`) are fixed *here*. Until this tag there was no
+tagged release containing that fix, so a consumer at or above `65436` had the
+caveat and no remedy.
+
+### Fixed
+
+* **An out-of-range derived xpra-tcp port is refused, not returned.** The defect
+  was never the arithmetic — it was that the resolver returned impossible ports
+  with `sources:{tcp:'derived'}`, indistinguishable from a valid answer, so the
+  failure surfaced later as an unrelated bind error. Now throws, naming the
+  affected window and both remedies. An explicit `xpraTcpPort` still bypasses
+  derivation, so a high CDP port stays usable.
+
+### Added
+
+* **`lib/url-marking.js`** — counterparty-URL detectors and the two record
+  projections, contributed by the chatgpt lane. Field selection is an explicit
+  **required** argument; the scan-everything mode is named
+  `scanAllStringsUnsafe` so choosing it is a decision rather than an omission.
+  Two consumers were carrying local copies and can now shim it.
+* `scripts/assert-pin-compat.mjs` — refuses a base pin that cannot serve the
+  consumer's configured port. Probes capability, not version.
+
+### Deprecated
+
+* `PORT_OFFSET_HTML5` — ⚠ **removal RETARGETED from v0.7.0 to v0.8.0.** The note
+  in v0.6.0 said it would go here. It has not, deliberately: v0.7.0 landed one
+  day later and **no consumer had adopted v0.6.0**, so removing now would honour
+  the letter of the deprecation while giving an effective window of zero
+  adopted releases. Verified before deciding that no consumer reads the value
+  (three comments, one QA name-list), so the removal stays cheap whenever it
+  happens. It is still **DO NOT USE**.
+
+### Gate (affects consumers only via base's release process)
+
+* A dirty submodule pointer is a **FAIL** — a consumer whose checkout disagrees
+  with its index produces a result about a base it does not declare.
+* A dirty working tree is a **SKIP** with a named reason, in every mode.
+* `--against-head` announces swaps with a PID marker, so an in-flight swap reads
+  as busy and an abandoned one reads as the incident it is.
+
 ## Unreleased (on `master`, not yet tagged)
 
+*Nothing yet — v0.7.0 is current.*
+
+<!-- released in v0.7.0:
 * **fix(ports): an out-of-range derived xpra-tcp port is refused, not returned.**
   `xpraTcpPort = port < 55535 ? port + 10000 : port + 100` runs off the end of
   the port space: CDP `65436` derives `65536`, which is not a port. **100 CDP
@@ -28,6 +76,7 @@ they are safe on the strength of a headline.
   reproduces the defect v0.6.0 removed.
 * `WEBCTL_BASE_DIR` exported by the release gate to the consumer contract.
 * Gate rollback now traps `INT`/`TERM`/`HUP`, not only `EXIT`.
+-->
 
 ## v0.6.0 — 2026-09-01
 
@@ -44,8 +93,7 @@ overflow paths existed:
   **exactly 1** of the 101 affected CDP ports (`65435`);
 * the **tcp** derivation itself — **NOT fixed in v0.6.0**. The other **100**
   ports (`65436..65535`) still derive an out-of-range value in this release,
-  silently and with full confidence. Fixed separately; see *Unreleased* above,
-  shipping in v0.7.0.
+  silently and with full confidence. **Fixed in v0.7.0** — see that entry above.
 
 So: if you pin v0.6.0 and your CDP port is below `65436`, you are unaffected by
 either. If it is at or above `65436`, v0.6.0 does **not** help you and you want
@@ -89,7 +137,8 @@ family being sound.
 
 ### Deprecated
 
-* `PORT_OFFSET_HTML5` — **removed at v0.7.0**.
+* `PORT_OFFSET_HTML5` — deprecated. (This entry said "removed at v0.7.0"; that
+  was retargeted to v0.8.0 when v0.7.0 was cut — see the v0.7.0 entry for why.)
 
 ### Docs
 
