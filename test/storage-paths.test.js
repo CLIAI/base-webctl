@@ -157,6 +157,18 @@ test('configFile places the client segment inside the per-tool root', () => {
   );
 });
 
+test('config is keyed on PROJECT, cache on CACHE_DIRNAME — pinned while they agree', () => {
+  // In all four real consumers these fields are EQUAL, so any divergence is
+  // invisible today and would surface as config silently relocating for the
+  // first consumer that sets them apart. Pinned here with them deliberately
+  // different, so the resolver's choice is asserted rather than coincidental.
+  const split = { ...C, PROJECT: 'the-project', CACHE_DIRNAME: 'the-cache-dir' };
+  const sp = createStoragePaths(split, { env: noXdg });
+  assert.equal(sp.configRoot, '/home/u/.config/CLIAI/the-project');
+  assert.equal(sp.cacheRoot, '/home/u/.cache/CLIAI/the-cache-dir');
+  assert.equal(sp.stateRoot, '/home/u/.local/state/CLIAI/the-cache-dir');
+});
+
 test('dotenv candidates are project-root FIRST, then the XDG location', () => {
   const sp = createStoragePaths(C, { env: noXdg });
   const cands = sp.dotenvCandidates('/repo');

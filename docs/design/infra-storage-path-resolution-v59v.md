@@ -146,6 +146,15 @@ f868 §canonical-tree's single dotenv location with this ordered pair.
 
 ## 6. The resolver contract — `createStoragePaths(C, opts)` (sm2t)
 
+> ⇒ **[1] CORRECTION 2026-09-02 — the sketch said `CACHE_DIRNAME`; the SHIPPED
+> code keys config on `C.PROJECT`.** They are different fields, and in all four
+> real consumers they are currently EQUAL — which is exactly why this is worth
+> pinning rather than leaving: the divergence is invisible today and would
+> surface as config silently relocating for the first consumer that sets them
+> apart. The implementation follows the code rather than the sketch, because the
+> code is what already has files under it, and a test asserts the two trees
+> diverge correctly with the fields deliberately different.
+
 ⇒ **IMPLEMENTED** in `lib/storage-paths.js`. sm2t-shaped, zero-dep, `env` and
 `fs` injectable for tests. Three refusals are enforced in code rather than
 documented, because this standard exists because a documented invariant was not
@@ -169,7 +178,7 @@ enough:
  * @param {ClientConfigConstants} C   // CACHE_DIRNAME, PROJECT, DOTENV_FILENAME, ...
  * @param {{ env?: Record<string,string>, client?: string }} [opts]
  * @returns {{
- *   configRoot: string,   // <XDG_CONFIG_HOME|~/.config>/CLIAI/<CACHE_DIRNAME>
+ *   configRoot: string,   // <XDG_CONFIG_HOME|~/.config>/CLIAI/<PROJECT>  [1]
  *   cacheRoot: string,    // <XDG_CACHE_HOME|~/.cache>/CLIAI/<CACHE_DIRNAME>
  *   stateRoot: string,    // <XDG_STATE_HOME|~/.local/state>/CLIAI/<CACHE_DIRNAME>
  *   locksDir: string,     // <XDG_RUNTIME_DIR>/.../locks  OR  <cacheRoot>/locks
@@ -184,11 +193,31 @@ enough:
 export function createStoragePaths(C, opts) { /* ... */ }
 ```
 
-Consumers (and the existing base modules — mounts, the mutex, the gateway store)
-get their roots from this ONE resolver instead of re-deriving `cacheRoot`. base's
-`mounts.cacheRoot()`, the mutex `lockBaseDir`, and the gateway `statePath` become
-thin callers of `createStoragePaths(C)` — a follow-up consolidation, **not part of
-this design-only step**.
+⇒ **CONSOLIDATION DONE 2026-09-02.** `mounts.cacheRoot()` and the mutex
+`lockBaseDir` are now thin callers of `createStoragePaths(C)`; the hand-rolled
+`$HOME` derivations are gone from `lib/`. (The gateway `statePath` is
+caller-supplied by contract, so it has nothing to consolidate — `gatewayStatePath()`
+is there for whoever constructs it.)
+
+⛔ **They pass `legacyHomeOnly: true`, and that is required rather than tidy.**
+The existing derivations honour no XDG variable, so consolidating them onto the
+XDG-aware default would **relocate cache, profiles and locks for anyone with
+`$XDG_CACHE_HOME` set** — silently, on upgrade. For locks that is the
+rollout-window mutual-exclusion break described in §4.1. For profiles it is
+quieter and arguably worse: **a relocated profile is an empty profile**, i.e. a
+silently logged-OUT browser, with the real authenticated session still sitting at
+the old path.
+
+So: new code gets the XDG-correct default this standard mandates; the existing
+sites keep their paths byte-identical until a **deliberate, announced migration**.
+Consolidation removes the drift risk (one implementation) without moving a single
+file — which is the same never-delete/never-move discipline as §"the resolver
+contract", applied to the consolidation itself.
+
+One deliberate behaviour change came with it: `$HOME` unset now **throws** rather
+than falling back. The two consolidated sites disagreed there anyway (`/tmp` vs
+`os.tmpdir()`), so consolidation had to pick one, and writing profiles and cookies
+somewhere world-readable is not the one.
 
 ## 7. Secret topology + .gitignore (carry from f868, hardened)
 
