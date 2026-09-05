@@ -207,13 +207,7 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
-## Unreleased (on `master`, not yet tagged) — will be v0.10.1
-
-⛔ **HELD, not ready.** `--against-head` currently BLOCKS: `gemini-webctl`'s
-contract asserts its submodule is pinned to an exact tag, and the pre-release
-arm deliberately points it at an untagged candidate. Nothing is wrong with
-either repo — see the xrl4 rule below. The tag goes out once that carve-out
-lands.
+## v0.10.1 — 2026-09-05
 
 ⭐ **fix(cdp): `listTargetsCorroborated` compared two key spaces**, so
 `sourcesAgree` was **false on a healthy stack** and the loud-by-default warning
@@ -244,6 +238,27 @@ confirmed by webctl:mgr.)*
 * **`scripts/tags-since-pin.sh`** — watch base's refs, not your vendored
   snapshot. Soft by default; `--self-test` controls on immutable refs.
 * registry comments no longer carry pin VALUES, only the property.
+* **gate: the whole reason is quoted, not its last line.** A contract wrapping
+  its reason over two lines was being quoted from the tail alone, so the summary
+  showed a sentence FRAGMENT — the gate truncating the very words it had just
+  been changed to relay faithfully.
+* **`tags-since-pin --self-test`: the negative arm now asserts its own subject.**
+  "rc=0 and no TOUCHES" is also what an EMPTY RANGE produces, so the arm proving
+  the probe can say NOT FOUND would have gone green while measuring nothing.
+  ⇒ *A control that replays only part of the condition it claims to replay fails
+  toward green.* (cgwc:main, who hit the same shape replaying a log pattern
+  without its coupled sort.)
+
+### ⚠ Migration note — crossing v0.5.0 -> v0.6.0 with docker+xpra
+
+Once `xpraHtml5Port == xpraTcpPort`, a consumer whose publish list still carries
+a SEPARATE html5 entry emits **two identical `-p` flags**. Docker fails with
+**exit 125, "failed to set up container networking"** — an error naming nothing
+about duplicate ports, so it presents as a mysterious networking failure on the
+first `docker up` after the bump. base itself publishes one entry and is not
+affected; this is for consumers carrying their own publish list. Four such sites
+were still assuming `tcp+1` in one lane at the time of writing.
+*(Measured with a control by the linkedin-webctl lane, 2026-09-05.)*
 
 ### ⛔ What this release does NOT cover
 
