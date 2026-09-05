@@ -68,6 +68,36 @@ mistake at higher arity; see `arch-coincident-fields-t2wf`.
 non-blank line. ⇒ **Gate obligation:** the gate quotes that line and never
 substitutes a cause of its own.
 
+### ⛔ Assert the FINDING, never the exit status
+
+A status says *something* was wrong. It does not say *the thing you are testing
+for* happened — and a check that accepts the status accepts every other reason
+too.
+
+Measured three ways on 2026-09-05, in three repos, all failing toward green:
+
+* A replay fixture reverted to its pre-fix state still exited 1, but for a
+  different reason than the defect it replays: `mutated -> exit=1, ledger-FAIL
+  lines: 0` against `fixed -> exit=1, ledger-FAIL lines: 1`. A control asserting
+  `rc === 1` passes the broken fixture cleanly. *(cgwc:main)*
+* `tags-since-pin`'s negative arm asserted `rc=0 and no matches`, which is also
+  what the probe returns over an EMPTY RANGE — so the arm proving it can say
+  NOT FOUND went green while comparing nothing. It now asserts it verifiably saw
+  the range.
+* A consumer contract returning 2 for "no suite yet" and 2 for "needs a human"
+  is the same shape one layer up: the right number, an unstated reason. Which is
+  why the reason travels as text (above) rather than as more codes.
+
+⇒ **A control must assert the finding it exists to produce, and a control that
+replays only part of a condition misrepresents the history it claims to replay.**
+Both failures are toward GREEN, which is the direction nobody investigates.
+
+⚠ Corollary for delete paths, from the same review: *deletion is eventually
+loud, accumulation never is* ranks NOTICEABILITY — it does not rank
+RECOVERABILITY, and the two come apart exactly where an argument is malformed.
+When the only options are a loud stop and an irreversible one, prefer the loud
+stop even where a silence argument otherwise holds.
+
 ### ⛔ A contract must not assert properties of its OWN pin
 
 `WEBCTL_BASE_DIR` is set by the gate and means: **the base you are testing was
