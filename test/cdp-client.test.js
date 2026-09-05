@@ -119,6 +119,53 @@ test('an unreadable HTTP list is NOT reported as agreement', async () => {
   } finally { restore(); globalThis.WebSocket = realWS; }
 });
 
+test('⭐ KNOWN-NEGATIVE: a HEALTHY stack agrees, and says nothing at all', async () => {
+  // A known-positive proves the instrument can say FOUND. An ALARM additionally
+  // needs a known-NEGATIVE — proof it can say NOT FOUND — because a thing that
+  // always fires and a thing that correctly fired are indistinguishable from
+  // outside. This alarm DID always fire: the two sources key their rows
+  // differently (targetId vs id), so `sourcesAgree` was false on every healthy
+  // call and the loud-by-default warning cried wolf on every call.
+  // Measured on a live stack by substack-webctl, 2026-09-05.
+  const restore = stubFetch({
+    '/json': [PAGE, SW],
+    '/json/version': { webSocketDebuggerUrl: 'ws://localhost:4327/devtools/browser/b1' },
+  });
+  const realWS = globalThis.WebSocket;
+  const realWarn = console.warn;
+  globalThis.WebSocket = fakeBrowserWs([PAGE, SW]); // SAME targets, both sources
+  const warnings = [];
+  console.warn = (/** @type {any} */ m) => warnings.push(String(m));
+  try {
+    const r = await listTargetsCorroborated(BASE);
+    assert.equal(r.sourcesAgree, true,
+      'identical targets from both sources MUST agree — a false here is the ' +
+      'comparator comparing two key spaces, not the stack being unhealthy');
+    assert.equal(warnings.length, 0, 'a healthy stack must be SILENT');
+    assert.deepEqual(r.targets.map((t) => t.id).sort(), ['p1', 'sw1'],
+      'targetId must be normalised to id so callers see one shape');
+  } finally { restore(); globalThis.WebSocket = realWS; console.warn = realWarn; }
+});
+
+test('a target with neither id nor url is reported, not collapsed', async () => {
+  // Keying an identity-less row on '' collapses every such row onto one key, so
+  // three distinct workers would read as "the same target" and a real
+  // disagreement would cancel out. Flagged as reasoned-not-measured by
+  // substack (their stack had zero worker targets); handled explicitly.
+  const GHOST = { type: 'service_worker' }; // no id, no url
+  const restore = stubFetch({
+    '/json': [GHOST],
+    '/json/version': { webSocketDebuggerUrl: 'ws://localhost:4327/devtools/browser/b1' },
+  });
+  const realWS = globalThis.WebSocket;
+  globalThis.WebSocket = fakeBrowserWs([GHOST]);
+  try {
+    const r = await listTargetsCorroborated(BASE, { onDisagree: null });
+    assert.equal(r.sourcesAgree, false,
+      'rows with no identity cannot be compared — that is a finding, not agreement');
+  } finally { restore(); globalThis.WebSocket = realWS; }
+});
+
 test('getVersion rewrites the browser ws URL to the host', async () => {
   const restore = stubFetch({
     '/json/version': { webSocketDebuggerUrl: 'ws://localhost:9222/devtools/browser/b1' },
@@ -142,8 +189,21 @@ test('the excluded parts are genuinely absent from the public surface', async ()
   }
 });
 
-/** Minimal browser-websocket double that answers Target.getTargets. */
+/**
+ * Minimal browser-websocket double that answers Target.getTargets.
+ *
+ * ⛔ IT RE-KEYS `id` -> `targetId` ON PURPOSE. That is what real chromium sends:
+ * Target.getTargets rows carry `targetId`, while GET /json rows carry `id`.
+ * This double used to hand back `id`, so it modelled a browser that does not
+ * exist — and a comparator that could never match the two sources passed
+ * against it for a whole release. A double that is kinder than the wire is not
+ * a test, it is an echo.
+ */
 function fakeBrowserWs(targetInfos) {
+  targetInfos = targetInfos.map((/** @type {any} */ t) => {
+    const { id, ...rest } = t;
+    return { ...rest, targetId: id };
+  });
   return class {
     constructor() {
       this._listeners = {};
