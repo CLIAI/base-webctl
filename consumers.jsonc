@@ -33,7 +33,7 @@
       "testCmd": "./test-against-base.sh --offline",
       "dockerOptIn": true,
       "tier": "full",
-      // linkedin's master mounts vendor/base-webctl (v0.3.0, 9 modules adopted),
+      // linkedin's master mounts vendor/base-webctl (9 modules adopted),
       // so it is genuinely wired. Contract adoption (./test-against-base.sh) is
       // pending — gate reports SKIP "contract pending" until it lands, then real
       // PASS/FAIL. Proven real-GREEN in a worktree 2026-06-23 (24/24 suites).
@@ -47,7 +47,7 @@
       "dockerOptIn": true,
       "tier": "full",
       // Flipped by webctl:base after INDEPENDENT verification (not on report):
-      // submodule mounted+pinned 5c3db07 == v0.5.0 exactly (same commit as
+      // submodule mounted and pinned to an exact tag (same commit as
       // substack); lib/xpra-presence.js is a one-line re-export shim, not a
       // copy; ./test-against-base.sh --offline run here -> exit 0 (1263 unit
       // tests through the shim); verify-no-byte-drift.sh clean. The adoption
@@ -134,7 +134,7 @@
       //
       // wired:true on the SAME commit as registration, which no prior consumer
       // did — master already mounts vendor/base-webctl pinned to the TAG
-      // v0.10.0 (020f93a) with a working client-config shim and the xrl4
+      // an exact tag, with a working client-config shim and the xrl4
       // contract shipped. Registering it wired:false would have been false.
       "wired": true
     },
@@ -154,7 +154,7 @@
       "localDir": "~/github/gwwtests/lindseymackereth-substack",
       // Registered + wired via arbitrate/promote (ubertmux-adm): proposal #1
       // (register) + #2 (this flip). FIRST family consumer to actually ship the
-      // xrl4 contract: submodule mounted+pinned @v0.5.0 (5c3db07), and
+      // xrl4 contract: submodule mounted and pinned to an exact tag, and
       // ./test-against-base.sh --offline is green (exit 0), secret hygiene clean —
       // independently verified by webctl-mgr AND spot-checked by ubertmux-adm.
       // Gate is now REAL-GREEN on a genuinely wired+contracted consumer

@@ -68,6 +68,33 @@ mistake at higher arity; see `arch-coincident-fields-t2wf`.
 non-blank line. ⇒ **Gate obligation:** the gate quotes that line and never
 substitutes a cause of its own.
 
+### ⛔ A contract must not assert properties of its OWN pin
+
+`WEBCTL_BASE_DIR` is set by the gate and means: **the base you are testing was
+chosen by the gate, not by your pin.** Under `--against-head` the gate points a
+consumer at a release CANDIDATE, which by definition is not yet tagged — that
+is the whole point of validating before tagging.
+
+So a contract check like *"vendor/base-webctl must be pinned to an exact tag"*
+is **structurally incapable of passing the pre-release arm**. It is a correct
+check about the consumer's own release hygiene and a guaranteed failure about
+the gate's candidate, and it fails for a reason that has nothing to do with the
+base under test.
+
+Observed 2026-09-05: `gemini-webctl` blocked a base release this way. Nothing
+was wrong with either repo; the check was answering a different question from
+the one the gate asked.
+
+⇒ **Rule:** a check that asserts a property of the PIN (is it a tag, which tag,
+is it pushed) must be skipped when `WEBCTL_BASE_DIR` is set, and should say it
+is skipping and why. A check that asserts a property of the base's CONTENTS
+(does this module exist, does this behaviour hold) runs in both modes and is
+the point of the exercise.
+
+This is the vacuous-green failure inverted — a **vacuous red**: a verdict that
+is guaranteed regardless of the state it claims to measure. It is not the safer
+direction. A gate that always blocks gets overridden, and then it is not a gate.
+
 **Output:** emit JSONL typed envelopes per the machine-interface spec (`lszd`),
 one per suite: `{type, ts, consumer, suite, result, reason?}` where `result ∈
 {pass,fail,skip}` and `reason` is a human-readable string — the consumer's own
