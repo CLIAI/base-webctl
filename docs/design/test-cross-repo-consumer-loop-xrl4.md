@@ -52,11 +52,28 @@ already has.
 |------|---------|--------------------------|
 | `0`  | pass | counts as PASS |
 | `1`  | fail | **blocks** the base release |
-| `2`  | blocked — needs human (login wall / captcha / quota; see `k7m2`, `dip7`) | counts as **SKIP**, not fail |
+| `2`  | **no verdict** — the contract ran but declined to judge. The consumer MUST print why as its last line. | counts as **SKIP**, not fail |
+
+⛔ **Exit 2 does NOT mean "needs human".** It once did, and the gate printed
+that label — asserting a cause it was never told. A consumer returns a NUMBER;
+only the consumer knows the reason. The two states routinely differ, and a
+*single* contract holds both: `gemini-webctl` exits 2 for "no unit suite yet"
+(nobody is blocked, no human is wanted) and for "needs docker plus a human
+Google sign-in" (somebody is). A third exit code cannot separate them — they
+come from the same script under different modes — so the reason travels as
+TEXT, not as a code. Adding codes 3, 4, 5 for each new flavour re-runs the same
+mistake at higher arity; see `arch-coincident-fields-t2wf`.
+
+⇒ **Contract obligation:** a contract exiting 2 prints its reason as its last
+non-blank line. ⇒ **Gate obligation:** the gate quotes that line and never
+substitutes a cause of its own.
 
 **Output:** emit JSONL typed envelopes per the machine-interface spec (`lszd`),
-one per suite: `{type, ts, consumer, suite, result}` where `result ∈
-{pass,fail,skip}`. The loop aggregates these.
+one per suite: `{type, ts, consumer, suite, result, reason?}` where `result ∈
+{pass,fail,skip}` and `reason` is a human-readable string — the consumer's own
+last line for exit 2, the gate's own words only where the gate genuinely knows
+(not wired, repo absent, dirty pointer). Omitted rather than empty when there is
+none. The loop aggregates these.
 
 ### Example mappings (per current consumers)
 

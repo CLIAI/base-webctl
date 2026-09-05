@@ -106,9 +106,22 @@ restore_submodule() {
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # emit a JSONL envelope: type, ts, consumer, suite, result
+# Minimal JSON string escaping for a reason carried into the envelope.
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\t' ' ' | tr -d '\000-\037'
+}
+
+# $4 = OPTIONAL reason. Emitted only when non-empty, so the envelope never
+# carries an empty string that reads like "no reason was given" when in fact
+# none was asked for.
 envelope() {
-  printf '{"type":"consumer-test","ts":"%s","consumer":"%s","suite":"%s","result":"%s"}\n' \
-    "$(ts)" "$1" "$2" "$3"
+  if [ -n "${4:-}" ]; then
+    printf '{"type":"consumer-test","ts":"%s","consumer":"%s","suite":"%s","result":"%s","reason":"%s"}\n' \
+      "$(ts)" "$1" "$2" "$3" "$(json_escape "$4")"
+  else
+    printf '{"type":"consumer-test","ts":"%s","consumer":"%s","suite":"%s","result":"%s"}\n' \
+      "$(ts)" "$1" "$2" "$3"
+  fi
 }
 
 pass=0 fail=0 skip=0
@@ -118,7 +131,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   [ -n "$name" ] || continue
 
   if [ "$wired" != "true" ]; then
-    envelope "$name" "$tier" "skip"
+    envelope "$name" "$tier" "skip" "not yet wired to the submodule"
     echo "SKIP  $name ($tier) — not yet wired to the submodule" >&2
     skip=$((skip + 1)); continue
   fi
@@ -140,13 +153,13 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     repo_dir="$CONSUMERS_DIR/$name"
   fi
   if [ ! -d "$repo_dir" ]; then
-    envelope "$name" "$tier" "skip"
+    envelope "$name" "$tier" "skip" "repo not present at $repo_dir"
     echo "SKIP  $name ($tier) — repo not present at $repo_dir" >&2
     skip=$((skip + 1)); continue
   fi
 
   if [ ! -d "$repo_dir/$submodulePath" ]; then
-    envelope "$name" "$tier" "skip"
+    envelope "$name" "$tier" "skip" "submodule '$submodulePath' missing in working copy"
     echo "SKIP  $name ($tier) — submodule '$submodulePath' missing in working copy" >&2
     skip=$((skip + 1)); continue
   fi
@@ -184,13 +197,13 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     # progress; a dead one says it was abandoned, which is the actual incident.
     mk="$(swap_marker "$name")"
     if [ -f "$mk" ] && kill -0 "$(cat "$mk" 2>/dev/null)" 2>/dev/null; then
-      envelope "$name" "$tier" "skip"
+      envelope "$name" "$tier" "skip" "swap in flight by pid $(cat "$mk"); pointer dirty BY DESIGN"
       echo "SKIP  $name ($tier) — swap in flight by pid $(cat "$mk"); pointer is dirty BY DESIGN, not abandoned" >&2
       skip=$((skip + 1)); continue
     fi
     declared="$(git -C "$repo_dir" ls-files -s "$submodulePath" 2>/dev/null | awk '{print $2}')"
     actual="$(git -C "$repo_dir/$submodulePath" rev-parse HEAD 2>/dev/null || echo unknown)"
-    envelope "$name" "$tier" "fail"
+    envelope "$name" "$tier" "fail" "DIRTY SUBMODULE POINTER: index ${declared:-unknown} != checkout ${actual}"
     {
       echo "FAIL  $name ($tier) — DIRTY SUBMODULE POINTER: checkout disagrees with the index."
       echo "        declared (index): ${declared:-unknown}"
@@ -215,7 +228,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # refusal to move someone's submodule while they edit.)
   dirty_files="$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
   if [ "${dirty_files:-0}" -gt 0 ]; then
-    envelope "$name" "$tier" "skip"
+    envelope "$name" "$tier" "skip" "working tree DIRTY ($dirty_files files) — consumer is mid-edit"
     echo "SKIP  $name ($tier) — working tree DIRTY ($dirty_files files) at $repo_dir;" >&2
     echo "        a result would describe no particular state, and --against-head will not move a submodule someone is editing" >&2
     skip=$((skip + 1)); continue
@@ -228,7 +241,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # auto-flips to a real PASS/FAIL. (testCmd's first token is the script path.)
   contract_script="${testCmd%% *}"
   if [ ! -x "$repo_dir/$contract_script" ]; then
-    envelope "$name" "$tier" "skip"
+    envelope "$name" "$tier" "skip" "contract '$contract_script' not present (xrl4 adoption pending)"
     echo "SKIP  $name ($tier) — contract '$contract_script' not present (xrl4 adoption pending)" >&2
     skip=$((skip + 1)); continue
   fi
@@ -260,15 +273,48 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # Exported in BOTH modes so the value is always truthful about what is being
   # validated. The submodule swap above stays as the fallback for consumers
   # that do not honour it yet; once they all do, the swap can go.
-  ( cd "$repo_dir" && WEBCTL_BASE_DIR="$BASE_ROOT" eval "$testCmd" ) || rc=$?
+  # The contract's output is captured as well as shown, so that on a no-verdict
+  # exit the gate can quote the consumer's OWN stated reason instead of naming a
+  # cause it was never told (see the exit-2 note below).
+  #
+  # ⛔ PIPE-STATUS TRAP: in `cmd | tee`, `$?` is TEE's status, which is almost
+  # always 0 — that would report every consumer, including a failing one, as
+  # PASS. ${PIPESTATUS[0]} is the contract's own. `set +e` because a failing
+  # contract is an expected outcome here, not a reason to abort the gate.
+  #
+  # Consumer output is merged onto STDERR. That is a DELIBERATE change, not a
+  # side effect: gate chatter already lives on stderr, and this leaves stdout as
+  # pure JSONL for the lszd machine interface, which consumer stdout used to
+  # interleave with.
+  run_log="$(mktemp "${TMPDIR:-/tmp}/webctl-gate-XXXXXX")"
+  set +e
+  ( cd "$repo_dir" && WEBCTL_BASE_DIR="$BASE_ROOT" eval "$testCmd" ) 2>&1 | tee "$run_log" >&2
+  rc=${PIPESTATUS[0]}
+  set -e
+
+  # The consumer's last word, used as the reason it declined a verdict.
+  reason="$(grep -v '^[[:space:]]*$' "$run_log" | tail -n 1 | sed 's/^[[:space:]]*//')"
+  rm -f "$run_log"
 
   if [ "$AGAINST_HEAD" = "1" ] && [ -n "$orig_sha" ]; then
     restore_submodule "$sub_abs" "$orig_sha" "$name"
   fi
   case "$rc" in
     0) envelope "$name" "$tier" "pass"; echo "PASS  $name" >&2; pass=$((pass + 1)) ;;
-    2) envelope "$name" "$tier" "skip"; echo "SKIP  $name — needs human (exit 2)" >&2; skip=$((skip + 1)) ;;
-    *) envelope "$name" "$tier" "fail"; echo "FAIL  $name (exit $rc)" >&2; fail=$((fail + 1)); fails+=("$name") ;;
+    # ⛔ exit 2 is NO VERDICT, not "needs human". The gate used to assert the
+    # latter, which is a cause it was never told: the consumer returns a NUMBER,
+    # and the reason is the consumer's to state. Two states were wearing one
+    # label (t2wf) — and a single consumer legitimately holds both: gemini's
+    # contract exits 2 for "no unit suite yet" (nobody is blocked) AND for
+    # "needs docker plus a human sign-in" (somebody is). A third exit code
+    # cannot separate those, because they come from the same script; only the
+    # consumer's own words can. So the gate quotes it rather than guessing.
+    2) envelope "$name" "$tier" "skip" "${reason:-}"
+       echo "SKIP  $name — no verdict (exit 2): ${reason:-consumer stated no reason}" >&2
+       skip=$((skip + 1)) ;;
+    *) envelope "$name" "$tier" "fail" "${reason:-}"
+       echo "FAIL  $name (exit $rc): ${reason:-no reason stated}" >&2
+       fail=$((fail + 1)); fails+=("$name") ;;
   esac
 done < <(node "$HERE/read-consumers.mjs")
 
