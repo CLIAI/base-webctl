@@ -293,7 +293,16 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   set -e
 
   # The consumer's last word, used as the reason it declined a verdict.
-  reason="$(grep -v '^[[:space:]]*$' "$run_log" | tail -n 1 | sed 's/^[[:space:]]*//')"
+  #
+  # ⛔ The TRAILING BLOCK, not the last line. A contract that wraps its reason
+  # over two lines ("...but there is no / unit suite yet.") was being quoted
+  # from its tail alone, which produced a sentence FRAGMENT presented as the
+  # whole reason — the gate mangling the very words it exists to relay
+  # faithfully. Takes the last contiguous run of non-blank lines, capped, so a
+  # failing contract's stack trace cannot flood the summary either.
+  reason="$(awk 'BEGIN{n=0} {if ($0 ~ /^[[:space:]]*$/) {n=0; next} lines[n++]=$0; if (n>3) {for(i=0;i<n-1;i++) lines[i]=lines[i+1]; n=3}}
+                 END{for(i=0;i<n;i++) printf "%s ", lines[i]}' "$run_log" \
+             | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//' | cut -c1-300)"
   rm -f "$run_log"
 
   if [ "$AGAINST_HEAD" = "1" ] && [ -n "$orig_sha" ]; then

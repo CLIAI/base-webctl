@@ -22,5 +22,8 @@ test('⭐ tags-since-pin --self-test returns both answers', () => {
   }
   assert.match(out, /SELF-TEST PASSED 2\/2/);
   assert.match(out, /OK \(answer: NEWS\)/, 'control A must reach the news answer');
-  assert.match(out, /OK \(answer: NO NEWS\)/, 'control B must reach the no-news answer');
+  // The negative arm must ALSO prove it saw the range — "no news" over an empty
+  // range is a pass that measured nothing.
+  assert.match(out, /OK \(answer: NO NEWS, and it verifiably compared the range\)/,
+    'control B must reach the no-news answer AND assert its own subject');
 });

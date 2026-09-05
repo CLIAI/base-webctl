@@ -155,10 +155,19 @@ if [ "$SELF_TEST" = "1" ]; then
   outB="$(report v0.7.0 v0.8.0)"; rcB=$?
   set -e
   printf '%s\n' "$outB" | sed 's/^/    /'
-  if [ "$rcB" = "0" ] && ! printf '%s' "$outB" | grep -q 'TOUCHES'; then
-    echo "  OK (answer: NO NEWS)"
+  # ⛔ ASSERT THE CONTROL'S OWN SUBJECT. "rc=0 and no TOUCHES" is also what you
+  # get when the probe found NO NEWER TAG AT ALL — so without this the negative
+  # arm passes while measuring nothing, and it fails toward GREEN. A control
+  # that replays only part of the condition it claims to replay is the shape
+  # cgwc:main hit tonight replaying a pattern without its coupled sort.
+  if [ "$rcB" = "0" ] \
+     && printf '%s' "$outB" | grep -q 'NEWER TAGS' \
+     && printf '%s' "$outB" | grep -q 'v0\.8\.0' \
+     && ! printf '%s' "$outB" | grep -q 'TOUCHES'; then
+    echo "  OK (answer: NO NEWS, and it verifiably compared the range)"
   else
-    echo "  ⛔ FAILED — expected no news, got rc=$rcB"; fails=$((fails + 1))
+    echo "  ⛔ FAILED — expected no-news OVER A RANGE IT ACTUALLY SAW, got rc=$rcB"
+    fails=$((fails + 1))
   fi
 
   if [ "$fails" -gt 0 ]; then
