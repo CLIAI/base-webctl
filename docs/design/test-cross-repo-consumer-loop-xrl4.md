@@ -68,7 +68,11 @@ mistake at higher arity; see `arch-coincident-fields-t2wf`.
 non-blank line. ⇒ **Gate obligation:** the gate quotes that line and never
 substitutes a cause of its own.
 
-### ⛔ Assert the FINDING, never the exit status
+### ⛔ Assert the FINDING, never a proxy for it
+
+*(Originally written as "never the exit status". The status is one proxy; it is
+not the only one, and naming the general form changes the fix — see the clock
+below.)*
 
 A status says *something* was wrong. It does not say *the thing you are testing
 for* happened — and a check that accepts the status accepts every other reason
@@ -91,6 +95,30 @@ Measured three ways on 2026-09-05, in three repos, all failing toward green:
 ⇒ **A control must assert the finding it exists to produce, and a control that
 replays only part of a condition misrepresents the history it claims to replay.**
 Both failures are toward GREEN, which is the direction nobody investigates.
+
+⚠ **THE CLOCK IS THE MOST COMMON PROXY, AND NAMING IT "TIMING" INVITES THE WRONG
+FIX.** A test that reads a directory straight after `closeLogging()` and expects
+the new file is observing a *listing* (a proxy) for *the stream having flushed*
+(the fact). Calling that "a timing bug" suggests **wait longer** — which is still
+a proxy and still wrong under load. Calling it what it is suggests **await the
+subject's own completion signal**, which is different code. Same shape as
+inferring "was blocked" from "did not acquire within 150 ms".
+*(linkedin-webctl's reclassification, adopted; it immediately caught two more
+instances in the reporting repo, where `sleep(200)` was replaced by awaiting the
+last message — causal and free, since ordered delivery on one socket proves every
+earlier frame was processed.)*
+
+⇒ A clock proxy differs from the others in ONE respect only: it is
+**load-dependent**, so its false result appears and disappears while nothing
+changes. That alters the SYMPTOM — a flake rather than a steady false green — and
+therefore how it is misdiagnosed (as flakiness, "fixed" with a longer sleep). It
+does not alter what it is or how to fix it. ⚠ Under a CPU cap, every wall-clock
+margin is a joint measurement of the code and the cap; prefer a completion signal,
+and where something genuinely must be timed, measure CPU time.
+
+⇒ A deadline is still legitimate where it **bounds a failure** rather than
+standing in for a success: a 5 s "give up" is a timeout, a 200 ms "it must be done
+by now" is a proxy.
 
 ⚠ Corollary for delete paths, from the same review: *deletion is eventually
 loud, accumulation never is* ranks NOTICEABILITY — it does not rank
