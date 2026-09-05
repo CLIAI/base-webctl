@@ -207,9 +207,63 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
-## Unreleased (on `master`, not yet tagged)
+## Unreleased (on `master`, not yet tagged) — will be v0.10.1
 
-*Nothing yet — v0.10.0 is current.*
+⛔ **HELD, not ready.** `--against-head` currently BLOCKS: `gemini-webctl`'s
+contract asserts its submodule is pinned to an exact tag, and the pre-release
+arm deliberately points it at an untagged candidate. Nothing is wrong with
+either repo — see the xrl4 rule below. The tag goes out once that carve-out
+lands.
+
+⭐ **fix(cdp): `listTargetsCorroborated` compared two key spaces**, so
+`sourcesAgree` was **false on a healthy stack** and the loud-by-default warning
+fired on every call. `Target.getTargets` returns rows keyed `targetId`;
+`GET /json` returns rows keyed `id`; `listTargetsViaBrowser` passed its rows
+through unnormalised, so browser rows fell back to the url while HTTP rows used
+the id. Now normalised (`targetId` -> `id`, `targetId` preserved) at the source,
+so no downstream comparison can inherit it. A row carrying neither id nor url is
+reported with its own reason rather than collapsing every such row onto the key
+`worker:`. *(Measured on a live stack by substack-webctl at v0.10.0; mechanism
+confirmed by webctl:mgr.)*
+
+  ⇒ **The rule, which is the durable half:** a known-positive proves an
+  instrument can say FOUND; an **ALARM additionally needs a known-NEGATIVE** —
+  proof it can say NOT FOUND — because a thing that always fires and a thing
+  that correctly fired are indistinguishable from outside.
+
+* **fix(release): the version string agrees with the tag, and is now asserted.**
+  Six tags shipped disagreeing with the tree inside them (`v0.4.0`/`v0.5.0` said
+  `0.3.0`; `v0.7.0`..`v0.10.0` said `0.6.0`). A one-off correction was
+  deliberately NOT the fix: a field wrong for five releases is inert, while a
+  field silently corrected once is one people start trusting again.
+* **gate: exit 2 is "no verdict", not "needs human"** — the gate was asserting a
+  cause it was never told. It now quotes the consumer's own last line and
+  carries it in the JSONL envelope.
+* **xrl4: a contract must not assert properties of its own pin** when
+  `WEBCTL_BASE_DIR` is set. A vacuous RED is not the safe direction.
+* **`scripts/tags-since-pin.sh`** — watch base's refs, not your vendored
+  snapshot. Soft by default; `--self-test` controls on immutable refs.
+* registry comments no longer carry pin VALUES, only the property.
+
+### ⛔ What this release does NOT cover
+
+* **It does not make `sourcesAgree` mean more than it says.** It compares
+  sorted identity key SETS from both sources. It does **not** verify that a
+  target is *functional*, and it is still not a basis for concluding a
+  service_worker is ABSENT — the browser endpoint remains authoritative and
+  `GET /json` is still not reliable for that, exactly as in v0.9.0.
+* **It does not fix the six already-published tags.** They are immutable and
+  still contain wrong version strings. `git describe` remains the only truthful
+  answer to "which base am I on" for anything at or below v0.10.0.
+* **`tags-since-pin.sh` does not help retroactively.** It ships inside the thing
+  it watches, so a consumer pinned before this tag does not have it.
+* **It reports paths, not semantics.** "v0.11.0 touched cdp-client.js" is not
+  "the thing you were waiting for landed."
+* **No lifecycle or enumeration behaviour changed.** A consumer already on
+  v0.10.0 that never called `listTargetsCorroborated` gains nothing here.
+* ⚠ **A suite file's NAME is now load-bearing for at least one consumer**
+  (`test/portless-mode.test.js`). Renaming or moving a test file is release-note
+  material, not housekeeping.
 
 <!-- released in v0.7.0:
 * **fix(ports): an out-of-range derived xpra-tcp port is refused, not returned.**
