@@ -117,6 +117,28 @@
       "wired": false
     },
     {
+      "name": "gemini-webctl",
+      // PRIVATE, in CLIAI. Every consumer in this org is private; only
+      // base-webctl itself is public. An authenticated Gemini session IS Greg's
+      // whole Google account, so this repo's secret hygiene is the strictest in
+      // the family (OAuth material, API keys and conversation transcripts, not
+      // just cookies).
+      "repo": "git@github.com:CLIAI/gemini-webctl.git",
+      "submodulePath": "vendor/base-webctl",
+      "testCmd": "./test-against-base.sh --offline",
+      "dockerOptIn": true,
+      "tier": "full",
+      // Dir name == registry name, under $WEBCTL_CONSUMERS_DIR, so no localDir
+      // is needed. Stated rather than assumed: the substack/fetlife bug was a
+      // silent SKIP that read as green.
+      //
+      // wired:true on the SAME commit as registration, which no prior consumer
+      // did — master already mounts vendor/base-webctl pinned to the TAG
+      // v0.10.0 (020f93a) with a working client-config shim and the xrl4
+      // contract shipped. Registering it wired:false would have been false.
+      "wired": true
+    },
+    {
       "name": "substack-webctl",
       "repo": "git@github.com:gwwtests/lindseymackereth-substack.git",
       "submodulePath": "vendor/base-webctl",
