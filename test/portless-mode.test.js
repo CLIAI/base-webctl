@@ -35,9 +35,46 @@ function hermeticMounts(C) {
 
 const PORTLESS = { containerEnv: { LWC_CDP_PORT: null } };
 
+// ⛔ NOT 4327. This suite used the live fleet's real CDP port, and on a box
+// where a lane is actually running, `pollCdp` opened a socket to a REAL browser
+// and the CDP-enabled CONTROL went green-path: bring-up SUCCEEDED where it was
+// asserted to fail. Caught 2026-09-22 with chatgpt-webctl up on :4327.
+//
+// ⭐ The defect is not the number, it is what the control was asserting. The
+// FACT is "this docker stub provides no CDP". The test asserted the PROXY
+// "a TCP connect to 127.0.0.1:<port> fails" — a statement about the MACHINE,
+// not about the stub. `pollCdp` is module-internal and not injectable, so the
+// proxy cannot be removed here; it can only be made honest, which is what
+// assertNothingListening() below does.
+//
+// Env-overridable per house rules, and deliberately not adjacent to any port
+// the family derives (CDP+10000 / CDP+100).
+const TEST_CDP_PORT = Number(process.env.WEBCTL_TEST_CDP_PORT || 45327);
+const TEST_XPRA_PORT = TEST_CDP_PORT + 10000;
+
 /**
- * Bring a stack up with a docker stub that NEVER answers CDP — which is the
- * real situation in portless mode, since nothing is listening.
+ * ⛔ ASSERT THE PREMISE THE PROXY RESTS ON. Without this, a collision reports
+ * as "CDP-enabled bring-up must fail" — a message that sends the reader to the
+ * driver, which is working perfectly. A test that cannot say why it failed
+ * costs more than one that fails less often.
+ */
+async function assertNothingListening(port) {
+  const net = await import('node:net');
+  const answered = await new Promise((resolve) => {
+    const sock = net.connect({ host: '127.0.0.1', port }, () => { sock.destroy(); resolve(true); });
+    sock.on('error', () => resolve(false));
+    setTimeout(() => { sock.destroy(); resolve(false); }, 300);
+  });
+  assert.equal(answered, false,
+    `PREMISE VIOLATED: something is listening on 127.0.0.1:${port}, so "nothing `
+    + `answers CDP" is false and this control measures the machine rather than the `
+    + `stub. Set WEBCTL_TEST_CDP_PORT to a free port. This is NOT a driver defect.`);
+}
+
+/**
+ * Bring a stack up with a docker stub that NEVER answers CDP.
+ * ⚠ "nothing is listening" is an assumption about the HOST, not about the stub —
+ * see TEST_CDP_PORT above and assertNothingListening().
  * @param {object} cfg
  * @param {{chromiumStaysUp?: boolean}} [o]
  */
@@ -60,7 +97,7 @@ async function bringUp(cfg, o = {}) {
     runDetached: async (/** @type {any} */ a) => { calls.push(a); return { code: 0, stderr: '' }; },
   };
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C), docker })
-    .createDriver({ port: 4327, host: '127.0.0.1', slug: 'test', force: true, ...cfg });
+    .createDriver({ port: TEST_CDP_PORT, host: '127.0.0.1', slug: 'test', force: true, ...cfg });
   let result, error;
   try { result = await drv.ensureRunning(); } catch (e) { error = e; }
   return { calls, result, error, drv };
@@ -77,6 +114,7 @@ test('portless bring-up SUCCEEDS even though CDP never answers', async () => {
 test('CONTROL: with CDP enabled the same stub FAILS — so the test is not vacuous', async () => {
   // If this passed too, the test above would prove nothing about portless: it
   // would just mean the stub happens to satisfy everything.
+  await assertNothingListening(TEST_CDP_PORT);
   const { error } = await bringUp({});
   assert.ok(error, 'CDP-enabled bring-up must fail when nothing answers CDP');
   assert.match(String(error.message), /CDP not reachable/);
@@ -89,8 +127,8 @@ test('the CDP port is neither PUBLISHED nor pre-flight reserved', async () => {
   const { calls } = await bringUp(PORTLESS);
   const xpra = calls.find((c) => String(c.name).includes('xpra'));
   const published = (xpra.publish || []).map((/** @type {any[]} */ p) => Number(p[2]));
-  assert.ok(!published.includes(4327), `CDP port must not be published, got ${published.join(',')}`);
-  assert.ok(published.includes(14327), 'the xpra port must still be published');
+  assert.ok(!published.includes(TEST_CDP_PORT), `CDP port must not be published, got ${published.join(',')}`);
+  assert.ok(published.includes(TEST_XPRA_PORT), 'the xpra port must still be published');
 });
 
 test('LWC_CDP_PORT really is absent from the container env', async () => {
@@ -109,7 +147,7 @@ test('inspect() and describe() say which mode this is, rather than implying it',
   const { drv: withCdp } = await bringUp({});
   const j = withCdp.inspect();
   assert.equal(j.cdpEnabled, true);
-  assert.equal(j.cdpHttpUrl, 'http://127.0.0.1:4327');
+  assert.equal(j.cdpHttpUrl, `http://127.0.0.1:${TEST_CDP_PORT}`);
 });
 
 test('healthCheck reports a portless stack HEALTHY, not permanently down', async () => {
