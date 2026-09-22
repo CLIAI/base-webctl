@@ -137,7 +137,23 @@ names the MEASUREMENT; `html5Answering` names the FACT.
 
 ⇒ **The probe speaks the protocol: an HTTP GET against the advertised
 `html5Url`, requiring a 2xx.** Nothing weaker establishes that a human can
-attach. *(Found by linkedin-webctl (PR #92) after fetlife-webctl probed its
+attach.
+
+⭐ **AND the derived port is reported beside the SERVING port, as two fields.**
+Their agreement is the fact, and one field cannot express it:
+
+```
+v0.5.0 pin   derived 14328, serving 14327   <- disagree: the defect
+v0.6.0 pin   derived 14399, serving 14399   <- agree: the bump working
+```
+
+⚠ These two checks are **complementary, not redundant**, and neither supersedes
+the other. The protocol probe catches *"the URL we advertise is dead"* directly.
+Derived-vs-serving additionally (a) says **why** — the derivation is wrong rather
+than the viewer being down — and (b) catches the case the probe cannot: **something
+else answering 200 on the derived port**, where a lone probe reports healthy.
+That is the `listTargetsCorroborated` shape again: two independent sources, and
+the disagreement is itself the finding. *(Found by linkedin-webctl (PR #92) after fetlife-webctl probed its
 running container; re-measured independently by fetlife and again here.)*
 
 #### The failure has two distinguishable causes, and both are actionable
@@ -302,6 +318,55 @@ tcp === 14327   (literal)               ->  FAILS,  sabotage caught
 ⇒ The constant-based form *looks* more principled and is, against a
 self-consistent lie, **blind**. Reading your expectation from the artifact under
 test cannot detect that artifact lying consistently.
+
+## ⛔ The profile is a second knob wearing the slug's name
+
+Measured in `mounts.js:133`:
+
+```js
+function resolveChromiumProfile(slug, userDataDir) {
+  const p = userDataDir ? expandHomePath(userDataDir) : profileDir(slug);
+  fs.mkdirSync(p, { recursive: true });
+  return p;
+}
+```
+
+⇒ **When `userDataDir` is set, the slug is ignored entirely.** Moving the slug
+renames the containers and leaves the profile where it was. A lane crossing
+v0.6.0 hit this on its first careful attempt: told *"test on a throwaway slug,
+never `default`"* precisely to keep an authenticated profile out of the path, it
+followed the instruction and **was pointed at the authenticated profile anyway**.
+Two containers would have shared one profile directory had the lock not refused.
+
+⭐ **The guard that caught it was `createProfileLock`, not the slug** — a lock
+doing load-bearing work on a path nobody designed it for. Worth knowing before
+anyone treats it as belt-and-braces.
+
+### Ruled
+
+* **The slug does NOT move an explicit `userDataDir`.** An explicit value wins
+  over a derived one (`2fc5`), and silently relocating a configured profile path
+  is the migration-that-moves-data hazard this family has already ruled against.
+  Two containers on one profile is also a legitimate thing to want.
+* **⛔ But the dangerous COMBINATION is reported loudly**: a non-default slug
+  *together with* an explicit `userDataDir` means the caller asked for isolation
+  and will not get it. Name both values and say so.
+* **`gui status` reports the profile path AND ITS PROVENANCE** — derived from the
+  slug, or set explicitly. This is the same gap as `ports.*.source`: the moment
+  the value's origin is reported, *"why did moving the slug not move this"*
+  answers itself. ⇒ *"Which profile am I about to open"* must be answerable
+  **before** a start, not after a lock refusal.
+
+### ⛔ And a status command must not CREATE the thing it reports
+
+`resolveChromiumProfile()` calls `fs.mkdirSync` unconditionally. So resolving
+the path for a **read-only** `gui status` would create the profile directory as
+a side effect — and `configured: false` lanes would start manufacturing empty
+profile dirs merely by being asked their status.
+
+⇒ base needs a **pure** resolver that answers the path without creating it, with
+the `mkdir` kept on the bring-up path where it belongs. A query with a
+filesystem side effect is not a query.
 
 ## Ruling — the `xpra` alias
 
