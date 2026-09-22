@@ -124,6 +124,18 @@ these questions: the tri-state is rendered correctly for HUMANS —
 `OK` / `NO` / `n/a (container stopped)` — and flattened to a boolean in the
 JSONL. The human surface was more honest than the machine one.)*
 
+#### ⛔ And there is a FOURTH state: no GUI stack is configured at all
+
+`running: false` says **"bring it up"**. For a lane with no driver there is
+nothing to bring up, and reporting a stopped container describes one that was
+never configured. Today that is `fetlife`, `gemini`, and the three unwired
+lanes — the majority of the family.
+
+⇒ `gui status` called from a lane without the harness must say **`configured:
+false`** rather than report a stopped container. Same argument as `null` above:
+a state that cannot be distinguished gets acted on wrongly, and here the wrong
+action is "start it", which will never work. *(fetlife-webctl.)*
+
 Collapsing the middle row into either neighbour is the failure this family
 already paid for once: a port that was published, reserved, advertised through
 `inspect()`, and answered nothing (`f6rd`, and the v0.6.0 html5 collapse). A
@@ -327,10 +339,22 @@ which is the only time it is cheap.)*
 
 ## ⚠ What this does not cover
 
-* **It does not help an unwired lane.** `fetlife-webctl` — the lane Greg named —
-  has **no submodule mounted at all** (`wired:false`, tier `contracts`). Shipping
-  this tag changes nothing for it until it is wired, and that wiring does not
-  depend on this release.
+* ⛔ **WIRING IS NOT THE CONSTRAINT — THE HARNESS IS.** This section previously
+  said `fetlife-webctl` had no submodule mounted. Stale since `2c881e9`: it is
+  wired, `tier: full`, and CAPABLE. **And it still cannot run `gui`.**
+
+  Falsified by that lane against its own tree: it has `lib/client-config*.js` and
+  nothing else — no `dockerfiles/`, no driver adoption, no `docker-ctl`, no
+  `xpra-attach`; its CLI takes `--remote-debugging-port` as a REQUIRED option
+  because **it never launches or manages a browser**, it attaches to one a human
+  started. There is no container, so `running` / `tcpReachable` / `attach`
+  describe state the lane does not possess.
+
+  ⇒ For the eight lanes with nothing, `gui` is **not additive** — it
+  **presupposes the docker harness**, which is the other half of Greg's ask. The
+  prior dependency is **harness → `gui`**, not wiring → `gui`. Two lanes are now
+  wired and neither can attach to anything, which is the measurement that settles
+  it.
 * **It does not make the two existing lanes symmetric by itself.** They must each
   rewrite against this surface and diff before switching (`v0.9.0`'s half-lift is
   the standing warning).

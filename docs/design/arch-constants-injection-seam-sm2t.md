@@ -313,3 +313,76 @@ The consequences were not cosmetic, and differed per consumer:
 Option A approved; this doc is `stable`. Implementation proceeds per the
 migration order above (v0.3.0 = base support + the 3 function/closure-clean
 modules; `mounts`/driver/registry/index follow).
+
+## ⛔ A contract base ENFORCES ELSEWHERE must travel as data, not as comments
+
+The seam above is about base **receiving** per-repo constants. This is its
+inverse: base **setting** values that a consumer-owned file must agree with.
+
+**Measured 2026-09-22.** The driver sets the xpra container's env at
+`chromium-docker-xpra.js:506`:
+
+```js
+env: { XPRA_TCP_BIND: `0.0.0.0:${xpraTcpPort}` }
+```
+
+and deliberately sets **no** `XPRA_HTML5_BIND` — the v0.6.0 port collapse. But
+the **entrypoint that consumes that contract is consumer-owned**, and one lane's
+requires both:
+
+```
+dockerfiles/xpra/entrypoint:33   for _required in XPRA_TCP_BIND XPRA_HTML5_BIND; do … FATAL
+dockerfiles/xpra/entrypoint:135  --html="$XPRA_HTML5_BIND"
+```
+
+⇒ Run that entrypoint against the current driver and the container **hard-fails
+at startup**. That is the *correct* failure — loud, with the remedy in the
+message — but note what it costs: **base's env-contract change is enforced in N
+consumer-owned shell scripts, and the only thing that can detect a mismatch is
+starting a container.** No unit suite exercises it; a lane can be green on 1320
+tests and dead on `docker up`.
+
+⭐ **And the contract is being re-derived from base's COMMENTS.** The `--html=on`
+ruling from v0.6.0 currently lives in four consumers' shell scripts plus prose
+here. That is the copy-rot mechanism this fleet has now hit five times (the
+Dockerfiles, the `engines.node` rationale, the contract glob, the port
+assertion, this).
+
+### Ruled
+
+* **base does NOT own the entrypoint or the Dockerfiles.** Owning them means
+  owning an image build, which contradicts *no build step, no toolchain imposed
+  on consumers* (`v8p3`). That invariant is not traded for this.
+* **base DOES own the contract, and publishes it AS DATA** — the required
+  container env vars, the forbidden ones, the `--html` form, and the base
+  version at which each changed. base is the party that sets and stops setting
+  these; a contract owned by whoever last copied a shell script is owned by
+  nobody.
+* **base ships an assertion a consumer can run WITHOUT starting a container**,
+  so the mismatch is caught by a contract test rather than by `docker up`. This
+  is the gap that makes the current failure expensive rather than merely loud.
+
+⚠ The precedent is already here: `WIRED_ENV_KEYS` + `assertContainerEnv` is
+exactly this shape for the *chromium* container. The xpra side was left to
+comments.
+
+⚠ **A related rule currently exists only as a comment** (`:493`): *"if the
+`cfg.containerEnv` seam is ever extended to this container, `XPRA_TCP_BIND` MUST
+join the refusal list"* — true, unreachable today, and enforced by nothing but a
+future reader noticing. It belongs in the same published data, so widening the
+seam trips it instead of relying on that.
+
+### What base specifies about `dockerfilesDir` today, and what it does not
+
+`mounts.js:dockerfilePath()` **does** specify the layout, in code:
+
+```
+<dockerfilesDir>/chromium/<normalizeBase(base)>.Dockerfile
+<dockerfilesDir>/xpra/ubuntu.Dockerfile          # xpra is always ubuntu
+```
+
+⇒ So the Dockerfile names are a **spec**, derived from `normalizeBase()`, not
+one consumer's habit. ⚠ **The entrypoints are not referenced by base at all** —
+their location, name and behaviour are pure convention-by-copy. Half the layout
+is specified and half is inherited, which is why it reads as arbitrary.
+
