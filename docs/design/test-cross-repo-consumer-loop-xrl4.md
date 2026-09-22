@@ -153,6 +153,33 @@ RECOVERABILITY, and the two come apart exactly where an argument is malformed.
 When the only options are a loud stop and an irreversible one, prefer the loud
 stop even where a silence argument otherwise holds.
 
+### ⛔ A contract MUST keep TWO directory variables
+
+`WEBCTL_BASE_DIR` names the base **under test**. A contract that hardcodes
+`vendor/base-webctl` answers questions about **its own pin** while the verdict
+line names the candidate.
+
+| variable | what it is | what it answers |
+|---|---|---|
+| `PIN_DIR` | our submodule | facts about OUR repo: pin-is-a-tag, the re-vendor check |
+| `BASE_DIR` | `${WEBCTL_BASE_DIR:-$PIN_DIR}` | the base under test |
+
+When the gate names a candidate, import **that** module by absolute path and
+inject your constants into it.
+
+⚠ **And it must be two NAMES, not one repointed one.** Merely repointing
+`BASE_DIR` at the candidate breaks the re-vendor check, which interpolates the
+path into a grep while the shim imports the literal submodule path — **a false
+RED introduced by the fix for a false GREEN**, invisible in a diff and caught
+only by control-testing.
+
+⇒ **A contract that cannot FAIL is not a contract.** Measured 2026-09-22
+against a base whose `deriveXpraPorts` returned `{99999, 1}`: two of four wired
+consumers reported PASS, having genuinely run the destroyed code. Verify with
+`scripts/probe-contract-capability.sh`, which is the gate-side half — a
+consumer silently not participating is otherwise indistinguishable from one that
+validated the candidate.
+
 ### ⛔ A contract must not assert properties of its OWN pin
 
 `WEBCTL_BASE_DIR` is set by the gate and means: **the base you are testing was
