@@ -73,6 +73,12 @@ CAND="$WORK/candidate"
 cp -a "$BASE_ROOT" "$CAND"
 rm -rf "$CAND/.git" "$CAND/node_modules"
 
+# ⚠ THE TARGET IS THE INNER RETURN, NOT AN EXPORT NAME. `deriveXpraPorts` is an
+# inner function returned by `createClientConfig`, NOT a top-level export — a
+# sabotage written against `export function deriveXpraPorts` matches nothing, so
+# the contract "passes" for the one reason that makes the result meaningless.
+# That exact mistake has already been made by another lane. The abort-if-it-did-
+# not-land check below is what makes a refactor of this line safe.
 SABOTAGE_FILE="$CAND/lib/client-config.js"
 python3 - "$SABOTAGE_FILE" <<'PY'
 import io, sys

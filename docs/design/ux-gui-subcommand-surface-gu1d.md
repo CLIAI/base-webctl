@@ -95,22 +95,62 @@ Adopted as-is where it is genuinely symmetric; the JSONL envelope follows `lszd`
 gui-status  {slug, base, container, running, chromiumRunning,
              ports: { "xpra-tcp":   {value, source},
                       "xpra-html5": {value, source} },
-             tcpReachable, html5Url, attach: {native, html5}}
+             html5Answering, html5Url, attach: {native, html5}}
 
 gui-attach  {slug, mode: "native"|"html5", ok, exitCode|url|command, printCli?}
 ```
 
 ### ⛔ Three states, never two
 
-`running` and `tcpReachable` are **separate fields and must stay separate**.
+`running` and `html5Answering` are **separate fields and must stay separate**.
 
-| `running` | `tcpReachable` | meaning |
+| `running` | `html5Answering` | meaning |
 |---|---|---|
 | `false` | **`null`** | **stopped** — never probed, bring it up |
-| `true` | `false` | **running but unreachable** — a real incident |
-| `true` | `true` | reachable |
+| `true` | `false` | **running but not serving** — a real incident |
+| `true` | `true` | answering |
 
-⛔ **`tcpReachable` IS NULLABLE, AND THAT IS THE WHOLE POINT.** A boolean `false`
+⛔ **THE FIELD IS NOT CALLED `tcpReachable`, AND THE PROBE IS NOT A SOCKET
+CONNECT.** This section said both. Measured on the live fleet:
+
+```
+port    connect()        HTTP GET
+14327   TRUE             200        <- the xpra client, genuinely serving
+14328   TRUE             reset      <- published, NOTHING behind it
+14878   ECONNREFUSED     —          <- not published at all
+```
+
+**Docker's published-port proxy ACCEPTS and then resets.** So `connect()`
+distinguishes *published* from *not published* — which is not the question the
+field is named after.
+
+⇒ And the consequence is fatal to the design as first written: **the most
+valuable row in this very table could essentially never fire.** A running
+container always has its port published, so a `connect()`-based probe returns
+`true` whenever the stack is up, and *"running but not serving"* — the one state
+no other command reports — becomes invisible. The field would have been a
+restatement of `running`.
+
+⭐ This is base's own v0.6.0 rationale — *"a published port that answered
+nothing"* — reproduced inside the check written to detect it. `tcpReachable`
+names the MEASUREMENT; `html5Answering` names the FACT.
+
+⇒ **The probe speaks the protocol: an HTTP GET against the advertised
+`html5Url`, requiring a 2xx.** Nothing weaker establishes that a human can
+attach. *(Found by linkedin-webctl (PR #92) after fetlife-webctl probed its
+running container; re-measured independently by fetlife and again here.)*
+
+#### The failure has two distinguishable causes, and both are actionable
+
+| observation | meaning | remedy |
+|---|---|---|
+| connection **refused** | not published — container down, or port not mapped | bring the stack up |
+| connects, then **reset**/non-2xx | published, but nothing serving inside | the container is up and the viewer is not |
+
+⇒ Report which. They are the same `false` and they send the operator to
+different places.
+
+⛔ **`html5Answering` IS NULLABLE, AND THAT IS THE WHOLE POINT.** A boolean `false`
 means two different things — *"probed and it failed"* and *"never probed"* — and
 only `running` disambiguates them. A consumer reading the one field it cares
 about would conclude "unreachable" from a probe that never ran.
@@ -142,8 +182,9 @@ already paid for once: a port that was published, reserved, advertised through
 boolean `up` reports that stack as healthy or as absent, and both readings send
 the operator somewhere useless.
 
-⇒ **`tcpReachable: false` with `running: true` is the single most valuable thing
-this surface can say.** It is the state no other command in the family reports.
+⇒ **`html5Answering: false` with `running: true` is the single most valuable
+thing this surface can say.** It is the state no other command in the family
+reports — and only a protocol-level probe can produce it.
 
 ### Exit codes are part of the contract — and ⛔ code 4 currently means two things
 
@@ -228,6 +269,40 @@ shared code is the risky part and glue is safely local. Here it was the reverse,
 and it is an argument for extracting the glue too rather than leaving each lane
 to re-derive it.
 
+### ⚠ A pre-v0.6.0 candidate must not produce a false RED
+
+A consumer's candidate arm asserts `xpraHtml5Port === xpraTcpPort`. That is
+correct from v0.6.0 onward and **wrong against a pre-v0.6.0 base**, which
+legitimately derives `tcp + 1`.
+
+⇒ **Ruled:** the candidate arm asserts equality, and when the candidate
+*predates v0.6.0* the contract returns **exit 2 — no verdict** with the reason
+printed, never a FAIL. A false RED against a legitimately supported pin is the
+trap this fleet keeps paying for; a silent pass is worse; "no verdict, and here
+is why" is the mechanism already ruled for exactly this shape.
+
+⚠ In practice `--against-head` names base's own HEAD, so it should never point
+at a pre-collapse base. The guard is cheap insurance against a candidate handed
+over by hand — and it stops four lanes each inventing a different answer.
+
+### ⛔ Example assertions ship as LITERALS
+
+Any assertion base publishes — in the contract data, the recipe, or this doc —
+uses a **literal** expected value, never one derived from a constant exported by
+the thing under test.
+
+Demonstrated rather than reasoned: a base sabotaged to lie about the derivation
+**and** the offset constant, so the two agree —
+
+```
+tcp === cc.PORT_OFFSET_XPRA_TCP + cdp   ->  PASSES, sabotage undetected
+tcp === 14327   (literal)               ->  FAILS,  sabotage caught
+```
+
+⇒ The constant-based form *looks* more principled and is, against a
+self-consistent lie, **blind**. Reading your expectation from the artifact under
+test cannot detect that artifact lying consistently.
+
 ## Ruling — the `xpra` alias
 
 ⚠ **The premise this was first written on was wrong.** The relay reported that
@@ -268,7 +343,7 @@ no divergence to reconcile, which makes the ruling smaller, not larger:
    deprecated alias and a fully supported one are indistinguishable to the person
    using it.** Nobody ever migrates, and the deprecation is a fact known only to
    its author — the same *two states rendered identically* failure as
-   `tcpReachable` above, in the same repo, found the same way.
+   `html5Answering` above, in the same repo, found the same way.
 
    I had read the code's stated intent ("to keep scripts quiet") and preserved
    the behaviour it described instead of asking whether the behaviour was right.
@@ -347,7 +422,7 @@ which is the only time it is cheap.)*
   nothing else — no `dockerfiles/`, no driver adoption, no `docker-ctl`, no
   `xpra-attach`; its CLI takes `--remote-debugging-port` as a REQUIRED option
   because **it never launches or manages a browser**, it attaches to one a human
-  started. There is no container, so `running` / `tcpReachable` / `attach`
+  started. There is no container, so `running` / `html5Answering` / `attach`
   describe state the lane does not possess.
 
   ⇒ For the eight lanes with nothing, `gui` is **not additive** — it
