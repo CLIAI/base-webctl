@@ -124,13 +124,42 @@ envelope() {
   fi
 }
 
-pass=0 fail=0 skip=0
+pass=0 fail=0 skip=0 stale=0
 fails=()
 
 while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localDir; do
   [ -n "$name" ] || continue
 
   if [ "$wired" != "true" ]; then
+    # ⛔ IS THAT `wired:false` STILL TRUE? Nobody re-examines it.
+    #
+    # A `wired:true` is EARNED — this lane verifies the mount, the tag and the
+    # shim before flipping one. A `wired:false` is never re-checked, so the
+    # registry is audited in ONE DIRECTION ONLY: its optimistic claims are
+    # tested and its pessimistic ones rot silently.
+    #
+    # Measured 2026-09-23: claude-chrome-extension-webctl was marked unwired
+    # while its submodule was mounted and pinned to a real tag. The gate printed
+    # "not yet wired to the submodule" — a FALSE STATEMENT — and that line is
+    # indistinguishable in the summary from a genuine placeholder. So the one
+    # wired lane the pre-release arm could not see looked exactly like the five
+    # lanes it is not supposed to see.
+    if [ -n "${localDir:-}" ]; then
+      case "$localDir" in
+        "~/"*)     stale_dir="$HOME/${localDir#\~/}" ;;
+        '$HOME/'*) stale_dir="$HOME/${localDir#\$HOME/}" ;;
+        *)         stale_dir="$localDir" ;;
+      esac
+    else
+      stale_dir="$CONSUMERS_DIR/$name"
+    fi
+    if [ -d "$stale_dir/${submodulePath:-vendor/base-webctl}" ]; then
+      pinned="$(git -C "$stale_dir/${submodulePath}" describe --tags --always 2>/dev/null || echo unknown)"
+      echo "⚠ STALE REGISTRY  $name — marked wired:false, but $submodulePath IS mounted (at $pinned)." >&2
+      echo "                  The gate is reporting a lane it could be validating as absent." >&2
+      envelope "$name" "$tier" "skip" "STALE registry entry: wired:false but submodule mounted at $pinned"
+      stale=$((stale + 1)); skip=$((skip + 1)); continue
+    fi
     envelope "$name" "$tier" "skip" "not yet wired to the submodule"
     echo "SKIP  $name ($tier) — not yet wired to the submodule" >&2
     skip=$((skip + 1)); continue
@@ -328,6 +357,12 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
 done < <(node "$HERE/read-consumers.mjs")
 
 echo "----- gate summary: pass=$pass skip=$skip fail=$fail -----" >&2
+if [ "$stale" -gt 0 ]; then
+  # Counted SEPARATELY. Folded into `skip` it is invisible, which is the whole
+  # defect: a lane the gate could validate, reported as one it cannot.
+  echo "⚠ $stale STALE REGISTRY ENTRIES — lanes marked unwired whose submodule is mounted." >&2
+  echo "  These are NOT covered by --against-head, and the summary above counts them as skips." >&2
+fi
 echo "----- validated against: $VALIDATED_AGAINST -----" >&2
 if [ "$AGAINST_HEAD" != "1" ]; then
   echo "NOTE: this run says NOTHING about releasing base HEAD. Use --against-head before tagging." >&2
