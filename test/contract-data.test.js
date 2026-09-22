@@ -312,3 +312,27 @@ test('⛔ no --restart reaches docker — asserted at the ARGV, not at a stub', 
   assert.equal(CONTAINER_LIFECYCLE_CONTRACT.restartPolicy, null);
   assert.equal(CONTAINER_LIFECYCLE_CONTRACT.survivesReboot, false);
 });
+
+test('⛔ the lifecycle contract names the PAIR ORDER, not just the absence of a policy', () => {
+  // The decisive reason for "no --restart" is correctness, not security:
+  // chromium runs with --network container:<xpra>, so its netns IS the xpra
+  // container. Docker restart policies have no ordering primitive, so the flag
+  // cannot express the dependency — and a naive policy reproduces the measured
+  // `docker start` failure on every boot: chromium races the X server, exits,
+  // and `docker ps` reports it running while CDP answers nothing.
+  assert.deepEqual(CONTAINER_LIFECYCLE_CONTRACT.pairOrder, ['xpra', 'chromium']);
+  assert.equal(CONTAINER_LIFECYCLE_CONTRACT.recovery, 'driver');
+  assert.match(CONTAINER_LIFECYCLE_CONTRACT.recoveryNote, /NOT `docker start`/);
+
+  // ⚠ And the order must match what the driver ACTUALLY does, or the contract
+  // is a claim about code that moved. Captured from the real run args: the xpra
+  // container is launched before the chromium one.
+  return captureDockerRun().then((calls) => {
+    const names = calls.map((c) => String(c.name));
+    const xi = names.findIndex((n) => n.includes('xpra'));
+    const ci = names.findIndex((n) => n.includes('chromium'));
+    assert.ok(xi >= 0 && ci >= 0, `both containers must launch; saw ${names.join(', ')}`);
+    assert.ok(xi < ci, `xpra must launch BEFORE chromium; saw ${names.join(', ')}`);
+  });
+});
+
