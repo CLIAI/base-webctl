@@ -207,6 +207,47 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.11.1 — 2026-09-22
+
+⛔ **`describeProfileResolution()` could not tell SAFE from DANGEROUS.** Shipped
+in v0.11.0 with `isolatedBySlug` as its only boolean, and it is `false` for both
+of these:
+
+```
+slug 'qa' + userDataDir '/tmp/isolated'        -> a fine isolated bring-up
+slug 'qa' + userDataDir <the DEFAULT profile>  -> a throwaway-named container
+                                                  mounting the authenticated one
+```
+
+Byte-identical output. A consumer branching on that boolean — the obvious use —
+got the same answer for a benign config and for the incident the function exists
+because of. ⇒ `isolatedBySlug` answers *"did the SLUG do the isolating?"*; a
+bring-up guard asks *"will this touch the DEFAULT profile?"*, and they diverge
+exactly where it matters.
+
+* **new `isDefaultProfile`** — the safety question, as its own field.
+* the two cases now produce **different warnings**, the dangerous one naming the
+  resolved path.
+* `isolatedBySlug` stays narrow deliberately, and a test pins that too, so it is
+  not later "fixed" into a safety flag and the conflation reintroduced from the
+  other side.
+
+**`TEARDOWN_CONTRACT.keeps` entries are now `{key, text}`.** ⚠ A shape change
+for anyone already consuming it. The consumer asserting that every kept artifact
+is named in its user-facing message was substring-matching prose, so rewording
+an entry would silently WEAKEN that check without failing anything. The key is
+the contract; the text is for humans.
+
+### ⛔ What this release does NOT cover
+
+* **It does not make `createDriver()`'s purity remove a consumer's scratch
+  `userDataDir`.** That was overstated in v0.11.0's notes. A test that CAPTURES
+  driver behaviour drives `ensureRunning()`, which still creates the directory —
+  so the workaround stays for capture tests. The fix buys the read-only case: a
+  `gui status` constructing a driver to read `inspect()`.
+* **It does not refuse anything.** `isDefaultProfile` is reported; the policy
+  stays with the consumer, because two containers on one profile is legitimate.
+
 ## v0.11.0 — 2026-09-22
 
 ⭐ **THE RELEASE THAT MAKES BASE'S CONTAINER CONTRACTS CHECKABLE.** Three facts

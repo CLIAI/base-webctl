@@ -163,7 +163,7 @@ test('⛔ TEARDOWN_CONTRACT matches what shutdown() ACTUALLY calls', async () =>
   }
 
   assert.deepEqual(TEARDOWN_CONTRACT.removes, []);
-  assert.ok(TEARDOWN_CONTRACT.keeps.some((k) => /container/i.test(k)),
+  assert.ok(TEARDOWN_CONTRACT.keeps.some((k) => k.key === 'containers'),
     'containers must be named in `keeps` — omitting them is the defect this records');
   assert.ok(TEARDOWN_CONTRACT.consequences.some((c) => /volume/i.test(c)),
     'the volume consequence must be stated, not left to be discovered');
@@ -213,6 +213,42 @@ test('⭐ describeProfileResolution names the slug/profile footgun, and only it'
   // case — nobody asked for isolation, so nothing was denied.
   const plain = m.describeProfileResolution('default', '~/real/profile');
   assert.equal(plain.warning, null, 'warning on the ordinary case would be noise');
+  });
+});
+
+test('⛔ SAFE and DANGEROUS must not render identically', () => {
+  // v0.11.0 shipped with `isolatedBySlug` alone, and it is FALSE for both:
+  //
+  //   slug 'qa' + userDataDir '/tmp/isolated'        -> a fine isolated bring-up
+  //   slug 'qa' + userDataDir <the DEFAULT profile>  -> a throwaway-named
+  //                                                     container mounting the
+  //                                                     authenticated profile
+  //
+  // A consumer branching on that boolean — the obvious use — got the same
+  // answer for both. The field answers "did the SLUG isolate?" while a bring-up
+  // guard asks "will this touch the default profile?", and they diverge exactly
+  // where it matters. This test exists so they cannot collapse again.
+  underTempHome(({ mounts: m }) => {
+    const defaultProfile = m.profilePathFor('default', null);
+
+    const safe = m.describeProfileResolution('qa', '/tmp/isolated-profile');
+    const danger = m.describeProfileResolution('qa', defaultProfile);
+
+    assert.equal(safe.isDefaultProfile, false);
+    assert.equal(danger.isDefaultProfile, true,
+      'resolving to the default profile is THE safety question and must be its own field');
+
+    assert.notEqual(safe.warning, danger.warning,
+      'a safe isolated bring-up and one mounting the default profile must not '
+      + 'produce identical output — that is the defect this test pins');
+    assert.match(String(danger.warning), /DEFAULT profile/);
+
+    // ⚠ And the narrow field stays narrow: both are "not isolated BY the slug",
+    // which is true and is NOT a safety signal. Asserted so nobody later
+    // "fixes" isolatedBySlug into a safety flag and reintroduces the conflation
+    // from the other side.
+    assert.equal(safe.isolatedBySlug, false);
+    assert.equal(danger.isolatedBySlug, false);
   });
 });
 
