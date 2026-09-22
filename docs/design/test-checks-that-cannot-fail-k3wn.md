@@ -257,6 +257,31 @@ service answering there. ⇒ Before trusting a pair, ask: **could these two ever
 disagree?** A pair that cannot is one field with two names, and a reader seeing
 both feels twice as confident for no additional evidence.
 
+### ⛔ And the same holds for two PEOPLE sharing a habit
+
+A lane reported that `inspect()` did not exist at a tag. It does — on the
+**driver**, not on `client-config.js` — and the grep used was
+`export function inspect`, which **cannot see a function returned in an object
+literal**. Two independent errors, either sufficient.
+
+⭐ **A second party then went to verify the correction at the tag, grepped for
+an `inspect` export, found none, and logged it "confirmed" — about to go to
+three lanes.** Two measurements, taken separately, both described as *verified
+at the tag*, **sharing one blind spot.**
+
+⇒ **Two measurements that share a blind spot corroborate nothing**, and the
+shared input does not have to be a line of code — here it was **a habit of
+grepping for `export`**. ⚠ Corroboration counts independent *methods*, not
+independent people: two readers with the same reflex are one instrument used
+twice.
+
+📎 And the blindness was exactly mirrored. A shim re-exporting only a factory's
+return is blind to **module-level** exports — the defect that motivated a
+shim-completeness check. A grep for module-level exports is blind to **the
+factory's return**. Same seam, opposite side, and in both cases the instrument
+was correct about everything it looked at. ⇒ **Completeness is not checkable
+from either side alone.**
+
 ## Published is not the same as understood
 
 Branching on an upstream vocabulary needs **two** checks, and collapsing them
