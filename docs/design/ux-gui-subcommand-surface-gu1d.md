@@ -104,11 +104,25 @@ gui-attach  {slug, mode: "native"|"html5", ok, exitCode|url|command, printCli?}
 
 `running` and `tcpReachable` are **separate fields and must stay separate**.
 
-| container | socket | meaning |
+| `running` | `tcpReachable` | meaning |
 |---|---|---|
-| not running | — | **stopped** — bring it up |
-| running | dead | **running but unreachable** — a real incident |
-| running | answers | reachable |
+| `false` | **`null`** | **stopped** — never probed, bring it up |
+| `true` | `false` | **running but unreachable** — a real incident |
+| `true` | `true` | reachable |
+
+⛔ **`tcpReachable` IS NULLABLE, AND THAT IS THE WHOLE POINT.** A boolean `false`
+means two different things — *"probed and it failed"* and *"never probed"* — and
+only `running` disambiguates them. A consumer reading the one field it cares
+about would conclude "unreachable" from a probe that never ran.
+
+The probe is short-circuited when the container is down (correctly — there is
+nothing to probe), so the field MUST be able to say "I did not measure this".
+`null` is not a missing value here; it is the measurement's own absence, stated.
+
+*(linkedin-webctl found this in its own shipped implementation while answering
+these questions: the tri-state is rendered correctly for HUMANS —
+`OK` / `NO` / `n/a (container stopped)` — and flattened to a boolean in the
+JSONL. The human surface was more honest than the machine one.)*
 
 Collapsing the middle row into either neighbour is the failure this family
 already paid for once: a port that was published, reserved, advertised through
@@ -119,17 +133,151 @@ the operator somewhere useless.
 ⇒ **`tcpReachable: false` with `running: true` is the single most valuable thing
 this surface can say.** It is the state no other command in the family reports.
 
+### Exit codes are part of the contract — and ⛔ code 4 currently means two things
+
+Scripts branch on exit codes, so they are a wire contract, not a CLI detail.
+base therefore defines the **vocabulary as data**; the consumer's CLI applies it.
+
+Measured in `chatgpt-webctl/lib/docker-cmd.js`, `EXIT_CONFIG_ERROR = 4` is
+returned for **both**:
+
+* `:86`, `:327` — **docker is unavailable** (the environment is not ready)
+* `:296`, `:307` — **`--scaling` with `--html5`** (the flag combination is wrong)
+
+⇒ These are the two states a wrapper most needs to tell apart, because they
+imply opposite actions: *retry after starting docker* versus *never retry, the
+command was wrong*. A script branching on `4` cannot distinguish "the machine is
+not ready" from "you made a typo".
+
+This is the exit-2 defect from `xrl4` one layer down — **two distinct states
+wearing one code** — with one difference that changes the remedy. There, a single
+contract legitimately produced both meanings and no code could separate them, so
+the reason had to travel as text. **Here the emit site KNOWS which case it is.**
+It is not that a number cannot carry the distinction; it is that the same number
+was assigned to two things we can already tell apart.
+
+⇒ **Ruled vocabulary for base:**
+
+| code | meaning |
+|---|---|
+| `0` | ok |
+| `1` | error — not running, or bad subcommand |
+| `4` | **environment not ready** (docker unavailable) |
+| `5` | **usage/config error** (bad flag combination) |
+
+⚠ **This is a deliberate behaviour change for the two existing lanes**, and the
+only one I expect their adoption diff to show. `--scaling --html5` moves `4 -> 5`.
+Flagging it in advance so it reads as a designed delta rather than a regression —
+an unexpected diff and an expected one look identical after the fact.
+
+⭐ The `--scaling --html5` refusal itself is adopted verbatim and must not be
+softened into a warn-and-ignore: the HTML5 path opens a URL instead of running a
+client, so the flag *could only ever silently do nothing*.
+
+### ⛔ `--readonly` — a flag that manufactures a false belief
+
+Measured in `linkedin-webctl` today, BEFORE its fix (PR #90):
+
+```
+gui attach --readonly    --html5 --print-cli  ->  http://127.0.0.1:14328/
+gui attach --no-readonly --html5 --print-cli  ->  http://127.0.0.1:14328/
+```
+
+Byte-identical. The flag was parsed, accepted, and **silently dropped** on the
+HTML5 path. The native path was correct throughout.
+
+⇒ On a profile authenticated as a real person, **an attach believed to be
+read-only that accepts input is worse than no flag at all.** An obviously
+interactive viewer gets handled carefully; a labelled-read-only one does not.
+The flag does not merely fail to protect — it *manufactures* the false belief
+that protection is present.
+
+**base adopts the REFUSAL, not an implementation.** `--readonly` with `--html5`
+is refused. This is correct whether or not the HTML5 client turns out to accept a
+readonly URL parameter, and if it is later confirmed, turning a refusal into a
+pass-through is a strictly smaller change than undoing a shipped silent-ignore.
+
+⚠ **CARRY THIS CAVEAT VERBATIM.** On the native path we emit `--readonly=yes`
+and **xpra** enforces it. That enforcement is xpra's, not ours, and **nothing
+tests that the viewer obeys**. The existing assertions prove our flag *reaches
+the viewer or is refused* — not that the viewer honours it. A real guarantee
+needs input-injection against a live attach, which does not exist and should not
+be written against an authenticated session without asking first.
+
+### What base should own FIRST
+
+`lib/browser-location/xpra-attach.js` in `linkedin-webctl` is already factored
+out and byte-identical across the two lanes — the natural first thing for base to
+take.
+
+⭐ But note which half carried the bug: **the byte-identical viewer wrapper was
+correct, and the per-repo `--html5` glue was not.** The usual instinct is that
+shared code is the risky part and glue is safely local. Here it was the reverse,
+and it is an argument for extracting the glue too rather than leaving each lane
+to re-derive it.
+
 ## Ruling — the `xpra` alias
 
-The two lanes disagree: linkedin marks `xpra` **deprecated**, chatgpt does not.
-Ruled, so neither inherits the other's accident:
+⚠ **The premise this was first written on was wrong.** The relay reported that
+linkedin deprecates `xpra` and chatgpt does not. Re-derived from both trees
+(the standing rule: a claim about another repo is re-derived from its refs, never
+taken from a report about it):
+
+| | deprecated? | where |
+|---|---|---|
+| chatgpt | **yes** | `lib/args.js:28`, `lib/help.js:755` |
+| linkedin | **yes** | `linkedin-runner.js:4983`, `:5235`, and three titled topics at `:5287`/`:5308`/`:5323` |
+
+**Both retain it, both document it as deprecated, neither removes it.** There is
+no divergence to reconcile, which makes the ruling smaller, not larger:
 
 * **base ships the `gui` verb only.** `xpra` is never introduced by base.
 * **A lane that already ships `xpra` keeps it, as a deprecated alias**, declared
-  by that lane. Removing it breaks muscle memory and scripts for no gain.
+  by that lane through `C`. Removing it breaks muscle memory and scripts for no
+  gain, and an alias that resolves is cheaper than a wrong-command error.
 * **The other eight lanes do not get it.** Introducing `xpra` there would be new
   debt on day one, and it names an **implementation** (the viewer) rather than a
-  **capability** (the GUI).
+  **capability** (the GUI). Both lanes already say so: the backend is
+  *"xpra now; possibly wprs/xvfb later"*.
+
+### Two alias behaviours that must survive extraction
+
+1. ⭐ **THE EMITTED JSONL TYPE IS ALWAYS `gui-*`, WHICHEVER ALIAS WAS TYPED.**
+   The deprecated name does not leak into the machine interface, so a parser
+   never has to know about it. This is the single most droppable detail here and
+   the most expensive to rediscover.
+2. ⚠ **The alias resolves FULLY SILENTLY** — no warning, *not even at `-vv`*
+   (`linkedin-runner.js:11149`, deliberately, "to keep scripts quiet").
+   **This paragraph first said base should preserve that. It should not**, and
+   the lane that wrote the silence is the one that argued me out of it.
+
+   Verified there today: `xpra status` and `gui status` produce byte-identical
+   stdout *and* stderr, and the word "deprecated" appears on neither. ⇒ **A
+   deprecated alias and a fully supported one are indistinguishable to the person
+   using it.** Nobody ever migrates, and the deprecation is a fact known only to
+   its author — the same *two states rendered identically* failure as
+   `tcpReachable` above, in the same repo, found the same way.
+
+   I had read the code's stated intent ("to keep scripts quiet") and preserved
+   the behaviour it described instead of asking whether the behaviour was right.
+   A comment explaining a choice is not evidence the choice was correct.
+
+   ⇒ **RULED: warn on `stderr`, and only when `stderr` is a TTY.** A human sees
+   the notice; a script or pipeline never does; no state file is needed to make
+   it "one-time". The JSONL contract lives on stdout and is untouched either way.
+   A silent deprecation is the worst of the available options — worse than not
+   deprecating at all, which is what the other lane is accidentally closer to
+   being right about.
+
+### ⚠ The deprecation lives in THREE places, for three audiences
+
+The args table (a maintainer reading the parser), the human help topic, and
+`ai_notes` (**agent-only** — agents read the reference form exclusively).
+
+⇒ A surface that emits the command but leaves each consumer to re-describe it
+**loses the agent-facing line first**, because it is the one nobody reads by
+accident. base therefore ships the alias's *description* alongside its
+registration, not just its name. *(cgwc:main's catch.)*
 
 ⚠ The naming matters more the moment the browser axis lands: `xpra` is the
 transport for chromium *and* firefox today, so it never distinguished what a user
@@ -152,8 +300,10 @@ through `C`, not a family design baked into base.
 
 **base does NOT ship:**
 
-* argument parsing, help text, or exit codes — those are the consumer's CLI,
-  and `nho9` already governs dual-audience help;
+* argument parsing or help *rendering* — those are the consumer's CLI, and
+  `nho9` already governs dual-audience help. ⚠ base DOES ship the exit-code
+  vocabulary and the alias descriptions as **data** (see below); it never calls
+  `process.exit`;
 * the act of spawning a viewer. base returns *what to run*; the consumer runs it.
   A library that execs a GUI client on the operator's desktop is not a library.
 
