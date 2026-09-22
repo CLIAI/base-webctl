@@ -458,6 +458,24 @@ export const XPRA_CONTAINER_ENV_CONTRACT = Object.freeze({
   an entrypoint still consuming a variable base stopped setting — which is the
   exact live failure.
 
+### ⛔ What a teardown LEAVES is the same class of fact
+
+`shutdown()` stops; it does not remove. Containers, volumes, network and profile
+dir all survive — and **stopped containers still hold the volume**, so a caller
+that stops and then runs `docker volume rm` gets a refusal it cannot predict
+from the verb's name.
+
+⇒ This belongs in the published contract beside the env contract, for the same
+three reasons: it is **base-owned** (base decides what the verb does), it is
+**enforced in N consumer-written sentences** (every lane writes its own
+user-facing "removed" string), and **nobody can check it** — there is no
+assertion a consumer can run to find out that its own wording is wrong.
+
+⚠ `shutdown` is the one driver verb whose NAME implies more than it does, which
+is exactly why the fact travels badly. *(fetlife-webctl wrote a teardown message
+specifically to carry a "say what teardown leaves" warning and overstated it by
+the very inference that warning was about — then corrected it at `bdced17`.)*
+
 ⚠ The consumer-side assertion keeps **injected-docker capture** as its ground
 truth and uses this data only for the message and the forbidden set. Verifying
 base's behaviour by grepping base's source returns the negation: a grep for
