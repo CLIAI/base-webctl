@@ -160,6 +160,53 @@ evidence* — it nearly repaired a test that was working.
 ⇒ (2) is cheap to check and almost never checked. Prove the mutation landed
 (diff it) before believing anything the run says.
 
+### ⭐ Trust the ARGUMENT; re-run the MEASUREMENT
+
+The right asymmetry for a cross-lane report, and it is not "verify everything"
+or "trust the sender":
+
+> **Neither of us needs corroboration on the reasoning. Both of us keep getting
+> the instruments wrong.**
+
+Two instances on 2026-09-22, one in each direction, each caught by a one-line
+check:
+
+* A lane built a finding on `r.warning && r.warning.kind === '…'` **without
+  `Boolean(...)`**, which yields `null`; compared strictly against `false`, every
+  benign case reported as a divergence. It nearly sent *"your fix is wrong on
+  four of six cases"*. The fix was one coercion. *(It caught this itself, which
+  is the only reason it cost nothing.)*
+* base predicted a shape change would break that lane's handling. That lane had
+  never consumed the field. The check was **one grep**.
+
+⇒ In both, the reasoning was sound and the instrument answered a different
+question than the one asked. ⚠ So do not respond to a good track record by
+dropping the cheap verification — the reasoning is the part that has been
+reliable, and it is not the part that fails.
+
+⭐ This is the rung above the will-not-go-red ladder: not *"is my test wrong"*
+but ***"is my instrument answering the question I asked"***. JavaScript
+truthiness and a BRE `$` are the same defect in different syntax.
+
+### ⛔ PUBLISHED is not the same as UNDERSTOOD
+
+When base publishes an enumeration so consumers can validate against it, that
+**closes drift and opens coverage**:
+
+| failure | closed by | still open |
+|---|---|---|
+| base emits a value not in its own published list | `list.includes(v)` | — |
+| base **adds** a value to the list **and emits it** | — | ⛔ passes `includes`, falls through the consumer's unchanged branch, **allowed silently** |
+
+⇒ A consumer needs **two checks, deliberately not one** — *drift* against the
+published list, *coverage* against its own handling. A single `includes` check
+is the vacuous form, and publishing the list is what makes it look sufficient.
+
+⇒ And put the coverage check in a **suite**, not only in the runtime guard: a
+guard fires at the worst moment, when someone is trying to start a container.
+⚠ Assert the subset **both ways** — a value you classify that base has since
+DROPPED is a stale entry nothing else would surface.
+
 ### ⛔ A CONDITIONAL ASSERTION IS A VACUITY VECTOR
 
 `if (X) assert(Y)` passes silently whenever `X` stops being true — **and a shape
