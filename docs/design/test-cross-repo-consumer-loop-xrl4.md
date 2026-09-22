@@ -120,6 +120,47 @@ and where something genuinely must be timed, measure CPU time.
 standing in for a success: a 5 s "give up" is a timeout, a 200 ms "it must be done
 by now" is a proxy.
 
+### ⛔ Enumerate what a teardown KEEPS — silence misleads as well as a false claim
+
+Two teardown messages for the same behaviour, measured 2026-09-22:
+
+| message | accurate? | belief produced |
+|---|---|---|
+| `"containers removed"` | **false** | everything is gone |
+| `stopped.` | **true** | everything is gone |
+
+⇒ **Both produce the same wrong belief**, and the reader of the accurate one
+loses an hour on a `docker volume rm` that cannot succeed while a stopped
+container holds the volume. ⇒ So the requirement is **"enumerate what is KEPT,
+and the removal order"** — not "do not make false claims". **An accurate message
+creates a false belief by omission**, which is the same reason a green summary
+line is not a verdict.
+
+⚠ **Sweep BOTH artifact classes after a verification run.** A verification slug
+litters two places, by two mechanisms base owns — a stop keeps the volume, and
+the profile resolver used to `mkdir` eagerly. Measured on this box: **13 x11
+volumes, 11 of them orphans from verification slugs in two lanes, neither of
+which had found them.** All 0 B. ⇒ The cost is never disk — *clutter nobody can
+explain is how a stale artifact gets read as a live one*. The names are
+slug-anchored and therefore enumerable, so the sweep is mechanical.
+
+### ⛔ Fixing an eager side effect at ONE call site says nothing about the others
+
+A consumer made its own profile resolver pure and recorded the fix as complete.
+base's driver went on calling the eager one — so **constructing a driver still
+created a profile directory**, before any bring-up and whether or not one ever
+happened. base's own registry suite was writing into the real `~/.cache` on
+every run.
+
+⚠ And the repair introduced a second instance immediately: a pure resolver
+beside an eager one is **two functions computing one value**, so a test stubbing
+only the eager one got the real path back from the pure one — and the profile
+lock then created it. ⇒ The eager form must be **defined in terms of** the pure
+one, never derive the path independently.
+
+⇒ When you remove a side effect, enumerate every caller of the thing you fixed,
+and check the repair did not split one value into two sources.
+
 ### ⛔ Re-derive a past claim AS OF the claim, not from the present
 
 A claim about another repo must be re-derived from its refs. ⚠ The axis that

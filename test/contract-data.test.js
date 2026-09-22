@@ -64,7 +64,11 @@ function underTempHome(body) {
 
 function hermeticMounts() {
   const m = createMounts(C, { dockerfilesDir: '/df' });
-  return { ...m, resolveChromiumProfile: (s, u) => u || `/tmp/no-mkdir/${s}`, cacheRoot: () => '/tmp/cache' };
+  // ⚠ BOTH resolvers are stubbed, consistently. Stubbing only
+  // resolveChromiumProfile leaves profilePathFor returning the REAL cache path,
+  // and the profile LOCK then creates it under ~/.cache during a unit run.
+  const fake = (/** @type {string} */ s, /** @type {string} */ u) => u || `/tmp/no-mkdir/${s}`;
+  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => '/tmp/cache' };
 }
 
 /** Bring a stack up against a fake docker and return the captured run args. */

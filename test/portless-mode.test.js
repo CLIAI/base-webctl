@@ -30,7 +30,11 @@ function fakeC() {
 }
 function hermeticMounts(C) {
   const m = createMounts(C, { dockerfilesDir: '/df' });
-  return { ...m, resolveChromiumProfile: (s, u) => u || `/tmp/no-mkdir/${s}`, cacheRoot: () => '/tmp/cache' };
+  // ⚠ BOTH resolvers are stubbed, consistently. Stubbing only
+  // resolveChromiumProfile leaves profilePathFor returning the REAL cache path,
+  // and the profile LOCK then creates it under ~/.cache during a unit run.
+  const fake = (/** @type {string} */ s, /** @type {string} */ u) => u || `/tmp/no-mkdir/${s}`;
+  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => '/tmp/cache' };
 }
 
 const PORTLESS = { containerEnv: { LWC_CDP_PORT: null } };
