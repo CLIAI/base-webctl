@@ -144,6 +144,33 @@ which had found them.** All 0 B. ⇒ The cost is never disk — *clutter nobody 
 explain is how a stale artifact gets read as a live one*. The names are
 slug-anchored and therefore enumerable, so the sweep is mechanical.
 
+### ⛔ When a test will not go red, take the hypotheses IN ORDER
+
+1. **my test is wrong**
+2. **the mutation never reached the assertion**
+3. **the thing under test cannot report failure**
+
+Most people stop at (1) and "fix" a working test. Measured twice on
+2026-09-22: one lane spent three rounds on (1) before reaching (3) and found a
+real tool bug; another's `sed` mutation contained a backtick and an apostrophe,
+**silently matched nothing**, and the green was *inadmissible rather than
+evidence* — it nearly repaired a test that was working.
+
+⇒ (2) is cheap to check and almost never checked. Prove the mutation landed
+(diff it) before believing anything the run says.
+
+### ⚠ A guard is correct only over the states that EXISTED when it was written
+
+A consumer's gate counted `# tests` and reported *"N tests, all green"*. Correct
+for every state the repo had — until honestly-**skipped** tests existed, at
+which point it announced *"62 tests, all green"* with 4 asserting nothing.
+`node --test` exits 0 on a skip, so nothing else would have caught it.
+
+⇒ **Adding a new state is what tests a guard.** Same shape as a negative claim
+nobody exercised. ⛔ And the specific correction generalises: a run that SKIPS
+everything is the empty-set green in a new costume, so parse `# pass` and
+`# skipped` separately and **fail when zero tests passed**.
+
 ### ⛔ A fixture where RIGHT and WRONG agree is not coverage
 
 A property test whose mutation **passes** is testing something else.

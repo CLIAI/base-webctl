@@ -207,6 +207,59 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.11.0 — 2026-09-22
+
+⭐ **THE RELEASE THAT MAKES BASE'S CONTAINER CONTRACTS CHECKABLE.** Three facts
+consumers were re-deriving from base's COMMENTS now ship as frozen data, each
+compared against what the driver actually does:
+
+* `XPRA_CONTAINER_ENV_CONTRACT` — `required` / `forbidden` / `htmlFlag` /
+  `since`. ⛔ `forbidden` is a **real list**, never the complement of `required`:
+  only "must not be set" catches an entrypoint still consuming a variable base
+  STOPPED setting, which is the live failure (an entrypoint requiring
+  `XPRA_HTML5_BIND` hard-fails against any base at or after v0.6.0).
+* `TEARDOWN_CONTRACT` — `removes` is **empty**. `shutdown()` stops; containers,
+  volumes, network and profile dir all survive, and **stopped containers still
+  hold the volume**, so a later `docker volume rm` refuses.
+* `CONTAINER_LIFECYCLE_CONTRACT` — ⛔ **no `--restart`, deliberately**, so
+  nothing survives a reboot. Recorded as a DECISION rather than a gap: lanes
+  hold sessions authenticated as a real person, a container revived by dockerd
+  has no runner while the profile lock records one, and making 14 lanes'
+  browsers into boot services is not a change base makes silently. *(An
+  undocumented absence cost one lane two weeks: it reported "containers up ~33h"
+  to three audiences with both containers EXITED since a reboot.)*
+
+**fix(profile): `createDriver()` no longer creates a profile directory.** It
+called the eager resolver, so merely BUILDING a driver made a directory — before
+any bring-up, and whether or not one ever happened. Every consumer constructing
+a driver to read `inspect()` (what a `gui status` does) littered one per slug.
+The `mkdir` moved to `ensureRunning()`.
+
+* `mounts.profilePathFor()` — pure path resolution, creates nothing.
+* `mounts.describeProfileResolution()` — names the slug/profile footgun BEFORE
+  docker is touched: when `userDataDir` is set the slug is ignored, so a
+  "throwaway" slug renames the containers and still mounts the configured,
+  often authenticated, profile.
+* `scripts/probe-contract-capability.sh` — asks whether each consumer's contract
+  can FAIL at all.
+
+### ⛔ What this release does NOT cover
+
+* **It does not change what `shutdown()` does.** It documents it. Volumes and
+  stopped containers still need removing by name.
+* **It does not add a restart policy.** After a reboot your containers are gone;
+  the contract now says so, and a reachability probe is the only thing that
+  notices.
+* **It does not ship `gui`.** The design is in `ux-gui-subcommand-surface-gu1d`;
+  the surface is not implemented, and for the lanes with no driver it
+  presupposes a docker harness this release does not provide either.
+* **The contract data is not the ground truth** — the driver is. A consumer
+  asserts against captured `runDetached` args and uses the data for the message
+  and the forbidden set. Grepping base's source returns the NEGATION: a grep for
+  `XPRA_HTML5_BIND` matches the comments saying it is deliberately not set.
+* **`describeProfileResolution()` reports; it does not refuse.** Two containers
+  on one profile is legitimate, so the policy is the consumer's.
+
 ## v0.10.1 — 2026-09-05
 
 ⭐ **fix(cdp): `listTargetsCorroborated` compared two key spaces**, so
