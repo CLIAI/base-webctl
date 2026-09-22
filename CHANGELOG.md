@@ -207,6 +207,49 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.13.0 — 2026-09-23
+
+⭐ **Port provenance, end to end — the first `gui` prerequisite, and useful on
+its own to every lane whether or not it ever ships `gui`.**
+
+* **`buildDriverCfg()` keeps `portSources`; `inspect()` reports
+  `ports: {<key>: {value, source}}`.** These were computed with care by
+  `deriveXpraPorts()` and `resolvePort()` and then dropped on the next line —
+  nothing in `lib/` consumed them, so the provenance existed for one statement
+  and died at the seam. ⇒ A caller could not tell a DERIVED port from a
+  CONFIGURED one, which is the distinction this family paid weeks for when a
+  derived html5 port was published, reserved and advertised while answering
+  nothing.
+* **`PORT_ORIGINS` + `portOrigin(source)`** make the family rule *"a CDP port
+  must be STATED, never GUESSED"* shareable. ⛔ Deriving from a project constant
+  is **not** guessing — `C.DEFAULT_CDP_PORT` is a decision someone wrote down —
+  and `'default'` is the word that invites the opposite reading:
+
+```
+stated                  a human wrote this value for THIS run
+derived-from-constants  computed from C, deterministic and auditable
+```
+
+⚠ `portOrigin()` returns **`null`** for anything unrecognised, never a default.
+Fail-closed by asymmetry: a wrongly-refused run prints what to do; a
+wrongly-accepted one is the bare-default ship the rule forbids.
+
+### ⛔ What this release does NOT cover
+
+* **It does not ship `gui`.** This is one of its prerequisites. The design is
+  `ux-gui-subcommand-surface-gu1d`; the two probes it needs (`guiReachable`,
+  `html5Answering`) are not implemented.
+* **It does not enforce the port rule.** base classifies; the consumer decides
+  whether a `derived-from-constants` origin is acceptable for a given verb —
+  and for `docker up` it must be, since requiring the port before you may start
+  the thing providing it is backwards.
+* **A single `PORT_ORIGINS.includes()` check is not sufficient.** Publishing a
+  vocabulary closes *drift* and opens *coverage*: an origin base adds and emits
+  passes that check and falls through an unchanged branch. Check against the
+  list AND against your own handling, and put the second in a suite.
+* **`source` is absent, not guessed, for a cfg predating `portSources`** — an
+  older consumer passing its own object gets `null`.
+
 ## v0.12.0 — 2026-09-22
 
 ⭐ **`describeProfileResolution().warning` gains `severity`, and base publishes
