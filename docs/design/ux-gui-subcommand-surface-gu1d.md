@@ -251,6 +251,20 @@ the operator somewhere useless.
 thing this surface can say.** It is the state no other command in the family
 reports — and only a protocol-level probe can produce it.
 
+⭐ **AND THE CONCRETE CASE IS A REAL INCIDENT, NOT A CONSTRUCTED ONE.** base
+starts containers with no `--restart` policy, deliberately (see
+`CONTAINER_LIFECYCLE_CONTRACT`), so **nothing survives a reboot.** A lane ran
+for **two weeks** with both containers EXITED since a reboot while reporting
+*"containers up ~33h"* to three audiences — it kept quoting a reading taken
+before the boot.
+
+After a reboot a lane is `configured: true`, containers gone, and
+**`guiReachable: false` is the only field that would have caught it.** ⇒ That is
+the row this surface exists for, and the failure it prevents is not a crash but
+**a status claim that ages into a lie** — nothing breaks, and the claim quietly
+stops being true. *(fetlife-webctl, which checked base's `runDetached` before
+assuming the affected lane had misconfigured itself.)*
+
 ### Exit codes are part of the contract — and ⛔ code 4 currently means two things
 
 Scripts branch on exit codes, so they are a wire contract, not a CLI detail.
