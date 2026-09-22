@@ -101,10 +101,23 @@ probe_out="$(cd "$CAND" && node -e '
       CONFIG_FILE_PROJECT:"c.jsonc", DOTENV_FILENAME:".env", DOTENV_TEMPLATE:".env.x",
       ENV_PREFIX:"P_", ENV_PREFIX_LEGACY:null, ENV_LEGACY_SUFFIXES:[],
     });
-    console.log(c.deriveXpraPorts(4427).xpraTcpPort);
-  }).catch((e) => { console.log("ERR:" + e.message); });
+    process.stdout.write(String(c.deriveXpraPorts(4427).xpraTcpPort));
+  }).catch((e) => { process.stdout.write("ERR:" + e.message); });
 ' 2>/dev/null || echo "ERR")"
-if [ "$probe_out" != "99999" ]; then
+# ⛔ STRIP ANSI, AND COMPARE NUMERICALLY. `console.log(<number>)` is coloured
+# YELLOW by util.inspect whenever node decides colour is on, so the captured
+# value can be `\e[33m99999\e[39m`. A string compare then fails and the abort
+# fires ON A TRUE POSITIVE — "the mutation did not land" becomes
+# indistinguishable from "I cannot parse my own output", which is this repo's
+# own defect class reappearing INSIDE the instrument built to detect it.
+#
+# Fixed at three layers so no single environment setting defeats it: the node
+# snippet writes a plain STRING (never colourised), ANSI is stripped here
+# anyway, and the comparison is numeric. ⚠ Deliberately NOT fixed by exporting
+# FORCE_COLOR=0 — that would make the check depend on one downstream library's
+# env convention, and NO_COLOR/TERM=dumb were both measured NOT to suppress it.
+probe_out="$(printf '%s' "$probe_out" | sed 's/\x1b\[[0-9;]*m//g' | tr -cd '0-9A-Za-z:._ -')"
+if [ "$probe_out" -ne 99999 ] 2>/dev/null; then
   echo "⛔ PROBE ABORTED: the sabotaged candidate does NOT misbehave (got '$probe_out')." >&2
   echo "   Every verdict below would have been a false CAPABLE. Not proceeding." >&2
   exit 1

@@ -173,6 +173,57 @@ path into a grep while the shim imports the literal submodule path — **a false
 RED introduced by the fix for a false GREEN**, invisible in a diff and caught
 only by control-testing.
 
+#### ⛔ The candidate check must assert a VALUE, not a TYPE
+
+Repointing the variable correctly is **necessary and not sufficient**.
+`typeof cc.deriveXpraPorts === 'function'` passes against a totally sabotaged
+base, because **a broken module still exports a function**. Measured by
+substack-webctl on the same broken input:
+
+```
+typeof assertion, sabotaged base -> PASSES   (the bug)
+ value assertion, sabotaged base -> FAILS    (correct)
+```
+
+⚠ **Consequence for anyone fixing a contract:** a consumer that mis-scopes the
+variable *and* only checks `typeof` will **not** move to CAPABLE when the scope
+alone is fixed — and the probe will look as though it lied.
+
+#### ⛔ A PORT ASSERTION IS NOT PORTABLE BETWEEN PINS
+
+`xpraHtml5Port === xpraTcpPort` is correct from **v0.6.0** onward and a
+**guaranteed false RED** against a v0.5.0 pin, which legitimately derives
+`html5 = tcp + 1`. Same signature as the path trap — a false RED introduced by
+the fix for a false GREEN — and **invisible in a diff, because the line is
+correct in the repo it was copied from.**
+
+⇒ The candidate check asserts **equality**; the pin check accepts `tcp` **or**
+`tcp + 1` and **prints which**, each carrying a comment saying why it is not the
+other one reused. Neither tolerance hides the sabotage.
+
+⇒ **Measure your own pin's derivation before pasting anyone's port assertion.**
+A consumer on v0.5.0 and one on v0.10.0 cannot share that line.
+
+#### ⛔ A MUTATION-BASED CONTROL MUST ABORT IF ITS MUTATION DID NOT LAND
+
+Not a nicety — a requirement. **Three separate lanes** have now written a control
+whose mutation silently failed, and in **all three** the only thing that caught it
+was an explicit did-it-land check:
+
+* a submodule mispinned with `git checkout` of unfetched objects — failed
+  silently, tree stayed clean, output indistinguishable from a passing control;
+* a patch aimed at a **top-level** `export function deriveXpraPorts` that does not
+  exist (it is an inner function inside the factory);
+* this repo's own capability probe, whose verify compared ANSI-coloured output
+  against a plain string and **aborted on a true positive** — *"the mutation did
+  not land"* rendered identically to *"I cannot parse my own output"*, inside the
+  instrument built to detect that class.
+
+⇒ An unlanded mutation reports **everything healthy**, which is indistinguishable
+from a healthy fleet. ⚠ And the check must compare the **value**, stripped of
+formatting: `console.log(<number>)` is coloured by `util.inspect` whenever node
+decides colour is on.
+
 ⇒ **A contract that cannot FAIL is not a contract.** Measured 2026-09-22
 against a base whose `deriveXpraPorts` returned `{99999, 1}`: two of four wired
 consumers reported PASS, having genuinely run the destroyed code. Verify with
