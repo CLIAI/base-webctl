@@ -201,7 +201,7 @@ test('⭐ describeProfileResolution names the slug/profile footgun, and only it'
   const bad = m.describeProfileResolution('qa-throwaway', '~/real/authenticated/profile');
   assert.equal(bad.source, 'explicit-userDataDir');
   assert.equal(bad.isolatedBySlug, false);
-  assert.match(String(bad.warning), /does NOT move the PROFILE/);
+  assert.equal(bad.warning.kind, 'isolated-but-not-by-slug');
 
   // Not a warning: no explicit dir, so the slug genuinely isolates.
   const derived = m.describeProfileResolution('qa-throwaway', null);
@@ -238,10 +238,15 @@ test('⛔ SAFE and DANGEROUS must not render identically', () => {
     assert.equal(danger.isDefaultProfile, true,
       'resolving to the default profile is THE safety question and must be its own field');
 
-    assert.notEqual(safe.warning, danger.warning,
+    // ⛔ Branch on `kind`, never on prose, and never on `warning !== null` —
+    // which is TRUE for both and would refuse the safe configuration.
+    assert.notEqual(safe.warning.kind, danger.warning.kind,
       'a safe isolated bring-up and one mounting the default profile must not '
       + 'produce identical output — that is the defect this test pins');
-    assert.match(String(danger.warning), /DEFAULT profile/);
+    assert.equal(danger.warning.kind, 'default-profile-under-throwaway-slug');
+    assert.equal(safe.warning.kind, 'isolated-but-not-by-slug');
+    assert.ok(safe.warning !== null && danger.warning !== null,
+      'both warn, so `warning !== null` cannot be the branch — that is the point');
 
     // ⚠ And the narrow field stays narrow: both are "not isolated BY the slug",
     // which is true and is NOT a safety signal. Asserted so nobody later

@@ -207,6 +207,38 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.11.2 — 2026-09-22
+
+⛔ **`describeProfileResolution().warning` is now `{kind, text}`**, not a bare
+string. ⚠ A shape change, and the third in a day for the one lane consuming this.
+
+It fires for two materially different situations and `warning !== null` is
+**true for both**:
+
+```
+default-profile-under-throwaway-slug   ⛔ the incident
+isolated-but-not-by-slug               a fine bring-up, just not isolated BY the slug
+```
+
+⇒ A consumer branching on *"is there a warning?"* would refuse a perfectly safe
+configuration, and the only alternative was matching the prose — which silently
+weakens the moment the wording changes.
+
+⭐ **Found by applying v0.11.1's own lesson rather than waiting for it to be
+reported.** `TEARDOWN_CONTRACT.keeps` was changed from prose to `{key, text}` in
+v0.11.1 for exactly this reason; `warning` had the same defect one field over
+and shipped in the same release.
+
+### ⛔ What this release does NOT cover
+
+* **It does not decide the refusal policy.** `isDefaultProfile` is `true` for an
+  ordinary `--slug default` bring-up too, which must be allowed — the dangerous
+  combination is *a slug claiming isolation that resolves to the default
+  profile*. base reports the fact and the `kind`; the consumer owns the policy,
+  because a lane deliberately sharing one profile is entitled to.
+* **Nothing else changed.** No driver, contract-data or teardown behaviour moves
+  in this release.
+
 ## v0.11.1 — 2026-09-22
 
 ⛔ **`describeProfileResolution()` could not tell SAFE from DANGEROUS.** Shipped

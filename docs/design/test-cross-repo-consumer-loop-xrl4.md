@@ -148,7 +148,8 @@ slug-anchored and therefore enumerable, so the sweep is mechanical.
 
 1. **my test is wrong**
 2. **the mutation never reached the assertion**
-3. **the thing under test cannot report failure**
+3. **the assertion was never reached** — ⛔ see the conditional-assertion rung below
+4. **the thing under test cannot report failure**
 
 Most people stop at (1) and "fix" a working test. Measured twice on
 2026-09-22: one lane spent three rounds on (1) before reaching (3) and found a
@@ -158,6 +159,41 @@ evidence* — it nearly repaired a test that was working.
 
 ⇒ (2) is cheap to check and almost never checked. Prove the mutation landed
 (diff it) before believing anything the run says.
+
+### ⛔ A CONDITIONAL ASSERTION IS A VACUITY VECTOR
+
+`if (X) assert(Y)` passes silently whenever `X` stops being true — **and a shape
+change is precisely when `X` stops being true.**
+
+Measured 2026-09-22. A consumer asserted that every artifact base's
+`TEARDOWN_CONTRACT` says it KEEPS is named in that lane's user-facing teardown
+message. base then changed `keeps` entries from prose strings to `{key, text}`
+— *a change that consumer had itself requested, for exactly this reason*. Its
+test did not fail. It went **quiet**:
+
+```
+keeps.join(' ')            -> "[object Object] [object Object] ..."
+kept.includes('containers') -> false   (and volumes, network, profileDir)
+⇒ the `if (kept.includes(thing))` body NEVER RAN. Test passed. Checked nothing.
+```
+
+⇒ The conditional was there to skip entries the lane does not keep. It also
+skipped **everything** the moment the shape moved.
+
+**The repair, which is the general form:**
+
+* assert the **shape** first, before anything that depends on it;
+* match on a **stable key**, never on prose;
+* **count** the assertions that actually ran, and fail if the count is zero;
+* ⭐ **fail on an unknown key rather than skip it** — this earned itself within
+  a minute, catching a `profileDir` vs `profile` mismatch the skipping form
+  would have hidden forever.
+
+⚠ Same family as a contract asserted against itself and as the negative-claim
+rule: the default state already satisfies the check, so nothing exercises it.
+⇒ And note how it arrived — **through a change the test's own author asked
+for**, to fix this very weakness one layer down. Requesting a stronger shape
+upstream does not make your checker of that shape any stronger.
 
 ### ⚠ A guard is correct only over the states that EXISTED when it was written
 
