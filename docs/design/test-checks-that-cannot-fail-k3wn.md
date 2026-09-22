@@ -148,6 +148,51 @@ one got the real path back from the other.
 
 ---
 
+### A suite number that cannot tell "passed" from "asserted nothing"
+
+Measured on this runner:
+
+```
+node --test <zero-byte file>        -> # tests 1 · # pass 1 · # fail 0
+node --test <only imports assert>   -> # tests 1 · # pass 1 · # fail 0
+node --test <test() with no assert> -> # tests 1 · # pass 1 · # fail 0
+```
+
+⇒ So `# pass 292` — the number this repo reports after every change and quotes
+to every consumer — **cannot distinguish asserted-and-passed from
+asserted-nothing.** *(Found by `cgwc:main` when its suite went 1381 → 1380 and
+the deleted file was an empty one left by an errant heredoc: the count moved for
+a reason unrelated to coverage, and nothing else would have said so.)*
+
+⚠ The failure is invisible in the direction nobody investigates — **the number
+goes up.**
+
+⇒ Two properties the guard needs, and both are the rule turned on the guard
+itself: **enumerate from what the runner actually runs**, cross-checked against
+a second source so a narrowing pattern cannot hide; and **zero files discovered
+FAILS** rather than reading as "nothing to check, OK".
+
+## A fixture's assumptions have a shelf life
+
+⭐ **Every other rule here is about a check that cannot fail. This is a check
+that cannot fail CORRECTLY — and it degrades without anyone touching it.**
+
+A fallback assuming `html5 == tcp + 1` was **correct when written** and harmless
+while the pin was at or below the release that derived it that way. The moment
+the pin crossed the release that retired that derivation, it became a
+**guaranteed false RED** — in any git-less tree, against a perfectly correct
+base, with **nothing changed in the test**. Caught three bumps later by the
+pristine positive arm of a control written for something else.
+*(`webctl:linkedin`.)*
+
+⇒ **Observe the value rather than assume it. A fallback is a fixture's expiry
+date written in invisible ink.**
+
+⚠ This is the version-marker problem with the polarity reversed, and a shared
+library shipped to lanes at different pins has **both**: a marker tells you an
+old copy carries old rot; it does not tell you that a *correct* copy's
+assumptions have expired against a newer pin. **Two mechanisms, not one.**
+
 ## The hypothesis ladder
 
 When a test will not go red under a mutation, work down this list. **The first
