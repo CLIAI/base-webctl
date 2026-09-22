@@ -139,6 +139,55 @@ names the MEASUREMENT; `html5Answering` names the FACT.
 `html5Url`, requiring a 2xx.** Nothing weaker establishes that a human can
 attach.
 
+### ⛔ TWO PATHS, TWO PROBES — and one of them must not speak HTTP
+
+`attach: { native, html5 }` offers two ways in. A single reachability field
+describes one of them and silently condemns the other.
+
+    xpra html5 client DISABLED, xpra protocol serving normally:
+      html5Answering -> false   (correct, and useful)
+      native attach  -> WORKS
+      ...and nothing here reported that second fact
+
+⇒ An operator reads one `false`, concludes the GUI is down, and the native
+viewer would have attached fine. Same *wrong action from an undistinguished
+state* as the tri-state and `configured: false`, one level down.
+
+**Measured here, all three ports, three probe strengths:**
+
+```
+port    connect()      connect-then-WAIT                    HTTP GET
+14327   TRUE           HELD-OPEN (605ms)                    200
+14328   TRUE           CONNECTED-then-CLOSED-by-peer (2ms)  reset
+14878   ECONNREFUSED   ECONNREFUSED (1ms)                   —
+```
+
+⭐ **Connect-then-wait separates all three states without speaking any
+protocol** — and the *timing* is diagnostic on its own: an immediate peer close
+is docker's proxy with nothing behind it, while a genuine server holds the
+socket. The bare `connect()` and the HTTP GET are not the only two options; the
+middle one exists.
+
+| field | probe | question it answers |
+|---|---|---|
+| `guiReachable` | connect-then-wait on `xpraTcpPort` | **is the transport serving at all** |
+| `html5Answering` | HTTP GET on `html5Url`, 2xx | **can a browser open it** |
+
+⇒ Connect-then-wait is right for the first **because** it is protocol-agnostic:
+the thing on the other end may be xpra's own protocol rather than HTTP. The
+REFUSED-vs-RESET split applies to it unchanged and is what makes it a three-way
+answer rather than a boolean.
+
+⚠ **And this is why the rename mattered more than it looked.** The objection to
+an HTTP probe was that it false-REDs when xpra's html5 client is disabled and
+the port speaks only the xpra protocol. That is fatal to a field called
+`tcpReachable` — and **not an objection at all** to one called
+`html5Answering`, where `false` is then simply *true and useful*. Naming the
+fact instead of the measurement did not merely describe the check better; it
+made the check correct. *(Probe from linkedin-webctl PR #92, hermetic against
+three local `net.createServer` cases so it proves out on a machine with no
+docker; the two-fields reading is fetlife-webctl's.)*
+
 ⭐ **AND the derived port is reported beside the SERVING port, as two fields.**
 Their agreement is the fact, and one field cannot express it:
 
@@ -364,9 +413,56 @@ the path for a **read-only** `gui status` would create the profile directory as
 a side effect — and `configured: false` lanes would start manufacturing empty
 profile dirs merely by being asked their status.
 
+⚠ **Stated precisely, because the status of the defect matters:** inside base
+the only caller is the bring-up path (`chromium-docker-xpra.js:271`), where the
+`mkdir` is correct. ⇒ So this is **prospective for base's own code — it arrives
+with the feature** — and *"answerable before a start"* is what creates the
+caller class in which it is a bug. ⛔ But both `resolveChromiumProfile` and
+`ensureProfileDir` are **public exports**, so a consumer writing its own status
+command can reach it today without any change here.
+
 ⇒ base needs a **pure** resolver that answers the path without creating it, with
-the `mkdir` kept on the bring-up path where it belongs. A query with a
-filesystem side effect is not a query.
+the `mkdir` kept on the bring-up path where it belongs. **A query with a
+filesystem side effect is not a query.**
+
+⇒ **Sequencing:** this is *not* a third prerequisite for `gui`. The pure
+resolver and the profile provenance ship **with `gui status`**, because
+`gui status` is the caller that turns them into bugs — a status command that
+creates directories is not a correct status command, so they are part of the
+feature rather than gates in front of it.
+
+## The container env contract, as data
+
+Ruled shape — **flat current contract plus `since`**, not a version-keyed map:
+
+```js
+export const XPRA_CONTAINER_ENV_CONTRACT = Object.freeze({
+  required:  Object.freeze(['XPRA_TCP_BIND']),
+  forbidden: Object.freeze(['XPRA_HTML5_BIND']),  // and WHY, in a comment
+  htmlFlag:  '--html=on',
+  since:     'v0.6.0',
+});
+```
+
+* ⛔ **A version-keyed map would be a second source of truth**, maintained by
+  hand, and wrong the moment someone adds a key without changing behaviour. It
+  also invites a consumer to *look up its own pin* instead of observing the
+  driver — the thing the assertion exists to avoid.
+* **`since` is for the human reading a failure, not a lookup key.** It turns
+  *"XPRA_HTML5_BIND is required but not passed"* into *"your entrypoint predates
+  v0.6.0"*. One string does that; a map is not needed.
+* **A consumer on an older base gets the truth from the code it mounts** — its
+  own `vendor/` — not from a newer base's table describing what it used to do.
+* ⛔ **`forbidden` is a REAL LIST, never the complement of `required`.** *"Not
+  required"* and *"must not be set"* are different, and only the second catches
+  an entrypoint still consuming a variable base stopped setting — which is the
+  exact live failure.
+
+⚠ The consumer-side assertion keeps **injected-docker capture** as its ground
+truth and uses this data only for the message and the forbidden set. Verifying
+base's behaviour by grepping base's source returns the negation: a grep for
+`XPRA_HTML5_BIND` in the driver matches the two comments saying it is
+deliberately not set. *(Shape specified by fetlife-webctl.)*
 
 ## Ruling — the `xpra` alias
 
