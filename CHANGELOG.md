@@ -207,6 +207,44 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.12.0 — 2026-09-22
+
+⭐ **`describeProfileResolution().warning` gains `severity`, and base publishes
+the complete vocabulary** as `PROFILE_WARNING_SEVERITIES`.
+
+`kind` says **what** it is. Nothing said **how bad**. ⇒ So every consumer had to
+independently decide which kinds are refusals, and they would drift — the
+copy-rot mechanism this family has now hit five times.
+
+⛔ **The specific failure it prevents:** a consumer branching on a single kind
+string **silently allows a third dangerous kind added later**. That is the
+skipping form, and the vocabulary is base's to grow, so the classification is
+base's to own.
+
+```
+danger  ⛔ refuse — a slug claiming isolation resolving to the DEFAULT profile
+notice  proceed; fine, but not what the caller may have assumed
+```
+
+⚠ A consumer should still **refuse an unknown severity** rather than assume it
+is benign. The asymmetry is the argument, not taste: a new benign value blocking
+a bring-up prints what to do; a new dangerous value silently allowed is a
+throwaway-named container mounting an authenticated profile.
+
+*(The gap was reported by fetlife-webctl, which had already implemented
+fail-closed-on-unknown-kind and asked for the classification to live with the
+kind rather than in eleven lanes' hardcoded sets.)*
+
+### ⛔ What this release does NOT cover
+
+* **base still does not refuse.** It classifies. A lane deliberately sharing one
+  profile is entitled to, so the policy stays with the consumer.
+* **It does not make a single-value check safe.** Branch on `severity` and
+  assert against `PROFILE_WARNING_SEVERITIES`; a consumer that hardcodes
+  `severity === 'danger'` and nothing else is back in the skipping form the day
+  a third severity ships.
+* **Nothing else moves.** No driver, teardown or contract-data behaviour change.
+
 ## v0.11.2 — 2026-09-22
 
 ⛔ **`describeProfileResolution().warning` is now `{kind, text}`**, not a bare

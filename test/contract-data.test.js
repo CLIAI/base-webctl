@@ -26,7 +26,7 @@ import {
   TEARDOWN_CONTRACT,
   CONTAINER_LIFECYCLE_CONTRACT,
 } from '../lib/browser-location/chromium-docker-xpra.js';
-import { createMounts } from '../lib/browser-location/mounts.js';
+import { createMounts, PROFILE_WARNING_SEVERITIES } from '../lib/browser-location/mounts.js';
 import * as realDocker from '../lib/browser-location/docker-ctl.js';
 
 const C = {
@@ -245,6 +245,19 @@ test('⛔ SAFE and DANGEROUS must not render identically', () => {
       + 'produce identical output — that is the defect this test pins');
     assert.equal(danger.warning.kind, 'default-profile-under-throwaway-slug');
     assert.equal(safe.warning.kind, 'isolated-but-not-by-slug');
+
+    // ⭐ SEVERITY IS THE FIELD A CONSUMER SHOULD BRANCH ON. `kind` says what;
+    // only severity says how bad — and a consumer branching on a single kind
+    // string silently ALLOWS a third dangerous kind added later. That is the
+    // skipping form, and it is why the classification belongs to base, which
+    // owns the vocabulary, rather than to N lanes' hardcoded sets.
+    assert.equal(danger.warning.severity, 'danger');
+    assert.equal(safe.warning.severity, 'notice');
+    for (const w of [danger.warning, safe.warning]) {
+      assert.ok(PROFILE_WARNING_SEVERITIES.includes(w.severity),
+        `severity '${w.severity}' is not in the published vocabulary — a consumer `
+        + 'asserting it knows every value would fail loudly here, which is the point');
+    }
     assert.ok(safe.warning !== null && danger.warning !== null,
       'both warn, so `warning !== null` cannot be the branch — that is the point');
 
