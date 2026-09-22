@@ -120,6 +120,33 @@ and where something genuinely must be timed, measure CPU time.
 standing in for a success: a 5 s "give up" is a timeout, a 200 ms "it must be done
 by now" is a proxy.
 
+### ⛔ Re-derive a past claim AS OF the claim, not from the present
+
+A claim about another repo must be re-derived from its refs. ⚠ The axis that
+rule does not name is **time**: re-deriving from a **later** ref measures a
+subject that has since changed.
+
+Measured 2026-09-22. `probe-contract-capability.sh` judged a consumer
+**INCAPABLE** at ~15:30. That consumer fixed its contract at **17:42** —
+honouring `WEBCTL_BASE_DIR` and asserting a value for the first time; its parent
+commit at 16:50 contained **zero** matches for either. A second party then
+re-checked *after* the fix, found the contract sound, and concluded **the probe
+had misjudged it** — preparing to tell the consumer its work had been
+unnecessary and to record a rule about two instruments agreeing while both were
+wrong.
+
+Both instruments had been right. The consumer's own commit message credits the
+probe by name and quotes its BEFORE/AFTER output.
+
+⇒ **In a fleet where lanes fix things within the hour, "I checked and it is fine
+now" is not evidence about what was true when the tool spoke.** Use
+`git show <commit>:<file>` and the commit's timestamp, not the working tree.
+
+⚠ The cost of getting this backwards is not symmetric with an ordinary error. It
+recasts a genuine fix as unnecessary AND makes a working instrument look
+unreliable — *a tool that appears to lie once gets distrusted permanently* —
+manufactured by a mistaken retraction rather than by any defect.
+
 ### ⚠ A FALSE ABSENCE from the right source, read with the wrong assumption
 
 `git ls-remote --tags` sorts refs **lexicographically, not by version**:
