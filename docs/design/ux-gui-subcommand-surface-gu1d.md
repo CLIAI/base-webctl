@@ -298,6 +298,24 @@ through `C`, not a family design baked into base.
 4. the `attach` descriptors (`native`, `html5`) as **data** — the command and URL
    a caller would use.
 
+### ⛔ THE SURFACE MUST NOT BE CJS-SHAPED
+
+Both lanes that ship `gui` today are **CJS**, and they reach base through the
+`require(esm)` shim. `fetlife-webctl` — the lane Greg named, wired 2026-09-22 —
+is **`"type": "module"`**. It is the family's first ESM consumer.
+
+⇒ A `require()`-based command loader, or a CJS-shaped entry point copied from
+either existing lane, **hard-errors there rather than degrading**. base is
+zero-dep ESM already, so the correct shape works for everyone: ESM module,
+`createGuiSurface(C, opts)`, and the CJS lanes keep reaching it the way they
+reach every other base module.
+
+⚠ The hazard is not base's format — it is inheriting a CALLING CONVENTION from
+the two reference implementations along with their contract. That is the same
+copy mechanism that put four byte-identical unpinned Dockerfiles in four repos
+from one upstream commit. *(Raised by fetlife-webctl before the code exists,
+which is the only time it is cheap.)*
+
 **base does NOT ship:**
 
 * argument parsing or help *rendering* — those are the consumer's CLI, and

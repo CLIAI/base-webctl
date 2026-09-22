@@ -81,15 +81,23 @@
       "repo": "git@github.com:gwwtests/fetlife-webctl.git",
       "submodulePath": "vendor/base-webctl",
       "testCmd": "./test-against-base.sh --offline",
-      "dockerOptIn": false,
-      "tier": "contracts",
+      // tier/dockerOptIn raised with the wired flip, not ahead of it: Greg's ask
+      // (gui + browser-in-docker in every lane) makes `full` correct, but
+      // registering an aspiration as a fact is what this registry has been burnt
+      // by. All three flip together, after the mount was verified here.
+      "dockerOptIn": true,
+      "tier": "full",
       // Twin of the substack path bug, fixed BEFORE it can bite: fetlife also
       // lives outside $WEBCTL_CONSUMERS_DIR. It is currently masked only
       // because wired:false short-circuits ahead of the path check, so the day
       // it wires it would SKIP-not-FAIL and vanish from the gate exactly as
       // substack did. Costs one line now; costs a third rediscovery later.
       "localDir": "~/github/gwwtests/fetlife-webctl",
-      "wired": false
+      // VERIFIED HERE, not taken from the lane's report: master 51dd3fb clean and
+      // pushed; describe --tags --exact-match -> an exact tag; type:module with
+      // engines.node >=22.12. ⭐ This is the FIRST ESM consumer — every other
+      // wired lane is CJS and reaches base through the require(esm) shim.
+      "wired": true
     },
     {
       "name": "claude-chrome-extension-webctl",
