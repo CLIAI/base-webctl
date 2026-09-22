@@ -160,6 +160,43 @@ evidence* — it nearly repaired a test that was working.
 ⇒ (2) is cheap to check and almost never checked. Prove the mutation landed
 (diff it) before believing anything the run says.
 
+### ⛔ The contract is duplicated AT DIFFERENT AGES — so the harness needs a VERSION MARKER on day one
+
+A shared harness library fixes the duplication. **It does not fix the lanes
+already carrying old copies**, and you cannot find those by diffing: each lane
+has legitimately diverged in its own assertions, so **rot and customisation look
+identical in a diff.**
+
+⇒ Without a marker, the library's first release creates **two populations** —
+lanes on the library, and lanes on copies of unknown age — and the second is
+exactly where the next defects of this class live, invisibly, because every one
+of them reports green.
+
+⇒ **So each contract states which harness generation it is**, and a sweep asks
+*"who is below N?"* rather than *"who differs?"*
+
+The evidence that this is the dominant failure mode, not a hypothetical: the
+three contract defects found so far were in **three different lanes at three
+different ages** —
+
+* a re-vendor `grep` matching the string in the shim's own **comment**, passing
+  across a genuine re-vendor;
+* `[ "$rc" = "2" ] && { … }` as an arm's last statement, returning 1 under
+  `set -e`, so a **green suite exits 1**;
+* naming the pin from the submodule **worktree** rather than the committed
+  gitlink — 4 of 5 contracts, and worst under `--against-head`, which is the
+  thing that makes worktree and gitlink differ.
+
+⚠ **Two of the three were found by the coordinator rather than by any lane** —
+not from reading better, but from **looking across copies**. A version marker
+makes that comparison mechanical instead of dependent on someone happening to
+look sideways.
+
+⚠ And one lane had the gitlink bug *because it copied a snapshot that had it*,
+from a recipe naming that snapshot as canonical. ⇒ Industrialising a template is
+industrialising whatever rot the snapshot carried, which is why new-lane
+scaffolding is on hold until the harness ships.
+
 ### ⭐ Trust the ARGUMENT; re-run the MEASUREMENT
 
 The right asymmetry for a cross-lane report, and it is not "verify everything"
