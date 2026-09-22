@@ -26,6 +26,38 @@ two things at once:
 * Bash `set -euo pipefail`; markdown blank-line-before-list + `*` bullets; small
   focused commits; non-trivial scripts ship `.README.md` + `.DEV_NOTES.md`.
 
+## ⛔ Roughly HALF of base's callable surface is not a module export
+
+**Measured 2026-09-23 at v0.13.1** — by construction, three times, by three
+parties independently:
+
+    module-level exports    140
+    factory-return members  117
+    ⇒ 46% of the callable surface is reachable ONLY by calling a factory
+
+⇒ So **`grep 'export function X'` is structurally blind to half of this
+library.** `inspect()` is the worked example: it exists on the driver returned
+by `createChromiumDockerXpra(C).createDriver(cfg)` and on `createProfileLock(C)`,
+and appears in **no** module's exports.
+
+⚠ **This is not a hypothetical.** A consumer lane and its manager *independently*
+concluded *"`inspect()` does not exist in base"*, both using a module-export
+query, both reporting *"verified at the tag"*. Neither was careless — **the
+query is the one a consumer naturally writes**, and a lane that reaches that
+conclusion reimplements the capability locally, which is the duplication this
+whole programme exists to stop, arrived at by someone doing due diligence.
+
+⇒ **To find something in base, construct and inspect; do not grep for
+`export`.** Two surfaces that are easy to confuse, named by the object they
+live on:
+
+    cfg.portSources          raw source STRINGS, on buildDriverCfg()'s result
+    driver.inspect().ports   {value, source} per port, on the DRIVER
+
+⚠ **And enumerating by CALLING is not free** — `resolveChromiumProfile()`
+`mkdir`s. Any tool that walks this surface must construct against a throwaway
+`HOME`/`userDataDir` and **prove it did not write**, rather than assert it.
+
 ## Design docs
 
 * Conventions + frontmatter schema: `docs/design/DESIGN_DOCS_GUIDELINES.md`.
