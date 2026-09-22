@@ -284,7 +284,10 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     if [ "$orig_sha" = "$BASE_HEAD" ]; then
       echo "NOTE  $name already pinned at base HEAD — no swap needed" >&2
     else
+      declared_at_swap="$(git -C "$repo_dir" ls-tree HEAD "$submodulePath" 2>/dev/null | awk '{print $3}')"
       echo "SWAP  $name: $submodulePath ${orig_sha:0:7} -> ${BASE_HEAD:0:7} (base HEAD)" >&2
+      echo "      declares ${declared_at_swap:0:7} — a contract naming its pin from the WORKTREE" >&2
+      echo "      will report the candidate as its pin while swapped. WEBCTL_DECLARED_PIN carries the truth." >&2
       swap_to_base_head "$sub_abs" "$name"
     fi
   fi
@@ -317,7 +320,26 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # interleave with.
   run_log="$(mktemp "${TMPDIR:-/tmp}/webctl-gate-XXXXXX")"
   set +e
-  ( cd "$repo_dir" && WEBCTL_BASE_DIR="$BASE_ROOT" eval "$testCmd" ) 2>&1 | tee "$run_log" >&2
+  # ⭐ WEBCTL_DECLARED_PIN — what the consumer DECLARES, from its committed
+  # gitlink, handed over because the swap makes it unknowable from inside.
+  #
+  # ⛔ THE DEFECT THIS CLOSES, AND IT IS WORST HERE. --against-head checks the
+  # submodule WORKTREE out at the candidate. A contract that names its pin with
+  # `git -C vendor/base-webctl describe` is then reading the worktree, so it
+  # prints "green against v0.13.1" FROM A REPO THAT DECLARES v0.5.0 — a true
+  # sentence about the wrong subject. Measured across the fleet: 4 of 5
+  # contracts name their pin from the worktree.
+  #
+  # ⇒ A checked-out submodule is an INTENTION; a committed gitlink is a PIN.
+  # Only the second is what a sibling cloning the repo gets. The gate creates
+  # the window in which they differ, so the gate is what should supply the
+  # declaration rather than leaving each contract to compute it — during the
+  # one moment it cannot.
+  declared_pin="$(git -C "$repo_dir" ls-tree HEAD "$submodulePath" 2>/dev/null | awk '{print $3}')"
+  ( cd "$repo_dir" \
+      && WEBCTL_BASE_DIR="$BASE_ROOT" \
+         WEBCTL_DECLARED_PIN="${declared_pin:-}" \
+         eval "$testCmd" ) 2>&1 | tee "$run_log" >&2
   rc=${PIPESTATUS[0]}
   set -e
 
