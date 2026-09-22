@@ -120,6 +120,33 @@ and where something genuinely must be timed, measure CPU time.
 standing in for a success: a 5 s "give up" is a timeout, a 200 ms "it must be done
 by now" is a proxy.
 
+### ⚠ A FALSE ABSENCE from the right source, read with the wrong assumption
+
+`git ls-remote --tags` sorts refs **lexicographically, not by version**:
+
+```
+v0.1.0   v0.10.0   v0.10.1   v0.2.0   …   v0.9.0   <- last line
+```
+
+So reading the tail and concluding *"tops out at v0.9.0, the v0.10 tags were
+never pushed"* is wrong while every command succeeded and every byte of output
+was correct. Reported 2026-09-22 by a lane about to mount base; the tags had been
+on origin for weeks.
+
+⇒ This is harder to catch than a failed command, because **nothing looks broken**.
+It is the same shape as a grep whose pattern spanned a line break returning a
+confident zero: right source, complete output, wrong reading.
+
+⛔ **And note the trap in its proposed remedy — "just push the tags again".**
+Re-pushing an already-pushed tag SUCCEEDS and changes nothing, so the fix would
+have been followed by the problem disappearing (it was never there), reading as
+confirmation. ⇒ **A remedy that cannot fail cannot tell you the diagnosis was
+wrong.** Prefer a remedy whose failure would be informative, or verify the
+diagnosis before applying a harmless one.
+
+⇒ Practical: `| sort -V`, or grep for the specific tag. Never read version
+ordering off git's ref output.
+
 ⚠ Corollary for delete paths, from the same review: *deletion is eventually
 loud, accumulation never is* ranks NOTICEABILITY — it does not rank
 RECOVERABILITY, and the two come apart exactly where an argument is malformed.
