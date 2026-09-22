@@ -27,28 +27,69 @@ const C = {
   ENV_PREFIX: 'DEMO_', ENV_PREFIX_LEGACY: null, ENV_LEGACY_SUFFIXES: [],
 };
 
-test('⭐ every channel resolvePort can emit is classifiable', () => {
-  // ⛔ THE COVERAGE CHECK, not merely the drift one. Asserting
-  // `PORT_ORIGINS.includes(x)` proves base agrees with itself; it proves
-  // nothing about whether every source the resolver ACTUALLY emits can be
-  // classified. A source added to the resolver without a rule here returns
-  // null and would be refused by every consumer — so the two must be walked
-  // together, from the resolver's real output.
+test('⭐ EVERY source that reaches inspect() is classifiable — all producers', () => {
+  // ⛔ THERE ARE TWO PRODUCERS OF PORT SOURCES, and v0.13.0 shipped classifying
+  // only one. resolvePort() emits 'default'/'cli'/'env:FOO'/'jsonc:port';
+  // deriveXpraPorts() emits 'derived', 'derived (== tcp; …)',
+  // 'jsonc.ports["xpra-tcp"]'. So TWO OF THE THREE PORTS inspect() carries
+  // returned null, and a fail-closed consumer would have refused every
+  // ordinary bring-up.
+  //
+  // ⭐ The previous version of this test listed resolvePort's channels BY HAND
+  // and I described it as walking "the resolver's real output". It walked ONE
+  // resolver's. ⇒ This one enumerates `cfg.portSources` — the object that
+  // actually reaches inspect() — so a producer added later cannot be missed by
+  // a hand-maintained list, which is the whole failure being repaired.
   const c = createClientConfig(C);
-  const channels = [
-    ['constants', { args: {}, dotenv: {}, env: {}, jsonc: {} }, 'derived-from-constants'],
-    ['flag',      { args: { port: 5000 }, dotenv: {}, env: {}, jsonc: {} }, 'stated'],
-    ['env',       { args: {}, dotenv: {}, env: { DEMO_PORT: '5001' }, jsonc: {} }, 'stated'],
-    ['dotenv',    { args: {}, dotenv: { DEMO_PORT: '5002' }, env: {}, jsonc: {} }, 'stated'],
-    ['jsonc',     { args: {}, dotenv: {}, env: {}, jsonc: { port: 5003 } }, 'stated'],
+  const matrix = [
+    ['defaults',        { args: {}, dotenv: {}, env: {}, jsonc: {} }],
+    ['cdp by flag',     { args: { port: 5000 }, dotenv: {}, env: {}, jsonc: {} }],
+    ['cdp by env',      { args: {}, dotenv: {}, env: { DEMO_PORT: '5001' }, jsonc: {} }],
+    ['cdp by dotenv',   { args: {}, dotenv: { DEMO_PORT: '5002' }, env: {}, jsonc: {} }],
+    ['cdp by jsonc',    { args: {}, dotenv: {}, env: {}, jsonc: { port: 5003 } }],
+    ['xpra tcp bag',    { args: {}, dotenv: {}, env: {}, jsonc: { ports: { 'xpra-tcp': 19999 } } }],
+    ['xpra tcp camel',  { args: {}, dotenv: {}, env: {}, jsonc: { xpraTcpPort: 18888 } }],
+    ['xpra tcp snake',  { args: {}, dotenv: {}, env: {}, jsonc: { xpra_tcp_port: 18887 } }],
+    ['xpra html5 bag',  { args: {}, dotenv: {}, env: {}, jsonc: { ports: { 'xpra-html5': 17777 } } }],
+    ['xpra html5 camel',{ args: {}, dotenv: {}, env: {}, jsonc: { xpraHtml5Port: 17776 } }],
   ];
-  for (const [label, state, want] of channels) {
-    const r = c.resolvePort(state);
-    const o = portOrigin(r.source);
-    assert.equal(o, want, `${label}: source '${r.source}' classified as ${o}, want ${want}`);
-    assert.ok(PORT_ORIGINS.includes(String(o)),
-      `${label}: '${o}' is not in the published vocabulary`);
+  let checked = 0;
+  for (const [label, state] of matrix) {
+    const cfg = c.buildDriverCfg(state);
+    assert.ok(cfg.portSources, `${label}: no portSources at all`);
+    for (const [key, source] of Object.entries(cfg.portSources)) {
+      const o = portOrigin(/** @type {string} */ (source));
+      assert.ok(o !== null,
+        `${label}: port '${key}' has source ${JSON.stringify(source)} which `
+        + 'portOrigin cannot classify — a fail-closed consumer refuses this run');
+      assert.ok(PORT_ORIGINS.includes(o), `${label}/${key}: '${o}' not in the vocabulary`);
+      checked++;
+    }
   }
+  // ⛔ COUNT THE ASSERTIONS. A matrix that silently produced no sources would
+  // pass every loop body zero times.
+  assert.ok(checked >= 30, `only ${checked} sources checked — the matrix is not exercising the producers`);
+});
+
+test('a CONFIGURED xpra port reads as stated; a computed one does not', () => {
+  // The distinction has to survive both producers, not only the cdp one.
+  const c = createClientConfig(C);
+  const derived = c.buildDriverCfg({ args: {}, dotenv: {}, env: {}, jsonc: {} });
+  assert.equal(portOrigin(derived.portSources['xpra-tcp']), 'derived-from-constants');
+
+  const stated = c.buildDriverCfg({ args: {}, dotenv: {}, env: {}, jsonc: { ports: { 'xpra-tcp': 19999 } } });
+  assert.equal(portOrigin(stated.portSources['xpra-tcp']), 'stated');
+});
+
+test('⚠ the API is reachable from the FACTORY surface, not only the module', () => {
+  // Consumers' shims re-export what createClientConfig() returns. A
+  // module-level-only API is unreachable from the lane that needs it — shipped
+  // that way in v0.13.0 and reported within the hour. A published API a
+  // consumer cannot reach is not published.
+  const c = /** @type {any} */ (createClientConfig(C));
+  assert.equal(typeof c.portOrigin, 'function');
+  assert.ok(Array.isArray(c.PORT_ORIGINS));
+  assert.equal(c.portOrigin('derived'), 'derived-from-constants');
 });
 
 test('⛔ a STATED value always wins over the constant', () => {

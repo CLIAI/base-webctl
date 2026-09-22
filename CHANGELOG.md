@@ -207,6 +207,51 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.13.1 — 2026-09-23
+
+⛔ **v0.13.0's `portOrigin()` could not classify TWO OF THE THREE PORTS
+`inspect()` carries.** Adopt v0.13.1 if you adopted v0.13.0.
+
+There are **two producers** of port sources and v0.13.0 handled one:
+
+```
+resolvePort()      'default' | 'cli' | 'env:FOO' | 'jsonc:port'      classified
+deriveXpraPorts()  'derived' | 'derived (== tcp; …)'
+                   'jsonc.ports["xpra-tcp"]' | 'jsonc.xpraTcpPort'   -> null
+```
+
+⇒ So a **fail-closed consumer — the shape base itself recommends — would have
+refused every ordinary bring-up**, because the default `xpra-tcp` source
+(`'derived'`) returned `null`.
+
+* `portOrigin()` classifies both producers. `jsonc.` joins `jsonc:`; anything
+  base COMPUTED (`derived…`, `default`) is `derived-from-constants`.
+* ⚠ **`portOrigin` and `PORT_ORIGINS` are re-exported on the FACTORY surface.**
+  They were module-level only, and consumers' shims expose what
+  `createClientConfig()` returns — so the lane that needed them could not reach
+  them. **A published API a consumer cannot reach is not published.**
+
+⭐ **Why the test missed it.** v0.13.0's coverage test listed `resolvePort`'s
+channels BY HAND while the commit described it as walking *"the resolver's real
+output"*. It walked ONE resolver's. It now enumerates `cfg.portSources` — the
+object that actually reaches `inspect()` — so a producer added later cannot be
+missed by a hand-maintained list, and it counts the assertions it ran.
+
+⇒ *Fixing an omission at one call site says nothing about the others* — a rule
+this repo recorded the previous day, applied to a single producer.
+
+*(Both gaps reported by cgwc:main within the hour of the tag, from adoption.)*
+
+### ⛔ What this release does NOT cover
+
+* **It does not make the vocabulary load-bearing.** A consumer can still
+  reimplement the classification with a local regex and pass every check —
+  nothing in a test can observe a vocabulary that is not used. Publishing data
+  is not adoption; the shared harness reading it is what would make it binding.
+* **Two values only.** `derived-from-constants` covers anything base computed,
+  including a port derived from another already-resolved value plus an offset.
+  A third value would be a breaking change for every fail-closed consumer.
+
 ## v0.13.0 — 2026-09-23
 
 ⭐ **Port provenance, end to end — the first `gui` prerequisite, and useful on
