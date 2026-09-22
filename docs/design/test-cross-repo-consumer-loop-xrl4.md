@@ -144,6 +144,45 @@ which had found them.** All 0 B. ⇒ The cost is never disk — *clutter nobody 
 explain is how a stale artifact gets read as a live one*. The names are
 slug-anchored and therefore enumerable, so the sweep is mechanical.
 
+### ⛔ A fixture where RIGHT and WRONG agree is not coverage
+
+A property test whose mutation **passes** is testing something else.
+
+Measured twice on 2026-09-22, in two repos, both by the author of the test:
+
+* A fixture for an ordering rule used a one-second-old reading, which never
+  trips the age check — so reordering the two checks changed nothing and the
+  test passed **under the mutation it was written to catch**. The pre-existing
+  test was doing all the work.
+* base's own `TEARDOWN_CONTRACT` test asserted `removes === []` **against the
+  constant** and never called `shutdown()`. Adding `docker.rm()` to `shutdown()`
+  left it GREEN — in the one contract whose entire content is a claim about what
+  a verb does NOT do.
+
+⇒ **The fixture must be one where the wrong implementation gives a DIFFERENT
+answer.** This is the same defect as an assertion reading its expectation from
+the artifact under test: in both, right and wrong agree, and agreement is
+mistaken for confirmation.
+
+⚠ Note which half of base's suite had it. The `required`/`forbidden` checks were
+control-tested and caught their mutations; the teardown check was not, and it
+was the one asserting a *negative*. **A claim that something does not happen is
+the easiest to assert vacuously**, because the default state already satisfies
+it.
+
+### ⛔ Hermetic means BEHAVIOURALLY hermetic, not LOCATION-hermetic
+
+A bundle of reference tests was verified independent of docker, the clock and
+the machine's boot state — and never checked for independence from the author's
+**directory layout**. Handed over flat, its repo-relative imports resolved
+outside the bundle and the run died with `ERR_MODULE_NOT_FOUND` before a single
+assertion, while its README stated *"every check control-tested, each failing
+with its own distinct message"*.
+
+⇒ The defect is not the import path. It is that **a reader records those
+properties as verified on the strength of a suite they believe ran.** Artifact
+correct, packaging carrying an assumption from the sender.
+
 ### ⛔ Fixing an eager side effect at ONE call site says nothing about the others
 
 A consumer made its own profile resolver pure and recorded the fix as complete.

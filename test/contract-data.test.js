@@ -132,10 +132,36 @@ test('`forbidden` is a REAL list, not the complement of `required`', () => {
   assert.ok(Object.isFrozen(XPRA_CONTAINER_ENV_CONTRACT));
 });
 
-test('⛔ TEARDOWN_CONTRACT.removes is EMPTY — shutdown stops, it does not remove', () => {
-  // A consumer printing "containers removed" after shutdown() is wrong. This
-  // assertion exists so that if shutdown() ever starts removing things, the
-  // published claim cannot silently stay behind.
+test('⛔ TEARDOWN_CONTRACT matches what shutdown() ACTUALLY calls', async () => {
+  // ⚠ THIS TEST PREVIOUSLY ASSERTED THE CONSTANT AGAINST ITSELF. It checked
+  // `removes === []` and never called shutdown(), so adding docker.rm() to
+  // shutdown left it GREEN — the drift this file exists to prevent, in the one
+  // contract whose whole content is a claim about what a verb does NOT do.
+  // Right and wrong gave the same answer, which looks like coverage and is not.
+  /** @type {string[]} */
+  const verbs = [];
+  const docker = {
+    ...realDocker,
+    dockerAvailable: async () => true,
+    containerExists: async () => true,
+    containerRunning: async () => true,
+    imageExists: async () => true,
+    stop: async (/** @type {string} */ n) => { verbs.push(`stop:${n}`); return { code: 0 }; },
+    rm: async (/** @type {string} */ n) => { verbs.push(`rm:${n}`); return { code: 0 }; },
+    volumeRm: async (/** @type {string} */ n) => { verbs.push(`volumeRm:${n}`); return { code: 0 }; },
+    networkRm: async (/** @type {string} */ n) => { verbs.push(`networkRm:${n}`); return { code: 0 }; },
+  };
+  const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(), docker })
+    .createDriver({ port: 4427, host: '127.0.0.1', slug: 'test', force: true });
+  await drv.shutdown();
+
+  assert.ok(verbs.some((v) => v.startsWith('stop:')), `shutdown() must stop; saw ${verbs.join(', ')}`);
+  for (const forbidden of ['rm:', 'volumeRm:', 'networkRm:']) {
+    assert.ok(!verbs.some((v) => v.startsWith(forbidden)),
+      `TEARDOWN_CONTRACT.removes is [] but shutdown() called ${forbidden} `
+      + `(saw: ${verbs.join(', ')}). Either the verb changed or the contract is stale.`);
+  }
+
   assert.deepEqual(TEARDOWN_CONTRACT.removes, []);
   assert.ok(TEARDOWN_CONTRACT.keeps.some((k) => /container/i.test(k)),
     'containers must be named in `keeps` — omitting them is the defect this records');
