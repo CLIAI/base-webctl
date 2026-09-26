@@ -250,6 +250,53 @@ built its input by hand and never called the classifier.
 field to what it measures exposes the gap for free — and sometimes, as above,
 **makes the check correct rather than merely better described**.
 
+## ⛔ "Assert the fact, not the proxy" does not tell you WHICH fact
+
+A lane keyed one carve-out three ways, each on a better-looking basis than the
+last:
+
+```
+v1  skip when WEBCTL_BASE_DIR is set        -> skipped a computable check on EVERY gated run
+v2  skip when BASE_DIR resolves to PIN_DIR  -> NEVER FIRED
+v3  delegate to the shared harness          -> correct
+```
+
+⭐ **v2 is the instructive one.** Told that v1 was a proxy, the author reached
+for a *fact* — path identity — and picked a fact about **the wrong thing**: the
+gate sets `WEBCTL_BASE_DIR` and swaps the submodule as **two separate
+operations**, so a carve-out keyed on the paths coinciding was **structurally
+incapable of firing**.
+
+⇒ So the rule is necessary and not sufficient. **A wrong fact reads exactly
+like a right one** — both are facts, both are checkable, and only running the
+real thing distinguishes them. ⚠ *"Assert the fact"* silently invites you to
+pick the fact you can most easily observe, which is rarely the one the
+behaviour depends on.
+
+⇒ Practical: after choosing a fact, ask **"what produces it, and is that the
+same operation as the thing I am carving out for?"** Here it was not, and
+nothing but a gated run would have said so.
+
+## ⭐ A contract's last line is API
+
+Anything that consumes output **positionally** makes the tail a contract.
+
+A release gate captures the trailing block of a contract's output as the FAIL
+reason. One contract ended with a paragraph explaining *why* it reads `ls-tree`
+rather than `describe` — correct, useful prose — so the verdict a reader saw
+was the explanation rather than the finding.
+
+⇒ **Explanation belongs above the verdict, never after it.** The actionable
+line goes last:
+
+```
+FAIL: submodule pointer DIVERGED — we declare 5c3db07, worktree is at 020f93a.
+  Fix with: git submodule update --init vendor/base-webctl
+```
+
+⚠ And the background reasoning moves to a file a reader opens **deliberately**,
+rather than one a capture lands in **by accident**.
+
 ## Two checks that share an input do not corroborate
 
 They **agree**. Two probes of the same derived port are satisfied by one foreign

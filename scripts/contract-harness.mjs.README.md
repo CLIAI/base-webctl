@@ -65,3 +65,30 @@ carries old rot. It does *not* say a **correct** copy's assumptions have expired
 against a newer pin. Two mechanisms.
 
 See `.DEV_NOTES.md`.
+
+## ⭐ A contract's last line is API
+
+The release gate captures the **trailing block** of your output as the FAIL
+reason. ⇒ Put the actionable line last and the explanation above it; background
+reasoning belongs in a file a reader opens deliberately, not one a capture lands
+in by accident.
+
+## Using the harness from a lane pinned BEFORE it existed
+
+You do not need a tag or a bump. Under `--against-head` the gate points
+`WEBCTL_BASE_DIR` at the **candidate**, so the harness is present exactly when
+it matters:
+
+```sh
+if [ -f "$BASE_DIR/scripts/contract-harness.mjs" ]; then
+  node "$BASE_DIR/scripts/contract-harness.mjs" pin --repo . --sub vendor/base-webctl
+  rc=$?
+  if [ "$rc" -eq 1 ]; then exit 1; fi        # explicit; never `[ "$rc" = 2 ] && …`
+else
+  ...your fallback...
+fi
+```
+
+⚠ **Both paths are then live, and both need testing** — a lane that adopts this
+way is running the fallback locally and the harness under the gate.
+
