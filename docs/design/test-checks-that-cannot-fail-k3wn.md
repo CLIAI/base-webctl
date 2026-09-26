@@ -277,6 +277,36 @@ behaviour depends on.
 same operation as the thing I am carving out for?"** Here it was not, and
 nothing but a gated run would have said so.
 
+### ⭐ And the cost of a wrong fact is ASYMMETRIC
+
+| key | failure | how it announces itself |
+|---|---|---|
+| a proxy that OVER-triggers (v1) | skips too much | eventually — someone notices a check never runs |
+| a fact about the WRONG operation (v2) | **cannot fire at all** | **never** |
+
+⇒ **A proxy that over-triggers announces itself eventually; a fact about the
+wrong operation is silent forever.** So when the two candidate keys are
+*observable but possibly unrelated* and *harder to observe but causally
+connected*, the harder one is not merely better — **it is the only one whose
+failure you will notice.**
+
+⚠ Same shape one layer up, from the same lane: a guard
+(`require_base_owned("LWC_CHROMIUM_PROFILE")`) that **could not fire** until an
+`ENV` line came out of three Dockerfiles. It existed, it was correct, and it
+asserted nothing.
+
+### ⚠ A fallback goes dark the moment the primary path becomes available
+
+A lane adopting the harness *under the gate* while keeping local logic has
+**two live paths**. At its next bump the local one stops executing — and it is
+the path nobody thinks to test, precisely because it is the one that always ran.
+
+⇒ The remedy belongs in **the commit where the code goes dark**, which is the
+only moment anyone is looking at it: either **delete** the fallback (the pinned
+library owns it now) or **exercise** it deliberately against a fixture — and
+say which. ⛔ Building that machinery earlier guards a path that is currently
+the live one.
+
 ## ⭐ A contract's last line is API
 
 Anything that consumes output **positionally** makes the tail a contract.
