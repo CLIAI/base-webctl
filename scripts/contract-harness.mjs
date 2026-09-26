@@ -99,8 +99,16 @@ function report(check, code, reason, extra = {}) {
  * `WEBCTL_BASE_DIR`. The directory variable is a PROXY: the gate sets it on
  * every run, so keying the skip on it skips a computable check every time. The
  * gate exporting the declared pin is the actual signal, and it is the one the
- * gate can supply precisely because the swap takes it away. (Three people have
- * keyed this carve-out three different ways in one file, each fixing the last.)
+ * gate can supply precisely because the swap takes it away. (FOUR people have
+ * keyed this carve-out four different ways, each fixing the last; the fourth
+ * blocked a release.)
+ *
+ * ⛔ GATE-PROVIDED ENV IS INDEPENDENT OF YOUR PIN — and misreading this is the
+ * likely CAUSE of the four. One lane deferred reading `WEBCTL_DECLARED_PIN`
+ * "until I bump, since v0.5.0 does not export it". ⇒ But it is not exported by
+ * the pinned LIBRARY at all: it is set by the GATE PROCESS in your contract's
+ * environment at runtime. **A lane on any pin, however old, receives it.**
+ * There was never a version reason to skip it.
  *
  * @param {string} repo @param {string} sub
  */

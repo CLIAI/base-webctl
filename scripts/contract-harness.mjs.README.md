@@ -32,6 +32,13 @@ submodule worktree. Those differ exactly when the release gate has swapped the
 submodule, which is when a contract is most likely to report a tag its own repo
 does not declare.
 
+⛔ **`WEBCTL_DECLARED_PIN` COMES FROM THE GATE PROCESS, NOT FROM YOUR PIN.** It
+is set in your contract's environment at runtime by `test-all-consumers.sh`
+before it swaps your submodule. ⇒ **A lane on any pin, however old, receives
+it** — there is no version in which "my base does not export it yet" is a
+reason to skip it. *(One lane deferred exactly on those grounds, which is the
+likeliest reason the correct key was used zero times in four attempts.)*
+
 ⛔ **The carve-out is keyed on `WEBCTL_DECLARED_PIN`, not `WEBCTL_BASE_DIR`.**
 The directory variable is a *proxy* — the gate sets it every run, so keying the
 skip on it skips a computable check every time. Under a swap the check returns

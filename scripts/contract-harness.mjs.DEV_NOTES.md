@@ -25,6 +25,18 @@ when the gate's swap tripped its own new check.
 ⇒ That is the argument for the library rather than another rule: the rule has
 been written down four times and re-derived wrong four times.
 
+### ⭐ And the likely CAUSE, which is worth more than the count
+
+One lane deferred reading `WEBCTL_DECLARED_PIN` *"until I bump, since v0.5.0
+does not export it"*. ⛔ **It is not exported by the pinned library at all** —
+the gate process sets it in the contract's environment at runtime, so a lane on
+any pin receives it.
+
+⇒ So the variable looked like part of base's API, subject to the adoption
+ordering every other base capability has, and was deferred on that reasoning.
+**Gate-provided env is independent of the consumer's pin**, and saying so is
+cheaper than counting the mis-keyings. *(webctl:mgr's diagnosis.)*
+
 ## Controls
 
 Every check is exercised in **both** directions against a hermetic fixture repo
