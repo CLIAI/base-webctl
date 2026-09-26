@@ -64,6 +64,25 @@ is enforced rather than documented:
 
 ⇒ *A convention depends on being read carefully. A guard does not.*
 
+### ⭐ Why the scan must walk the TREE — the worked example
+
+The orphaned profile is the proof, and `cgwc:main` bounded it: **Chromium 144**
+against its containers' 148, created 2026-03-23, last written 2026-09-09, and
+**referenced in no code of the two lanes that share `browser-location`.**
+
+⇒ **Three cheaper sweeps each look sufficient and all three are blind to it:**
+
+| sweep | why it misses |
+|---|---|
+| config-keyed | no config names it |
+| code-keyed | `grep` finds nothing in either lane |
+| container-keyed | no container mounts it |
+
+⇒ Only *"walk the tree and look for `Local State` / `Cookies` / `Login Data`"*
+sees it. ⚠ And a fourth, plausible-sounding sweep — *"directories named after a
+tool"* — is worse than blind: it would **hit a live profile that no config
+mentions.**
+
 ## 2. A target never names a profile path
 
 ⭐ **A target references a profile by an OPAQUE ID. It does not own, name, or
@@ -81,25 +100,49 @@ is not a config value at all, it arrives from the driver's mount. That is
 would create authority over a 2.2G artifact that a human re-earned by signing
 in** — something no config file has today.
 
-## 3. Where targets live — NEST, do not re-home
-
-Config is **already** shared-namespaced at `~/.config/CLIAI/<client>/webctl/`.
-So this is *"re-home an existing shared location"*, and the answer is: **do not.**
+## 3. Where targets live — a SIBLING, and nothing moves
 
 ```
-~/.config/CLIAI/webctl/targets/<name>.toml      mode 600
+~/.config/webctl/targets/<name>.toml            mode 600   ← new; nothing moves
+~/.config/CLIAI/<client>/webctl/…               untouched
 ```
 
-* **Nesting is additive** — a new directory appears and nothing moves. Replacing
-  the CLIAI namespace is a *migration*, and a migration near profile-shaped
-  directories is the operation §1 exists to refuse. ⇒ Do not open with the
-  hazard class this design is about.
-* ⭐ **Targets sit ABOVE `<client>`, not inside it.** A target is *where a
-  browser is*; a client is *which persona*. One target legitimately serves
-  several clients, so nesting it under one would force a copy per client —
-  duplication with a different shape.
-* Migration cost measured: chatgpt's real config is **2 keys, untouched since
-  2026-02-09**. ⇒ The cost was never in the files. It was entirely in the noun.
+⛔ **REVISED. The first draft put targets at `~/.config/CLIAI/webctl/targets/`,
+and that is the CLIENT slot.** Measured by `cgwc:main` against its own
+resolver:
+
+```
+--client default  -> ~/.config/CLIAI/default/webctl
+--client webctl   -> ~/.config/CLIAI/webctl/webctl      ← the same directory
+--client targets  -> ~/.config/CLIAI/targets/webctl
+```
+
+⇒ A target directory there is **structurally indistinguishable from a client
+named `webctl`**, and that is not hypothetical — verified on this box, **two of
+the three entries in that slot are already tool names**:
+
+```
+~/.config/CLIAI/default   ~/.config/CLIAI/linkedin-webctl   ~/.config/CLIAI/telegram-webctl
+```
+
+Anything enumerating `CLIAI/*/` as the client list would report `webctl`
+alongside them.
+
+⭐ **And this is §1 applied to my own path choice.** Reserving `webctl` as
+"not a client name" is a **convention** — and §1's entire argument is that a
+convention is necessary and not sufficient, because **a directory listing is
+what people and scripts actually read.** *A reserved name is invisible in `ls`.*
+
+⇒ **The fix costs nothing that nesting was buying.** I chose nesting to avoid a
+**migration** — but a sibling is a *new* directory, so nothing moves there
+either. chatgpt's config stays exactly where it is; its migration cost stays
+**nil** (2 keys, untouched since 2026-02-09); and the collision cannot occur
+**by construction** rather than by convention.
+
+⚠ If a future reason forces targets inside `CLIAI`, the structural form is a
+segment that **cannot be a client name** — a leading dot (`CLIAI/.targets/`) —
+never a reserved word. *(cgwc prefers the sibling regardless, so that "is this a
+client?" never needs asking. Agreed.)*
 
 ⛔ **Host names and tailnet IPs never enter git.** Mode `600`, **fail loud when
 absent, and no default IP anywhere in code** — a history import in one lane
@@ -111,9 +154,17 @@ nearly published tailnet IPs from older file versions.
 `LWC_CDP_PORT` on chromium; absent ⇒ portless). **Never from image labels**,
 which are Dockerfile literals rather than facts about a running stack.
 
-⇒ *A reading is not a state*, applied to configuration: **a port written into a
-target goes stale the moment a container is recreated**, and a stale port in a
-config file is indistinguishable from a current one.
+⇒ **Store how to FIND the stack; never what you would have to MEASURE.**
+
+⚠ My first draft generalised this as *"a reading is not a state, applied to
+config"*, and `ccew` — whose measurement it came from — says that **overstates
+it**. What was measured is narrower: ports and bindings read from the **running
+containers** were true; **image labels**, being Dockerfile literals, were false.
+
+⇒ A target legitimately stores **config it owns** — the ssh alias, the
+transport choice, the slug. Those are not readings, and a rule phrased as
+*"never store anything you could observe"* would forbid the file's own
+contents.
 
 ```toml
 # ~/.config/CLIAI/webctl/targets/bp17.toml
@@ -194,6 +245,45 @@ out of three Dockerfiles.
 
 ⇒ ⭐ **The mechanism is sound; only the placement can make it vacuous.**
 
+⭐ **And `ccew` measured the placement on bp17: the profile AND base's lock file
+already live on bp17's filesystem, where the X server is.** Its knot tools take
+**no lock at all** today — they attach over ssh.
+
+⇒ So the lease is taken **in the same remote process that injects the input**:
+
+```
+ssh bp17 flock -w5 <lease> docker exec … xdotool …
+```
+
+Acquire and act become **one command on the target host, with no window between
+them**, and a tool on any machine necessarily contends on the same file.
+*(ccew: mgr's "the lock must be where the contention is", made atomic.)*
+
+### ⛔ A LEASE IS NECESSARY AND NOT SUFFICIENT — the contender was a HUMAN
+
+⚠ **This section first read as though the lease were the whole answer. It is
+not.** The contender that moved X focus mid-run was **Greg, in a viewer** —
+and **no lease binds a human.**
+
+⇒ So the lease must be paired with **concurrent-use detection**: before and
+after each input burst, check that **window focus, active tab and focused
+element changed only as our own keys predict**; otherwise **pause and report**
+rather than continue typing.
+
+⚠ Without that, a shared browser is protected against other *tools* and
+unprotected against the *person* most likely to be using it. *(ccew, correcting
+a narrowing in my first draft.)*
+
+### ⛔ Never glob `profiles/*/` — match the exact configured path
+
+The protected pre-sign-in baseline (`profiles/<slug>/chromium.pre-signin-…/`)
+still contains a stale `SingletonLock`. ⇒ Anything globbing for profiles or
+locks **finds a live-looking lock inside an artifact that must never be
+touched.**
+
+✅ base does not glob today — verified, every path is matched exactly — and
+this is recorded so it stays that way. *(ccew.)*
+
 ### (c) Tabs by `targetId`, never by index
 
 `/json` is MRU-ordered, so an index names a different tab the moment anyone
@@ -212,8 +302,31 @@ An extension holding **`cookies` (with host access to the signed-in site)** AND
 can carry a session off the machine.
 
 ⇒ A target **declares which extensions it runs**, and the tooling **refuses**
-to co-locate such an extension with a signed-in session — unless the target
-records an **explicit accept**. ⚠ Refuse-by-default rather than warn: the
+to co-locate such an extension with a signed-in session — unless an **explicit
+accept** has been recorded.
+
+⛔ **The accept lives BESIDE THE PROFILE and is only REFERENCED from the
+target**, by the same opaque id the target already uses for the profile.
+
+* An accept is a judgement about **this profile's exposure on this machine** —
+  which extensions, signed into what. ⇒ A **syncable** accept is *a declaration
+  that was correct when written and silently becomes wrong later* — the same
+  shape as the retired xpra `+1` port and the log-rotation filename patterns,
+  *with a plane ticket*.
+* ⭐ **And it comes free: profiles are already non-syncable by policy**, so
+  placing the accept beside one **inherits** the right non-portability rather
+  than asserting it. *A rule that must be remembered is weaker than a location
+  that cannot travel.*
+* Reference-not-contain keeps it discoverable: *"where is the accept"* is
+  answerable from the target without the target **owning** it — the same
+  separation §2 already makes for paths. *(cgwc:main, refining webctl:mgr.)*
+* ⛔ **AND THE ACCEPT IS BOUND TO WHAT IT JUDGED** — extension **ids +
+  versions + a hash of the permission set**. ⚠ Extensions **auto-update**: an
+  accept given for HoloTab 1.4.0 must **re-prompt** if 1.5.0 adds a permission.
+  An unbound accept is a judgement that silently outlives its subject.
+* **Beside the chromium dir, not inside it** —
+  `profiles/<slug>/isolation-accept.json` — because **chromium owns the
+  inside**. *(ccew.)* ⚠ Refuse-by-default rather than warn: the
 asymmetry is that a wrongly-refused bring-up prints what to do, and a wrongly
 allowed one exfiltrates a session.
 
@@ -244,9 +357,10 @@ configured at all.
 
 ## ⚠ Open, for the lanes rather than for me
 
-⚠ **Answers below are attributed and are INPUT, not resolution.** `ccew` runs
-the only real remote target and has not answered yet; if it disagrees, **that
-disagreement is the finding** and these do not absorb it.
+⚠ **Answers are attributed.** ⭐ **`ccew` has now answered from my summary and
+has NOT yet read the doc** — it says so itself and will send a second pass. So
+these are resolved on the questions it addressed and **open on anything the doc
+says beyond my summary of it.**
 
 1. **Does the lease need to be cross-machine?**
    ⇒ *webctl:mgr:* **yes, and it lives on the target host** — *the lock must be
@@ -261,11 +375,14 @@ disagreement is the finding** and these do not absorb it.
    ⭐ *"Clearance does not travel across a hop"* — a judgement is not
    transferable because its grounding is not transferred with the conclusion.
    ⇒ **The target may DECLARE that an accept is required; the accept itself
-   stays with the profile it judges.** ✅ Persuasive; adopting unless ccew,
-   which would actually record one, objects.
+   stays with the profile it judges.** ✅ `ccew` agrees, and adds that the
+   accept must be **bound to extension ids + versions + a permission-set hash**
+   because extensions auto-update. Settled.
 3. **`--client` holders**: rename to `--target`, or accept both with one
    documented as an alias?
    ⇒ *webctl:mgr:* `--target` is right for the new concept regardless;
    **whether and when `ccew` renames its existing `--client` is `ccew`'s call,
-   since it pays.** ⚠ Still genuinely open — and it is the one question whose
-   answer costs a lane rather than base.
+   since it pays.** ✅ `ccew` agrees and will pay the
+   rename where they collide — `--target` for WHERE, `--client` for WHICH
+   STACK. It also confirms **targets above client**: on bp17 slug and location
+   move together *only by accident*, and one host could carry two slugs.
