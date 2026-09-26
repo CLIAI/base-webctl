@@ -169,9 +169,30 @@ only discovers it *afterwards*.
 
 ⇒ **A lease on X input is a PRECONDITION for sharing a browser, not an
 optimisation.** Acquire before typing, release after; refuse to type without
-it. ⚠ This is the same shape as `profile-lock` and should reuse its
-already-paid-for semantics (ownership recorded, takeover only on a dead
-holder) rather than inventing a second locking model.
+it.
+
+### ⭐ The lease reuses `profile-lock` — and its PLACEMENT is the whole question
+
+⛔ **Put the lock where the CONTENTION is: on the TARGET HOST, beside the X
+server.** A lock held where the *tools* run does not constrain a tool on
+another machine — knot and a laptop each take their own local lock and both
+type into the same X display. ⇒ Acquire it over the same transport the tool is
+already using. *(webctl:mgr.)*
+
+⚠ **And `profile-lock` already spans hosts correctly, which was not obvious.**
+Measured: `acquire()` records `hostname: os.hostname()` (`:155`), and
+`isHolderAlive()` returns **`{alive: true, reason: 'remote'}`** for a lock held
+by a different host (`:86`) — it **fails closed** on a foreign holder rather
+than taking it over.
+
+⇒ So there is nothing to build and nothing to replace. **But that correct,
+already-paid-for check is reachable only if both parties see the SAME LOCK
+FILE.** Place the lock locally and the hostname comparison has nothing to
+compare against: the guard exists, is right, and is **structurally unable to
+fire** — the same shape as a guard that could not fire until an `ENV` line came
+out of three Dockerfiles.
+
+⇒ ⭐ **The mechanism is sound; only the placement can make it vacuous.**
 
 ### (c) Tabs by `targetId`, never by index
 
@@ -223,10 +244,28 @@ configured at all.
 
 ## ⚠ Open, for the lanes rather than for me
 
-1. **Does a shared target need the lease to be cross-machine?** The X server is
-   on the target host; the tools may not be.
-2. **Where does the accept in §7 live** — in the target file (syncable, and
-   therefore travels to machines where the judgement may not hold), or beside
-   the profile (not syncable, but then it is not target-declared)?
-3. **`--client` holders**: is renaming to `--target` worth the break, or should
-   base accept both with one documented as the alias?
+⚠ **Answers below are attributed and are INPUT, not resolution.** `ccew` runs
+the only real remote target and has not answered yet; if it disagrees, **that
+disagreement is the finding** and these do not absorb it.
+
+1. **Does the lease need to be cross-machine?**
+   ⇒ *webctl:mgr:* **yes, and it lives on the target host** — *the lock must be
+   where the contention is*. ✅ Adopted into §6(b) above, with the correction
+   that `profile-lock` already handles the cross-host case and only its
+   **placement** can make it vacuous.
+2. **Where does the §7 accept live?**
+   ⇒ *webctl:mgr:* **beside the PROFILE, not in the target.** The accept is a
+   judgement about *a specific browser's contents* — which extensions, signed
+   into what. The target is syncable; the profile is not. ⛔ An accept in the
+   target **travels to machines where the thing it judged is different**.
+   ⭐ *"Clearance does not travel across a hop"* — a judgement is not
+   transferable because its grounding is not transferred with the conclusion.
+   ⇒ **The target may DECLARE that an accept is required; the accept itself
+   stays with the profile it judges.** ✅ Persuasive; adopting unless ccew,
+   which would actually record one, objects.
+3. **`--client` holders**: rename to `--target`, or accept both with one
+   documented as an alias?
+   ⇒ *webctl:mgr:* `--target` is right for the new concept regardless;
+   **whether and when `ccew` renames its existing `--client` is `ccew`'s call,
+   since it pays.** ⚠ Still genuinely open — and it is the one question whose
+   answer costs a lane rather than base.
