@@ -514,6 +514,34 @@ attempt proved nothing — the gate refuses a dirty tree, so it exited 2 before
 reaching the probe, and *"the gate did not block"* and *"the gate never ran"* look
 alike in an exit code nobody read carefully.
 
+## ⛔ A SUITE PORTED BYTE-IDENTICAL CANNOT BOTH STAY IDENTICAL AND STAY PASSING
+
+*(`cgwc`, who found it while answering a question about something else, and reported it
+against their own prior green reports.)*
+
+Three test suites were ported **byte-identical** from a sibling lane. They then went
+**RED and stayed red for 25 days, invisibly**, because they had been dropped from the
+test glob rather than reconciled — which converted a **visible failure into an invisible
+one**.
+
+⭐ **The root cause is architectural, not carelessness.** Byte-sharing works for a
+**pure module parameterised by constants** — one such module is byte-shared and green in
+both repos. It **cannot** work for a suite whose **assertions are VALUES**: ports, image
+names, entry-point paths. ⇒ *"Keep it byte-identical"* and *"keep it passing"* are in
+**direct conflict for tests**, and the conflict is resolved silently the first time
+someone needs the suite to stop failing.
+
+⚠ **And the reporting consequence reached another repo.** Every *"1404/1404 green"* that
+lane had reported — including the bump report that base acted on — was **true of the
+glob** and **silent about the excluded suites**. ⇒ A pass count is a statement about
+what the runner *found*, and a glob is part of the claim. Four of the failures were the
+same four a third lane had reported as blocking, a fortnight earlier, to the same
+audience.
+
+⇒ **Guard:** fail on any NEW unwrapped suite, with a dated baseline and a staleness
+check, so wrapping one **forces** removing its exemption. Without the staleness check
+the baseline becomes the permanent excuse.
+
 ## Two checks that share an input do not corroborate
 
 They **agree**. Two probes of the same derived port are satisfied by one foreign

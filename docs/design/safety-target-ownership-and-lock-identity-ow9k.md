@@ -138,6 +138,41 @@ locatable holder**, not from the schema. ⚠ They also checked whether it was a
 regression: the liveness code is **byte-identical between v0.13.1 and v0.16.0**, so it
 is longstanding.
 
+### ⛔ AND MY BAD FIXTURE BECAME TWO OTHER LANES' CONCLUSIONS
+
+**This is the most expensive mistake in the document, so it is recorded at length.**
+My probe wrote the holder pid under **`holderPid`** and gave the lock **no
+`containerName`**. So it was not a "future-format lock" at all — it was **a lock with
+no holder field this reader looks at**, and the schema number was decoration.
+
+Two lanes then measured against my claim and reached **opposite, incorrect
+conclusions:**
+
+* one reported *"case 2 does not reproduce at v0.13.1"* — correct observation, because
+  their fixture named the pid `pid`, where the reader looks;
+* the other concluded it was a **regression** introduced by the factory refactor, on
+  the theory that newer base **gates the pid read on a recognised schema** — and was
+  preparing not to adopt base's module because adopting would make their lane *less
+  safe*.
+
+✅ **Both settled by measurement, and there is NO regression and NO schema gate:**
+
+```
+profile-lock.js md5   v0.13.1  6124d14c1734
+                      v0.16.0  6124d14c1734
+                      HEAD     6124d14c1734     ⇒ byte-identical
+grep schemaVersion    ONE occurrence, at the WRITE  ⇒ nothing branches on it
+same fixture, pid under `pid`     -> acquire ok=FALSE   (refused, correctly)
+same fixture, pid under `holderPid` -> acquire ok=TRUE  (my result)
+```
+
+⭐ **THE LESSON IS NOT "CHECK YOUR FIXTURES".** It is that **a wrong CAUSAL claim in a
+circulated design doc is executed by other lanes as if it were a specification.** They
+did the right thing — they measured rather than believed — and the measurement still
+cost them, because the *variable I named* determined what they varied. ⇒ A finding must
+state **what was varied and what was held constant**, or the next reader reproduces the
+framing rather than the fact.
+
 ⭐ **So these are TWO defects, not one, and the fix I was heading for was wrong.**
 `SCHEMA_VERSION` being unread is real. A lock presenting neither a pid nor a container
 *where this reader looks* being declared dead is also real — and it is the one my
@@ -460,6 +495,37 @@ profile-shaped"* — which is the *"directories named after a tool"* sweep that 
 unknown files during profile repair, so an inside lock must be **reconstructible** and
 its absence must never read as permission. Chromium's own `SingletonLock` is precedent
 that the inside is not exclusively Chromium's.
+
+⚠ **AND ONE ARGUMENT NEITHER CRITERION ANSWERS** *(`fetlife`, measured)*: the profile
+dir is **rw bind-mounted into the container**, so an inside lock is **writable by the
+very process it arbitrates** — and across machines the container runs as a **different
+uid**, which they hit this week (`Permission denied` ⇒ chromium `Exited(133)`). ⇒ On a
+remote target an inside lock may be a file **the arbitrating process cannot write at
+all.** That is a *writability* objection, not a *loss* objection, so
+reconstructibility does not dispose of it.
+
+### ✅ AND THE QUESTION DISSOLVES — placement was never the correctness axis
+
+**`cgwc` reframed it and I think they are right.** A wipe that destroys a profile under
+a live holder is **a bug at any placement**: inside, the lock vanishes and nothing false
+is asserted; beside, the lock survives and asserts ownership of data that is gone. Each
+is bad differently and **neither is fixed by moving the file.**
+
+⇒ **The rule is not where the lock lives but WHO MAY DESTROY:**
+
+> ⛔ **A wipe must ACQUIRE the lock before destroying, and refuse if it cannot.**
+
+⭐ **And this repo already has the precedent twice**, which is what makes it a pattern
+rather than a new rule: `ttl-gc` never deletes, and log-rotation's *"a file you did not
+create is not yours to delete"*. An unsynchronised destroyer cannot be made safe by file
+placement, and this is the third instance of the same shape.
+
+⇒ **For MOVE, the answer is identity, not path:** if the record carries a **profile
+identity checkable against the profile actually present**, then a moved-away lock is
+**self-invalidating**, and a new profile created at an old path **cannot inherit a stale
+claim**. ⭐ With both rules in place, placement becomes a **tidiness** question rather
+than a correctness one — which is why the two strong arguments above could both be
+right without either being decisive.
 
 * **`<target>`** — the target name from `btg4` §3/§4.
 * **`<profile_id>`** — `btg4` §2's **opaque** id.
