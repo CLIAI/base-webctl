@@ -514,6 +514,43 @@ attempt proved nothing — the gate refuses a dirty tree, so it exited 2 before
 reaching the probe, and *"the gate did not block"* and *"the gate never ran"* look
 alike in an exit code nobody read carefully.
 
+## ⛔ A MEASUREMENT ATTACHED TO A CLAIM SUPPRESSES THE READER'S OWN VERIFICATION
+
+The sharpest thing to come out of a design review this month, and it is about how
+findings travel rather than how they are made.
+
+A circulated document asserted a causal claim — *"an unread `schemaVersion` causes a
+live holder to be taken over"* — **with a measurement attached.** Two lanes reviewed
+it. Both **measured rather than believed**, which is the discipline this document asks
+for. Both still got a wrong answer, in **opposite directions**, because they varied
+**the variable the claim named**.
+
+⭐ **Measuring protected them from accepting the conclusion and did nothing to protect
+them from adopting the FRAME.** One lane put it exactly:
+
+> *"I had that grep available and did not run it, because the claim came with a
+> measurement attached and measurements feel like they have already done that work."*
+
+⇒ **Two rules, one for each side of a finding:**
+
+* **Writing:** state **what was varied and what was held constant.** A causal claim
+  without that is a frame, and a frame is what the next reader will reproduce.
+* **Reading:** **before building a control around a named variable, check the variable
+  is LOAD-BEARING.** One `grep` would have shown the field appeared once, at the write.
+
+⚠ **And note what this is NOT.** It is not "be more sceptical of colleagues" — both
+lanes behaved well and one of them caught the error. It is that **evidence transfers
+credibility to the parts of a claim it does not cover.** A measurement of *what
+happened* silently underwrites the assertion about *why*, and nothing in the artifact
+distinguishes the measured half from the reasoned half.
+
+⭐ ⚠ **The follow-up compounded it: retracting the wrong ATTRIBUTION, I also discarded
+the real FINDING.** The fixture's renamed holder field was dismissed as invalid — when
+renaming a field is precisely what a schema bump does, so the fixture had modelled the
+hazard by its most likely mechanism. ⇒ **A retraction needs the same discipline as a
+claim: say which part was wrong.** "I was wrong" is as untargeted as "it is broken",
+and it throws away evidence.
+
 ## ⛔ A SUITE PORTED BYTE-IDENTICAL CANNOT BOTH STAY IDENTICAL AND STAY PASSING
 
 *(`cgwc`, who found it while answering a question about something else, and reported it

@@ -166,6 +166,40 @@ same fixture, pid under `pid`     -> acquire ok=FALSE   (refused, correctly)
 same fixture, pid under `holderPid` -> acquire ok=TRUE  (my result)
 ```
 
+### ⚠ AND I OVER-RETRACTED — the STATE my fixture produced is real, and it is the forward-compat case
+
+**`cgwc` corrected the correction, and they are right.** I wrote that my probe was
+*"never a future-format lock"*. ⇒ **Renaming `pid` → `holderPid` is exactly what a v2
+schema would do.** So the fixture **did** model a future-format lock, by its **most
+likely mechanism** — I then diagnosed it by the wrong variable and, retracting, threw
+out the finding with the attribution.
+
+Measured in **both** implementations (base's factory and one lane's pre-factory copy),
+with that fixture:
+
+```
+ok=true, and both log: "taking over stale lock … (no-pid)"
+```
+
+⇒ **A live holder declared stale, with `no-pid` stated as a DIAGNOSIS** — a conclusion
+derived from a field the reader failed to find. The sentence I objected to is real and
+reachable; only its cause was misattributed.
+
+⭐ **SO THE SCHEMA CHECK IS MORE JUSTIFIED, NOT LESS — and my earlier framing was too
+clean.** I wrote *"the version is a proxy; locating the holder is the fact."* True, and
+incomplete. The hazard is not *"someone hand-writes a bad lock"*; it is **"v2 renames a
+field and v1 reads the absence as nobody home"**. ⇒ The two checks cover **different
+moments**, and both are needed:
+
+| check | catches it | when |
+|---|---|---|
+| `schemaVersion > ours ⇒ refuse` | before any field is interpreted | **the only advance warning that names may have MOVED** |
+| cannot LOCATE a holder ⇒ refuse | at read time | the backstop when no version is declared, or it lies |
+
+⚠ Neither subsumes the other: a future format that declares its version honestly is
+caught by the first **before** misreading anything; one that does not declare it is
+caught only by the second.
+
 ⭐ **THE LESSON IS NOT "CHECK YOUR FIXTURES".** It is that **a wrong CAUSAL claim in a
 circulated design doc is executed by other lanes as if it were a specification.** They
 did the right thing — they measured rather than believed — and the measurement still
