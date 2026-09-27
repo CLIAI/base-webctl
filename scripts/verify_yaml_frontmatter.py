@@ -152,8 +152,20 @@ class DocFrontmatter(BaseModel):
 
 # ── Index + cross-reference validation ────────────────────────────────────────
 
-def build_id_index(root: Path) -> dict[str, Path]:
-    index: dict[str, Path] = {}
+def build_id_index(root: Path) -> dict[str, list[Path]]:
+    """Map each 4-char ID to EVERY doc that declares it.
+
+    ⛔ A dict keyed by ID CANNOT REPRESENT A COLLISION: a second doc with the
+    same ID overwrote the first, so the duplicate check downstream regrouped an
+    already-unique mapping and `len(paths) > 1` was unreachable. "No duplicate
+    IDs across documents" was therefore a documented check that could not fail,
+    in the validator AGENTS.md tells every agent to run before commit. Measured
+    2026-09-27: 47 docs scanned, 40 indexed, "All files passed validation."
+
+    ⇒ The list is what makes a duplicate representable at all; the check
+    below only reads it.
+    """
+    index: dict[str, list[Path]] = {}
     for md_file in sorted(root.rglob("*.md")):
         if md_file.name == "DESIGN_DOCS_GUIDELINES.md":
             continue
@@ -161,13 +173,13 @@ def build_id_index(root: Path) -> dict[str, Path]:
             post = frontmatter.load(str(md_file))
             doc_id = post.metadata.get("id")
             if doc_id:
-                index[str(doc_id)] = md_file
+                index.setdefault(str(doc_id), []).append(md_file)
         except Exception:
             pass
     return index
 
 
-def validate_file(md_file: Path, root: Path, id_index: dict[str, Path]) -> list[str]:
+def validate_file(md_file: Path, root: Path, id_index: dict[str, list[Path]]) -> list[str]:
     errors: list[str] = []
 
     # Check filename format
@@ -239,19 +251,20 @@ def main(root_dir: str = "docs/design") -> int:
 
     print(f"Scanning {len(md_files)} design doc(s) in {root}...")
     id_index = build_id_index(root)
-    print(f"  {len(id_index)} document(s) with IDs indexed.\n")
-
-    # Check for duplicate IDs
-    seen_ids: dict[str, list[Path]] = {}
-    for doc_id, path in id_index.items():
-        seen_ids.setdefault(doc_id, []).append(path)
+    indexed = sum(len(paths) for paths in id_index.values())
+    print(f"  {indexed} document(s) with IDs indexed, {len(id_index)} distinct ID(s).\n")
 
     total_errors = 0
-    for doc_id, paths in seen_ids.items():
+
+    # ⛔ Duplicate IDs. Read the real lists — see build_id_index: regrouping a
+    # dict keyed by ID made this branch unreachable. Both counts are printed
+    # above so a divergence is legible even to a reader who trusts the verdict.
+    for doc_id, paths in sorted(id_index.items()):
         if len(paths) > 1:
-            print(f"DUPLICATE ID '{doc_id}':")
+            print(f"DUPLICATE ID '{doc_id}': {len(paths)} documents declare it")
             for p in paths:
                 print(f"  {p.relative_to(root)}")
+            print()
             total_errors += 1
 
     for md_file in md_files:
