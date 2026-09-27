@@ -177,10 +177,63 @@ name       = "workstation"
 control    = "ssh"            # ssh | local      — CDP and X input. NEVER tailscale.
 view       = ["ssh", "tailscale-relay"]   # xpra html5; tailscale ONLY via the relay
 ssh        = "workstation"    # passed THROUGH to ssh; see §5
+kind       = "docker-xpra"    # docker-xpra | direct — see below; `direct` has no
+                              # container, so `slug` and `view` do not apply
 slug       = "default"        # base driver cfg slug -> container names
+base       = "debian"         # chromium image variant: debian | arch | ubuntu
 profile_id = "claude-main"    # OPAQUE. Resolved elsewhere. Never a path.
-lifecycle  = "owner"          # owner | attach-only   — see §6
+lifecycle  = "owner"          # owner | attach-only   — §6, and see the (tool,target) note
 ```
+
+#### ⛔ `base` and `kind` were MISSING — found independently by TWO lanes
+
+**`linkedin` and `fetlife` reported the same gap from different code**, which makes
+it a design signal rather than one lane's local detail.
+
+`linkedin`, measured — the container name does **not** carry the image variant:
+
+```
+base=debian  xpra=<tool>-xpra-default  image=<tool>/chromium-debian:latest
+base=arch    xpra=<tool>-xpra-default  image=<tool>/chromium-arch:latest
+```
+
+⇒ **Same container name, different image.** Two targets differing only by base are
+**indistinguishable in the schema and collide on container identity in reality.**
+⚠ And `buildDriverCfg()` returns `mode: null, base: null` — the mode arrives
+separately through an env var — so a target **cannot inherit it from the cfg**
+either. `fetlife` reports the same from its side: `--base ubuntu|debian|arch`
+selects the driver mode, `DEFAULT_BASE` is `debian`, and container names plus the
+Dockerfile path both derive from it, so a target naming `slug` but not `base`
+**cannot address a stack someone brought up as `arch`.**
+
+`linkedin`, second gap — **not every mode is containerised.** `localhost-direct` is
+a live mode: a plain host Chromium on a CDP port, whose module contains **zero**
+mentions of slug or container. A target for it would carry `slug` as a meaningless
+field and `view` as inapplicable, because there is no xpra. ⇒ Hence `kind`:
+`slug`, `base` and `view` are **conditional on `kind = "docker-xpra"`**, and a
+schema that pretends otherwise forces two lanes to write fields that mean nothing.
+
+#### ⚠ `lifecycle` is per-target, and OWNERSHIP IS PER (TOOL, TARGET)
+
+**`substack` falsified the single-value form, measured.** Their lane has an owner
+tool and a separate extractor that **always attaches to a browser it did not bring
+up**:
+
+```
+grep -c "driver.start|createChromiumDockerXpra|makeDriver" <extractor>  ->  0
+```
+
+The extractor takes `--cdp <url>`, checks reachability, and tells the operator to
+start the container first. ⇒ **It is structurally an attacher.** One lane, one
+stack, **two lifecycle values**, and `linkedin` reports the same split shape from
+its own code.
+
+⇒ So either `lifecycle` belongs to the **(tool, target)** pair, or a lane needs two
+target files naming one stack — which would be a lie about there being two stacks.
+**Not resolved here.** ⭐ And note what the field cannot do even then: `lifecycle`
+states **intent**, and **nothing states the FACT of who brought the browser up.**
+That is §7's declaration-versus-installed distinction applied to ownership — and
+§7 already argues the fact side is the one that matters.
 
 ### ⛔ Transport is PER-SURFACE — a single field lets a user write the forbidden config
 
@@ -272,7 +325,58 @@ only discovers it *afterwards*.
 optimisation.** Acquire before typing, release after; refuse to type without
 it.
 
-### ⭐ The lease reuses `profile-lock` — and its PLACEMENT is the whole question
+### ⛔ FALSIFIED: the lease CANNOT reuse `profile-lock` as it stands
+
+**`fetlife` falsified this section against base's own code, and I reproduced it.**
+An earlier draft said *"the mechanism is sound; only the placement can make it
+vacuous."* ⇒ **Placement is not the only thing.**
+
+```
+lib/browser-location/profile-lock.js:36
+  const LOCK_FILENAME = `.${C.PROJECT}.lock.json`;
+```
+
+The lock filename **embeds the consuming tool's project name**. Measured here,
+two tools against one shared profile directory:
+
+```
+tool A lock:  <shared-profile>/.alpha-webctl.lock.json
+tool B lock:  <shared-profile>/.beta-webctl.lock.json
+SAME FILE? false   ⇒ THEY NEVER CONTEND
+```
+
+⭐ **So two tools sharing one profile take two DIFFERENT lock files and never
+contend** — with perfect placement, on the target host, beside the X server, over
+one transport. The cross-host `isHolderAlive() -> {alive:true, reason:'remote'}`
+guard is real and correct, and **it has nothing to compare against between tools,
+because the two parties never open the same file.**
+
+⚠ **And there is a second layer beneath it** *(also `fetlife`)*: the profile
+PATHS are per-tool too — `cacheRoot()` resolves through `createStoragePaths(C)`,
+so each tool's profiles live under its own cache root. Sharing therefore needs an
+explicit `userDataDir` override in **both** tools, and even then the filename
+splits them.
+
+⇒ **This is this document's own guard-that-cannot-fire shape, in the mechanism it
+chose to enforce §6.** The lease was the part of §6(b) doing the work, and as
+specified it could not have arbitrated anything.
+
+⇒ **The fix must make both parties name the SAME file.** Either a lock keyed by
+**target + `profile_id`** rather than by `C.PROJECT`, or an explicit lease path
+carried in the target file. ⚠ Whichever is chosen, §2's *"a target names a profile
+only by an OPAQUE id, never a path"* must resolve to **one concrete path outside
+every per-tool cache namespace** — otherwise the indirection re-introduces the
+split it was meant to remove. **Not yet designed; this is the open item §6(b)
+depends on.**
+
+✅ **What IS already satisfied, measured by `fetlife`:** repeated `docker up` on
+one target is **idempotent** — `StartedAt` unchanged across three ups,
+`RestartCount=0` — so base's driver already refuses to restart a running stack,
+which is exactly the §6(a) hazard *within one tool*. ⇒ **§6(a) is satisfied for
+same-tool contention and unenforced for cross-tool contention.** Those read as one
+problem and are two.
+
+### On PLACEMENT, which was the original question here
 
 ⛔ **Put the lock where the CONTENTION is: on the TARGET HOST, beside the X
 server.** A lock held where the *tools* run does not constrain a tool on

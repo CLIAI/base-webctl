@@ -89,3 +89,42 @@ test('⛔ provenance is ABSENT, never guessed, for a cfg that predates it', () =
   assert.equal(i.ports.cdp.source, null, 'the ORIGIN is not');
   assert.equal(i.ports['xpra-tcp'].source, null);
 });
+
+// ── the ABSENCE must explain itself ──────────────────────────────────────────
+//
+// ⛔ WHY: a lane measured `source: null` on all three ports of a LIVE LOCAL stack
+// and reasonably concluded base had published a vocabulary nothing reads. It
+// does read it — the control above proves that — but a bare `null` CONFLATES two
+// causes: a pin that predates portSources, and a current pin whose consumer
+// hand-built its driver cfg instead of calling buildDriverCfg(). base cannot tell
+// them apart from inside, so it must not pretend to; what it can do is stop the
+// reader guessing.
+
+test('⛔ a cfg without portSources says WHY every source is null', () => {
+  const withSources = createClientConfig(C).buildDriverCfg({ args: {}, dotenv: {}, env: {}, jsonc: {} });
+  const handBuilt = { ...withSources };
+  delete (/** @type {any} */ (handBuilt).portSources);
+
+  const i = createChromiumDockerXpra(C, { mounts: hermeticMounts() }).createDriver(handBuilt).inspect();
+
+  // The sources stay null — absent, never guessed.
+  for (const k of ['cdp', 'xpra-tcp', 'xpra-html5']) {
+    assert.equal(i.ports[k].source, null, `${k} source must be null, not fabricated`);
+  }
+  // ⇒ ...and the reason must be stated, naming BOTH causes and the remedy for each.
+  assert.ok(i.portSourcesUnavailable, 'the absence must explain itself');
+  assert.match(i.portSourcesUnavailable, /buildDriverCfg/,
+    'it must name the hand-built-cfg cause and its remedy');
+  assert.match(i.portSourcesUnavailable, /bump base|predates/,
+    'it must name the stale-pin cause too — naming one of two causes is what sent a lane wrong');
+});
+
+test('⭐ CONTROL: a cfg WITH portSources carries no diagnostic at all', () => {
+  // Otherwise the field is noise on every healthy call, and a field that is
+  // always present stops being read — which is how the null went unnoticed.
+  const cfg = createClientConfig(C).buildDriverCfg({ args: {}, dotenv: {}, env: {}, jsonc: {} });
+  const i = createChromiumDockerXpra(C, { mounts: hermeticMounts() }).createDriver(cfg).inspect();
+  assert.equal('portSourcesUnavailable' in i, false,
+    'the healthy case must be silent, or the diagnostic becomes wallpaper');
+  assert.equal(i.ports.cdp.source, 'default');
+});
