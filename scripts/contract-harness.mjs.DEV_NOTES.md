@@ -94,6 +94,44 @@ so sabotage has to be committed locally before it can be exercised. The first
 attempt measured nothing and reported exit 2, which is not the same as "the gate
 did not block".
 
+## ⛔ `no-revendor` could not see the case it exists for (generation 1 → 2)
+
+`readdirSync` on both trees, plus a filename-equality match. **Half of base's own
+lib is nested** (12 flat, 12 under `lib/browser-location/`), so `profile-lock.js`,
+`mounts.js` and `chromium-docker-xpra.js` were never in the comparison set at all.
+
+Measured with three planted copies — nested→flat, into a subdirectory under a new
+name, and renamed in place. **All three reported `pass`**, with the confident reason
+*"3 local file(s) examined; none shadows a base module"*. It even under-counted: one
+of the four local files was in a subdirectory and was not examined.
+
+⇒ Fixed by walking both trees recursively and matching on **normalised content**
+(comments stripped, whitespace collapsed) as well as on name. Content matching is
+what makes a rename or a move detectable; the name match is kept for a copy that was
+edited after being taken.
+
+⭐ **Three guards on the check itself**, since this is a check about checks:
+* zero base modules discovered ⇒ **FAIL** (the comparison set is gone, which is not
+  a clean bill);
+* zero local files examined ⇒ **FAIL** (already there from generation 1);
+* **the normaliser must DISCRIMINATE** — if distinct base modules collapse to fewer
+  than two hashes, the detector is broken and no conclusion is offered. That is the
+  silent direction: a degenerate normaliser would shrink the comparison set without
+  any symptom.
+
+⚠ **Stated limit:** an **edited AND renamed** copy still escapes. Catching that
+needs content shingles rather than whole-file hashing. The PASS reason says so, so
+the limit is published rather than implied.
+
+### How it was found, which is the reusable part
+
+`webctl:mgr`'s template survey reported it **and said it had not been re-measured**,
+asking for verification before action. ⇒ That instruction is why it arrived here as
+three concrete planted copies with an exit code, rather than as an adopted
+description — and the re-measurement found it was **worse** than reported, because
+the nested half of base's lib was missing from the comparison set entirely, which
+the report had not identified.
+
 ## Deliberately not here yet
 
 * **Exercisable under the gate.** The pin check's swap arm is the one path that

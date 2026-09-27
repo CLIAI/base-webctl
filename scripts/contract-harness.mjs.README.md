@@ -50,6 +50,18 @@ is a vacuous RED. *A gate that always blocks gets overridden.*
 
 ### `no-revendor`
 
+⚠ **GENERATION 2 CHANGED WHAT `pass` MEANS HERE.** Generation 1 read only the TOP
+LEVEL of both trees and matched only IDENTICAL FILENAMES. Since **half of base's own
+lib is nested**, that check could not see most of the library: three planted
+re-vendors (a nested module copied flat, a copy into a subdirectory under a new
+name, and a rename in place) all reported `pass`. ⇒ Generation 2 walks both trees
+**recursively** and matches by **normalised content** as well as by name, so a copy
+is caught under any name in any directory, and after reformatting or re-commenting.
+
+⛔ **What it still does NOT catch:** a copy that was **edited** and **renamed**.
+The PASS reason says so explicitly rather than leaving an impression of coverage.
+
+
 Asserts no local file shadows a base module. **Asserts code, never prose** —
 comments are stripped first, because the check this replaces grepped for the
 vendor path and matched the string inside the shim's own comment.
@@ -58,6 +70,12 @@ vendor path and matched the string inside the shim's own comment.
 shape that let the original grep pass.
 
 ### `generation`
+
+⚠ **Now 2.** Bumped because the meaning of a `no-revendor` pass changed — which is
+exactly what the marker is for. A sweep should ask *"who is below 2?"*; a contract
+still recording generation 1 was written against a check that could not see a copy
+in a subdirectory.
+
 
 Prints `HARNESS_GENERATION`. A consumer records the generation it was written
 against, so a sweep asks **"who is below N?"** instead of "who differs?" —

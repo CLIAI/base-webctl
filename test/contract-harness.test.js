@@ -235,3 +235,98 @@ test('⛔ gate-probe FAILS when the gate reports a swap but hands over no declar
   assert.equal(r.status, 1, `must FAIL, not decline; got ${r.status}\n${r.stderr}`);
   assert.match(r.stderr, /did not hand over WEBCTL_DECLARED_PIN/);
 });
+
+// ── no-revendor: recursion and content ───────────────────────────────────────
+//
+// ⛔ THE CHECK COULD NOT SEE THE CASE IT EXISTS FOR. Until generation 2 it read
+// only the TOP LEVEL of both trees and matched only IDENTICAL FILENAMES — while
+// HALF of base's own lib is nested (12 flat, 12 under lib/browser-location/). So
+// `profile-lock.js`, `mounts.js` and `chromium-docker-xpra.js` were not even in
+// the comparison set. Measured: three planted re-vendors all reported `pass` with
+// the reason "3 local file(s) examined; none shadows a base module".
+//
+// ⭐ Reported by webctl:mgr's template survey, WITH the instruction to re-measure
+// before acting — which is why it was caught as three concrete planted copies
+// rather than adopted as a described defect.
+
+/** A fixture whose vendored base mirrors base's real shape: some flat, some nested. */
+function revendorFixture() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'revendor-'));
+  const vlib = path.join(dir, 'vendor', 'base-webctl', 'lib');
+  fs.mkdirSync(path.join(vlib, 'browser-location'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'lib', 'cdp'), { recursive: true });
+  fs.writeFileSync(path.join(vlib, 'client-config.js'),
+    '// base\nexport function createClientConfig(C) { return { C }; }\n');
+  fs.writeFileSync(path.join(vlib, 'browser-location', 'profile-lock.js'),
+    '// base nested\nexport function createProfileLock(C) { return { C }; }\n');
+  return { dir, vlib };
+}
+
+test('⛔ MUTATION: a NESTED base module copied to the local top level is caught', () => {
+  const { dir, vlib } = revendorFixture();
+  // The case generation 1 was structurally blind to: the name is not in the
+  // top-level listing of base's lib at all.
+  fs.copyFileSync(path.join(vlib, 'browser-location', 'profile-lock.js'),
+    path.join(dir, 'lib', 'profile-lock.js'));
+
+  const r = run(['no-revendor', '--repo', dir]);
+  assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /profile-lock\.js/);
+  assert.match(r.stderr, /browser-location/, 'it must name WHICH base module was copied');
+});
+
+test('⛔ MUTATION: a copy into a SUBDIRECTORY under a NEW NAME is caught by content', () => {
+  const { dir, vlib } = revendorFixture();
+  fs.copyFileSync(path.join(vlib, 'client-config.js'), path.join(dir, 'lib', 'cdp', 'client.mjs'));
+
+  const r = run(['no-revendor', '--repo', dir]);
+  assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /client\.mjs/, 'the local path must be named');
+  assert.match(r.stderr, /identical after normalisation/, 'and HOW it was detected');
+});
+
+test('⭐ a copy that was REFORMATTED and RE-COMMENTED is still caught', () => {
+  // ⇒ What a re-vendor looks like after someone has "adapted" it. Normalisation
+  // strips comments and collapses whitespace, so cosmetic edits do not hide it.
+  const { dir, vlib } = revendorFixture();
+  const src = fs.readFileSync(path.join(vlib, 'client-config.js'), 'utf8');
+  fs.writeFileSync(path.join(dir, 'lib', 'adapted.js'),
+    `// OUR adapted copy, reformatted\n\n${src.replace('// base\n', '').replace(/ /g, '  ')}\n`);
+
+  const r = run(['no-revendor', '--repo', dir]);
+  assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /adapted\.js/);
+});
+
+test('⭐ CONTROL: a legitimate RE-EXPORT shim is not flagged', () => {
+  // The pattern consumers are SUPPOSED to use. A check that flagged this would be
+  // overridden within a day, which is worse than one that misses a copy.
+  const { dir } = revendorFixture();
+  fs.writeFileSync(path.join(dir, 'lib', 'profile-lock.js'),
+    "export { createProfileLock } from '../vendor/base-webctl/lib/browser-location/profile-lock.js';\n");
+  fs.writeFileSync(path.join(dir, 'lib', 'own.js'), 'export const mine = 1;\n');
+
+  const r = run(['no-revendor', '--repo', dir]);
+  assert.equal(r.status, 0, `a shim must pass; got ${r.status}\n${r.stderr}`);
+});
+
+test('⛔ a base lib with ZERO modules FAILS rather than finding nothing to report', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'revendor-empty-'));
+  fs.mkdirSync(path.join(dir, 'vendor', 'base-webctl', 'lib'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'lib', 'own.js'), 'export const mine = 1;\n');
+
+  const r = run(['no-revendor', '--repo', dir]);
+  assert.equal(r.status, 1, 'losing the comparison set is a FAIL, not a clean bill');
+  assert.match(r.stderr, /lost its comparison set|ZERO modules/);
+});
+
+test('the reason states what this check does NOT cover', () => {
+  // ⇒ An edited copy under a different name still escapes. Saying so in the PASS
+  // reason is the difference between a limit and a false impression of coverage.
+  const { dir } = revendorFixture();
+  fs.writeFileSync(path.join(dir, 'lib', 'own.js'), 'export const mine = 1;\n');
+  const r = run(['no-revendor', '--repo', dir]);
+  assert.equal(r.status, 0);
+  assert.match(r.stderr, /EDITED copy under a DIFFERENT name is\s+not detected/);
+});

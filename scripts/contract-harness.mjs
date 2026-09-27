@@ -46,13 +46,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 /**
  * ⭐ THE GENERATION MARKER. Bump when a check's BEHAVIOUR changes, never for
  * wording. A consumer records the generation it was written against; a sweep
  * then asks "who is below N?" rather than diffing five divergent copies.
  */
-export const HARNESS_GENERATION = 1;
+export const HARNESS_GENERATION = 2;
 
 /**
  * ⚠ NOT BUMPED BY `gate-probe`, DELIBERATELY. The marker answers "who is
@@ -270,13 +271,41 @@ function checkNoRevendor(repo, sub, libDir) {
   if (!fs.existsSync(baseLib)) {
     return report('no-revendor', EXIT.noVerdict, `no base lib at '${sub}/lib' to compare against`);
   }
-  const baseModules = new Set(fs.readdirSync(baseLib).filter((f) => f.endsWith('.js')));
+
+  const baseFiles = walkJs(baseLib);
+  // ⛔ ZERO BASE MODULES IS NOT A PASS — the comparison set is gone.
+  if (baseFiles.length === 0) {
+    return report('no-revendor', EXIT.fail,
+      `found ZERO modules under '${sub}/lib'. This check has lost its comparison set, `
+      + 'which is not the same as finding no re-vendoring.');
+  }
+
+  /** @type {Map<string,string>} normalised hash -> base path */
+  const byHash = new Map();
+  /** @type {Map<string,string>} basename -> base path */
+  const byName = new Map();
+  for (const abs of baseFiles) {
+    const rel = path.relative(baseLib, abs);
+    byHash.set(normHash(fs.readFileSync(abs, 'utf8')), rel);
+    byName.set(path.basename(abs), rel);
+  }
+
+  // ⭐ SELF-CONTROL, EVERY RUN: the hash must DISCRIMINATE. A normaliser that
+  // collapsed distinct modules to one hash would silently shrink the comparison
+  // set — the failure this check exists to avoid, turned on the check itself.
+  if (baseFiles.length > 1 && byHash.size < 2) {
+    return report('no-revendor', EXIT.fail,
+      `the content normaliser collapsed ${baseFiles.length} distinct base modules into `
+      + `${byHash.size} hash(es), so it cannot tell files apart. The detector is broken; `
+      + 'no conclusion about this repo is available.');
+  }
 
   const localDir = path.join(repo, libDir);
   if (!fs.existsSync(localDir)) {
     return report('no-revendor', EXIT.noVerdict, `no local '${libDir}/' to examine`);
   }
-  const localFiles = fs.readdirSync(localDir).filter((f) => /\.(js|mjs|cjs)$/.test(f));
+  const subAbs = path.resolve(repo, sub);
+  const localFiles = walkJs(localDir).filter((f) => !path.resolve(f).startsWith(subAbs + path.sep));
 
   // ⛔ ZERO FILES EXAMINED IS NOT A PASS.
   if (localFiles.length === 0) {
@@ -285,33 +314,88 @@ function checkNoRevendor(repo, sub, libDir) {
       + 'subject, not an absence of re-vendoring.');
   }
 
-  /** @type {string[]} */
-  const shadowed = [];
-  let examined = 0;
-  for (const f of localFiles) {
-    const raw = fs.readFileSync(path.join(localDir, f), 'utf8');
-    // Strip comments FIRST — the original defect was a match inside one.
-    const code = raw.replace(/\/\*[\s\S]*?\*\//g, '').split('\n')
-      .filter((l) => !/^\s*(\/\/|#)/.test(l)).join('\n');
-    examined++;
-    if (baseModules.has(f)) {
-      // A same-named local file is only a re-vendor if it DEFINES the surface
-      // rather than re-exporting base's. Both halves are code.
+  /** @type {{local:string, base:string, how:string}[]} */
+  const found = [];
+  for (const abs of localFiles) {
+    const rel = path.relative(repo, abs);
+    const raw = fs.readFileSync(abs, 'utf8');
+    const code = stripComments(raw);
+
+    // (1) CONTENT — a copy is a copy under any name, in any directory.
+    const hit = byHash.get(normHash(raw));
+    if (hit) {
+      found.push({ local: rel, base: hit, how: 'identical after normalisation' });
+      continue;
+    }
+
+    // (2) NAME — for a copy edited after it was taken. Still only a re-vendor if
+    // it DEFINES the surface rather than re-exporting base's.
+    const named = byName.get(path.basename(abs));
+    if (named) {
       const reexports = new RegExp(`(from|require\\()\\s*['"][^'"]*${sub.replace(/[/\\]/g, '\\$&')}/lib/`).test(code);
       const defines = /\b(export\s+(function|const|class)|module\.exports\s*=)/.test(code);
-      if (defines && !reexports) shadowed.push(f);
+      if (defines && !reexports) {
+        found.push({ local: rel, base: named, how: 'same module name, defines rather than re-exports' });
+      }
     }
   }
 
-  if (shadowed.length > 0) {
+  if (found.length > 0) {
     return report('no-revendor', EXIT.fail,
-      `${shadowed.length} local file(s) DEFINE a surface base also provides, without importing `
-      + `base's: ${shadowed.join(', ')}. That is a re-vendor; the submodule is bypassed.`,
-      { shadowed, examined });
+      `${found.length} local file(s) re-vendor base: `
+      + found.map((f) => `${f.local} <- lib/${f.base} (${f.how})`).join('; ')
+      + '. The submodule is bypassed.',
+      { found, examined: localFiles.length, baseModules: baseFiles.length });
   }
   return report('no-revendor', EXIT.pass,
-    `${examined} local file(s) examined; none shadows a base module`, { examined });
+    `${localFiles.length} local file(s) examined against ${baseFiles.length} base module(s); `
+    + 'none is a copy by content or by name. ⚠ An EDITED copy under a DIFFERENT name is '
+    + 'not detected by this check.',
+    { examined: localFiles.length, baseModules: baseFiles.length });
 }
+
+/**
+ * Every .js/.mjs/.cjs under `dir`, RECURSIVELY.
+ *
+ * ⛔ THE OLD VERSION USED readdirSync AND SAW ONLY THE TOP LEVEL — while HALF of
+ * base's own lib is nested (12 flat, 12 under lib/browser-location/). So the names
+ * of profile-lock.js, mounts.js and chromium-docker-xpra.js were not even in the
+ * comparison set, and a consumer could copy any of them to its own top level and
+ * PASS. Measured 2026-09-27: three planted re-vendors — nested→flat, into a
+ * subdirectory, and renamed in place — ALL reported `pass`, with the reason
+ * "3 local file(s) examined; none shadows a base module".
+ *
+ * @param {string} dir @returns {string[]}
+ */
+function walkJs(dir) {
+  /** @type {string[]} */
+  const out = [];
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      if (e.name === 'node_modules' || e.name === '.git') continue;
+      out.push(...walkJs(abs));
+    } else if (/\.(js|mjs|cjs)$/.test(e.name)) out.push(abs);
+  }
+  return out;
+}
+
+/** @param {string} src Strip comments, so prose cannot satisfy a code check. */
+function stripComments(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n')
+    .filter((l) => !/^\s*(\/\/|#)/.test(l)).join('\n');
+}
+
+/**
+ * Hash of the NORMALISED code: comments stripped, whitespace collapsed. ⇒ A copy
+ * is still recognised after reformatting or re-commenting, which is what a
+ * re-vendor looks like once someone has "adapted" it.
+ * @param {string} src
+ */
+function normHash(src) {
+  return createHash('sha256').update(stripComments(src).replace(/\s+/g, ' ').trim()).digest('hex');
+}
+
 
 // ── entry ─────────────────────────────────────────────────────────────────────
 const [, , cmd, ...args] = process.argv;
