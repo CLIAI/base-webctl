@@ -36,7 +36,7 @@ no test to catch it**, so a rule belongs in exactly one of them.
 
 ---
 
-## base's own, 2026-09-22/23
+## base's own, 2026-09-22/27
 
 Each of these shipped from this repo. The finder is named where it was not base.
 
@@ -171,6 +171,54 @@ goes up.**
 itself: **enumerate from what the runner actually runs**, cross-checked against
 a second source so a narrowing pattern cannot hide; and **zero files discovered
 FAILS** rather than reading as "nothing to check, OK".
+
+### ⛔ A documented check that could not fail — in the validator every agent is told to run
+
+`scripts/verify_yaml_frontmatter.py` states, in its own docstring, that it checks
+*"No duplicate IDs across documents"*. It could not. The index was built as
+
+```python
+index: dict[str, Path] = {}
+index[str(doc_id)] = md_file        # a second doc with the same ID OVERWRITES
+```
+
+and the duplicate check then **regrouped that already-unique mapping**:
+
+```python
+for doc_id, path in id_index.items():        # keys unique BY CONSTRUCTION
+    seen_ids.setdefault(doc_id, []).append(path)
+for doc_id, paths in seen_ids.items():
+    if len(paths) > 1:                       # ⇒ UNREACHABLE. Every list has one element.
+```
+
+Measured 2026-09-27 over master plus the 21 unmerged `design/*` branches: **47
+docs scanned, 40 indexed, `All files passed validation`, rc 0.** Eleven documents
+collided across four IDs and the verdict was green.
+
+⭐ **The container chosen for the index decided whether the defect was
+expressible.** No amount of care in the checking loop could recover information
+the data structure had already thrown away — so this is not a logic bug to be
+found by reading the check; it is found by asking *what would a violation look
+like by the time this code sees it?*
+
+⚠ And the count that exposed it was **printed on every run and read as normal**:
+`Scanning 47 … / 40 document(s) with IDs indexed`. A discrepancy is not a
+signal until something asserts on it, which is why the repair pins
+`indexed == scanned` rather than trusting the next reader to subtract.
+
+⇒ Two further consequences worth separating from the vacuity:
+
+* IDs are what `docs/design` cross-references **resolve through**. A collision
+  did not merely go unreported — `relates_to: [v7m2]` silently resolved to
+  whichever doc won the overwrite. **The corpus answers confidently and wrongly**,
+  which is worse than refusing to answer.
+* The check ran **only when an agent remembered the command in `AGENTS.md`**. A
+  check nothing invokes is indistinguishable from one that cannot fail; the
+  repair therefore wires it into `npm test` as well as fixing it.
+
+⚠ **The design-doc corpus is the coverage instrument for the whole family** —
+which specs a consumer applies is read off these IDs. An unenforced uniqueness
+rule in *that* corpus is a measuring instrument with an unmarked scale.
 
 ## A fixture's assumptions have a shelf life
 
