@@ -414,6 +414,61 @@ The defect was reaching for it to answer *what is present*.
 by counting blobs — which is why the disagreement surfaced at all: the two methods
 were independent, not two people running the same command.)*
 
+## ⛔ A REFUSAL TEST NEEDS A POSITIVE CONTROL ON THE SAME FIXTURE
+
+*(Contributed by `ccew`, measured 2026-09-27, at `webctl:mgr`'s suggestion. Their
+tool and file names are generalised here because base is public — the shape, not
+the paths, is what transfers.)*
+
+A lane has a tool that decides **which browser tab is on screen, by pixels**: each
+tab's capture is located inside a screenshot of the window, and the tool must
+**refuse** when 0 tabs match or when 2+ match. Its offline test used synthetic tabs
+A, B (identical to A) and C, against a window showing A.
+
+**The vacuous pass.** On the first run:
+
+* *"two matches → refused"* — ✅ GREEN
+* *"no match → refused"* — ✅ GREEN
+* *"one match → A"* — ⛔ **RED**: the locator matched **nothing at all.**
+
+The fixture was **pixel noise**, which the locator's quarter-resolution coarse
+search cannot lock onto (best 83.0 against a runner-up of 83.07 — measured, not
+inferred). ⇒ **So the 2-match refusal was the 0-match refusal wearing a different
+label**: it refused because nothing matched, not because two things did. The
+ambiguity guard — the thing the test existed for — was never exercised, and read as
+exercised.
+
+⭐ **THE GENERAL FORM.** A test asserting *"refuse when X"* passes whenever the
+detector sees **nothing**: that is, whenever X is absent **and** whenever the
+detector is **blind**. Those two are indistinguishable from the outside, and one
+of them is a working guard while the other is a broken instrument.
+
+⇒ **Only a case on the SAME FIXTURE where the detector must SEE something
+separates them.** The positive arm is not an extra nicety beside the refusal
+tests; it is **what makes the refusal tests mean anything.** The fix was
+page-like fixtures (flat blocks, bars, lines — which is what real UIs are), after
+which the positive arm found A and the ambiguous case reported *"2 tabs match the
+window (A B) — ambiguous, refusing"* for the right reason.
+
+⭐ **AND A SECOND LANE ARRIVED AT THIS INDEPENDENTLY, THE SAME DAY, BY A DIFFERENT
+ROUTE.** Reviewing `arch-browser-targets-btg4`, `substack` argued that §1's
+"no profile under the config root" guard **needs a known-positive fixture more than
+any other assertion in the set** — create a temp dir containing a file named
+`Cookies` and require the guard to report it — *"a sweep for `Cookies` that has
+never been seen to FIND one is the false-zero shape"*, citing a false zero their
+own repo produced from a grep that could not match, where the audit read clean.
+⇒ One lane found it from a pixel locator that saw nothing; the other from a
+filesystem sweep that matched nothing. **Two independent instruments, two
+independent lanes, one shape** — which is the corroboration this document asks for
+elsewhere, and the reason this entry is not merely one lane's anecdote.
+
+⚠ This is the same family as *"a zero is evidence, an absence is not"* and as the
+gate's stale-entry detector, arrived at **from the test side** rather than from the
+instrument side. Every refusal-shaped assertion in this repo should be read against
+it — including the `no-revendor` zero-files check and `gate-probe`'s own
+no-verdict arms, which are refusals with positive controls precisely because of
+this hazard.
+
 ## ⛔ A GUARD and a CLAIM that read the same input cannot disagree
 
 Distinct from *"two checks that share an input do not corroborate"* below: this is
