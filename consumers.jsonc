@@ -192,7 +192,19 @@
       // selects no probes. So a wrong tier cannot produce a vacuous green; it
       // misinforms the humans and the JSONL readers, which is why it still gets
       // the honest value rather than the flattering one.
-      "tier": "contracts",
+      // ✅ FLIPPED contracts -> cdp-client 2026-09-27, on the condition I stated when
+      // registering: a real import now exists. The lane reports a single vendor
+      // importer (lib/base.mjs) whose connect() runs on base's CdpSession, with live
+      // QA green on BOTH its targets — one Chromium, one Opera. ⚠ Their live QA also
+      // found a real defect in that CdpSession (pending-call timers not cleared on
+      // socket close, so a process outlived its work by the full command timeout),
+      // which is the strongest evidence the import is real rather than declared.
+      //
+      // ⚠ telegram's note still applies and is now half-resolved: base ships a CDP
+      // CLIENT (lib/cdp-client.js) but not the full extraction telegram's tier
+      // anticipated. Two lanes now register cdp-client; the first was declared-and-
+      // unbacked, the second is backed by an import.
+      "tier": "cdp-client",
       // No localDir: verified the repo is at ~/github/CLIAI/perplexity-webctl and
       // the directory name equals the registry name. Stated rather than assumed —
       // the substack/fetlife bug was a silent SKIP that read as green.
