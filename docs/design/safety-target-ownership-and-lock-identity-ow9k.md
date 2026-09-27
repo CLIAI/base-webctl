@@ -119,8 +119,39 @@ lock"*. It states a **conclusion** — `stale`, reason `no-pid` — derived from
 it failed to find. A live holder is declared dead and **taken over**, and the
 message reads like a successful diagnosis.
 
-**Control:** a well-formed v1 lock held by a live pid conflicts correctly. ⇒ The
-mechanism works for the one format it knows and fails **open** for everything else.
+**Control:** a well-formed v1 lock held by a live pid conflicts correctly.
+
+⛔ **BUT MY CAUSAL CLAIM WAS WRONG, AND `linkedin` ISOLATED IT.** I varied
+`schemaVersion`; the outcome is driven by **`containerName` and `pid`**:
+
+```
+container + pid           -> {alive:true,  reason:'unknown'}
+container, NO pid         -> {alive:true,  reason:'unknown'}   <- fail-CLOSED
+NO container + pid        -> {alive:true,  reason:'pid'}
+NO container, NO pid      -> {alive:false, reason:'no-pid'}    <- the fail-open
+v99, NO container NO pid  -> {alive:false, reason:'no-pid'}    <- schema IRRELEVANT
+```
+
+⇒ **A `schemaVersion: 99` lock that carries a recognisable `containerName` or `pid`
+is treated as ALIVE and refused.** The takeover in my experiment came from **no
+locatable holder**, not from the schema. ⚠ They also checked whether it was a
+regression: the liveness code is **byte-identical between v0.13.1 and v0.16.0**, so it
+is longstanding.
+
+⭐ **So these are TWO defects, not one, and the fix I was heading for was wrong.**
+`SCHEMA_VERSION` being unread is real. A lock presenting neither a pid nor a container
+*where this reader looks* being declared dead is also real — and it is the one my
+control actually exercised. ⇒ **The guard therefore cannot be "add a schema check."** A
+genuinely newer format is dangerous **precisely because it may put the holder
+somewhere this reader does not look**, so the rule has to be:
+
+> ⛔ **"I cannot LOCATE a holder ⇒ refuse"** — independent of version.
+
+A version check would pass a future format that *did* declare its version honestly
+while still hiding its holder field, and would refuse a future format that was
+perfectly readable. The version is a proxy; **locating the holder is the fact.**
+
+
 
 ⚠ This is `t2wf` and `k3wn` at once: a published version marker nothing reads is
 indistinguishable from no marker at all, and "unrecognised" and "dead" arrive at
@@ -218,6 +249,82 @@ the contender `ccew` actually met. ⇒ `btg4` §6(b)'s concurrent-use detection 
 other half of this, and neither half is sufficient alone. ⚠ And a refusal must name the file and say *why it
 could not be read*, or the operator's only recourse is to delete a lock they do not
 understand — which converts a fail-closed design back into a fail-open habit.
+
+## 2a. ⛔ A REFUSING API IS NOT A REFUSING SYSTEM — and ow9k cannot fix that alone
+
+**`linkedin` measured the consumer side and it inverts the expected benefit.** Their
+driver does:
+
+```js
+try {
+  const r = await profileLock.acquire(profilePath, {…}, { force: true, dockerInspect });
+  if (r.tookOver && r.previous) logger.warn('took over stale profile lock…');
+} catch (e) {
+  logger.warn('could not write lock … (continuing anyway)');
+}
+```
+
+Two independent problems, **either sufficient**:
+
+* **`force: true`** bypasses the conflict check by construction. Verified:
+  `acquire(force:true)` over a lock held by their **own live pid** returns
+  `{ok:true, tookOver:true}`. It steals a live lock.
+* **`r.ok` is never checked** — only `r.tookOver`. ⇒ If §2 refuses by returning
+  `ok:false`, this code **ignores it and starts the container**. If it refuses by
+  **throwing**, the `catch` logs and says *"continuing anyway"*.
+
+⛔ **So §2 as specified would not stop that lane — it would make it proceed with NO
+LOCK AT ALL, which is strictly worse than today**, where at least a record gets
+written.
+
+⭐ **⇒ "Every wired lane refuses" is NOT a property this design can assert.** A
+refusing API needs a **consumer that checks**, and no return value or exception can
+compel one.
+
+### ✅ RULED: `{ok:false}` for the OLD verdicts, THROW for the NEW ones
+
+`linkedin` asked which, because the check they must add differs. **Neither form is
+ignore-proof** — they demonstrated both failure modes in one call site. But they differ
+in **what ignoring looks like**:
+
+| form | ignoring it requires | evidence left |
+|---|---|---|
+| `{ok:false}` | writing **nothing** — the default path proceeds | ⛔ none |
+| **throw** | writing a `catch` that swallows | ✅ **an explicit, greppable act** |
+
+⇒ So a throw is not chosen because it cannot be ignored; it is chosen because
+**ignoring it leaves evidence in the source** that a reviewer, or a contract
+assertion, can find.
+
+⭐ **And the rule that follows is sharper than "throw everything": THE FORM SHOULD
+DEPEND ON WHETHER THE CASE IS NEW.**
+
+* **HELD by a known live holder — keep `{ok:false, conflict:true}`.** Consumers already
+  have code for this; one lane's recovery depends on the adjacent takeover path (§2b).
+  Changing its form would break working code to no benefit.
+* ⛔ **The NEW UNKNOWN verdicts — corrupt, holder-not-locatable, unreadable format —
+  must THROW**, with a **distinctly named error type**. Because they are new, **no
+  consumer has code for them**, and a new `{ok:false}` is absorbed silently by every
+  existing caller that only checks `tookOver`. A throw is the only form existing code
+  **cannot absorb without saying so.**
+* ⇒ Throwing here **breaks nobody's working path**: it interrupts only a path that
+  would otherwise have proceeded unsafely, which is the definition of the change.
+* A named type also lets a lane catch **narrowly**, and lets a contract assert *"no
+  handler swallows `ProfileLockRefused` without rethrowing"* — which is the closest
+  base can get to enforcing a consumer-side property.
+* ⚠ **`force` must never be the convenient default.** The measured call site passes
+  `force: true` unconditionally; whatever base ships must make the safe call the short
+  one.
+
+⚠ The rest is consumer-side, and this document must not claim otherwise.
+
+⚠ **AND THE JUSTIFICATION AT THAT CALL SITE IS THIS DOCUMENT'S OWN FAILURE SHAPE.**
+The comment defends `force: true` with *"`ensureRunning()` above already refused if a
+LIVE holder existed"* — **a precondition assumed at one site and enforced at another.**
+`linkedin` drew the parallel themselves: it is the same shape as a check whose
+precondition was the thing under test (`k3wn`). ⇒ If the pre-check's liveness verdict
+ever diverges from `acquire`'s — and §2d says liveness is **caller-dependent** — then
+`force` quietly steals.
 
 ## 2b. ✅ RULED: a stopped-or-missing LOCAL CONTAINER stays an AUTOMATIC takeover
 
@@ -324,10 +431,35 @@ alive.** ⇒ So each placement has a way of decoupling the lock from the truth:
 *beside* survives a move it should not survive, *inside* is destroyed by a wipe it
 should survive. Neither is free, and the choice is which failure a lane can detect.
 
-⇒ **Open, and it is now the design's main unresolved question.** It cannot be
-settled by preference: it needs a rule for what happens to the lock when the profile
-**moves** and when it is **wiped**, and whichever placement is chosen must answer the
-other case explicitly rather than inherit it.
+✅ **RESOLVED — and by a criterion rather than a preference, which is why it settles
+it.** `linkedin` supplied it, with evidence that argues **against their own instinct**:
+
+> **The inside file must be RECONSTRUCTIBLE, not outside.** A lock whose loss is
+> **recoverable** can live inside; a file whose loss **silently re-grants** something
+> cannot.
+
+⇒ **So the two files get DIFFERENT answers, and the earlier disagreement dissolves:**
+
+| file | loss means | placement |
+|---|---|---|
+| **profile lock / X-input lease** | a lock is missing ⇒ the next acquire re-creates it, and a lost lease is **released**, which is safe | ✅ **INSIDE** |
+| **`isolation-accept.json`** | an accept is missing ⇒ ⛔ **silently re-grants** what it recorded a decision about | ✅ **BESIDE** |
+
+⭐ So `ccew` was right about `isolation-accept.json` and `cgwc` was right about the
+lock, and neither generalises to the other file. ⚠ **Do not generalise either.**
+
+⚠ **And what a SIBLING actually costs, measured:** a sibling sits in whatever directory
+the profile's parent happens to be — which for real profiles on one machine means
+`~/priv/` for some and `~/.config/` directly for others, across ~20 Chromium-shaped
+profiles most of which are **not ours**. ⇒ Sibling files scatter into directories we do
+not own, and a sweep for them degenerates into *"any file next to anything
+profile-shaped"* — which is the *"directories named after a tool"* sweep that §1 of
+`btg4` rejects as **worse than blind**.
+
+⚠ `ccew`'s objection survives as a **requirement, not a veto**: Chromium may delete
+unknown files during profile repair, so an inside lock must be **reconstructible** and
+its absence must never read as permission. Chromium's own `SingletonLock` is precedent
+that the inside is not exclusively Chromium's.
 
 * **`<target>`** — the target name from `btg4` §3/§4.
 * **`<profile_id>`** — `btg4` §2's **opaque** id.
@@ -407,6 +539,19 @@ invisible lock is an unlocked profile.
 
 1. **Read BOTH** the target-keyed name and the legacy `.<PROJECT>.lock.json`.
 2. **A legacy lock whose holder is alive is HELD.** Not "old format, ignore".
+   ⛔ **And TWO live legacy holders is not an edge case, it is the DESIGN** *(`linkedin`)*:
+   the legacy name is **per-tool**, so on a shared profile two tools hold two locks that
+   are both valid and both live. ⇒ **Which wins? NEITHER.** Two live holders on one
+   profile means the invariant is **already violated**, and the honest action is to
+   **refuse and name both**. ⚠ A tie-break rule would be a mechanism for *resolving* a
+   state that should be impossible, and the first time it fired it would resolve it
+   wrongly.
+   ⚠ **And note what this does to clause 1:** with per-tool legacy names there is no
+   single legacy name to read. The reader must **enumerate every `.{tool}.lock.json` it
+   does not own** — which is a **glob, not a name**, inside one known profile directory.
+   ⇒ That is compatible with `ccew`'s *"never glob `profiles/*`"* rule, which forbids
+   globbing **across** profiles; this globs **within** one configured profile path. The
+   distinction has to be stated or the two rules read as contradictory.
 3. **A legacy lock that cannot be read is UNKNOWN ⇒ refuse** (§2).
 4. **Write only the new name.** Never write both; two lock files for one resource is
    `t2wf` by construction, and the moment they disagree neither is authoritative.

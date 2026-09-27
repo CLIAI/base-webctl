@@ -132,6 +132,32 @@ description — and the re-measurement found it was **worse** than reported, bec
 the nested half of base's lib was missing from the comparison set entirely, which
 the report had not identified.
 
+## ⛔ A generation number renders TWO STATES IDENTICALLY
+
+*(Raised by `linkedin` as a consistency point against this repo's own spec, not as a
+new idea.)*
+
+`HARNESS_GENERATION` certifies *"this consumer's copy has property P"*. ⇒ But a
+consumer that **never had the defect** and a consumer that **found and fixed it**
+record the **same `2`** — and those are different facts. Only the second implies that
+somebody **verified** the repair.
+
+⚠ **So the field cannot answer the question a sweep will eventually want:** *which
+lanes actually ran the planted-re-vendor check, and which inherited a number?* One
+lane has already planted both a nested and a top-level re-vendor against its own
+contract and watched them fail by path — and its `2` will be indistinguishable from a
+`2` copied from a template.
+
+⭐ **This is the same shape as `xrl4`'s own `pass=0` under an `OK` summary: a field
+that renders two states identically.** The generation marker was introduced to fix
+exactly that kind of blindness, and it reproduces it one level up.
+
+⇒ **Cheap now, expensive at six lanes:** record **HOW** the generation was
+established, not only that it was — e.g. `{generation: 2, established: "verified" |
+"inherited"}`. ⚠ Not yet implemented, and deliberately not rushed into the v0.16.0
+tag: changing what a contract records is a change to what every lane writes, and it
+should land with the ownership work rather than alone.
+
 ## Deliberately not here yet
 
 * **Exercisable under the gate.** The pin check's swap arm is the one path that
