@@ -210,15 +210,19 @@ framing rather than the fact.
 ⭐ **So these are TWO defects, not one, and the fix I was heading for was wrong.**
 `SCHEMA_VERSION` being unread is real. A lock presenting neither a pid nor a container
 *where this reader looks* being declared dead is also real — and it is the one my
-control actually exercised. ⇒ **The guard therefore cannot be "add a schema check."** A
-genuinely newer format is dangerous **precisely because it may put the holder
-somewhere this reader does not look**, so the rule has to be:
+control actually exercised. ⇒ **A schema check ALONE is not the guard**, because a
+genuinely newer format is dangerous precisely because it may put the holder somewhere
+this reader does not look. So the backstop has to be:
 
 > ⛔ **"I cannot LOCATE a holder ⇒ refuse"** — independent of version.
 
-A version check would pass a future format that *did* declare its version honestly
-while still hiding its holder field, and would refuse a future format that was
-perfectly readable. The version is a proxy; **locating the holder is the fact.**
+⚠ **SUPERSEDED IN PART — see the over-retraction note above.** I first wrote here that
+*"the version is a proxy; locating the holder is the fact"*, and concluded the schema
+check was therefore unnecessary. That is too clean: a version bump is **the only advance
+warning that field names may have MOVED**, and it fires **before** any field is
+interpreted, whereas the locate-the-holder rule fires only after a misread has already
+been attempted. ⇒ **Both, covering different moments** — the table above, not this
+paragraph, is the current rule.
 
 
 
@@ -733,9 +737,13 @@ The suite must plant, in one fixture:
 
 ## 7. Open, for the lanes rather than for me
 
-1. ✅ **ANSWERED — sibling, not inside.** `ccew`, from existing practice plus three
-   independent reasons (§3). Chromium owns the inside; a profile copy must not carry
-   a lock; a sibling is flockable from a remote shell.
+1. ✅ **ANSWERED, BUT NOT AS THIS ENTRY FIRST SAID.** ⚠ It read *"sibling, not inside,
+   decided"* for part of today — a verdict I closed on one lane's input, reopened on a
+   second lane's measurement, and which then **dissolved**: placement is not the
+   correctness axis at all. ⇒ The answers are **a wipe must ACQUIRE the lock before
+   destroying** and **a record must carry a checkable profile IDENTITY** (§3); with both,
+   placement is tidiness. Left visible rather than rewritten, because a question that
+   changed answer three times should not read as though it were settled once.
 2. **Who mints the claim** when a lane's bring-up script and its CLI are separate
    programs — the script, with the CLI reading it? And what happens on a manual
    `docker start` that bypasses both?
@@ -756,10 +764,9 @@ The suite must plant, in one fixture:
    which is the same shape as §1(c) reached from the opposite direction.
 6. ✅ **ANSWERED — there is no fifth SHAPE; there are eight REASONS** (§5), and the
    state worth adding is a **reading**, not a shape: `reason:'unknown'` (§2d).
-7. ⛔ **NOW THE MAIN OPEN QUESTION: placement** (§3). Two lanes, two strong arguments,
-   opposite directions, and each placement decouples the lock from the truth in a
-   different failure. Needs a rule for the profile **moving** and for the profile being
-   **wiped**, not a preference.
+7. ✅ **CLOSED — was "the main open question: placement", now dissolved** (§3, and see
+   #1). ⇒ **The main open question is now #8**, which is the one nothing in this
+   document answers.
 8. **OPEN: how does a GUEST establish liveness at all** (§2d)? Every refusal in §2 is
    reachable by a guest; `reason:'unknown'` is not escapable by one, because it cannot
    inject the inspector. ⇒ Either the claim carries enough to decide, or a guest can

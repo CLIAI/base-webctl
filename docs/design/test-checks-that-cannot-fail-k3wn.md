@@ -514,6 +514,44 @@ attempt proved nothing — the gate refuses a dirty tree, so it exited 2 before
 reaching the probe, and *"the gate did not block"* and *"the gate never ran"* look
 alike in an exit code nobody read carefully.
 
+## ⛔ A DOC ASSEMBLED UNDER REVIEW CONTRADICTS ITSELF, AND NOTHING CHECKS PROSE
+
+base's own, 2026-09-27. A design doc was revised **eight times in one afternoon** as
+five lanes reviewed it. Each edit was correct when written. Three of them were later
+**superseded by a further edit that did not go back and amend them**:
+
+* an open question recorded *"✅ ANSWERED — sibling, not inside"* while the body, two
+  hundred lines up, had **reopened and then dissolved** that very question;
+* another recorded *"⛔ NOW THE MAIN OPEN QUESTION: placement"* after placement had
+  stopped being a question at all;
+* a section asserted *"the version is a proxy; locating the holder is the fact"* thirty
+  lines below a correction stating that framing was *"true, and incomplete"*.
+
+⚠ **A reader arriving at any one of those three would have implemented the superseded
+answer**, and would have had no way to know — each read as a settled verdict, and the
+document's own ✅ markers made them look *more* authoritative than the corrections.
+
+⭐ **THE MECHANISM IS ACCRETION UNDER REVIEW, NOT CARELESSNESS.** A reviewer's finding
+lands where it is relevant. Nobody's finding is *"and your summary table three sections
+up now disagrees"*. ⇒ So the contradiction is created by the **process that improves the
+document**, and it grows with the quality of the review.
+
+⛔ **And no test can see it, because it is prose.** The frontmatter verifier checks
+fields, IDs and cross-refs; the index guard checks the doc is cited. **Nothing checks
+that a document agrees with itself**, which is the same gap as an error message citing a
+path that does not exist — both are unexecuted text asserting something checkable.
+
+⇒ **The cheap discipline, since a checker is not available:** after a review round,
+**grep your own verdict words** — `DECIDED`, `RESOLVED`, `ANSWERED`, `OPEN` — and read
+them as a list. Three of the four contradictions above were visible in one such grep and
+in nothing else. ⚠ And when a question has changed answer more than once, **say so in
+place** rather than rewriting it to look settled: *"this read differently for part of
+today"* is information a reader needs, because it tells them the answer is young.
+
+⚠ **This repo has shipped the shape before** — a release note records a design doc that
+*"no longer contradicts itself between §2 and its P1 correction"*. The second occurrence
+is what makes it a pattern rather than an incident.
+
 ## ⛔ A TEST THAT CATCHES A DEFECT BY HANGING HAS NO VERDICT
 
 base's own, 2026-09-27, and the fix for one defect introduced this one.
