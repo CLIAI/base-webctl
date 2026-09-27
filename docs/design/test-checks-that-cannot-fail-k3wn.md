@@ -414,6 +414,51 @@ The defect was reaching for it to answer *what is present*.
 by counting blobs — which is why the disagreement surfaced at all: the two methods
 were independent, not two people running the same command.)*
 
+## ⛔ A GUARD and a CLAIM that read the same input cannot disagree
+
+Distinct from *"two checks that share an input do not corroborate"* below: this is
+**one** check, whose precondition and whose assertion are computed from the same
+value. The check then passes by construction.
+
+Shipped in base 2026-09-27, in the tool written to prevent exactly this. A probe
+was added to assert that the pin check DECLINES a verdict inside the release
+gate's swap window. Its first draft:
+
+```js
+const swapped = declaredEnv !== worktree;      // ⛔ the comparison UNDER TEST
+if (!swapped) return noVerdict('not exercised');
+const v = judgePin(…);
+if (v.code !== NO_VERDICT) return fail(…);      // ⇒ UNREACHABLE
+```
+
+`judgePin` decides "swapped" by that same comparison. So whenever the guard let
+execution through, the assertion was already guaranteed — **the FAIL branch could
+not run**, and the probe would have reported pass forever, including across a real
+regression in the one arm it exists to watch.
+
+⭐ **THE FIX IS STRUCTURAL, NOT A STRONGER ASSERTION.** No amount of care inside
+the assertion recovers a guard that has already pre-decided the answer. The
+precondition has to come from a **different source**: here, the gate exports
+`WEBCTL_GATE_SWAPPED=1` because *it* knows it performed a swap, which makes the
+claim about the comparison falsifiable.
+
+⚠ **The tell is that a whole TEST becomes unwritable.** The mutation — the gate
+reports a swap while declared equals worktree, so the check returns a real verdict
+and the probe must fail — could not be expressed against the first design at all.
+⇒ **If you cannot write the test that makes a check go red, the check is the
+problem, not the test.** That is the cheapest available detector for this shape,
+and it fires before any code ships.
+
+### And the WIRING needs its own red
+
+A probe's unit tests prove the probe can fail. They say nothing about whether the
+system that invokes it acts on that. Here the gate's blocking path was verified by
+sabotaging the library, committing locally, and running the real gate: `defect=4`,
+exit 1, BLOCKED, attributed to base rather than to the four consumers. ⚠ The first
+attempt proved nothing — the gate refuses a dirty tree, so it exited 2 before
+reaching the probe, and *"the gate did not block"* and *"the gate never ran"* look
+alike in an exit code nobody read carefully.
+
 ## Two checks that share an input do not corroborate
 
 They **agree**. Two probes of the same derived port are satisfied by one foreign

@@ -52,6 +52,48 @@ proves it fails on the thing that happened.*
 `WEBCTL_DECLARED_PIN` is merely *set* to the value already checked out —
 otherwise the skip triggers on every gated run and the check is decorative.
 
+## ⛔ `gate-probe`'s first draft could not fail — in the tool built to prevent that
+
+The probe asserts that `pin` declines a verdict inside the gate's swap window.
+The first draft established "a swap is in effect" like this:
+
+```js
+const swapped = declaredEnv !== worktree;   // ⛔ the SAME comparison judgePin makes
+if (!swapped) return noVerdict(…);
+const v = judgePin(repo, sub);
+if (v.code !== EXIT.noVerdict) return fail(…);   // ⇒ UNREACHABLE
+```
+
+`judgePin` decides "swapped" by that same comparison, so whenever the probe's
+guard let it through, `judgePin` was guaranteed to decline. **The FAIL branch
+could not execute.** The probe would have reported pass forever, including across
+a real regression in the arm it exists to watch.
+
+⭐ **The fix is structural, not a stronger assertion: take the PRECONDITION FROM
+A DIFFERENT SOURCE than the claim.** The gate knows it performed a swap, so it
+exports `WEBCTL_GATE_SWAPPED=1`, and the probe's statement about `judgePin`'s own
+comparison becomes falsifiable. The mutation test — gate reports a swap while
+declared equals worktree, so `judgePin` returns a real verdict and the probe must
+FAIL — **could not even be written against the first design.**
+
+⇒ Generalised in `test-checks-that-cannot-fail-k3wn`: *a guard and a claim that
+read the same input cannot disagree.*
+
+### Proving the GATE blocks, not just that the probe can fail
+
+The probe's own unit tests cover its FAIL branch. That leaves the WIRING
+untested — so the gate's blocking path was itself verified by sabotage: set
+`swapped = false` in `judgePin`, commit locally, run `--against-head`. Result:
+`ok=0 defect=4`, exit 1, `BLOCKED`, attributed to base rather than to the four
+consumers, each quoting the wrong verdict verbatim — *"declared gitlink 0c47272
+is tag v0.13.0"*, a true sentence about the wrong subject. Then reset.
+
+⚠ Note the ordering trap: the gate **refuses a dirty base tree** (exit 2, and
+correctly so — consumers would be tested against a commit that does not exist),
+so sabotage has to be committed locally before it can be exercised. The first
+attempt measured nothing and reported exit 2, which is not the same as "the gate
+did not block".
+
 ## Deliberately not here yet
 
 * **Exercisable under the gate.** The pin check's swap arm is the one path that

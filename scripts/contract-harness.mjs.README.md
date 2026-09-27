@@ -25,6 +25,9 @@ than by any lane reading its own.
 
 ## The checks
 
+`pin`, `no-revendor` and `generation` are for your contract; `gate-probe` is for
+the release gate (see below).
+
 ### `pin`
 
 Asserts the pin is an exact tag, read from the **committed gitlink** — not the
@@ -65,6 +68,30 @@ carries old rot. It does *not* say a **correct** copy's assumptions have expired
 against a newer pin. Two mechanisms.
 
 See `.DEV_NOTES.md`.
+
+### `gate-probe` — for the GATE, not for your contract
+
+```sh
+node <base>/scripts/contract-harness.mjs gate-probe --repo . --sub vendor/base-webctl
+```
+
+⚠ **A lane does not call this.** The release gate calls it, inside the window
+where it has swapped a consumer's submodule to a release candidate, and it
+asserts that `pin` **declines a verdict** there — because a candidate is not
+tagged. Run by hand it always returns **no verdict** (exit 2), never pass: there
+is no swap window, so there is nothing to assert.
+
+| state | result |
+|---|---|
+| `WEBCTL_GATE_SWAPPED` unset | **no verdict** — not exercised, and not a pass |
+| gate reports a swap, no `WEBCTL_DECLARED_PIN` | **fail** — the state that variable exists to prevent |
+| gate reports a swap, `pin` declines and names both SHAs | **pass** |
+| gate reports a swap, `pin` returns PASS or FAIL | **fail** — base's defect, not the consumer's |
+
+⇒ Its precondition comes from **`WEBCTL_GATE_SWAPPED`, set by the gate**, and
+deliberately not from comparing the declared pin against the worktree — which is
+the comparison it is testing. A guard and a claim that read the same input cannot
+disagree.
 
 ## ⭐ A contract's last line is API
 
