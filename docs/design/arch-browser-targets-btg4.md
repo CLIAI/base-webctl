@@ -56,6 +56,10 @@ is enforced rather than documented:
 
 * any migration, consolidation or move **refuses** a directory containing
   `Local State`, `Cookies` or `Login Data`, naming the file it found;
+* ⛔ **it matches file NAMES ONLY and never opens them.** The walk goes *into*
+  authenticated profiles, so it passes `Cookies` and `Login Data` — and
+  "names, never contents" belongs **in the guard's spec, beside it**, the way
+  the `set -x` rule sits beside `set -x`. *(ccew.)*
 * the check scans **the filesystem**, never the config files. ⚠ That is
   load-bearing: an orphaned 118M authenticated profile exists on this box
   **referenced by no config and mounted by no container**, so a config-keyed
@@ -169,12 +173,33 @@ contents.
 ```toml
 # ~/.config/CLIAI/webctl/targets/bp17.toml
 name       = "bp17"
-transport  = "ssh"            # ssh | tailscale | local
+# ⛔ TRANSPORT IS PER-SURFACE, NOT PER-TARGET. See below.
+control    = "ssh"            # ssh | local      — CDP and X input. NEVER tailscale.
+view       = ["ssh", "tailscale-relay"]   # xpra html5; tailscale ONLY via the relay
 ssh        = "bp17"           # passed THROUGH to ssh; see §5
 slug       = "default"        # base driver cfg slug -> container names
 profile_id = "claude-main"    # OPAQUE. Resolved elsewhere. Never a path.
 lifecycle  = "owner"          # owner | attach-only   — see §6
 ```
+
+### ⛔ Transport is PER-SURFACE — a single field lets a user write the forbidden config
+
+⚠ **The first draft had one `transport` field. That was wrong, and it
+contradicted §5.** Measured by `ccew` on bp17, which runs **two transports at
+once**:
+
+| surface | what it carries | transport |
+|---|---|---|
+| **control** | CDP, and X input via `ssh … docker exec … xdotool` | **ssh only**, to loopback |
+| **view** | xpra html5 | ssh tunnel for knot **and** a tailscale relay with a source-IP allowlist for phone/tablet |
+
+⇒ So `transport = "tailscale"` would mean **CDP reachable on a tailnet
+interface** — exactly what §5 forbids. ⛔ **My own schema permitted the
+configuration my own security rule prohibits.**
+
+⇒ Split into `control` and `view`, with `control` accepting only `ssh` or
+`local`. ⭐ **Then §5's rule is enforced by the schema rather than by prose** —
+which is this document's own §1 argument, applied to the file format. *(ccew.)*
 
 ## 5. Transport: `--ssh <value>`, passed through
 
@@ -183,8 +208,26 @@ type after `ssh` and hands it over, so `~/.ssh/config` — aliases, users, jump
 hosts, keys — works for free. Measured on bp17: a bare `user@host` **fails**;
 only the `Host` block works.
 
-* **Injection-safe by construction**: `ssh "$value" -- <argv…>`, never a shell
-  string assembled from parts.
+* ⛔ **CORRECTION — `ssh "$value" -- <argv…>` IS NOT INJECTION-SAFE.** The first
+  draft said it was. It is not, and this was a security claim in a document
+  about controlling signed-in browsers.
+
+  ssh's own manual: *"the arguments will be **appended to the command,
+  separated by spaces**, before it is sent to the server to be executed."*
+  ⇒ The remote side receives a **string**, and the **remote shell re-parses
+  it**. `--` only stops **local** option parsing. So `ssh host -- echo 'a;b'`
+  still runs `echo a; b` remotely.
+
+  ⇒ Safety requires one of:
+  * **each remote argv element quoted for the remote shell** (`printf '%q'` per
+    element), or
+  * ⭐ **a fixed remote entry point that reads the data on stdin** — the shape
+    `type-secret` already uses (`… xdotool type --file -`).
+
+  ⚠ And it matters most for precisely the argv that carries untrusted text:
+  **`xdotool type` payloads, URLs, search strings** — page-derived or
+  user-supplied. *(ccew, who quotes its own `tools/ccew/xdo.sh` as the working
+  form.)*
 * ⛔ **A DEDICATED connection: `ControlMaster=no`, `ControlPath=none`.** With
   multiplexing **the forward belongs to the master and outlives Ctrl-C** — a
   tunnel into a signed-in browser's control surface, still open after the user
@@ -270,6 +313,17 @@ after each input burst, check that **window focus, active tab and focused
 element changed only as our own keys predict**; otherwise **pause and report**
 rather than continue typing.
 
+⭐ **And add "the xpra screen size changed" to the signals.** It changes when
+any viewer **attaches or resizes** — measured repeatedly — which makes it **the
+earliest sign a human has arrived, before they touch anything.** *(ccew.)* ⇒ The
+other signals fire once the contention has already happened; this one fires
+before it.
+
+⚠ **Lease file: `profiles/<slug>/x-input.lease` — BESIDE the chromium dir, not
+inside it**, because chromium owns the inside. Same argument already adopted for
+`isolation-accept.json`. And never globbed. `flock` is present on the target
+(util-linux 2.39.3, checked by ccew).
+
 ⚠ Without that, a shared browser is protected against other *tools* and
 unprotected against the *person* most likely to be using it. *(ccew, correcting
 a narrowing in my first draft.)*
@@ -304,6 +358,13 @@ can carry a session off the machine.
 ⇒ A target **declares which extensions it runs**, and the tooling **refuses**
 to co-locate such an extension with a signed-in session — unless an **explicit
 accept** has been recorded.
+
+⛔ **But the check runs against the manifests of what is actually INSTALLED IN
+THE PROFILE, never against the target's declared list.** Web-Store installs and
+**auto-updates change the set with no config edit at all** — so a declared list
+is a statement about intent, and the profile is the statement about fact.
+⇒ The declaration says what *should* be there; the manifests say what *is*, and
+a mismatch is itself a finding. *(ccew.)*
 
 ⛔ **The accept lives BESIDE THE PROFILE and is only REFERENCED from the
 target**, by the same opaque id the target already uses for the profile.
