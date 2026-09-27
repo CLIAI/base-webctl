@@ -213,6 +213,33 @@ field and `view` as inapplicable, because there is no xpra. ⇒ Hence `kind`:
 `slug`, `base` and `view` are **conditional on `kind = "docker-xpra"`**, and a
 schema that pretends otherwise forces two lanes to write fields that mean nothing.
 
+##### ⛔ `kind` NEEDS A THIRD VALUE, AND IT WAS MIXING TWO CONCEPTS
+
+**`perplexity` measured that neither value covers them, and found the worse problem
+underneath.** Their targets are two **pre-existing** browsers in manager-created
+zones on a remote host, reached over ssh:
+
+* `"direct"` does **not** fit — their CDP port is **neither stable nor owned by a
+  local browser**; it is resolved **live from a zone manager's labels over ssh**.
+* Proposed third value, working name **`managed-zone`**, with `{ssh, zone, app,
+  control}`.
+
+⭐ **AND THE DEEPER FINDING: `kind` as drafted CONFLATED LIFECYCLE/TRANSPORT WITH
+BROWSER ENGINE.** One of their two targets is **Opera**. ⇒ **Engine belongs in its
+own field**, because a target can be (managed-zone, Opera) or (managed-zone,
+Chromium) and `kind` cannot express both axes. This is
+`arch-coincident-fields-t2wf` in advance: two concepts sharing one field are
+indistinguishable from one concept, and the collision only shows up when a
+deployment needs them to differ.
+
+⚠ **AND THE ENGINE CANNOT BE SNIFFED FROM CDP.** Measured by `perplexity`:
+Opera's `/json/version` reports **`Browser: Chrome/151`**. Only the user-agent's
+`OPR/` token or the brand list identifies it. ⇒ So a target must **declare** its
+engine; a tool that detects it from `/json/version` will confidently call Opera
+Chromium, and any engine-conditional behaviour will silently take the wrong branch.
+That is a stated-not-measured field by necessity — the one case where §4's *"store
+how to FIND, never what you would MEASURE"* inverts, because the measurement lies.
+
 #### ⚠ `lifecycle` is per-target, and OWNERSHIP IS PER (TOOL, TARGET)
 
 **`substack` falsified the single-value form, measured.** Their lane has an owner
@@ -527,9 +554,86 @@ this document stops it, and nothing in their code can tell.
 
 ⭐ **So ownership as specified is a property of a (tool, target) pair established
 by WHO CALLED `start` — and that fact is not recorded anywhere a second tool can
-read it.** A lane can be an owner by intent and a guest by construction, at the
-same time. ⚠ That means the earlier ruling's *"this reclassifies nobody today"* is
-true **per lane** and does not reach **per tool**.
+read it.** ⚠ That means the earlier ruling's *"this reclassifies nobody today"* is
+true of today's **intent** and is not **enforced** by anything.
+
+#### ⛔ BUT "WHO CALLED START" IS THE WRONG TEST — THE HARM IS WHOSE SESSIONS ARE IN THE PROFILE
+
+**I had this wrong, and `webctl:mgr` corrected it from the code.** I reasoned that a
+tool which never calls `start` is a guest by construction, and concluded that a lane
+attaching to browsers it did not itself launch had been misclassified. ⇒ That
+conflates the **mechanism** with the **harm**.
+
+§6(d) exists because **`Runtime.evaluate` in a profile holding SOMEONE ELSE'S
+authenticated sessions is equivalent to those sessions.** So the test is *whose
+sign-ins are in this profile*, not *which process called start*:
+
+| situation | guest? |
+|---|---|
+| tool evaluates in a profile holding **another party's** sessions | ⛔ **yes** — §6(d) applies |
+| lane's bring-up script starts a browser; lane's CLI attaches to it | ✅ **no** — **one owner split across two processes** |
+| tool attaches to a profile holding only **its own** sign-ins | ✅ no |
+
+⭐ **"An owner split across two processes" is a real third category, and it is not
+a guest.** A lane whose own bring-up script creates the target, whose profiles hold
+only its own sign-ins, and whose CLI then attaches, is the target's owner — the
+split is an implementation detail of that lane, not a trust boundary. Measured by
+`webctl:mgr` by reading one lane's own bring-up script rather than inferring from
+its CLI's flags.
+
+⇒ **What survives of the original finding is the half that matters:** nothing lets
+a tool CHECK which row of that table it is in. If a bring-up script and a CLI
+disagree about the target, or another lane's browser answers on the stated port, the
+attacher cannot tell. The classification is sound; it is simply **unverifiable at
+the point of use**.
+
+#### ⭐ CANDIDATE ANSWER: AN OWNERSHIP TOKEN, VERIFIED BEFORE ANY ATTACH
+
+*(Design adopted by `webctl:mgr` for the new-tool template; recorded here because
+btg4 is where it has to be settled.)*
+
+* **Established when the tool — or its own bring-up script — CREATES the target.**
+* **Token = (tool id, target name, a random nonce)**, written into the target's own
+  metadata (container labels, or a file inside the target's data dir) **and mirrored
+  in the tool's target config.**
+* **Verified before ANY CDP attach.**
+* ⛔ **Mismatch or absence is a REFUSAL, not a warning** — consistent with §7, which
+  refuses rather than warns for the same reason: a warning on a path that otherwise
+  works is a warning nobody reads twice.
+
+⭐ **AND A LANE ARRIVED AT A STRONGER FORM INDEPENDENTLY.** `perplexity` audited
+its own attach path after reading this section and found the hole in it: their CDP
+port is *stated* in a target file rather than a free-form URL, and `connect()`
+verifies the browser **kind** — but **a stale or typo'd tunnel reaching another
+tool's Chromium would pass a kind check.** Their planned fix does not add a token to
+a stable port; it removes the stable port:
+
+* the CLI builds its tunnel **per invocation**;
+* it resolves the remote CDP port through the **zone manager's ownership labels**
+  (zone + app + owner uid) on the target host;
+* it forwards to an **ephemeral local port it owns for that call**;
+* the remote command travels **on stdin** (`safety-safe-invocation-file-payloads-r7x2`
+  §1b), not as interpolated argv;
+* a stable port survives only for an explicit persistent mode, **which warns that
+  identity is weaker there**.
+
+⇒ **Identity established BY CONSTRUCTION at the point of use, rather than checked
+against a record.** That is strictly better than a token wherever it is achievable:
+there is no stale port left to typo, so the failure mode is *absent* rather than
+*detected*. ⚠ It is not always achievable — it needs a manager that labels
+ownership and a transport you can build per call — so the token remains the general
+answer and this remains the preferred one.
+
+⭐ **Prior art for the LOCK fix, from the same lane:** their lock is keyed by
+**target name, per invocation** — which is exactly the identity §6(b) needs and
+`C.PROJECT` is not.
+
+⚠ **Design this WITH the lock-identity question, not after it.** Both are *"who owns
+this target"*: the lease needs an identity that is not `C.PROJECT`, and the attach
+check needs an identity a second process can verify. ⇒ Solving them separately
+means the second fix re-derives the first, and the two answers can disagree — which
+is how a profile ends up with one notion of ownership for locking and another for
+attaching.
 
 ⇒ `substack`'s minimum viable form, which I think is right: **the thing that
 brought the browser up leaves a token beside the profile, and an attacher that
@@ -689,8 +793,8 @@ configured at all.
   consolidating `~/.config/<tool>/` — is the one §1 refuses.
 * **It does not give config authority over profile paths**, and that omission
   is the point rather than an oversight.
-* **It does not build the remote mechanics.** `xq` owns the remote-execution
-  capability; base owns the **convention**. ⇒ Coordinate rather than implement
+* **It does not build the remote mechanics.** A separate **zone-manager** tool owns
+  the remote-execution capability; base owns the **convention**. ⇒ Coordinate rather than implement
   twice.
 * **It does not decide `--client` vs `--target`.** ⚠ `--client` already means
   *driver cfg slug* in at least one lane; reusing it for a location is a second
