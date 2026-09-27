@@ -231,6 +231,37 @@
       "wired": true
     },
     {
+      "name": "grok-webctl",
+      "repo": "git@github.com:CLIAI/grok-webctl.git",
+      "submodulePath": "vendor/base-webctl",
+      "testCmd": "./test-against-base.sh --offline",
+      "dockerOptIn": false,
+      // *-webctl controller for Grok. Role only, at the lane's request: no account,
+      // no host, no path.
+      "tier": "contracts",
+      // No localDir, and the lane asked for it to STAY absent: verified the repo is
+      // at $WEBCTL_CONSUMERS_DIR/grok-webctl with the directory name equal to the
+      // registry name, so none is needed now or at wiring time.
+      //
+      // ✅ wired:false is CORRECT and not an aspiration: verified here — 2 commits,
+      // README + AGENTS only, and `ls-tree HEAD vendor/base-webctl` returns nothing.
+      // There is genuinely nothing for the gate to run, so it reports SKIP "not yet
+      // wired". ⚠ And because no submodule is mounted, the stale-entry detector does
+      // NOT fire here — which is the check that made claude-chrome-extension's
+      // wired:false a lie. The two states look the same in this file and are
+      // distinguishable only by the mount, which is why the detector reads the mount.
+      //
+      // ⇒ Registering a lane with no code yet is consistent with this file's stated
+      // purpose ("A NEW tool registers here at creation so the gate picks it up
+      // automatically"), and is NOT the same as registering the webctl-template:
+      // grok is a future consumer, a template is never a consumer at all, so a
+      // template row could never pass or fail while this one will.
+      //
+      // Will pin v0.16.0 at Phase B (tag object cd5fda5 -> commit ab7d635,
+      // HARNESS_GENERATION 2 at the tag), the same pin the template takes.
+      "wired": false
+    },
+    {
       "name": "substack-webctl",
       "repo": "git@github.com:gwwtests/lindseymackereth-substack.git",
       "submodulePath": "vendor/base-webctl",
