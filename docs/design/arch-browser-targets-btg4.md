@@ -413,7 +413,7 @@ the useful part:
 
 #### A guest is not blind — and where it genuinely goes dark
 
-Most read-only extraction does **not** need to run page JS *(toolkit contributed
+Much read-only extraction does **not** need to run page JS *(toolkit contributed
 by `webctl:mgr`; not re-measured here)*:
 
 | need | CDP method | runs page JS? |
@@ -421,13 +421,49 @@ by `webctl:mgr`; not re-measured here)*:
 | markup, incl. shadow roots | `DOM.getDocument({pierce: true})` | no |
 | an element's markup | `DOM.getOuterHTML` | no |
 | computed accessible names | `Accessibility.getFullAXTree` | no |
+| **rendered article text** | **`Runtime.evaluate` (`innerText`)** | **YES** |
 
-⚠ **THE HONEST GAP: state that only page JS can MATERIALISE.** Virtual-scroll
-content that does not exist in the DOM until a scroll handler runs, and lazy state
-behind an event, are not reachable by any of the above. ⇒ **That is the point at
-which a guest must become an owner of its own target** — not a reason to weaken
-the posture, and not something to leave a lane to discover as a mysterious empty
-result.
+⛔ **THE GAP HAS TWO HALVES, AND THE SECOND IS THE DANGEROUS ONE.** The first
+draft of this section named only the first, which `substack` falsified by
+measurement.
+
+**(i) State not yet MATERIALISED.** Virtual-scroll content that does not exist in
+the DOM until a scroll handler runs; lazy state behind an event. No markup read
+reaches it.
+
+**(ii) RENDERED-TEXT SEMANTICS.** The content *is* in the markup, and page JS and a
+markup read **disagree about what the text IS.** `innerText` is
+**layout-dependent**: it excludes `display:none`, `<template>` and `<script>`
+bodies, and collapses whitespace per CSS. Measured by `substack` against a live
+stack with a self-authored `data:` URL — no network, no third-party content:
+
+| read | contains `display:none` text? | contains `<script>` body? |
+|---|---|---|
+| `innerText` (page JS) | **no** | **no** |
+| `DOM.getOuterHTML`, tags stripped | **yes** | **yes** |
+
+⇒ **No markup read reproduces `innerText`**, and `Accessibility.getFullAXTree`
+gives accessible *names*, not an article body.
+
+⭐ **AND THE TWO HALVES FAIL IN OPPOSITE DIRECTIONS, WHICH IS WHY (ii) LEADS:**
+
+| gap | symptom | is it noticed? |
+|---|---|---|
+| (i) not materialised | **EMPTY** result | ✅ yes — emptiness is loud |
+| (ii) rendered-text semantics | **LONGER, plausible, CONTAMINATED** result | ⛔ **no** |
+
+⚠ **AND IT CAN INVERT A SAFETY GATE RATHER THAN MERELY DIRTY AN OUTPUT.**
+`substack`'s recovery check passes when extracted text is *substantially longer*
+than a known preview and free of paywall markers. Markup-derived text is **longer**
+(hidden boilerplate, `<template>`, `<script>`) and can be marker-free ⇒ so a
+guest-mode extraction pushes **toward a false "recovered" verdict** instead of
+failing closed. Their suite already carries a known-failing case of exactly that
+over-capture shape, which is how the direction is known rather than guessed.
+
+⇒ **That is the point at which a guest must become an owner of its own target** —
+not a reason to weaken the posture. And extending the original wording: not
+something to leave a lane to discover as a mysterious empty result — **a
+mysterious WRONG result is not discovered at all.**
 
 ### (e) One visible side panel, and the screen size
 
