@@ -207,6 +207,82 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.15.0 — 2026-09-27
+
+**Headline: three consumer lanes reviewed `arch-browser-targets-btg4` and two of
+them FALSIFIED parts of it against base's own code.** The review found more than
+the design did. `inspect()` gained a diagnostic; everything else in this release is
+specification and verification.
+
+### ⛔ What this headline does NOT cover
+
+* **§6(b)'s LEASE IS STILL BROKEN — this release records it, it does not fix it.**
+  `profile-lock.js:36` builds `LOCK_FILENAME` from `C.PROJECT`, so two tools sharing
+  one profile take two DIFFERENT lock files and never contend. Reproduced:
+  `.alpha-webctl.lock.json` vs `.beta-webctl.lock.json`, *SAME FILE? false*. ⇒ The
+  X-input lease **cannot arbitrate between the two parties it exists for.** Fixing it
+  means deciding where lock identity lives (target + `profile_id`, or an explicit
+  lease path), which is a design decision and deliberately not rushed into a patch.
+  ⚠ **If you are building on §6(b), you are building on a guard that cannot fire.**
+* **Nothing ESTABLISHES ownership at the point of use either.** A tool cannot tell
+  whether it is an owner or a guest; `--cdp <url>` is free-form and a typo'd port
+  reaches another lane's authenticated browser. Same missing identity as the lease,
+  one level up. Open.
+* **`portSourcesUnavailable` explains an absence; it does not create provenance.**
+  If your cfg does not come from `buildDriverCfg()`, the sources are still `null` —
+  you now get told why instead of guessing. Two causes remain indistinguishable from
+  inside base (stale pin vs hand-built cfg) and the field says so.
+* **`gate-probe` is for the GATE, not for your contract.** A lane never calls it. It
+  returns no-verdict by hand, every time.
+* **`HARNESS_GENERATION` is still 1.** An additive verb creates no stale copies, so
+  contracts written against generation 1 are current. Not a bug.
+* **btg4 is still `status: draft`,** with two open items above and no `lib/`
+  implementation. Nothing here lets you point a tool at a remote browser yet.
+
+### Added
+
+* `contract-harness.mjs gate-probe` — asserts, **inside the gate's real swap
+  window**, that `pin` declines a verdict and that its reason names both SHAs. The
+  gate runs it per swapped consumer, counts it separately, and **blocks the release
+  on a defect, attributed to base rather than to the consumer**. Zero exercises
+  reports *"UNTESTED, not passed"*. Previously this arm was proven only against a
+  forged fixture.
+* `inspect().portSourcesUnavailable` — present **only** when `cfg.portSources` is
+  missing, naming both causes and both remedies, so the healthy case stays silent
+  and the field cannot become wallpaper.
+
+### Fixed
+
+* `judgePin()` split from `checkPin()` so `gate-probe` asserts on **the same
+  verdict** the `pin` verb produces rather than a re-derivation.
+
+### Docs
+
+* **btg4** gained: the two-half guest gap (rendered-text semantics, which fails
+  *silently plausible* rather than silently empty, and can invert a safety gate);
+  `kind` and `base` in the schema, both found independently by two lanes; ownership
+  as a **(tool, target)** property; §8 retitled to carry *"one tool, ONE target that
+  is not local"*; and that a remote target implies **that host built its own images**,
+  because UID/GID are build args and the failure surfaces as a browser crash.
+* **r7x2** — new: argv arrays, file payloads, and §1b, **the remote shell an argv
+  array does not cross.** `execFile('ssh', [host, '--', ...argv])` satisfies the
+  array rule exactly and is still an injection. ⭐ Records that the stdin form is not
+  merely an alternative to per-element `%q`: it is **the only one that stays correct
+  when someone later adds an argument.**
+* **k3wn** gained three shapes: `git log -S` measures **transitions, not states**,
+  and its wrong answer has the right shape; **a guard and a claim that read the same
+  input cannot disagree** — detected because *a whole test became unwritable*; and
+  **a refusal test needs a positive control on the same fixture**, reached
+  independently by two lanes the same day.
+* **AGENTS.md**: base is the one **PUBLIC** repo — provenance by ROLE, and our own
+  agent handles carry machine names, so cite the LANE.
+
+### Registry
+
+* `claude-chrome-extension-webctl` corrected to `wired:true` (the gate caught the
+  registry under-reporting a real consumer), and `perplexity-webctl` registered at
+  `tier: contracts`.
+
 ## v0.14.0 — 2026-09-27
 
 **Headline: the contract harness.** The checks every consumer contract was
