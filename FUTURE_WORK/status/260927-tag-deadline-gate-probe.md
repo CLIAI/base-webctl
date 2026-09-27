@@ -1,4 +1,16 @@
-# gate-probe is on master and UNTAGGED — tag by ~2026-10-04 if no lib/ change lands
+# ✅ RESOLVED 2026-09-27 — gate-probe shipped in v0.15.0
+
+**The ~2026-10-04 fallback never had to fire.** A `lib/` change landed the same day
+(`inspect().portSourcesUnavailable`, from fetlife's review), so the ruling's primary
+path applied: gate-probe rode with it. Tagged **v0.15.0** (commit `72d42ab`, tag
+object `3528250`), gate `--against-head` green with `harness gate-probe: ok=4
+defect=0`. Kept rather than deleted because the reasoning below is the reusable
+part, and because a resolved deadline that vanishes leaves no record that it was
+met rather than forgotten.
+
+---
+
+# (original) gate-probe is on master and UNTAGGED — tag by ~2026-10-04 if no lib/ change lands
 
 **Ruled by `webctl:mgr` 2026-09-27.** Recorded here because a deadline held only in
 a tmux pane is a deadline nobody inherits.
