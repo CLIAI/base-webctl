@@ -237,8 +237,13 @@ Opera's `/json/version` reports **`Browser: Chrome/151`**. Only the user-agent's
 `OPR/` token or the brand list identifies it. ⇒ So a target must **declare** its
 engine; a tool that detects it from `/json/version` will confidently call Opera
 Chromium, and any engine-conditional behaviour will silently take the wrong branch.
-That is a stated-not-measured field by necessity — the one case where §4's *"store
-how to FIND, never what you would MEASURE"* inverts, because the measurement lies.
+⚠ **REFINED by `perplexity`, who measured it:** `/json/version`'s **`Browser`** field
+lies, but the **UA's `OPR/` token and the brand list do NOT.** ⇒ So the engine *is*
+measurable — just not from the field §4 would reach for first. The rule is therefore
+**"declared, and VERIFIED against the UA/brands at connect"**, which is what their
+`connect()` already does. ⭐ Not *"the measurement lies"* but **"the obvious
+measurement lies and a less obvious one does not"** — a weaker and more useful claim
+than the one I first wrote.
 
 #### ⚠ `lifecycle` is per-target, and OWNERSHIP IS PER (TOOL, TARGET)
 

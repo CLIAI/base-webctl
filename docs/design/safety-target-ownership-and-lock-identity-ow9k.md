@@ -39,6 +39,30 @@ identity, two mechanisms*.
 ⛔ **Nothing here has been implemented.** Every wired consumer already uses
 `profile-lock`, so this is circulated for review **before** any `lib/` change.
 
+## 0. ⭐ LEAD WITH THE GRANULARITY, NOT THE REFUSALS
+
+**`cgwc` argued the ordering and is right: the three refusals below harden a lock
+that is currently guarding the wrong thing.** Measured by them with two lanes'
+constants against one profile:
+
+```
+createProfileLock(<tool A> constants).lockPath('/p')  ->  /p/.<tool-a>.lock.json
+createProfileLock(<tool B> constants).lockPath('/p')  ->  /p/.<tool-b>.lock.json
+```
+
+⇒ **Mutual exclusion over the resource that actually matters — the profile — is
+absent today, in every wired lane, and no fail-open case is involved.** Dropping the
+tool name from the filename (§3) is therefore the larger win; §2's refusals make a
+correct lock trustworthy, and §3 makes it a lock over the right resource.
+
+⭐ **And `cgwc` extracted the rule that generalises it.** This is the third
+scope-mismatch in their lane this month, and the earlier two point the *opposite*
+way: a shared log directory needed pruning scoped **by tool** (a blanket filter ate
+siblings' files), a tab-activity ledger had to be **tool-scoped** for the same
+reason — and this one is tool-scoped where it must be **resource-scoped**. ⇒ The rule
+is not *"scope by tool"* or *"scope by resource"* but **scope by WHAT MUST BE
+MUTUALLY EXCLUSIVE** — a different question each time, and the one nobody asks.
+
 ## 1. Three measured defects, not three hypotheses
 
 All reproduced 2026-09-27 against base at `v0.16.0`, each with a control.
@@ -195,6 +219,75 @@ other half of this, and neither half is sufficient alone. ⚠ And a refusal must
 could not be read*, or the operator's only recourse is to delete a lock they do not
 understand — which converts a fail-closed design back into a fail-open habit.
 
+## 2b. ✅ RULED: a stopped-or-missing LOCAL CONTAINER stays an AUTOMATIC takeover
+
+**`substack` asked for this explicitly because it gates a human action, and their
+argument decides it.** Their containers exited at a reboot (no restart policy,
+family-wide) and sat `Exited` with a valid lock present for two weeks. `start` worked
+only because `container-stopped` ⇒ dead ⇒ takeover.
+
+⇒ **§2's `--force` requirement scopes to a REMOTE holder ONLY.** It does **not**
+reclassify a local container-backed holder.
+
+⭐ **And the reason is the distinction the whole document turns on: a stopped
+container is a FACT YOU CAN CHECK, not an inference across a network.** `--force`
+exists where liveness cannot be established. Where it *can* be established — by
+asking the local container runtime — requiring a human adds no safety and removes
+recovery. ⚠ Getting this wrong would mean every reboot leaves that lane needing
+manual intervention, and the thing it blocks is the operator sign-in that has been
+its only open action for weeks.
+
+## 2c. ⚠ WHAT THE MODULE ALREADY GETS RIGHT, AND A REWRITE MUST NOT REGRESS
+
+*(`cgwc`, who nearly reported it as a bug and checked first.)* They found a **dead
+pid while the container was running** and started writing it up — then found
+`isHolderAlive()` asks **docker** whenever `containerName` is present, and returns
+`{alive: true, reason: 'unknown'}` when **no inspector is supplied**.
+
+⇒ **So the liveness question ALREADY FAILS CLOSED: unprobeable means held.** This
+document is about replacing fail-open with refusal, and this is a place base is
+**already correct**. ⛔ A rewrite that tightened the corrupt path while regressing
+that default would be a **net loss**. The lock record carrying **both** `pid` and
+`containerName` is what makes it possible: for a container-backed browser the pid is
+a CLI that exits seconds later, and **the container is the holder.**
+
+## 2d. ⛔ LIVENESS IS CALLER-DEPENDENT — the load-bearing gap for guest ownership
+
+*(`substack`, sharpening their own earlier warning.)* There are **three** claims where
+I had written two:
+
+1. *the code refuses an unparseable lock* — offline-testable with planted files;
+2. *no unparseable lock is ever acquired in production* — **not** asserted by (1);
+3. *every caller decides liveness the same way* — ⛔ **FALSE today.**
+
+(3) fails because `dockerInspect` is **injected**. base's own driver injects it; a
+caller that does not — another lane's tooling, or a guest tool — sees **the same lock
+file as alive forever**.
+
+⇒ **So a guest that cannot inject `dockerInspect` can never learn that the owner is
+gone.** For a design whose purpose is letting a guest determine ownership, that is the
+load-bearing gap, and it is not fixed by any of §2's refusals. ⚠ A contract that
+asserts the refusals **with a stub** has said nothing about what production callers
+inject.
+
+## 2e. ⚠ A PID FROM A PREVIOUS BOOT, and the field that is recorded but never read
+
+*(`substack`.)* `process.kill(pid, 0)` cannot distinguish *"my holder lives"* from
+*"an unrelated process now has that number"*. On a machine where `pid_max` is
+4,194,304 and live pids already span nearly that whole range, a reboot restarts the
+counter into the same dense region. ⇒ Not a tail risk.
+
+⭐ **Scoped honestly, because it does NOT bite the lane that found it:** the container
+branch returns *before* the pid branch, so for a container-held lock the `pid` field is
+**recorded and never read**. The hazard is real only for a lock **without** a
+`containerName` — a direct, non-containerised browser. ⚠ **And a field that looks
+load-bearing while being unreachable is worth knowing about on its own**: someone will
+eventually "fix" a stale lock by checking that pid.
+
+⇒ **Fix: record `boot_id` beside the pid** (`/proc/sys/kernel/random/boot_id`). A pid
+from a previous boot then reads as **known meaningless** rather than plausibly alive.
+This document is titled *lock identity*, and a pid is only an identity within one boot.
+
 ## 3. Lock identity: key on the TARGET, not on the tool
 
 ⇒ The lock filename must be derived from **what is being contended** — the target
@@ -204,13 +297,37 @@ and the profile — not from **who is contending**.
 <profile>/.webctl-target.<target>.<profile_id>.lock.json      (shape, not final)
 ```
 
-✅ **DECIDED — BESIDE the profile, not inside it.** `ccew` already does exactly this
-(`profiles/<slug>/x-input.lease`, beside `chromium/`) and gave three reasons, each of
-which survives on its own: **Chromium owns the inside** (its own `Singleton*` files,
-its scrubs, its layout); **a profile move or copy must not carry a lock**; and a
-**sibling path is trivially flockable from a remote shell** without touching
-Chromium's files. ⇒ That closes open question #1, and it matches the argument they
-won for `isolation-accept.json`.
+⛔ **REOPENED — I MARKED THIS DECIDED ON ONE LANE'S INPUT AND A SECOND LANE HAS
+MEASUREMENT AGAINST IT.** Recording both arguments rather than the one that arrived
+first, because they are both strong and they point opposite ways.
+
+**BESIDE** *(`ccew`, from existing practice — `profiles/<slug>/x-input.lease` beside
+`chromium/`)*: Chromium owns the inside; **a profile move or copy must not carry a
+lock**; a sibling is trivially flockable from a remote shell without touching
+Chromium's files. Same argument they won for `isolation-accept.json`.
+
+**INSIDE** *(`cgwc`, with 20 days of evidence)*: their profile lock has sat inside a
+constantly-written profile since 2026-09-07, **unmodified**, beside Chromium's own
+`.org.chromium.Chromium.*` artifact. ⇒ *"Chromium owns the inside"* is true but
+**namespaced** — it prefixes its own files and empirically does not sweep unknown
+dotfiles. That is a measurement, not a preference.
+⭐ **And their stronger argument is SEPARABILITY, not tidiness:** a beside-lock
+**survives the profile moving**, and then guards a directory that is not there — or
+worse, **a NEW profile created at the old path inherits a stale lock asserting
+ownership of data it has never seen.** Inside means the lock cannot be separated from
+what it guards **by construction**.
+
+⚠ **AND THE INVERSE HAZARD, WHICH `substack` FOUND IN BASE AS IT STANDS:** the
+profile lock is inside today, so **anything that resets or wipes the chromium profile
+dir while the container keeps running silently RELEASES a lock whose holder is still
+alive.** ⇒ So each placement has a way of decoupling the lock from the truth:
+*beside* survives a move it should not survive, *inside* is destroyed by a wipe it
+should survive. Neither is free, and the choice is which failure a lane can detect.
+
+⇒ **Open, and it is now the design's main unresolved question.** It cannot be
+settled by preference: it needs a rule for what happens to the lock when the profile
+**moves** and when it is **wiped**, and whichever placement is chosen must answer the
+other case explicitly rather than inherit it.
 
 * **`<target>`** — the target name from `btg4` §3/§4.
 * **`<profile_id>`** — `btg4` §2's **opaque** id.
@@ -218,11 +335,14 @@ won for `isolation-accept.json`.
 * ⚠ **`profile_id` must resolve to ONE concrete path outside every per-tool cache
   namespace**, or the indirection re-introduces the split it removes (`fetlife`).
 
-⭐ **Prior art, not the answer:** `perplexity` already keys its lock by **target
-name, per invocation** — which is exactly this identity, arrived at independently
-by a lane that needed it. Their lock is a working existence proof that target-keyed
-locking is implementable; it is not evidence about migration, which they did not
-have to do.
+⚠ **CORRECTED — I OVERSTATED THIS, AND THE LANE SAID SO.** I had called
+`perplexity`'s lock *"a working existence proof that target-keyed locking is
+implementable"*. It is **target-keyed WITHIN ONE TOOL**: the lock lives under **that
+tool's own cache directory**, so a second tool locking the same browser takes a
+different file and never contends — **the same failure reproduced in §1(a), one level
+up.** ⇒ It proves per-tool target keying, **not cross-tool arbitration**, which is
+the thing §6(b) needs. *(Their filename prefix `port-` also shows the mutex API still
+assumes its key is a port.)*
 
 ## 4. Ownership: a claim, and the stronger form that needs no claim
 
@@ -243,6 +363,12 @@ nothing in a CDP connection carries provenance (`substack`).
   and with `btg4` §7.
 
 ### (ii) ⭐ The stronger form — identity by CONSTRUCTION
+
+⚠ **PROPOSED BY ONE LANE, UNIMPLEMENTED — corrected at their insistence.** I had
+cited this as prior art. Today `perplexity`'s `connect()` attaches to a **stated**
+local port and checks engine kind; the label-resolved, ephemeral, stdin-driven tunnel
+is **written down as a follow-up and nothing more.** ⇒ Do not read what follows as
+something that exists.
 
 *(`perplexity`, designed after auditing their own attach path.)* Rather than
 guarding a stable port with a claim, **remove the stable port**: build the tunnel
@@ -284,14 +410,54 @@ invisible lock is an unlocked profile.
 3. **A legacy lock that cannot be read is UNKNOWN ⇒ refuse** (§2).
 4. **Write only the new name.** Never write both; two lock files for one resource is
    `t2wf` by construction, and the moment they disagree neither is authoritative.
-5. **Removing legacy support needs its own release**, and the CHANGELOG must say
-   which version stops reading the old name — because that is the release in which
-   an old running holder silently becomes invisible.
+5. ⛔ **NEVER STOP READING THE LEGACY NAME** *(`cgwc`, strengthening this clause).*
+   *"Read both during migration"* implies an end date, and **the end date is governed
+   by the slowest lane on the machine** — which base cannot know and no lane can
+   observe. ⇒ Reading an extra filename costs one `stat`; getting the window wrong
+   **silently removes mutual exclusion**. So there is no release that stops reading it.
+
+### ⚠ And migration state is per-MACHINE, not per-repo
+
+*(`cgwc`.)* During any window, one box can run a lane on the **old** name and another
+lane on the **new** one simultaneously. They write different files and do not see each
+other ⇒ **the very period in which you are being careful is the period with NO mutual
+exclusion.** That is the strongest argument for (5): the window cannot be closed by
+coordination between repos, because the state is not in a repo.
+
+⚠ **Also: for at least one lane, adoption is a SHIM, not a migration.** `cgwc` carries
+its own pre-factory copy of `profile-lock` (its own file, never loading base's) whose
+**export surface is identical** to base's factory return, and whose `lockPath()` yields
+**the same path** given the same constants. ⇒ So they are the same module at different
+**ages**, not forks, and ow9k reaches that lane only when it adopts. ⭐ Which is also
+why they will pin the corrupt and `schemaVersion: 99` cases in their suite **before**
+adopting: those cases are currently uncovered, so *"tests still pass"* would be
+evidence of nothing.
 
 ### ⭐ And it must be proven with a PLANTED OLD-FORMAT LOCK
 
 *(`webctl:mgr`'s instruction, and `ccew`'s rule applied: a refusal test needs a
 positive control on the same fixture.)*
+
+⛔ **ENUMERATE THE ARMS FROM THE REASON CODES, NOT FROM FOUR SHAPES** *(`substack`).*
+The module already distinguishes **eight**: `remote · unknown · container ·
+container-missing · container-stopped · no-pid · pid · pid-dead`. My proposed "fifth
+state" (a lock left by a removed container) **already exists** as `container-missing`,
+and the reboot case is `container-stopped`. ⇒ A fixture set enumerated from shapes
+drifts from an implementation enumerated from reasons.
+
+⭐ **And the state to ADD is not a lock shape but a lock READING: `reason:'unknown'`**
+— the same file, two callers, opposite verdicts, decided by dependency injection
+rather than by any fact (§2d). It fails closed, so it is safe; and it is precisely the
+state that makes guest ownership-detection impossible.
+
+✅ **More is offline-testable than I credited** *(`substack`)*, because `dockerInspect`
+is an injectable async: planted files plus a stub cover corrupt, future-schema,
+foreign-hostname (⇒ HELD, `remote`), `{running:true}` (⇒ HELD), `{exists:false}` and
+`{running:false}` (⇒ takeover), and the test process's own pid (⇒ HELD, live and local).
+⚠ What is genuinely **not** offline-testable is narrower than *"two tools contend"*: it
+is **cross-HOST** contention, plus anything needing a real container lifecycle or X
+server. Same-host two-process contention is already covered by a shipped concurrency
+test.
 
 The suite must plant, in one fixture:
 
@@ -334,7 +500,23 @@ The suite must plant, in one fixture:
 4. ✅ **ANSWERED — a remote holder only by NAMING it** (§2): `--force` takes the exact
    holder token, refuses on mismatch, logs the override; a local holder may be
    auto-taken-over only when provably dead. *(`ccew`.)*
-5. **STILL OPEN: does any lane rely on the current fail-open?** `ccew` answers **no**
-   and asks for all three cases to refuse. Other lanes outstanding.
-6. **STILL OPEN: is there a fifth lock state?** A record left by a container that was
-   `docker rm`'d, for instance — raised as a candidate, not yet measured.
+5. ✅ **ANSWERED — no lane relies on the current fail-open.** `ccew`, `cgwc`,
+   `substack` and `perplexity` all answered **no**, each from measurement, and all four
+   asked for the refusals. ⚠ But `substack` distinguished a case I had conflated: they
+   **do** rely on a **dead-holder takeover** (§2b), which is not the same thing.
+   ⛔ And `perplexity` measured **three rows that still ACQUIRE** in their own
+   per-invocation lock — corrupt metadata with the pid file removed, future-schema with
+   the pid file removed, and, worst, **valid metadata naming a LIVE pid alongside a
+   corrupt pid file ⇒ acquired**. That last one *ignores metadata it could have read*,
+   which is the same shape as §1(c) reached from the opposite direction.
+6. ✅ **ANSWERED — there is no fifth SHAPE; there are eight REASONS** (§5), and the
+   state worth adding is a **reading**, not a shape: `reason:'unknown'` (§2d).
+7. ⛔ **NOW THE MAIN OPEN QUESTION: placement** (§3). Two lanes, two strong arguments,
+   opposite directions, and each placement decouples the lock from the truth in a
+   different failure. Needs a rule for the profile **moving** and for the profile being
+   **wiped**, not a preference.
+8. **OPEN: how does a GUEST establish liveness at all** (§2d)? Every refusal in §2 is
+   reachable by a guest; `reason:'unknown'` is not escapable by one, because it cannot
+   inject the inspector. ⇒ Either the claim carries enough to decide, or a guest can
+   never learn the owner is gone — which would make §4's posture undecidable in exactly
+   the case it exists for.
