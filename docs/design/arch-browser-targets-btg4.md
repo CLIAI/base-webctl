@@ -383,6 +383,52 @@ taking the X-input lease, which is deliberately **serialised and contended**
 trade. A tool that finds this too slow is asking to be the lifecycle owner of its
 own target, which is §6(a)'s answer, not an exception to this one.
 
+#### ⭐ GUEST IS ABOUT WHOSE BROWSER IT IS, NOT ABOUT WHAT THE TOOL DOES
+
+**The categories are named by OWNERSHIP.** A tool driving a browser **it owns** is
+that target's lifecycle owner and **may evaluate in its own profile**. The guest
+posture applies **only** to a tool that is a guest in **another tool's**
+authenticated browser.
+
+⚠ **This had to be said explicitly, because as first written the posture read as
+banning `Runtime.evaluate` outright — which would have broken every extraction
+lane.** DOM extraction commonly *uses* `Runtime.evaluate`: it is how computed
+text, shadow content and virtual-scroll state get out of a page. A posture that
+forbade it to all tools would have made `data-dom-content-extraction` work
+impossible, and the doc would have shipped a rule the family could not follow.
+
+⇒ Ruled by `webctl:mgr`: this **reclassifies nobody today** — each lane runs its
+own stack with its own login, so each is already an owner. The only live guest
+case is a lane joining another lane's browser.
+
+⛔ **Two resolutions REJECTED, with reasons**, because the discarded options are
+the useful part:
+
+* *"Guests may evaluate, but only on their own `targetId` and with no network side
+  effects"* — **rejected: CDP cannot enforce it.** It would be honour-system, and
+  §1 of this document exists to say a guard beats a convention.
+* *"Add a third posture between owner and guest"* — **held, not adopted.** An
+  unused posture is spec for code that does not exist. Add it when a real lane
+  needs it.
+
+#### A guest is not blind — and where it genuinely goes dark
+
+Most read-only extraction does **not** need to run page JS *(toolkit contributed
+by `webctl:mgr`; not re-measured here)*:
+
+| need | CDP method | runs page JS? |
+|---|---|---|
+| markup, incl. shadow roots | `DOM.getDocument({pierce: true})` | no |
+| an element's markup | `DOM.getOuterHTML` | no |
+| computed accessible names | `Accessibility.getFullAXTree` | no |
+
+⚠ **THE HONEST GAP: state that only page JS can MATERIALISE.** Virtual-scroll
+content that does not exist in the DOM until a scroll handler runs, and lazy state
+behind an event, are not reachable by any of the above. ⇒ **That is the point at
+which a guest must become an owner of its own target** — not a reason to weaken
+the posture, and not something to leave a lane to discover as a mysterious empty
+result.
+
 ### (e) One visible side panel, and the screen size
 
 The xpra screen size follows the latest viewer; only one side panel is visible
