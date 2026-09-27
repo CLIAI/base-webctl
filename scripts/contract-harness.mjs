@@ -54,6 +54,14 @@ import { execFileSync } from 'node:child_process';
  */
 export const HARNESS_GENERATION = 1;
 
+/**
+ * ⚠ NOT BUMPED BY `gate-probe`, DELIBERATELY. The marker answers "who is
+ * carrying old ROT?" — a purely ADDITIVE verb creates none, so bumping would
+ * declare every existing copy stale and send five lanes looking for a defect
+ * that is not there. ⇒ A version marker that cries wolf stops being read, which
+ * would cost exactly the sweep it exists to enable.
+ */
+
 const EXIT = Object.freeze({ pass: 0, fail: 1, noVerdict: 2, usage: 3 });
 
 /** @param {string[]} args @param {string} name */
@@ -110,16 +118,22 @@ function report(check, code, reason, extra = {}) {
  * environment at runtime. **A lane on any pin, however old, receives it.**
  * There was never a version reason to skip it.
  *
+ * ⭐ JUDGEMENT IS SEPARATE FROM REPORTING so that `gate-probe` can assert on
+ * THE SAME VERDICT this function produces. A probe that re-derived the verdict
+ * would be a second implementation, and two implementations agreeing proves
+ * only that they agree.
+ *
  * @param {string} repo @param {string} sub
+ * @returns {{code: number, reason: string, extra: Record<string, any>}}
  */
-function checkPin(repo, sub) {
+function judgePin(repo, sub) {
   const declaredEnv = process.env.WEBCTL_DECLARED_PIN || '';
   const gitlink = git(['ls-tree', 'HEAD', sub], repo).split(/\s+/)[2] || '';
   const worktree = git(['rev-parse', 'HEAD'], path.join(repo, sub));
 
   if (!gitlink && !worktree) {
-    return report('pin', EXIT.noVerdict,
-      `no submodule found at '${sub}' — this contract cannot judge a pin that is not mounted`);
+    return { code: EXIT.noVerdict, extra: {},
+      reason: `no submodule found at '${sub}' — this contract cannot judge a pin that is not mounted` };
   }
 
   const swapped = !!declaredEnv && !!worktree && declaredEnv !== worktree;
@@ -128,22 +142,111 @@ function checkPin(repo, sub) {
     // points at a release candidate, which by definition is not yet tagged.
     // Skipping loudly, with the declared pin named, so the skip is a decision
     // and not a silence.
-    return report('pin', EXIT.noVerdict,
-      `the release gate has swapped this submodule (declared ${declaredEnv.slice(0, 7)}, `
-      + `worktree ${worktree.slice(0, 7)}). A candidate is not yet tagged, so pin-is-a-tag `
-      + 'does not apply; CONTENTS checks still do.',
-      { declared: declaredEnv, worktree });
+    return { code: EXIT.noVerdict,
+      reason: `the release gate has swapped this submodule (declared ${declaredEnv.slice(0, 7)}, `
+        + `worktree ${worktree.slice(0, 7)}). A candidate is not yet tagged, so pin-is-a-tag `
+        + 'does not apply; CONTENTS checks still do.',
+      extra: { declared: declaredEnv, worktree } };
   }
 
   const pin = gitlink || worktree;
   const tag = git(['describe', '--tags', '--exact-match', pin], path.join(repo, sub));
   if (!tag) {
-    return report('pin', EXIT.fail,
-      `the declared gitlink ${pin.slice(0, 7)} is not an exact tag. Pin by TAG: a bare `
-      + 'commit is not a release and cannot be reasoned about by a sibling.', { declared: pin });
+    return { code: EXIT.fail,
+      reason: `the declared gitlink ${pin.slice(0, 7)} is not an exact tag. Pin by TAG: a bare `
+        + 'commit is not a release and cannot be reasoned about by a sibling.',
+      extra: { declared: pin } };
   }
-  return report('pin', EXIT.pass, `declared gitlink ${pin.slice(0, 7)} is tag ${tag}`,
-    { declared: pin, tag });
+  return { code: EXIT.pass, reason: `declared gitlink ${pin.slice(0, 7)} is tag ${tag}`,
+    extra: { declared: pin, tag } };
+}
+
+/** The `pin` verb: judge, then report. @param {string} repo @param {string} sub */
+function checkPin(repo, sub) {
+  const v = judgePin(repo, sub);
+  return report('pin', v.code, v.reason, v.extra);
+}
+
+// ── gate-probe ────────────────────────────────────────────────────────────────
+/**
+ * Assert that `pin` declines a verdict IN THE REAL SWAP STATE.
+ *
+ * ⛔ WHY THIS VERB EXISTS. The swap arm of `judgePin` — return NO VERDICT when
+ * the gate has pointed the submodule at an untagged candidate — was tested only
+ * against a FORGED fixture: the disagreement was constructed by hand. ⇒ A forged
+ * fixture proves the arm CAN fire. It does not prove it fires in the state the
+ * gate actually produces, and the gate is the only place that state exists on
+ * demand.
+ *
+ * ⚠ VACUITY IS THE WHOLE RISK HERE. Outside the swap window this probe MUST NOT
+ * report pass: there is nothing to assert, and a pass would mean "the arm works"
+ * on the strength of never having tried it. It returns NO VERDICT with the
+ * reason instead, every time, including when run by hand.
+ *
+ * @param {string} repo @param {string} sub
+ */
+function checkGateProbe(repo, sub) {
+  const swappedByGate = process.env.WEBCTL_GATE_SWAPPED === '1';
+  const declaredEnv = process.env.WEBCTL_DECLARED_PIN || '';
+  const worktree = git(['rev-parse', 'HEAD'], path.join(repo, sub));
+
+  // ⛔ THE PRECONDITION COMES FROM THE GATE, NOT FROM THE COMPARISON UNDER TEST.
+  // The first draft of this probe decided "a swap is in effect" by computing
+  // `declaredEnv !== worktree` — the SAME comparison judgePin makes — and then
+  // asserted that judgePin declines. That assertion was guaranteed true: the
+  // branch reporting "pin returned PASS inside a swap window" was UNREACHABLE.
+  // ⇒ A check whose precondition and whose assertion read the same input cannot
+  // fail. WEBCTL_GATE_SWAPPED is set by the gate, which knows it performed a
+  // swap, so the claim about judgePin's own comparison becomes falsifiable.
+  if (!swappedByGate) {
+    return report('gate-probe', EXIT.noVerdict,
+      'WEBCTL_GATE_SWAPPED is not 1, so the release gate has not told us it swapped '
+      + 'anything. This probe asserts behaviour that exists only inside the gate\'s swap '
+      + 'window; there is nothing to assert here and a PASS would be vacuous.');
+  }
+  if (!declaredEnv) {
+    return report('gate-probe', EXIT.fail,
+      'the gate says it SWAPPED (WEBCTL_GATE_SWAPPED=1) but did not hand over '
+      + 'WEBCTL_DECLARED_PIN. In that state a contract cannot know its own declared pin '
+      + 'at all, which is the exact failure the variable exists to prevent.');
+  }
+  if (!worktree) {
+    return report('gate-probe', EXIT.fail,
+      `the gate says it swapped, but there is no submodule worktree at '${sub}' to have `
+      + 'swapped. One of the two is wrong, and a contract run in this state is judging nothing.');
+  }
+
+  // ⭐ Ask the SAME function the `pin` verb asks — not a re-derivation.
+  const v = judgePin(repo, sub);
+
+  if (v.code !== EXIT.noVerdict) {
+    const named = { 0: 'PASS', 1: 'FAIL' }[v.code] || String(v.code);
+    return report('gate-probe', EXIT.fail,
+      `pin returned ${named} although the gate reports a swap in effect (declared `
+      + `${declaredEnv.slice(0, 7)}, worktree ${worktree.slice(0, 7)}). It must decline a `
+      + 'verdict: a release candidate is not tagged, so a PASS asserts a tag that does not '
+      + 'exist and a FAIL blocks every release. '
+      + `Its reason was: ${v.reason}`,
+      { declared: declaredEnv, worktree, pinCode: v.code });
+  }
+
+  // ⚠ The reason TRAVELS AS TEXT (xrl4), so a reader must be able to see both
+  // sides. A no-verdict naming neither SHA is a verdict nobody can act on — and
+  // it would satisfy a code-only assertion.
+  const bothNamed = v.reason.includes(declaredEnv.slice(0, 7))
+    && v.reason.includes(worktree.slice(0, 7));
+  if (!bothNamed) {
+    return report('gate-probe', EXIT.fail,
+      'pin declined a verdict, but its reason does not name BOTH the declared pin '
+      + `(${declaredEnv.slice(0, 7)}) and the worktree (${worktree.slice(0, 7)}). The reason is `
+      + `the only thing that travels; a reader cannot act on it. Reason was: ${v.reason}`,
+      { declared: declaredEnv, worktree });
+  }
+
+  return report('gate-probe', EXIT.pass,
+    'pin declined a verdict inside a gate-reported swap window and named both sides '
+    + `(declared ${declaredEnv.slice(0, 7)}, worktree ${worktree.slice(0, 7)})`,
+    { declared: declaredEnv, worktree });
 }
 
 // ── no-revendor ───────────────────────────────────────────────────────────────
@@ -224,9 +327,10 @@ switch (cmd) {
     code = EXIT.pass; break;
   case 'pin': code = checkPin(repo, sub); break;
   case 'no-revendor': code = checkNoRevendor(repo, sub, libDir); break;
+  case 'gate-probe': code = checkGateProbe(repo, sub); break;
   default:
     process.stderr.write(
-      'usage: contract-harness.mjs <generation|pin|no-revendor> [--repo D] [--sub P] [--lib D]\n'
+      'usage: contract-harness.mjs <generation|pin|no-revendor|gate-probe> [--repo D] [--sub P] [--lib D]\n'
       + '⇒ exit 0 pass · 1 fail · 2 no verdict (reason on the last line) · 3 usage\n');
     code = EXIT.usage;
 }

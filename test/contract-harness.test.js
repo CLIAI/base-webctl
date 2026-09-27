@@ -14,21 +14,26 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TOOL = path.join(ROOT, 'scripts', 'contract-harness.mjs');
 
-/** Run the harness; never throws, so a control can assert on the code. */
+/**
+ * Run the harness; never throws, so a control can assert on the code.
+ *
+ * ⚠ spawnSync, NOT execFileSync-in-try/catch. The earlier form returned
+ * `stderr: ''` on every SUCCESSFUL run, because execFileSync returns stdout
+ * only — so an assertion about a passing run's human-readable reason could not
+ * match anything, and read as the probe being silent rather than as the helper
+ * discarding the stream. A test helper that drops a stream on one path makes
+ * whole assertions unexpressible on that path.
+ */
 function run(args, env = {}) {
-  try {
-    const stdout = execFileSync(process.execPath, [TOOL, ...args],
-      { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
-    return { status: 0, stdout, stderr: '' };
-  } catch (/** @type {any} */ e) {
-    return { status: e.status == null ? -1 : e.status, stdout: e.stdout || '', stderr: e.stderr || '' };
-  }
+  const r = spawnSync(process.execPath, [TOOL, ...args],
+    { cwd: ROOT, encoding: 'utf8', env: { ...process.env, ...env } });
+  return { status: r.status == null ? -1 : r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
 /** A throwaway consumer repo with a real submodule-shaped gitlink. */
@@ -154,4 +159,79 @@ test('the harness owns the exit codes, and publishes its generation', () => {
 
   const bad = run(['no-such-check']);
   assert.equal(bad.status, 3, 'usage errors are 3, distinct from fail(1) and no-verdict(2)');
+});
+
+// ── gate-probe ────────────────────────────────────────────────────────────────
+//
+// ⛔ THE FIRST DRAFT OF `gate-probe` COULD NOT FAIL, and that is why these tests
+// exist in this shape. It decided "a swap is in effect" by computing
+// `declaredEnv !== worktree` — the SAME comparison judgePin makes — and then
+// asserted judgePin declines. The assertion was guaranteed true and the
+// FAIL branch was unreachable. ⇒ The precondition now comes from the GATE
+// (WEBCTL_GATE_SWAPPED), which is a different source, so the claim about
+// judgePin's own comparison is falsifiable — and the MUTATION test below is the
+// one the first design could not express at all.
+
+test('gate-probe: NO VERDICT outside the gate — never a vacuous pass', () => {
+  const { dir, g } = fixture();
+  g(['add', 'vendor/base-webctl']);
+  g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
+
+  const r = run(['gate-probe', '--repo', dir]);
+  assert.equal(r.status, 2,
+    `must decline, not pass, when no swap window exists; got ${r.status}\n${r.stderr}`);
+  assert.match(r.stdout, /"result":"no-verdict"/);
+  assert.match(r.stderr, /vacuous/i, 'the reason must say WHY it declined');
+});
+
+test('⭐ gate-probe: PASSES in a real swap window, and names both sides', () => {
+  const { dir, sub, g } = fixture();
+  g(['add', 'vendor/base-webctl']);
+  g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
+  const declared = execFileSync('git', ['-C', sub, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+
+  // The swap the gate performs: check the submodule out at an untagged candidate
+  // WITHOUT touching the parent's committed gitlink.
+  fs.writeFileSync(path.join(sub, 'lib', 'candidate.js'), 'export const c = 3;\n');
+  g(['-C', sub, 'add', '.']);
+  g(['-C', sub, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'candidate']);
+  const worktree = execFileSync('git', ['-C', sub, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  assert.notEqual(declared, worktree, 'the fixture must actually produce a disagreement');
+
+  const r = run(['gate-probe', '--repo', dir],
+    { WEBCTL_GATE_SWAPPED: '1', WEBCTL_DECLARED_PIN: declared });
+  assert.equal(r.status, 0, `must pass in a real swap window; got ${r.status}\n${r.stderr}`);
+  // ⚠ Assert the SHAs are named, not just that it passed: the reason is the only
+  // thing that travels to a human (xrl4).
+  assert.match(r.stderr, new RegExp(declared.slice(0, 7)));
+  assert.match(r.stderr, new RegExp(worktree.slice(0, 7)));
+});
+
+test('⛔ MUTATION: gate-probe FAILS when pin returns a verdict under a gate-reported swap', () => {
+  // ⇒ THE TEST THE FIRST DESIGN COULD NOT EXPRESS. The gate claims a swap while
+  // the declared pin EQUALS the worktree, so judgePin takes its ordinary path and
+  // returns a real verdict (here: pass, since the gitlink is a tag). A probe
+  // whose precondition were the same comparison would silently decline instead.
+  const { dir, sub, g } = fixture();
+  g(['add', 'vendor/base-webctl']);
+  g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
+  const same = execFileSync('git', ['-C', sub, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+
+  const r = run(['gate-probe', '--repo', dir],
+    { WEBCTL_GATE_SWAPPED: '1', WEBCTL_DECLARED_PIN: same });
+  assert.equal(r.status, 1,
+    `a verdict under a reported swap must FAIL the probe; got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /returned PASS/, 'the probe must say WHAT pin returned');
+});
+
+test('⛔ gate-probe FAILS when the gate reports a swap but hands over no declared pin', () => {
+  // The state WEBCTL_DECLARED_PIN exists to prevent. Declining here would leave
+  // the gate's own omission unreported.
+  const { dir, g } = fixture();
+  g(['add', 'vendor/base-webctl']);
+  g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
+
+  const r = run(['gate-probe', '--repo', dir], { WEBCTL_GATE_SWAPPED: '1' });
+  assert.equal(r.status, 1, `must FAIL, not decline; got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /did not hand over WEBCTL_DECLARED_PIN/);
 });

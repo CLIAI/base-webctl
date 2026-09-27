@@ -125,6 +125,8 @@ envelope() {
 }
 
 pass=0 fail=0 skip=0 stale=0
+probe_ok=0 probe_bad=0 probe_none=0
+declare -a probe_fails=()
 fails=()
 
 while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localDir; do
@@ -279,6 +281,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   #   0 pass | 1 fail | 2 blocked-needs-human (-> skip).
   sub_abs="$repo_dir/$submodulePath"
   orig_sha=""
+  swapped_now=0
   if [ "$AGAINST_HEAD" = "1" ]; then
     orig_sha="$(git -C "$sub_abs" rev-parse HEAD)"
     if [ "$orig_sha" = "$BASE_HEAD" ]; then
@@ -289,7 +292,45 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
       echo "      declares ${declared_at_swap:0:7} — a contract naming its pin from the WORKTREE" >&2
       echo "      will report the candidate as its pin while swapped. WEBCTL_DECLARED_PIN carries the truth." >&2
       swap_to_base_head "$sub_abs" "$name"
+      swapped_now=1
     fi
+  fi
+
+  # ⭐ GATE-EXERCISE THE HARNESS'S NO-VERDICT ARM, IN THE ONLY PLACE THE STATE
+  # EXISTS ON DEMAND. `contract-harness.mjs pin` must DECLINE a verdict while a
+  # candidate is checked out, because a candidate is not tagged. That arm was
+  # previously proven only against a FORGED fixture — a hand-built
+  # disagreement — which shows the arm CAN fire, not that it fires here.
+  #
+  # ⛔ WEBCTL_GATE_SWAPPED IS THE POINT. The probe must not decide for itself
+  # whether a swap happened by re-computing `declared != worktree`, because that
+  # is the same comparison it is testing — a precondition and an assertion
+  # reading one input cannot disagree. The gate KNOWS it swapped, so the gate
+  # says so, and the probe's claim becomes falsifiable.
+  #
+  # ⚠ A probe failure is BASE's defect, not the consumer's. Counted separately
+  # and attributed to the harness, because folding it into the consumer's column
+  # would blame a lane for a candidate's bug.
+  if [ "${swapped_now:-0}" = "1" ]; then
+    probe_declared="$(git -C "$repo_dir" ls-tree HEAD "$submodulePath" 2>/dev/null | awk '{print $3}')"
+    probe_out=""
+    set +e
+    probe_out="$(cd "$repo_dir" \
+      && WEBCTL_GATE_SWAPPED=1 WEBCTL_DECLARED_PIN="${probe_declared:-}" \
+         node "$BASE_ROOT/scripts/contract-harness.mjs" gate-probe \
+           --repo "$repo_dir" --sub "$submodulePath" 2>&1)"
+    probe_rc=$?
+    set -e
+    case "$probe_rc" in
+      0) probe_ok=$((probe_ok + 1))
+         echo "PROBE $name — harness declined a verdict in the real swap window ✓" >&2 ;;
+      2) probe_none=$((probe_none + 1))
+         echo "PROBE $name — NO VERDICT from the probe itself; it could not be exercised:" >&2
+         echo "      $(printf '%s' "$probe_out" | tail -n 1)" >&2 ;;
+      *) probe_bad=$((probe_bad + 1)); probe_fails+=("$name")
+         echo "PROBE $name — ⛔ HARNESS DEFECT (exit $probe_rc). This is BASE's bug, not $name's:" >&2
+         printf '      %s\n' "$probe_out" >&2 ;;
+    esac
   fi
 
   echo "RUN   $name ($tier): $testCmd" >&2
@@ -385,9 +426,26 @@ if [ "$stale" -gt 0 ]; then
   echo "⚠ $stale STALE REGISTRY ENTRIES — lanes marked unwired whose submodule is mounted." >&2
   echo "  These are NOT covered by --against-head, and the summary above counts them as skips." >&2
 fi
+if [ "$AGAINST_HEAD" = "1" ]; then
+  echo "----- harness gate-probe: ok=$probe_ok defect=$probe_bad no-verdict=$probe_none -----" >&2
+  if [ "$probe_ok" -eq 0 ] && [ "$probe_bad" -eq 0 ]; then
+    # ⚠ NOT silence. Zero exercises means the arm went UNTESTED this run — every
+    # consumer was already at base HEAD, or none was wired — and "no defect
+    # found" over zero attempts is the shape this whole harness exists to stop.
+    echo "⚠ the no-verdict arm was NOT EXERCISED this run (no consumer was swapped)." >&2
+    echo "  That is UNTESTED, not passed." >&2
+  fi
+fi
 echo "----- validated against: $VALIDATED_AGAINST -----" >&2
 if [ "$AGAINST_HEAD" != "1" ]; then
   echo "NOTE: this run says NOTHING about releasing base HEAD. Use --against-head before tagging." >&2
+fi
+if [ "$probe_bad" -gt 0 ]; then
+  # ⇒ Blocks the release. A harness that answers wrongly under the gate makes
+  # every contract's pin verdict untrustworthy at exactly the moment it matters.
+  echo "BLOCKED: the harness gate-probe found a DEFECT IN BASE while validating ${probe_fails[*]}." >&2
+  echo "  This is not a consumer failure. Fix the harness before tagging." >&2
+  exit 1
 fi
 if [ "$fail" -gt 0 ]; then
   echo "BLOCKED: ${fails[*]} failed against this base." >&2
