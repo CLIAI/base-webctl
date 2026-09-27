@@ -121,9 +121,11 @@
       // real consumer the registry under-reported, and every gate run counted it
       // as a skip.
       //
-      // ⚠ PINNED AT v0.7.0 — six releases behind. So this entry becoming visible
-      // to the gate is the START of a conversation about a very old pin, not the
-      // end of one. Its own test/pin-by-tag.test.js exists, but the xrl4
+      // ⚠ PINNED AT v0.7.0 — **7 minor releases / 11 tags / 71 commits** behind
+      // (measured; webctl:mgr corrected my first figure of "six releases", which
+      // I had eyeballed from the version numbers instead of counting the tags).
+      // So this entry becoming visible to the gate is the START of a conversation
+      // about a very old pin, not the end of one. Its own test/pin-by-tag.test.js exists, but the xrl4
       // contract (./test-against-base.sh) does NOT, so the gate reports SKIP
       // "contract pending" rather than FAIL.
       //

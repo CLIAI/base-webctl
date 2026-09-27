@@ -301,8 +301,10 @@ in this family that fails by reassuring us.
   submodule mounted", and the mount is real: pinned at tag **v0.7.0**, submodule
   checked out, ten-plus non-vendor files importing it. This was not an aspiration
   registered early; it was a real consumer the registry under-reported, counted as
-  a skip on every run. ⚠ v0.7.0 is six releases behind, so making it visible
-  starts a conversation about a very old pin rather than closing one.
+  a skip on every run. ⚠ v0.7.0 is **7 minor releases / 11 tags / 71 commits**
+  behind, so making it visible starts a conversation about a very old pin rather
+  than closing one. (The v0.14.0 tag's own copy of this entry says "six releases
+  behind" — wrong, corrected here on master. A published tag does not get moved.)
 
 ### Docs (index)
 
