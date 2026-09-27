@@ -16,6 +16,17 @@ two things at once:
   enter git. `.gitignore` follows base's own `infra-directory-structure-f868`
   template. base docs forbid defaulting a browser profile into any
   publishable/exportable location.
+* ⛔ **base is the ONE PUBLIC repo in this family** — `CLIAI/base-webctl` is
+  public; **every** consumer is private. So a worked example here is a
+  publication. ⇒ **Provenance by ROLE, never by hostname:** write *"measured by
+  `ccew` on its remote target"*, never the host alias; and never a real hostname,
+  username, IP or home path in a doc, comment or commit message. Redacting does
+  not weaken a measurement whose subject is a tool's behaviour rather than a
+  machine. ⚠ Measured 2026-09-27: `arch-browser-targets-btg4` had shipped **13**
+  host-alias references, and a contributed section additionally printed a real
+  hostname and, via `x$(id -un)y`, the remote username. A first redaction pass
+  replaced an alias with a name *derived from* the real hostname — which is not a
+  redaction. Check the diff, not the intent.
 * **Zero runtime dependencies** (`arch-zero-dependency-philosophy-v8p3`). base is
   modern **ESM JavaScript** with **JSDoc** types checked by `tsc --checkJs
   --noEmit` in base's CI only — **no build step, no toolchain imposed on
