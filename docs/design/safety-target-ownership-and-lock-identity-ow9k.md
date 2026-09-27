@@ -28,6 +28,14 @@ thing:
 fix re-derives the first, and the two answers can then disagree — one notion of
 ownership for locking and another for attaching, on the same profile.
 
+⚠ **AND THE TITLE IS HALF WRONG — my own premise, corrected by review.** *"One
+question asked twice"* is right about **identity** and wrong about **mechanism**.
+`ccew` showed that the X-input lease and the profile lock have **different lifetime
+semantics** (§1b): they must agree on **what** is being contended, and they must
+**not** share an implementation, because giving the lease a persistent record would
+manufacture a staleness problem it does not have. ⇒ Read this document as *one
+identity, two mechanisms*.
+
 ⛔ **Nothing here has been implemented.** Every wired consumer already uses
 `profile-lock`, so this is circulated for review **before** any `lib/` change.
 
@@ -94,6 +102,66 @@ mechanism works for the one format it knows and fails **open** for everything el
 indistinguishable from no marker at all, and "unrecognised" and "dead" arrive at
 `acquire()` as the same value.
 
+## 1b. ⭐ TWO RESOURCES, TWO LIFETIME SEMANTICS — and only one of them can go stale
+
+**`ccew` measured this and it changes the shape of the design.** Their lane does
+**not** use a `profile-lock` record for the X-input lease at all: the lease is a
+**separate `flock` file with a plain-text holder note**. ⇒ The two things §1 treats
+as one problem have **different lifetime semantics**, and conflating them imports a
+failure mode that one of them does not have:
+
+| | **profile lock** | **X-input lease** |
+|---|---|---|
+| form | a JSON **record** on disk | an **open file descriptor** under `flock` |
+| held by | a recorded pid/host | the **process itself** |
+| release | the record is rewritten or removed | the fd closes |
+| on a **crash** | ⚠ the record **survives** ⇒ STALE | ✅ the kernel closes the fd ⇒ **released** |
+| can it go stale? | **yes** — hence §2 and §5 | ⛔ **no, by construction** |
+
+⭐ **So §2's fail-closed table and §5's migration apply to the RECORD, and the
+lease needs neither** — there is no stale lease to misread, so there is nothing for
+a schema check to get wrong. A design that gave the lease a record would be
+*creating* the problem §2 exists to contain.
+
+⚠ **AND THIS IS THE SECOND TIME A LANE HAS SOLVED A PROBLEM BY REMOVING THE BAD
+STATE RATHER THAN GUARDING IT.** `perplexity` removed the stable endpoint so there
+is nothing to point at the wrong browser (§4(ii)); `ccew` removed the persistent
+lease record so there is nothing to misjudge as stale. ⇒ **Prefer a construction in
+which the bad state cannot exist over a guard that detects it** — and when you
+cannot, say which you built, because a guard needs a positive control and a
+construction does not.
+
+## 1c. The acquire mechanism, in `ccew`'s words and measured by them
+
+> *"Take the lease **ON THE TARGET HOST**, in a process owned by the acting tool, and
+> **HOLD IT FOR THE WHOLE INPUT BURST, not per command**: per-command locking still
+> lets another tool interleave between one tool's click and its typing. Mechanism:
+> `ssh HOST flock -n -E 75 LEASE -c 'write holder note; echo HELD; cat >/dev/null'`,
+> whose stdin is a **FIFO** only the acting tool writes. RELEASE = the tool closes
+> its fd → remote `cat` gets EOF → the lock drops; a **CRASH does the same**, because
+> the kernel closes the fd. So no stale lease survives the holder. BUSY → refuse,
+> naming the holder from the note."*
+
+**Measured arms:** holder A acquires; a contender is refused with `rc 75` **and the
+holder named**; explicit release frees it; `kill -9` of the holder frees it within
+2 s; an integrated task script refuses with its own exit code while a second tool
+holds the lease.
+
+⭐ **"For the whole burst, not per command" is the load-bearing clause.** A
+per-command lease is not a weaker version of this — it is a **different and broken
+guarantee**, because the interleaving it permits (another tool's keystrokes between
+this tool's click and its typing) is exactly the corruption the lease exists to
+prevent, and every individual acquire would report success.
+
+### ⚠ Two traps met while building it
+
+* **Do not feed ssh's stdin from a process substitution.** `<(sleep N)` **orphans**
+  the helper, which inherits the caller's stderr pipe — so a later `tool | grep`
+  **hangs** on a pipe nothing will close. Use a **FIFO**.
+* **The release path must not fail under `set -e`.** `kill` of an ssh that has
+  already exited returns 1, which aborts the cleanup that was meant to be
+  unconditional.
+
 ## 2. The rule that governs all three
 
 > ⛔ **An unrecognised, unreadable or newer lock is HELD/UNKNOWN. Never free.**
@@ -111,7 +179,19 @@ cannot tell" is **someone might be**. ⇒ Three outcomes, not two:
 | **`schemaVersion` < ours, unmigratable** | **UNKNOWN** | ⛔ **refuse** |
 
 ⭐ **`--force` is the escape hatch, and it must be the ONLY one.** A human can
-override; an inference cannot. ⚠ And a refusal must name the file and say *why it
+override; an inference cannot.
+
+⛔ **AND A REMOTE HOLDER IS OVERRIDABLE ONLY BY NAMING IT** *(`ccew`)*. `--force`
+must take the **exact holder token** from the lock — host + pid + since — **refuse on
+mismatch**, and log the override. Reason: **liveness of a remote holder cannot be
+checked locally**, so a bare `--force` is a guess with a signed-in session at stake,
+and two tools driving one X display send keystrokes into the wrong place in a browser
+holding the operator's sessions. ⇒ A **local** holder is different: liveness *is*
+checkable, so auto-take-over is allowed **only when provably dead**.
+
+⚠ **And no lock binds a HUMAN in a viewer.** `--force` policy cannot protect against
+the contender `ccew` actually met. ⇒ `btg4` §6(b)'s concurrent-use detection is the
+other half of this, and neither half is sufficient alone. ⚠ And a refusal must name the file and say *why it
 could not be read*, or the operator's only recourse is to delete a lock they do not
 understand — which converts a fail-closed design back into a fail-open habit.
 
@@ -123,6 +203,14 @@ and the profile — not from **who is contending**.
 ```
 <profile>/.webctl-target.<target>.<profile_id>.lock.json      (shape, not final)
 ```
+
+✅ **DECIDED — BESIDE the profile, not inside it.** `ccew` already does exactly this
+(`profiles/<slug>/x-input.lease`, beside `chromium/`) and gave three reasons, each of
+which survives on its own: **Chromium owns the inside** (its own `Singleton*` files,
+its scrubs, its layout); **a profile move or copy must not carry a lock**; and a
+**sibling path is trivially flockable from a remote shell** without touching
+Chromium's files. ⇒ That closes open question #1, and it matches the argument they
+won for `isolation-accept.json`.
 
 * **`<target>`** — the target name from `btg4` §3/§4.
 * **`<profile_id>`** — `btg4` §2's **opaque** id.
@@ -234,16 +322,19 @@ The suite must plant, in one fixture:
 
 ## 7. Open, for the lanes rather than for me
 
-1. **Filename shape.** Is `.webctl-target.<target>.<profile_id>.lock.json` right, or
-   should the lease live in a **sibling** directory as `btg4` §3 chose for targets,
-   leaving the profile dir to Chromium? ⚠ `ccew` argued the sibling case for
-   `isolation-accept.json` and it applies here.
+1. ✅ **ANSWERED — sibling, not inside.** `ccew`, from existing practice plus three
+   independent reasons (§3). Chromium owns the inside; a profile copy must not carry
+   a lock; a sibling is flockable from a remote shell.
 2. **Who mints the claim** when a lane's bring-up script and its CLI are separate
    programs — the script, with the CLI reading it? And what happens on a manual
    `docker start` that bypasses both?
 3. **Does any lane rely on the CURRENT fail-open?** ⇒ If a tool today recovers from
    a corrupt lock by acquiring anyway, fail-closed will surface as a new refusal.
    **Say so now**, not after the release.
-4. **`--force` semantics across hosts.** Should it override a remote holder, or only
-   a local one? Overriding a live remote holder is the one case that can log a human
-   out of a signed-in browser.
+4. ✅ **ANSWERED — a remote holder only by NAMING it** (§2): `--force` takes the exact
+   holder token, refuses on mismatch, logs the override; a local holder may be
+   auto-taken-over only when provably dead. *(`ccew`.)*
+5. **STILL OPEN: does any lane rely on the current fail-open?** `ccew` answers **no**
+   and asks for all three cases to refuse. Other lanes outstanding.
+6. **STILL OPEN: is there a fifth lock state?** A record left by a container that was
+   `docker rm`'d, for instance — raised as a candidate, not yet measured.
