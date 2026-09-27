@@ -3,11 +3,15 @@ id: r7x2
 title: "Safe Invocation: Array Arguments, File Payloads & Input Security"
 category: safety
 created: "2026-03-03"
-updated: "2026-03-03"
+updated: "2026-09-27"
 status: draft
-tags: [safe-invocation, injection-prevention, file-payloads, stdin, shell-escaping, security]
-tech: []
-relates_to: []
+tags: [safe-invocation, injection-prevention, file-payloads, stdin, shell-escaping, security, remote-shell, ssh]
+tech:
+  - name: "OpenSSH"
+    version: ">=8"
+  - name: "bash"
+    version: ">=4"
+relates_to: [dip7, btg4, k3wn]
 depends_on: []
 expands: []
 similar_to: []
@@ -77,6 +81,68 @@ subprocess.run(f"sort {filename} | uniq", shell=True)
 ```
 
 Even in the static case, prefer array-based invocation when practical.
+
+## Principle 1b: an argv array is NOT safe ACROSS A REMOTE SHELL
+
+> Measured and written by `ccew-webctl:dev` on a real two-host pair, 2026-09-27,
+> remote login shell `bash`. Host names, the remote hostname and the remote
+> user name are **redacted** below: base-webctl is the only PUBLIC repo in this
+> family, and a worked example is not a reason to publish someone's
+> infrastructure. The behaviour is a property of ssh, not of those hosts.
+
+⛔ **`execFile('ssh', [host, '--', ...argv])` satisfies Principle 1 EXACTLY —
+an argv array, no local shell — and is still a shell injection.** ssh **joins**
+the remote argv with spaces into ONE string, and the **remote login shell
+re-parses it**. `--` only ends LOCAL option parsing.
+
+| call (local argv array) | remote output | verdict |
+|---|---|---|
+| `ssh HOST -- echo 'a;hostname'` | `a` then the remote hostname | ⛔ `;` split it; `hostname` RAN remotely |
+| `ssh HOST -- echo 'x$(id -un)y'` | `x<remote-user>y` | ⛔ command substitution RAN remotely |
+| `ssh HOST "echo $(printf %q 'a;hostname')"` | `a;hostname` | ✅ inert |
+| `printf 'a;hostname' \| ssh HOST 'cat; echo'` | `a;hostname` | ✅ inert (data on stdin) |
+
+⇒ **Principle 1 covers ONE shell. A remote hop adds a SECOND shell that the
+local rule cannot see.** Treat every transport that re-parses as its own shell
+boundary, each needing this discipline: an ssh remote command, `docker exec sh -c`,
+`su -c`, `bash -c "$x"`.
+
+⭐ **THIS IS WHY PRINCIPLE 1 IS NOT ENOUGH ON ITS OWN, and the failure is
+documented rather than hypothetical.** `arch-browser-targets-btg4` §5 shipped the
+claim that `ssh "$value" -- <argv…>` is "injection-safe by construction". It was
+written by someone who had read and believed Principle 1, and it is false. A rule
+that says array-based invocation "eliminates the entire class of problems" reads
+as covering every case — so the reader does not go looking for the class it
+omits. That is the shape this whole document should be read against: **a true
+rule, stated without its boundary, produces confident wrong answers.**
+
+### What to do instead
+
+1. ⭐ **PREFERRED — DATA ON STDIN, COMMAND FIXED.** The remote command is a
+   constant literal written by the tool; the variable payload travels on stdin:
+
+   ```sh
+   tr -d '\n' < payload_file | ssh "$HOST" "docker exec -i … xdotool type --file -"
+   ```
+
+   A secret never appears in any argv, so it is absent from `ps` output and from
+   any trace. ⚠ And `set -x` must never be in force across such a read.
+
+2. **OTHERWISE — QUOTE EVERY ELEMENT FOR THE REMOTE SHELL,** never a join:
+   `ssh "$HOST" "cmd $(printf '%q ' "$@")"`. ⚠ `%q` is **bash** quoting: for
+   control characters it emits `$'…'` (measured: `$'tab\there'`), which a POSIX
+   `sh` does not parse. So either assert the remote shell is bash, or restrict
+   payloads to printable text, or use (1). In Node the equivalent is a
+   shell-quote applied **per element for the REMOTE side** — never
+   `argv.join(' ')`.
+
+3. ⛔ **NEVER** build the remote command by concatenating untrusted parts, even
+   out of an array; and **NEVER** rely on `--` for safety.
+
+4. ⚠ **The payloads most at risk are the ones these tools actually carry:** text
+   typed into pages, URLs, search strings — anything page-derived. Page text is
+   attacker-controllable, so a remote-shell injection is **a path from a web page
+   to a shell on the target host.**
 
 ## Principle 2: File-Based Payload Resolution
 

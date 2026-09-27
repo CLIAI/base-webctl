@@ -171,12 +171,12 @@ transport choice, the slug. Those are not readings, and a rule phrased as
 contents.
 
 ```toml
-# ~/.config/CLIAI/webctl/targets/bp17.toml
-name       = "bp17"
+# ~/.config/CLIAI/webctl/targets/workstation.toml
+name       = "workstation"
 # ⛔ TRANSPORT IS PER-SURFACE, NOT PER-TARGET. See below.
 control    = "ssh"            # ssh | local      — CDP and X input. NEVER tailscale.
 view       = ["ssh", "tailscale-relay"]   # xpra html5; tailscale ONLY via the relay
-ssh        = "bp17"           # passed THROUGH to ssh; see §5
+ssh        = "workstation"    # passed THROUGH to ssh; see §5
 slug       = "default"        # base driver cfg slug -> container names
 profile_id = "claude-main"    # OPAQUE. Resolved elsewhere. Never a path.
 lifecycle  = "owner"          # owner | attach-only   — see §6
@@ -185,13 +185,13 @@ lifecycle  = "owner"          # owner | attach-only   — see §6
 ### ⛔ Transport is PER-SURFACE — a single field lets a user write the forbidden config
 
 ⚠ **The first draft had one `transport` field. That was wrong, and it
-contradicted §5.** Measured by `ccew` on bp17, which runs **two transports at
+contradicted §5.** Measured by `ccew` on its remote workstation target, which runs **two transports at
 once**:
 
 | surface | what it carries | transport |
 |---|---|---|
 | **control** | CDP, and X input via `ssh … docker exec … xdotool` | **ssh only**, to loopback |
-| **view** | xpra html5 | ssh tunnel for knot **and** a tailscale relay with a source-IP allowlist for phone/tablet |
+| **view** | xpra html5 | ssh tunnel for the operator machine **and** a tailscale relay with a source-IP allowlist for phone/tablet |
 
 ⇒ So `transport = "tailscale"` would mean **CDP reachable on a tailnet
 interface** — exactly what §5 forbids. ⛔ **My own schema permitted the
@@ -205,7 +205,7 @@ which is this document's own §1 argument, applied to the file format. *(ccew.)*
 
 ⛔ **Not a home-grown `--host` resolver.** `--ssh` takes whatever the user would
 type after `ssh` and hands it over, so `~/.ssh/config` — aliases, users, jump
-hosts, keys — works for free. Measured on bp17: a bare `user@host` **fails**;
+hosts, keys — works for free. Measured on a remote target: a bare `user@host` **fails**;
 only the `Host` block works.
 
 * ⛔ **CORRECTION — `ssh "$value" -- <argv…>` IS NOT INJECTION-SAFE.** The first
@@ -226,8 +226,15 @@ only the `Host` block works.
 
   ⚠ And it matters most for precisely the argv that carries untrusted text:
   **`xdotool type` payloads, URLs, search strings** — page-derived or
-  user-supplied. *(ccew, who quotes its own `tools/ccew/xdo.sh` as the working
-  form.)*
+  user-supplied. Page text is attacker-controllable, so this is **a path from a
+  web page to a shell on the target host.**
+
+  ⭐ **Now specced, with the measurements, as `safety-safe-invocation-file-payloads-r7x2`
+  §1b** — written by `ccew` from a real two-host pair, including the table showing
+  `;` and `$(…)` executing remotely through an argv array. ⇒ Read that § rather
+  than this paragraph: it also records **why Principle 1 of that document was not
+  enough to prevent the claim above**, which is the more useful lesson than the
+  correction itself.
 * ⛔ **A DEDICATED connection: `ControlMaster=no`, `ControlPath=none`.** With
   multiplexing **the forward belongs to the master and outlives Ctrl-C** — a
   tunnel into a signed-in browser's control surface, still open after the user
@@ -244,7 +251,7 @@ only the `Host` block works.
 ## 6. Sharing one browser between tools
 
 ⚠ **This is the next real configuration, not a hypothetical** — Greg wants
-`perplexity-webctl` on the same bp17 instance that already runs the Claude
+`perplexity-webctl` on the same remote instance that already runs the Claude
 extension and HoloTab.
 
 ### ⛔ (a) ONE lifecycle owner; everyone else is attach-only
@@ -269,7 +276,7 @@ it.
 
 ⛔ **Put the lock where the CONTENTION is: on the TARGET HOST, beside the X
 server.** A lock held where the *tools* run does not constrain a tool on
-another machine — knot and a laptop each take their own local lock and both
+another machine — the operator machine and a laptop each take their own local lock and both
 type into the same X display. ⇒ Acquire it over the same transport the tool is
 already using. *(webctl:mgr.)*
 
@@ -288,14 +295,15 @@ out of three Dockerfiles.
 
 ⇒ ⭐ **The mechanism is sound; only the placement can make it vacuous.**
 
-⭐ **And `ccew` measured the placement on bp17: the profile AND base's lock file
-already live on bp17's filesystem, where the X server is.** Its knot tools take
+⭐ **And `ccew` measured the placement on its remote target: the profile AND
+base's lock file already live on the TARGET's filesystem, where the X server
+is.** Its operator-machine tools take
 **no lock at all** today — they attach over ssh.
 
 ⇒ So the lease is taken **in the same remote process that injects the input**:
 
 ```
-ssh bp17 flock -w5 <lease> docker exec … xdotool …
+ssh "$TARGET" flock -w5 <lease> docker exec … xdotool …
 ```
 
 Acquire and act become **one command on the target host, with no window between
@@ -343,7 +351,39 @@ this is recorded so it stays that way. *(ccew.)*
 `/json` is MRU-ordered, so an index names a different tab the moment anyone
 touches the browser.
 
-### (d) Per-tool CDP posture, and (e) one visible side panel
+### ⛔ (d) FAMILY DEFAULT: in an authenticated profile, a guest tool gets NO CDP WRITE
+
+**Ruled by `webctl:mgr` for `ccew` and raised here, by `ccew`, to be the default
+for the family rather than one lane's deny-list. Adopted.**
+
+In a profile holding **authenticated sessions**, a tool that is not the
+lifecycle owner — a *guest* — gets:
+
+* ✅ **READ-ONLY CDP, on its OWN tab, addressed by `targetId`** (§c), and nothing
+  else;
+* ⛔ **no CDP WRITE at all** — not `Input.*`, not `Runtime.evaluate`, not
+  navigation;
+* ⇒ **actions go through X, under the input lease** (§b).
+
+⭐ **Why a deny-list of CDP methods is the wrong shape, and a posture is the
+right one.** `Runtime.evaluate` on a signed-in tab is equivalent to the session:
+it can read any cookie the page can, issue any authenticated request, and
+exfiltrate to anywhere. So the guest/owner line is **not about which methods are
+dangerous** — it is about which tool is *accountable for the browser*. A deny-list
+enumerates today's dangerous methods; a posture survives CDP gaining a new one.
+
+⚠ **And this is why the transport rules in §5 are load-bearing rather than
+cautious.** If CDP is reachable on a routable interface, "guest tools get
+read-only" is a statement about our own code and about nobody else's. The
+posture is only meaningful behind loopback + an authenticated tunnel.
+
+⇒ Note what the default costs: a guest cannot type, click or navigate without
+taking the X-input lease, which is deliberately **serialised and contended**
+(§b) — including against a human, who holds no lease at all. That is the intended
+trade. A tool that finds this too slow is asking to be the lifecycle owner of its
+own target, which is §6(a)'s answer, not an exception to this one.
+
+### (e) One visible side panel, and the screen size
 
 The xpra screen size follows the latest viewer; only one side panel is visible
 at a time. Both are properties of the shared stack, so both belong to the
@@ -445,5 +485,5 @@ says beyond my summary of it.**
    **whether and when `ccew` renames its existing `--client` is `ccew`'s call,
    since it pays.** ✅ `ccew` agrees and will pay the
    rename where they collide — `--target` for WHERE, `--client` for WHICH
-   STACK. It also confirms **targets above client**: on bp17 slug and location
+   STACK. It also confirms **targets above client**: on that target slug and location
    move together *only by accident*, and one host could carry two slugs.

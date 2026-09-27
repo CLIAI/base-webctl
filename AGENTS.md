@@ -84,7 +84,9 @@ live on:
     `infra-xpra-remote-access-gateway-f6rd`.
   * **safety** — `safety-blocked-state-handling-k7m2`,
     `safety-defense-in-depth-pipeline-dip7`, `safety-process-mutex-v8m2`,
-    `safety-process-mutex-factory-p06y`.
+    `safety-process-mutex-factory-p06y`,
+    `safety-safe-invocation-file-payloads-r7x2` (argv arrays, file payloads — and
+    §1b, the REMOTE shell boundary an argv array does not cross).
   * **ux** — `ux-dual-audience-help-nho9`, `ux-tab-management-lru-1wsg`,
     `ux-ui-state-hygiene-iqrg`, `ux-gui-subcommand-surface-gu1d`.
   * **data** — `data-jsonl-machine-interface-lszd`.
