@@ -375,6 +375,45 @@ FAIL: submodule pointer DIVERGED — we declare 5c3db07, worktree is at 020f93a.
 ⚠ And the background reasoning moves to a file a reader opens **deliberately**,
 rather than one a capture lands in **by accident**.
 
+## ⛔ `git log -S` measures TRANSITIONS, not states — and its wrong answer has the right shape
+
+Auditing *"which public commits contain this identifier?"* with `git log -S<string>`
+returns the commits where the **count of matches CHANGED**. That is not the
+question. Measured 2026-09-27, auditing a host alias across four commits:
+
+| commit | matches present | listed by `-S`? |
+|---|---|---|
+| 8c31f54 | 12 | yes |
+| 696ab9d | 10 | yes |
+| b7d4395 | **6** | ⛔ **NO** — its edit did not change the count |
+| 18e329b | 5 | yes |
+| 8ad59e7 | **0** | ⛔ **YES** — this is the commit that REMOVED them |
+
+⇒ So the instrument **omitted a genuinely exposed commit and included the fix**,
+and still returned four commits — a plausible-looking list of the right length,
+with two of the four wrong. ⭐ **A wrong answer shaped like a right one is not
+caught by reviewing the answer.** The correct instrument counts matches in the
+**blob at each commit**, which asks about states:
+
+```sh
+for c in $(git log --format=%h <ref> -- <path>); do
+  printf '%s %s\n' "$c" "$(git show "$c:<path>" | grep -ic '<pattern>')"
+done
+```
+
+⭐ **AND THE DIAGNOSIS IS THE TRANSFERABLE PART: when two parties disagree about
+a SET, suspect the instrument before the arithmetic.** Both parties here had done
+the counting correctly. `-S` is documented to do what it did — it is a pickaxe for
+finding *when something changed*, which is a different and also useful question.
+The defect was reaching for it to answer *what is present*.
+
+⚠ The same shape applies to any transition-based tool used as a state query:
+`git log -S`/`-G`, `git log --follow` for "did this file ever contain", a diff-based
+"what changed" audit read as "what exists". *(Instrument diagnosed by
+`webctl:mgr` on their own measurement, after `webctl:base` derived a different set
+by counting blobs — which is why the disagreement surfaced at all: the two methods
+were independent, not two people running the same command.)*
+
 ## Two checks that share an input do not corroborate
 
 They **agree**. Two probes of the same derived port are satisfied by one foreign
