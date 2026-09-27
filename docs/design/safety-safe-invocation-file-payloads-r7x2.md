@@ -84,7 +84,7 @@ Even in the static case, prefer array-based invocation when practical.
 
 ## Principle 1b: an argv array is NOT safe ACROSS A REMOTE SHELL
 
-> Measured and written by `ccew-webctl:dev` on a real two-host pair, 2026-09-27,
+> Measured and written by `ccew` on a real two-host pair, 2026-09-27,
 > remote login shell `bash`. Host names, the remote hostname and the remote
 > user name are **redacted** below: base-webctl is the only PUBLIC repo in this
 > family, and a worked example is not a reason to publish someone's

@@ -27,6 +27,15 @@ two things at once:
   hostname and, via `x$(id -un)y`, the remote username. A first redaction pass
   replaced an alias with a name *derived from* the real hostname — which is not a
   redaction. Check the diff, not the intent.
+  * ⛔ **AND OUR OWN AGENT HANDLES CARRY MACHINE NAMES.** A fleet handle is
+    `lane:role@host` — so citing a reviewer by their handle publishes the host.
+    ⇒ **Cite the LANE** (`ccew`, `cgwc`, `webctl:mgr`), never `lane@host`. The lane
+    is the information; the machine is not. ⚠ Measured 2026-09-27: ~30 lines of
+    June-era `proposals/` and `FUTURE_WORK/` attribute *"For:"* and *"From:"* with
+    full `lane@host` handles, which is the bulk of this repo's remaining exposure
+    — and it is the one class that is **mechanically** removable without losing
+    anything, because the lane name survives the edit. *(Raised by `ccew`, whose
+    own handle carries it.)*
 * **Zero runtime dependencies** (`arch-zero-dependency-philosophy-v8p3`). base is
   modern **ESM JavaScript** with **JSDoc** types checked by `tsc --checkJs
   --noEmit` in base's CI only — **no build step, no toolchain imposed on
