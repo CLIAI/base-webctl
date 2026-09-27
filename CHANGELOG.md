@@ -207,6 +207,55 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.16.0 — 2026-09-27
+
+**Headline: `HARNESS_GENERATION` is 2, because `no-revendor` could not see the case
+it exists for.** Cut immediately and deliberately: consumers run the harness **from
+their pinned vendor copy**, so generation 2 reaches nobody without a tag — and a
+bare-commit pin stays forbidden. ⇒ **Bump to v0.16.0 before writing a new contract.**
+
+### ⛔ What this headline does NOT cover
+
+* **An EDITED AND RENAMED copy still escapes `no-revendor`.** Whole-file
+  normalised hashing catches a copy that was reformatted or re-commented; it does not
+  catch one that was edited *and* renamed. That needs content shingles. ⇒ The PASS
+  reason **says so on every run**, because a green that implies coverage it does not
+  have is how this check spent generation 1.
+* **Generation 2 does not audit your existing copies.** It tells a sweep *"who is
+  below 2?"*. A contract recording 1 is not broken — it was written against a check
+  that could not see a subdirectory copy, and it answers honestly.
+* **§6(b)'s LEASE IS STILL BROKEN**, exactly as in v0.15.0. `LOCK_FILENAME` is built
+  from `C.PROJECT`, so two tools sharing a profile never contend. Recorded, not fixed.
+  ⚠ Anyone building on §6(b) is building on a guard that cannot fire.
+* **Ownership is still unverifiable at the point of use.** btg4 now records the
+  candidate answers — an ownership token, and one lane's stronger per-invocation form
+  — but neither is implemented.
+* **btg4 remains `status: draft`** with no `lib/` implementation. Nothing here points
+  a tool at a remote browser.
+
+### Fixed
+
+* **`no-revendor` walks both trees RECURSIVELY and matches by NORMALISED CONTENT.**
+  Generation 1 read only the top level and matched only identical filenames — while
+  **half of base's own lib is nested**, so `profile-lock.js`, `mounts.js` and
+  `chromium-docker-xpra.js` were never in the comparison set. Measured: three planted
+  re-vendors (nested→flat, subdirectory + rename, rename in place) **all reported
+  `pass`**. Now all three are caught, each naming the base module it copies and how.
+  ⭐ A legitimate **re-export shim is still not flagged** — the control that matters,
+  because flagging the pattern consumers are meant to use would get the check
+  overridden. And the normaliser must **discriminate**: distinct base modules
+  collapsing to fewer than two hashes is a broken detector, reported as such.
+
+### Docs
+
+* **btg4**: the guest test is **whose sessions are in the profile**, not who called
+  `start` — so *"one owner split across two processes"* is a real third category and
+  not a guest. `kind` was **two fields wearing one name** (transport/lifecycle vs
+  browser ENGINE), with a third value `managed-zone` proposed; and an engine
+  **cannot be sniffed** — Opera's `/json/version` reports `Browser: Chrome/151`, the
+  one place §4's *"store how to FIND, never what you would MEASURE"* inverts because
+  the measurement lies.
+
 ## v0.15.0 — 2026-09-27
 
 **Headline: three consumer lanes reviewed `arch-browser-targets-btg4` and two of
