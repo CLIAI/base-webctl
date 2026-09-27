@@ -515,6 +515,32 @@ the useful part:
   unused posture is spec for code that does not exist. Add it when a real lane
   needs it.
 
+#### ⛔ OPEN: nothing ESTABLISHES ownership at the point of use
+
+**`substack` found the hole under the ruling, and it is the one I would fix next.**
+The postures are defined; **how a tool KNOWS which one it is in is not.**
+
+Their extractor takes `--cdp <url>` — a free-form URL. ⇒ **A copied command line
+or a typo'd port points it at another tool's authenticated browser, where it would
+evaluate page JS.** Nothing in the CDP connection carries ownership, nothing in
+this document stops it, and nothing in their code can tell.
+
+⭐ **So ownership as specified is a property of a (tool, target) pair established
+by WHO CALLED `start` — and that fact is not recorded anywhere a second tool can
+read it.** A lane can be an owner by intent and a guest by construction, at the
+same time. ⚠ That means the earlier ruling's *"this reclassifies nobody today"* is
+true **per lane** and does not reach **per tool**.
+
+⇒ `substack`'s minimum viable form, which I think is right: **the thing that
+brought the browser up leaves a token beside the profile, and an attacher that
+cannot present it knows it is a guest.** That does not make the posture
+enforceable against a determined caller — but it converts an **honour system into
+a detectable state**, which is the difference §1 of this document is about.
+
+⚠ **This is the same gap as the lease's**, one level up: both need an identity
+that lives with the TARGET rather than with the tool. Solve them together or the
+second fix will re-introduce the first.
+
 #### A guest is not blind — and where it genuinely goes dark
 
 Much read-only extraction does **not** need to run page JS *(toolkit contributed
@@ -617,7 +643,36 @@ target**, by the same opaque id the target already uses for the profile.
 asymmetry is that a wrongly-refused bring-up prints what to do, and a wrongly
 allowed one exfiltrates a session.
 
-## 8. One tool, several targets
+## 8. One tool, several targets — and one tool, ONE target that is not local
+
+⭐ **§8's title was costing it its most relevant reader** *(`substack`)*. For a
+cache/extraction lane, *"several targets"* is an interactive-driver problem it does
+not have: one publication, one browser; multiple publications would be multiple
+**slugs**, not multiple targets. Target *switching* buys such a lane nothing — so
+its reviewer skims the heading, concludes the document is not for them, and misses
+the only part that is.
+
+⇒ **The part that is:** the authenticated browser **need not be on the machine
+that runs the extraction.** Their blocker for weeks has been that a **human** must
+sign in at a GUI, and that GUI is xpra html5 on one box. If the human were at
+another machine, they would need exactly the `view` transport of §4 — with
+`control` staying loopback, because the extraction itself is CDP.
+
+⇒ So the second shape is **"one tool, ONE target that is not local", driven by
+WHERE THE HUMAN IS** rather than by which browser to pick. Same mechanism, opposite
+motivation, and the two deserve separate names.
+
+### ⚠ A remote target implies THAT HOST BUILT ITS OWN IMAGES
+
+*(`fetlife`, measured the hard way.)* base passes **UID/GID as build args**, so
+images are **machine-specific**. Moving one with `docker save | ssh docker load`
+produced a container running as the *source* machine's uid against a profile
+directory owned by a different one ⇒ `Permission denied` ⇒ chromium
+`Exited(133)` with a crashpad error **several layers from the cause.**
+
+⇒ State it in the target contract, because **the failure surfaces as a browser
+crash rather than as a mismatch** — and a crash sends the reader to the browser,
+which is the one place the answer is not.
 
 **Each invocation names exactly one target** (`--target <name>`, default from
 config). A tool may *know* several; it acts on one.

@@ -139,6 +139,21 @@ rule, stated without its boundary, produces confident wrong answers.**
 3. ⛔ **NEVER** build the remote command by concatenating untrusted parts, even
    out of an array; and **NEVER** rely on `--` for safety.
 
+⭐ **(1) AND (2) ARE NOT EQUAL OPTIONS, and listing them as a pair understates
+it** *(raised by `linkedin`)*: **the stdin form is the only one that stays correct
+when someone later adds an argument.** Per-element `%q` is correct exactly as long
+as every future interpolation remembers to quote — it is a rule a maintainer must
+keep applying, and the whole reason this document exists is that such rules are
+kept until they are not. A fixed remote entry point reading data on stdin has
+**nothing left to remember**. ⇒ Prefer (1); reach for (2) when the remote side
+genuinely cannot take the payload on stdin.
+
+⚠ `linkedin` also named *why* the original error was easy to make: **`--` reads as
+a safety boundary because it is one everywhere else.** In `rm -- "$f"`, `grep -- "$p"`
+and `git checkout -- "$f"` it genuinely ends option parsing and protects the
+operand. With `ssh` it ends **local** option parsing and does nothing about the
+remote shell. The token's meaning is intact; the *inference* from it is what fails.
+
 4. ⚠ **The payloads most at risk are the ones these tools actually carry:** text
    typed into pages, URLs, search strings — anything page-derived. Page text is
    attacker-controllable, so a remote-shell injection is **a path from a web page
