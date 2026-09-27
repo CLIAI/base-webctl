@@ -111,7 +111,26 @@
       "dockerOptIn": true,
       "tier": "full",
       "localDir": "~/github/gwwtests/claude-chrome-extension-webctl",
-      "wired": false
+      // ⛔ FLIPPED false → true 2026-09-27, because THE GATE CAUGHT THIS FILE
+      // LYING. The stale-entry detector reported "wired:false but submodule
+      // mounted", and the mount is real: gitlink b2620e9, which
+      // `describe --tags --exact-match` names v0.7.0, with the submodule checked
+      // out and **ten-plus non-vendor files importing it** (ccew-webctl.js,
+      // lib/cdp-client.js, lib/mounts-with-extensions.js, lib/client-config.js,
+      // lib/modes.js, …). This was not an aspiration registered early; it was a
+      // real consumer the registry under-reported, and every gate run counted it
+      // as a skip.
+      //
+      // ⚠ PINNED AT v0.7.0 — six releases behind. So this entry becoming visible
+      // to the gate is the START of a conversation about a very old pin, not the
+      // end of one. Its own test/pin-by-tag.test.js exists, but the xrl4
+      // contract (./test-against-base.sh) does NOT, so the gate reports SKIP
+      // "contract pending" rather than FAIL.
+      //
+      // ⚠ And its working tree is currently DIRTY (2 files), which the gate
+      // skips ahead of any swap — so flipping this does not touch a lane that is
+      // mid-edit. Verified read-only here before the flip.
+      "wired": true
     },
     {
       "name": "comparis-ch-webctl",
@@ -144,6 +163,57 @@
       // did — master already mounts vendor/base-webctl pinned to the TAG
       // an exact tag, with a working client-config shim and the xrl4
       // contract shipped. Registering it wired:false would have been false.
+      "wired": true
+    },
+    {
+      "name": "perplexity-webctl",
+      "repo": "git@github.com:CLIAI/perplexity-webctl.git",
+      "submodulePath": "vendor/base-webctl",
+      "testCmd": "./test-against-base.sh --offline",
+      "dockerOptIn": false,
+      // TIER = contracts, which is NOT what the lane proposed, and the reason is
+      // this registry's own scar: it has been burnt by registering an aspiration
+      // as a fact (see fetlife above). Measured here, not taken from the report:
+      // the submodule is mounted, and NO file outside vendor/ imports it yet. So
+      // every browser-capability tier is a statement about future code.
+      // `full` overclaims (they drive two EXISTING browsers — Chromium and Opera
+      // — in xq zones over forwarded CDP, not base's chromium-docker-xpra
+      // driver). `cdp-client` is the right eventual answer and would make
+      // perplexity the SECOND adopter of the CDP-client extraction after
+      // telegram, whose note explains that the tier is declared-but-unbacked
+      // because base ships no CDP client. ⇒ Flip to cdp-client when an import
+      // exists, not before.
+      //
+      // ⚠ `tier` is PURELY DESCRIPTIVE — measured 2026-09-27: it is read into a
+      // variable by test-all-consumers.sh, verify-no-byte-drift.sh and
+      // probe-contract-capability.sh and then used only as an envelope label. It
+      // selects no probes. So a wrong tier cannot produce a vacuous green; it
+      // misinforms the humans and the JSONL readers, which is why it still gets
+      // the honest value rather than the flattering one.
+      "tier": "contracts",
+      // No localDir: verified the repo is at ~/github/CLIAI/perplexity-webctl and
+      // the directory name equals the registry name. Stated rather than assumed —
+      // the substack/fetlife bug was a silent SKIP that read as green.
+      //
+      // ⭐ ON `main`, NOT `master`. The wired definition above says "master";
+      // that wording is the registry's, not the gate's — the gate never resolves
+      // a branch name, it uses whatever is checked out (verified by grep). Noted
+      // so nobody "fixes" this repo by looking for a master branch.
+      //
+      // wired:true VERIFIED HERE against base's refs, not on the lane's report:
+      // gitlink 7a35aba, which `describe --tags --exact-match` names v0.13.1. ⚠
+      // The lane's message quoted "v0.13.1 (2f9275c)" — 2f9275c is their OWN
+      // HEAD and not a base object at all. The pin is nonetheless correct, and
+      // the near-miss worth recording is that `git rev-parse v0.13.1` returns
+      // 1ba45ac, the ANNOTATED TAG OBJECT, while the commit is 7a35aba. Anything
+      // comparing a tag to a gitlink must ask for `v0.13.1^{commit}` or it will
+      // report a false mismatch on every annotated tag this repo ships.
+      //
+      // The xrl4 contract is NOT present yet, so the gate reports SKIP
+      // "contract pending" — never FAIL — and auto-flips to real PASS/FAIL the
+      // instant ./test-against-base.sh lands. wired:true is still the correct
+      // value: the gate's own stale-entry detector defines wired BY THE MOUNT,
+      // so wired:false on a mounted submodule would be flagged STALE.
       "wired": true
     },
     {

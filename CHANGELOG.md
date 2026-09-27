@@ -207,6 +207,110 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.14.0 — 2026-09-27
+
+**Headline: the contract harness.** The checks every consumer contract was
+copying are now a library a contract **calls** — `scripts/contract-harness.mjs`,
+verbs `generation` / `pin` / `no-revendor`. The harness **owns the exit code**
+(0 pass / 1 fail / 2 no-verdict / 3 usage) so no contract re-implements the
+`[ "$rc" = "2" ]` handling that already turned one lane's green suite into
+exit 1. Cut because three defects were found in three lanes' copies at three
+different ages, and **a defective contract reports green** — the one duplication
+in this family that fails by reassuring us.
+
+### ⛔ What this headline does NOT cover
+
+* **The harness is three checks, not the contract.** A lane still writes its own
+  suite invocation, teardown enumeration and version marker. Adopting the harness
+  does not make a contract complete; it removes the three that were provably
+  rotting.
+* **The gate-swap arm is proven by a FORGED fixture only.** `pin` returns
+  no-verdict when `WEBCTL_DECLARED_PIN` disagrees with the worktree, and that
+  state is reproduced in tests by constructing it by hand. It is **not yet
+  exercisable during a real `--against-head` gate run**, which is the only place
+  the state occurs on demand. Until that lands, the arm is tested against a model
+  of the gate rather than the gate.
+* **It fixes FUTURE duplication, not the copies already out there.** Lanes
+  carrying older copies keep their rot, and you cannot find them by diffing —
+  rot and legitimate per-lane customisation look identical in a diff.
+  `HARNESS_GENERATION = 1` makes "who is below N?" answerable, but **nothing
+  sweeps automatically**; someone has to ask.
+* **`verify_yaml_frontmatter.py`'s duplicate-ID repair is forward-looking.**
+  master's corpus is clean and now provably so, but the four colliding IDs that
+  exposed the defect live on **unmerged `design/*` branches**. Any lane that
+  merged those locally has collisions that resolved silently until this release.
+* **`base-surface.mjs` proves purity for the surface it walks**, not for every
+  factory base will add. Enumerating by calling is not free — `resolveChromiumProfile()`
+  mkdirs — so the tool constructs against a throwaway `HOME` and asserts it did
+  not write. A future factory that writes somewhere else is not covered by that
+  guard.
+* **No runtime behaviour changed.** `lib/` gained data on an existing frozen
+  contract and comments; a consumer bumping to v0.14.0 gets tooling, contract
+  data and docs, **not** new browser capability. If you are waiting on the CDP
+  client extraction, this is not it.
+
+### Added
+
+* `scripts/contract-harness.mjs` + `.README.md` + `.DEV_NOTES.md`, with
+  `HARNESS_GENERATION` exported so a sweep can ask who is behind.
+* `scripts/base-surface.mjs` + docs — enumerate base **by constructing**, because
+  `grep 'export function'` is structurally blind to the ~46% of the callable
+  surface that is only reachable through a factory. The tool carries a vacuity
+  guard on itself: zero factory returns exits 1 rather than becoming the grep it
+  replaces.
+* `CONTAINER_LIFECYCLE_CONTRACT` gains `pairOrder`, `recovery` and
+  `recoveryNote` — additive fields on a frozen contract, naming the pair ORDER
+  rather than only the absence of a restart policy.
+
+### Fixed
+
+* **`verify_yaml_frontmatter.py`: the duplicate-ID check could not fail.** The
+  index was `dict[str, Path]`, so a colliding ID overwrote its predecessor and
+  the check downstream regrouped an already-unique mapping — `len(paths) > 1` was
+  unreachable while the docstring advertised the check. Measured over master plus
+  the unmerged design branches: **47 docs scanned, 40 indexed, "All files passed
+  validation", rc 0**, with eleven docs colliding across four IDs. Cross-references
+  resolve through these IDs, so `relates_to: [v7m2]` had been resolving to
+  whichever doc won the overwrite. The verifier now also runs under `npm test`;
+  it previously ran only when an agent remembered the command.
+* The release gate exports `WEBCTL_DECLARED_PIN` before each swap, because the
+  swap is exactly what makes a contract unable to know its own declared pin.
+
+### Docs
+
+* New: `arch-browser-targets-btg4` — a target says WHERE a browser is and how to
+  reach it; a profile is the Chromium user-data directory. Includes the
+  per-surface transport split (`control` never leaves ssh/local; `view` may use a
+  tailscale relay), and a correction: `ssh host -- <argv>` is **not**
+  injection-safe, because ssh joins the remote argv with spaces and the remote
+  shell re-parses it.
+* New: `test-checks-that-cannot-fail-k3wn` — verification discipline, led
+  deliberately by base's **own** shipped defects rather than other lanes'.
+* `xrl4` gains the harness's version-marker requirement.
+* `AGENTS.md` records that roughly half of base's callable surface is not a
+  module export, with the measurement.
+
+### Registry
+
+* `perplexity-webctl` registered, `wired:true`, `tier: contracts`. Tier is the
+  honest value rather than the proposed one: the submodule is mounted but no file
+  outside `vendor/` imports it yet, so any browser tier would be a statement
+  about future code. Flip to `cdp-client` when an import exists.
+* **`claude-chrome-extension-webctl` flipped `wired:false` → `true` — the gate
+  caught this registry lying.** The stale-entry detector reported "wired:false but
+  submodule mounted", and the mount is real: pinned at tag **v0.7.0**, submodule
+  checked out, ten-plus non-vendor files importing it. This was not an aspiration
+  registered early; it was a real consumer the registry under-reported, counted as
+  a skip on every run. ⚠ v0.7.0 is six releases behind, so making it visible
+  starts a conversation about a very old pin rather than closing one.
+
+### Docs (index)
+
+* `AGENTS.md`'s corpus list was missing **7 of 26** design docs, including two
+  written that week. `test/agents-md-indexes-the-corpus.test.js` now fails on an
+  uncited doc or a citation resolving to no file — the list is checked rather than
+  maintained by memory.
+
 ## v0.13.1 — 2026-09-23
 
 ⛔ **v0.13.0's `portOrigin()` could not classify TWO OF THE THREE PORTS

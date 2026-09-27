@@ -68,18 +68,33 @@ live on:
     decision, semver, secret modes, FUTURE_WORK),
     `arch-constants-injection-seam-sm2t` (how shared modules receive per-repo
     constants without importing them — the `createX(C)` factory seam),
-    `arch-automatic-browser-lifecycle-8hw5`.
+    `arch-automatic-browser-lifecycle-8hw5`,
+    `arch-browser-targets-btg4` (a TARGET says where a browser is and how to
+    reach it; a PROFILE is the Chromium user-data dir — local, docker, or remote
+    over ssh), `arch-coincident-fields-t2wf` (two fields holding one value are
+    indistinguishable from one field).
   * **test** — `test-cross-repo-consumer-loop-xrl4` (the `test-against-base.sh`
-    contract + `consumers.jsonc` + the release gate).
+    contract + `consumers.jsonc` + the release gate),
+    `test-checks-that-cannot-fail-k3wn` (verification discipline, led by base's
+    OWN shipped defects).
   * **infra** — `infra-directory-structure-f868`, `infra-browser-configuration-v7m2`,
     `infra-cdp-websocket-client-v7x3`, `infra-client-profile-registry-lf4f`,
     `infra-config-precedence-2fc5`, `infra-dotenv-configuration-r7m3`,
-    `infra-logging-output-sazn`.
+    `infra-logging-output-sazn`, `infra-storage-path-resolution-v59v`,
+    `infra-xpra-remote-access-gateway-f6rd`.
   * **safety** — `safety-blocked-state-handling-k7m2`,
-    `safety-defense-in-depth-pipeline-dip7`, `safety-process-mutex-v8m2`.
+    `safety-defense-in-depth-pipeline-dip7`, `safety-process-mutex-v8m2`,
+    `safety-process-mutex-factory-p06y`.
   * **ux** — `ux-dual-audience-help-nho9`, `ux-tab-management-lru-1wsg`,
-    `ux-ui-state-hygiene-iqrg`.
+    `ux-ui-state-hygiene-iqrg`, `ux-gui-subcommand-surface-gu1d`.
   * **data** — `data-jsonl-machine-interface-lszd`.
+
+⛔ **This list is checked, not maintained by memory.**
+`test/agents-md-indexes-the-corpus.test.js` fails if a doc exists uncited or a
+citation resolves to no file. Measured 2026-09-27, before that guard: 26 docs on
+disk, **19 cited** — seven invisible to anyone who trusted the index, two of them
+written that same week. The drift is silent: a missing entry breaks nothing, it
+just means a lane re-derives a spec that already exists.
 
 ## Submodule / migration role
 
