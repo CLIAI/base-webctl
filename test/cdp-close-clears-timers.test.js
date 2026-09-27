@@ -1,109 +1,83 @@
-// cdp-close-clears-timers.test.js — a rejected call must not leave an ARMED timer.
+// cdp-close-clears-timers.test.js — a settled promise is not the end of the work.
 //
-// ⛔ WHY: `CdpSession`'s close handler rejected every in-flight call and never
-// cleared its timer. The rejection was correct and arrived on time, so nothing
-// looked broken — while an armed timer held the event loop open for the full
-// command timeout. Found by a consumer's LIVE QA, not here: 15.7 s of wall clock
-// for 0.39 s of work, after every command that had evaluated.
+// ⛔ THE DEFECT: `CdpSession`'s close handler rejected every in-flight call and never
+// cleared its timer. The rejection was correct and arrived in milliseconds, so
+// nothing looked broken — while an ARMED timer held the event loop open for the full
+// command timeout. Found by a consumer's live QA: 15.7 s of wall clock for 0.39 s of
+// work, after every command that had evaluated. `waitForEvent` had it worse: on a
+// close its caller waited the entire timeout and then failed with "did not arrive",
+// a true sentence naming the wrong cause.
 //
-// ⚠ AND THE PATH HAD NO TEST BECAUSE THE SOCKET WAS NOT INJECTABLE. The defect
-// lived in exactly the branch that could not be reached from a test, which is the
-// week's recurring shape. `WebSocketImpl` was added for this.
+// ⭐ "Clear timers on close" reads as bookkeeping. It is a LIVENESS bug, and the
+// framing that makes it obvious came from another lane who found the same shape in
+// their own code: **the promise settling is not the end of the work if a timer
+// survives it.**
 //
-// ⭐ The assertion is on `process.getActiveResourcesInfo()` — public since Node 17
-// — because that measures THE REPORTED SYMPTOM (a live timer keeping the process
-// up) rather than a proxy for it. Asserting only that the promise rejects would
-// have passed against the defect: it always did.
+// ⛔ AND MY FIRST VERSION OF THIS FILE COULD NOT REPORT. It asserted in-process on
+// `process.getActiveResourcesInfo()`. But `node --test` keeps its own loop alive and
+// buffers a file's output until the file completes — so a leaked timer did not fail
+// the test, it PREVENTED IT FROM REPORTING. Measured with the fix reverted: NO TAP
+// output at all, killed at 25 s. ⇒ `npm test` would have HUNG rather than failed, and
+// a suite that hangs has no verdict, which is worse than a red one. The same lane
+// warned me: the regression test has to SPAWN, because the property is process
+// liveness and only a process can observe it.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CdpSession } from '../lib/cdp-client.js';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-/** Count live Timeout handles. */
-const timers = () => process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const PROBE = path.join(HERE, 'helpers', 'cdp-leak-probe.mjs');
 
 /**
- * A socket that opens, swallows sends, and closes on demand — never replying.
- * Deliberately minimal: the point is a reply that never comes.
+ * Run one scenario in a child and time its EXIT. The child arms a 10-minute timer,
+ * so a surviving one cannot drain inside any plausible budget.
+ * @param {string} mode
+ * @param {number} budgetMs
  */
-function fakeSocket() {
-  /** @type {Record<string, Function[]>} */
-  const ls = {};
-  const sock = {
-    sent: /** @type {string[]} */ ([]),
-    addEventListener(/** @type {string} */ ev, /** @type {Function} */ fn) {
-      (ls[ev] ||= []).push(fn);
-    },
-    send(/** @type {string} */ d) { sock.sent.push(d); },
-    fire(/** @type {string} */ ev, /** @type {any} */ arg) { for (const fn of ls[ev] || []) fn(arg); },
-  };
-  return sock;
-}
-
-/** @param {{sock?: any}} [out] */
-function session(out = {}) {
-  const sock = fakeSocket();
-  if (out) out.sock = sock;
-  // A long timeout so a leaked timer is unmistakable: if the fix is absent, the
-  // handle is still armed when we assert, exactly as in production.
-  return new CdpSession('ws://127.0.0.1:1/devtools/page/x',
-    { defaultTimeout: 600000, WebSocketImpl: function () { return sock; } });
+function exitTime(mode, budgetMs = 8000) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const child = spawn(process.execPath, [PROBE, mode], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    const killer = setTimeout(() => child.kill('SIGKILL'), budgetMs);
+    child.on('exit', (code, signal) => {
+      clearTimeout(killer);
+      resolve({ ms: Date.now() - started, code, signal, out, err });
+    });
+  });
 }
 
 test('⛔ a pending COMMAND rejected by close leaves no armed timer', async () => {
-  /** @type {any} */ const out = {};
-  const s = session(out);
-  const connected = s.connect();
-  out.sock.fire('open');
-  await connected;
-
-  const before = timers();
-  const call = s.cdp('Runtime.evaluate', { expression: '1' });
-  assert.equal(timers(), before + 1, 'the fixture must actually arm a timer, or this test proves nothing');
-
-  out.sock.fire('close');
-  await assert.rejects(call, /closed before the reply arrived/);
-
-  // ⇒ THE ASSERTION THAT FAILS AGAINST THE DEFECT. The rejection above passed
-  // before the fix too; only the handle count distinguishes them.
-  assert.equal(timers(), before,
-    'the timer of a rejected call is still armed — it will hold the event loop '
-    + 'open until the command timeout, which is the reported symptom');
+  const r = /** @type {any} */ (await exitTime('command'));
+  // The scenario itself must have happened, or a fast exit proves nothing.
+  assert.match(r.out, /SCENARIO-DONE/, `the scenario did not complete:\n${r.err}`);
+  assert.equal(r.signal, null,
+    `the child had to be KILLED after ${r.ms}ms — a timer survived the rejection and `
+    + 'held the event loop open. That is the reported symptom.');
+  assert.equal(r.code, 0, `child exited ${r.code}:\n${r.err}`);
+  assert.ok(r.ms < 3000, `child took ${r.ms}ms to exit; it should drain immediately`);
 });
 
-test('⛔ a pending waitForEvent rejected by close leaves no armed timer, and says WHY', async () => {
-  /** @type {any} */ const out = {};
-  const s = session(out);
-  const connected = s.connect();
-  out.sock.fire('open');
-  await connected;
-
-  const before = timers();
-  const waiting = s.waitForEvent('Page.loadEventFired');
-  assert.equal(timers(), before + 1, 'the fixture must arm a timer');
-
-  out.sock.fire('close');
-  // ⚠ Before the fix this did not reject at all on close: the caller waited the
-  // whole timeout and then failed with "did not arrive within Nms" — a true
-  // sentence naming the wrong cause.
-  await assert.rejects(waiting, /closed while waiting for event Page\.loadEventFired/);
-  assert.equal(timers(), before, 'the waiter timer is still armed after close');
+test('⛔ a pending waitForEvent rejected by close exits promptly AND names the close', async () => {
+  // The probe asserts the reason itself, so a wrong reason fails the child.
+  const r = /** @type {any} */ (await exitTime('waiter'));
+  assert.match(r.out, /SCENARIO-DONE/, `the scenario did not complete:\n${r.err}`);
+  assert.equal(r.signal, null, `the child had to be KILLED after ${r.ms}ms — waiter timer survived`);
+  assert.equal(r.code, 0, `child exited ${r.code}:\n${r.err}`);
+  assert.ok(r.ms < 3000, `child took ${r.ms}ms to exit`);
 });
 
-test('⭐ CONTROL: a call that RECEIVES its reply also leaves no armed timer', async () => {
-  // Otherwise "no armed timers" could be satisfied by a session that never arms
-  // any, and both tests above would pass over a broken fixture.
-  /** @type {any} */ const out = {};
-  const s = session(out);
-  const connected = s.connect();
-  out.sock.fire('open');
-  await connected;
-
-  const before = timers();
-  const call = s.cdp('Runtime.evaluate', { expression: '1+1' });
-  const id = JSON.parse(out.sock.sent[0]).id;
-  out.sock.fire('message', { data: JSON.stringify({ id, result: { result: { value: 2 } } }) });
-
-  assert.deepEqual(await call, { result: { value: 2 } });
-  assert.equal(timers(), before, 'the happy path must also clear its timer');
+test('⭐ CONTROL: a call that RECEIVES its reply also exits promptly', async () => {
+  // ⇒ Without this, "the child exits fast" could be satisfied by a session that
+  // never arms a timer at all, and both tests above would pass over a dead fixture.
+  const r = /** @type {any} */ (await exitTime('reply'));
+  assert.match(r.out, /SCENARIO-DONE/, `the scenario did not complete:\n${r.err}`);
+  assert.equal(r.signal, null, `the happy path also leaked: killed after ${r.ms}ms`);
+  assert.ok(r.ms < 3000, `child took ${r.ms}ms to exit`);
 });

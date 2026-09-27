@@ -514,6 +514,43 @@ attempt proved nothing — the gate refuses a dirty tree, so it exited 2 before
 reaching the probe, and *"the gate did not block"* and *"the gate never ran"* look
 alike in an exit code nobody read carefully.
 
+## ⛔ A TEST THAT CATCHES A DEFECT BY HANGING HAS NO VERDICT
+
+base's own, 2026-09-27, and the fix for one defect introduced this one.
+
+A liveness defect — a rejected call leaving an **armed timer** that held the event loop
+open — was covered by a test asserting in-process on
+`process.getActiveResourcesInfo()`. It looked like the right instrument: it measures
+the reported symptom rather than a proxy.
+
+⛔ **But `node --test` keeps its own loop alive and buffers a file's output until the
+file completes.** So the leaked timer did not fail the test — **it prevented the test
+from reporting at all.** Measured with the fix reverted: **no TAP output whatsoever**,
+killed at 25 s.
+
+⇒ **`npm test` would have HUNG rather than failed**, and a suite that hangs produces
+**no verdict** — which `xrl4` already names as worse than a red one: a red result routes
+to the change that caused it, a hang routes to "CI is flaky".
+
+⭐ **The property was PROCESS LIVENESS, so the only instrument that can observe it is a
+PROCESS.** The repair spawns a child that runs the scenario and returns, and times its
+exit; a surviving timer means the child must be killed, which the parent reports as a
+failure with the elapsed time in the message. ⚠ The child deliberately does **not** call
+`process.exit()` — that would mask the very thing under test — and it prints a sentinel
+so that a fast exit for the wrong reason cannot pass.
+
+⚠ **Both directions, after the repair:** reverting the fix now yields `not ok` with
+*"had to be KILLED after 8052ms — a timer survived the rejection"*, and the two adjacent
+arms stay green because only one path was reverted. Before the repair, the same
+revert yielded silence.
+
+⭐ **The transferable rule:** *the test harness is part of the instrument.* An assertion
+about the event loop, made **inside** a runner that owns the event loop, is measuring
+the runner. ⇒ Ask what the runner guarantees before choosing an in-process assertion —
+and where the property is about a process existing, exiting or being killed, **spawn.**
+*(The gap was pointed out by another lane, who had just fixed the same shape in their
+own probe and had already concluded the test must spawn.)*
+
 ## ⛔ A MEASUREMENT ATTACHED TO A CLAIM SUPPRESSES THE READER'S OWN VERIFICATION
 
 The sharpest thing to come out of a design review this month, and it is about how
