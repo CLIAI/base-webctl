@@ -95,9 +95,9 @@ Adopted as-is where it is genuinely symmetric; the JSONL envelope follows `lszd`
 gui-status  {slug, base, container, running, chromiumRunning,
              ports: { "xpra-tcp":   {value, source},
                       "xpra-html5": {value, source} },
-             html5Answering, html5Url, attach: {native, html5}}
+             html5Answering, html5Url, attach: {native, html5, dockerGl}}
 
-gui-attach  {slug, mode: "native"|"html5", ok, exitCode|url|command, printCli?}
+gui-attach  {slug, mode: "native"|"html5"|"docker-gl", ok, exitCode|url|command, printCli?}
 ```
 
 ### ⛔ Three states, never two
@@ -604,6 +604,63 @@ which is the only time it is cheap.)*
   `process.exit`;
 * the act of spawning a viewer. base returns *what to run*; the consumer runs it.
   A library that execs a GUI client on the operator's desktop is not a library.
+
+## ✅ RULED: a THIRD attach mode, `docker-gl` — and three things base will not do
+
+Greg asked for `<tool> gui attach` with an **OpenGL xpra client in docker** to be a
+family standard that base **enforces**, *"codif[ied] in repo, shared libraries, QA
+checklists so other projects inherit standard and later verify when QA is done"*.
+Raised by `grok` with a concrete proposal; working implementation exists in one lane
+and is the fleet's ruled pattern for the remote case.
+
+✅ **(1) ADOPTED — `attach` gains a third descriptor.** `attach: { native, html5,
+dockerGl }`, returned **as data** exactly like the other two, and `gui-attach` gains
+`mode: "native" | "html5" | "docker-gl"`. This is additive and fits the existing shape.
+
+⛔ **(2) REFUSED — it must NOT become "the default where a GL client repo is
+configured".** That makes the selected mode depend on **what was detected**, and this
+document already exists partly because a *detected* answer hid which thing you got:
+`running` and `html5Answering` are separate fields precisely so one `false` cannot be
+read as the other. ⚠ A mode chosen by detection means an operator cannot tell, from the
+command they typed, which client they are about to get — and the two have different
+failure modes and different security surfaces.
+⇒ **Base REPORTS availability; the caller STATES the mode.** Same rule `btg4` reached
+for the browser engine: **declared, then verified** — never sniffed.
+
+⛔ **(3) REFUSED — the shell implementation does not come into base as it stands.**
+base is the family's only **PUBLIC** repo. The working script is parameterised on
+specific **hosts** and names a specific **image repository**, and this repo's own
+invariant is *provenance by role, never by hostname*. ⇒ **Base owns the CONTRACT and
+the CHECK; the template or the lane owns the host-specific shell.** That split is not a
+hedge — the shell is the part that legitimately differs per machine, and the contract
+is the part that must not.
+
+⭐ **(4) THE IMPORTANT ONE — A CHECKLIST CONSUMERS "CITE" IS NOT ENFORCEMENT.** The
+proposal was that the GL check and the attach guards *"become a base QA checklist that
+consumers' `test-against-base.sh` must cite"*. ⛔ **Citing is not checking.** A contract
+that names a checklist passes whether or not the property holds, which is the exact
+shape `test-checks-that-cannot-fail-k3wn` catalogues and the exact shape Greg's own
+words rule out: *"later verify when QA is done"* requires something that **executes**.
+
+⇒ And the good news is that it already executes. The existing `--glcheck` is a
+**three-row pass**: host, container — which must **match** — and an **llvmpipe
+control**. ⭐ **That control is a positive arm**: it proves the check can tell
+hardware GL from software rasterisation, so a passing result is not merely "the probe
+returned something". It is already the right shape, and it should ship **as a check
+base can run**, not as prose a consumer promises to have read.
+
+⚠ **What base must therefore ship, and in this order:**
+
+1. the `dockerGl` **descriptor** in `inspect()`/`gui-attach`, as data (above);
+2. an **executable** GL assertion with the llvmpipe control retained — a lane's QA
+   either runs it or does not, and the gate can see which;
+3. the attach **guards** as assertions, not bullet points: no published port, socket
+   mode `0700`, a per-attach network, and a **relay that is read-only**.
+
+⚠ **And what remains genuinely a checklist**, because it cannot be executed from base:
+whether a **human** could actually see and use the window. That one stays prose, and
+should say so rather than hiding among the executable items — `gu1d`'s own point that a
+CDP probe tells you nothing about whether a human can attach.
 
 ## ⚠ What this does not cover
 
