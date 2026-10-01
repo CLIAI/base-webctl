@@ -657,6 +657,27 @@ base can run**, not as prose a consumer promises to have read.
 3. the attach **guards** as assertions, not bullet points: no published port, socket
    mode `0700`, a per-attach network, and a **relay that is read-only**.
 
+### ⚠ The working kit cannot be COPIED into base — measured, and it is prose not logic
+
+A lane offered its kit for base to lift, having already made `--glcheck` decide
+**PASS/FAIL itself** (exit 0/1) rather than print rows for a human to compare, with an
+offline test of **7 fixes each carrying a negative control**. ⭐ That is the right shape
+and the valuable part.
+
+⛔ **But all 8 files of that kit carry host identifiers** — including both test scripts.
+Measured: the references are in **comments, headers and usage examples**, not in the
+executable logic (the offline test's single hit is a comment reading *"no ⟨host⟩, no
+window"*). ⇒ So for a lane's own **private** repo nothing is wrong; the constraint is
+purely base's **publication** one.
+
+⇒ **Therefore what base lifts is the CHECK STRUCTURE, not the files:** the PASS/FAIL
+exit, the three-row GL comparison with its forced-software control, and the
+one-negative-control-per-guard pattern — re-expressed with role-based prose. ⚠ Anyone
+doing this should expect a **re-write of the text and a port of the logic**, and should
+not plan it as a copy: *"we will lift their tests"* under-estimates it, and a sed over
+hostnames is the shape this repo already caught itself doing (a redaction that replaced
+an alias with a name derived from the real hostname).
+
 ⚠ **And what remains genuinely a checklist**, because it cannot be executed from base:
 whether a **human** could actually see and use the window. That one stays prose, and
 should say so rather than hiding among the executable items — `gu1d`'s own point that a
