@@ -661,8 +661,32 @@ base can run**, not as prose a consumer promises to have read.
 
 A lane offered its kit for base to lift, having already made `--glcheck` decide
 **PASS/FAIL itself** (exit 0/1) rather than print rows for a human to compare, with an
-offline test of **7 fixes each carrying a negative control**. ⭐ That is the right shape
-and the valuable part.
+offline test of **7 cases covering 2 fixes, with 2 negative controls** — corrected by
+that lane after I first wrote *"7 fixes each carrying a negative control"*, which
+overstated it on both counts. Verified here from the suite itself:
+
+```
+H1   --host-xpra exits after its client; no docker call follows        (fix a)
+H1c  CONTROL: `exit $?` removed -> docker calls DO follow               (must be caught)
+G1   glcheck PASS:  host == container, control shows llvmpipe           (fix b)
+G2   glcheck FAIL:  container renders llvmpipe
+G3   glcheck FAIL:  container renderer differs from host
+G4   glcheck FAIL:  control does NOT show llvmpipe (runner ignored the env)
+G4c  CONTROL: control-row branch removed -> G4's input passes           (must be caught)
+```
+
+⭐ **And the shape is better than the count I got wrong.** `G1`–`G4` are not one
+assertion repeated: they separate a pass from **three distinct failure causes**, so a
+FAIL says *which* way GL was wrong. ⚠ `G4` is the subtle one — *the control row itself
+did not show llvmpipe*, meaning the runner ignored the forced-software env, so the
+control was not controlling. ⇒ **A check whose own control can fail silently is the
+thing this family keeps rediscovering**, and that case exists because someone went
+looking for it.
+
+⚠ **I restated their count without checking it**, into this document, which elsewhere
+records that *a measurement attached to a claim suppresses the reader's verification*.
+⇒ The rule applies to flattering numbers too: "7 fixes" was more impressive than "2
+fixes, 7 cases", and that is exactly when it goes unchecked.
 
 ⛔ **But all 8 files of that kit carry host identifiers** — including both test scripts.
 Measured: the references are in **comments, headers and usage examples**, not in the
