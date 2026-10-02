@@ -49,6 +49,35 @@ The record's keys and values are judged by `validateTarget` (closed key set, enu
 opaque `profile_id`, no leading-dash ssh alias). A file not mode 600 is refused
 (`checkConfigMode`).
 
+## 1a. ONE shared config, ONE loader — `loadSharedWebctlConfig()`
+
+Greg, 2026-10-03: new lanes and existing ones *"all source from shared
+`~/.config/webctl/`"*, with a declared default browser host and chromium-in-docker as
+the default container. Every lane reading those files its own way would be the
+duplication this family exists to stop, so base reads them:
+
+```
+~/.config/webctl/                    mode 700
+~/.config/webctl/config.toml         mode 600   default_target = "<name>"
+~/.config/webctl/targets/<name>.toml mode 600   one record per target (§1)
+```
+
+* **`loadSharedWebctlConfig({home})`** returns the default target's NAME as a
+  **config-layer** value for `resolveTarget` (so flag and env still win), every record
+  that validates, and an error per file that does not — naming the file and the key,
+  never a value.
+* ⛔ **A file not mode 600 is refused, not read** (`checkConfigMode`). A record that fails
+  `validateTarget` is refused. A `default_target` naming no valid record is an error,
+  never a silent fall-through to "no default".
+* **TOML, a deliberate SUBSET** (zero dependencies): `key = "string" | integer | true |
+  false | ["a", "b"]`, `#` comments. Anything else — tables, multi-line strings, dotted
+  keys — is **refused with its line number**, never half-parsed.
+* **No directory is an ordinary state**: `present: false`, no default, no error — and
+  then `resolveTarget` refuses as it always has. The loader **never creates** the
+  directory; base's tests prove it does not write.
+* The DEFAULT is a person's declaration in their own home directory. The loader supplies
+  no fallback of its own.
+
 ## 2. ✅ RULED: `--target` is THE location flag; `--client` never chooses a location
 
 `btg4` left the noun collision open. Settled here, once:
