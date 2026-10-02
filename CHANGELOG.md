@@ -219,9 +219,10 @@ is the strongest form: it names the ownership in the function that reads it.
   empty-file guard for that run. A non-zero exit and a vanished `describe()` still fail;
   an inherited env var cannot enable it.
 
-* ⛔ **`--tap` — REQUIRED in a gate contract.** With spec on stdout, `gemini` and
-  `substack` each measured **zero TAP lines** after adopting the runner: green locally,
-  dark to the gate's line scan. ⚠ The default stays **spec**. A candidate of this release
+* ⛔ **`--tap` — REQUIRED in a gate contract.** On `gemini`'s and `substack`'s suites,
+  v0.27.0's runner printed **zero TAP lines** to stdout (spec default), which would leave a
+  contract green locally and dark to the gate's line scan. Both lanes measured it, kept TAP
+  visible by passing the reporter through, and reported it. ⚠ The default stays **spec**. A candidate of this release
   flipped it to TAP, and the gate went red on `fetlife`, whose contract parses spec's
   `ℹ tests N`. That broke the rule this repo wrote the same day: a change must not alter
   what an existing caller already gets. Visibility is therefore a documented required flag,

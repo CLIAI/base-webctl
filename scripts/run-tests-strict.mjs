@@ -31,9 +31,10 @@ delete env.WEBCTL_STRICT_ALLOW_PLAIN_SCRIPTS;
 const passthrough = [];
 let human = 'spec';
 for (const a of process.argv.slice(2)) {
-  // ⛔ PASS --tap IN A CONTRACT. The release gate reads contract output line by line, and
-  // with spec on stdout two adopting lanes streamed ZERO TAP lines (`gemini`, `substack`)
-  // — green locally, dark to the gate. The DEFAULT stays spec: flipping it to TAP broke a
+  // ⛔ PASS --tap IN A CONTRACT. The release gate reads contract output line by line. On
+  // `gemini`'s and `substack`'s suites THIS RUNNER printed 0 TAP lines to stdout (spec
+  // default); both lanes measured it, kept TAP visible by passing the reporter through,
+  // and reported it — hence --tap. The DEFAULT stays spec: flipping it to TAP broke a
   // lane that parses spec's "ℹ tests N" (`fetlife`, at the v0.28.0 gate) — a change to what
   // an existing caller already gets (sb7q). So visibility is a documented REQUIRED flag.
   if (a === '--tap') human = 'tap';

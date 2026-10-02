@@ -8,8 +8,10 @@ node vendor/base-webctl/scripts/run-tests-strict.mjs "test/**/*.test.{js,mjs,cjs
 
 * Spec on stdout by default; the strict verdict on stderr.
 * ⛔ **In a gate contract, pass `--tap`.** The release gate reads contract output line by
-  line; with spec, two adopting lanes streamed **zero TAP lines** — green locally, dark to
-  the gate. (The default stays spec because a lane already parses spec's `ℹ tests N`;
+  line, and with its spec default **this runner printed zero TAP lines** on `gemini`'s
+  and `substack`'s suites — a contract relying on it would be green locally and dark to
+  the gate. Both lanes measured that, kept TAP visible by passing the reporter through,
+  and reported it. (The default stays spec because a lane already parses spec's `ℹ tests N`;
   flipping it broke that lane at the v0.28.0 gate.) Prove it in your contract: FAIL if no
   TAP line streamed (`substack`'s arm).
 * Fails on any `test:fail` event (TODO/SKIP excepted), **including a suite whose
