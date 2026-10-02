@@ -139,6 +139,22 @@ driving: the ownership claim (`ow9k`) where the lane has one — not a process-t
 config port alone → `no-target`; out-of-range / non-numeric / two ports / non-loopback host
 → refused with their own codes; `--port` beside `--target` → qualifier.
 
+## 3b. Refusal instructions name only the knobs a lane HAS; rulings from adoption
+
+* **`hints.supports`** — the knobs this tool actually has (`target`, `ssh`, `port`, `env`,
+  `config`). The `no-target` instructions then name **only those**. *(From `substack`: a
+  lane relaying the generic text documented `--ssh` and `default_target`, which it has
+  neither of.)* Without `supports` the generic text is kept; an unknown entry or an empty
+  list **throws** — a typo must not silently drop a way to fix the refusal.
+* ✅ **Ruled by `webctl:mgr` for `fetlife`, recorded here:** an **env port alone refuses**
+  (strict §3a); a **named target's stated `local_cdp_port` counts** as a location for CDP
+  commands, since the person declared it in the record. Full precedence:
+  **`--target`/`--ssh` > bare `--port` > env > config.**
+* *Noted, not ruled:* the closed target schema has **no runtime key** (docker mode, image
+  base), so a lane may keep those as image-selection flags with defaults — a default for
+  *which image*, not for *where*. If base adds a `runtime` key, lanes read it from the
+  record instead.
+
 ## 4. `lf4f` is superseded in part
 
 `infra-client-profile-registry-lf4f` (draft, earlier) is the `--client <profile>` registry

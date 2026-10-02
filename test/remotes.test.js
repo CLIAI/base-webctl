@@ -429,3 +429,22 @@ test('needsTarget:false with a --port still resolves (the port was stated), and 
   assert.equal(resolveTarget([{ source: 'flag', port: 4877 }], { needsTarget: false }).verdict, 'resolved');
   assert.equal(resolveTarget([], { needsTarget: false }).verdict, 'not-needed');
 });
+
+test('⛔ refusal instructions name ONLY the knobs the lane declares — control: undeclared keeps the generic text', () => {
+  const r = /** @type {any} */ (resolveTarget([], { supports: ['target', 'env'], envKey: 'CLIAI_DEMO_BROWSER_TARGET' }));
+  assert.equal(r.code, 'no-target');
+  assert.match(r.instructions, /--target <name>/);
+  assert.match(r.instructions, /CLIAI_DEMO_BROWSER_TARGET/);
+  assert.doesNotMatch(r.instructions, /--ssh/, 'a lane without --ssh must not document it');
+  assert.doesNotMatch(r.instructions, /default_target/, 'nor a config key it does not read');
+  assert.ok(r.reason.includes(r.instructions), 'the reason carries the same instructions');
+  // --port named when declared
+  assert.match(/** @type {any} */ (resolveTarget([], { supports: ['port'] })).instructions, /--port <n>/);
+  // control: no `supports` → the generic text, unchanged
+  const g = /** @type {any} */ (resolveTarget([]));
+  assert.match(g.instructions, /--ssh <alias>/);
+  assert.match(g.instructions, /default_target/);
+  // a typo or an empty list is a programming error, not a silent omission
+  assert.throws(() => resolveTarget([], { supports: ['tagret'] }), /unknown supports entry: tagret/);
+  assert.throws(() => resolveTarget([], { supports: [] }), /supports is empty/);
+});
