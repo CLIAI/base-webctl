@@ -221,3 +221,31 @@ test('the "vanished suite" hint appears only when a SUITE failed — not for an 
     fs.rmSync(plainFail.dir, { recursive: true, force: true }); fs.rmSync(vanish.dir, { recursive: true, force: true });
   }
 });
+
+test('a caller\'s OWN stdout reporter is kept and ours is not added — TAP streams ONCE (no double count)', () => {
+  const fx = fixture('ok.test.cjs', "const { it } = require('node:test'); it('a', () => {}); it('b', () => {});\n");
+  try {
+    const r = spawnSync(process.execPath,
+      [RUNNER, '--test-reporter=tap', '--test-reporter-destination=stdout', fx.file], { encoding: 'utf8', env });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal((r.stdout.match(/^ok \d+ - /gm) || []).length, 2, `each test once, got:\n${r.stdout}`);
+    assert.doesNotMatch(r.stdout, /✔/, 'no spec stacked on the caller\'s TAP');
+    // the strict verdict still applies
+    assert.match(r.stderr, /STRICT: 0 failure events/);
+  } finally { fs.rmSync(fx.dir, { recursive: true, force: true }); }
+});
+
+test('⛔ --tap BESIDE a passed-through stdout reporter is refused: "replace, don\'t add"', () => {
+  const fx = fixture('ok.test.cjs', "const { it } = require('node:test'); it('a', () => {});\n");
+  try {
+    for (const extra of [['--test-reporter=tap', '--test-reporter-destination=stdout'],
+                         ['--test-reporter=tap', '--test-reporter-destination', 'stdout']]) {
+      const r = spawnSync(process.execPath, [RUNNER, '--tap', ...extra, fx.file], { encoding: 'utf8', env });
+      assert.equal(r.status, 3, JSON.stringify(extra));
+      assert.match(r.stderr, /REPLACES/);
+    }
+    // control: --tap alone streams each test once
+    const ok = spawnSync(process.execPath, [RUNNER, '--tap', fx.file], { encoding: 'utf8', env });
+    assert.equal((ok.stdout.match(/^ok \d+ - /gm) || []).length, 1);
+  } finally { fs.rmSync(fx.dir, { recursive: true, force: true }); }
+});

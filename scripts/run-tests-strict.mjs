@@ -30,6 +30,7 @@ delete env.NODE_TEST_CONTEXT;
 delete env.WEBCTL_STRICT_ALLOW_PLAIN_SCRIPTS;
 const passthrough = [];
 let human = 'spec';
+let explicitHuman = false;
 for (const a of process.argv.slice(2)) {
   // ⛔ PASS --tap IN A CONTRACT. The release gate reads contract output line by line. On
   // `gemini`'s and `substack`'s suites THIS RUNNER printed 0 TAP lines to stdout (spec
@@ -37,16 +38,29 @@ for (const a of process.argv.slice(2)) {
   // and reported it — hence --tap. The DEFAULT stays spec: flipping it to TAP broke a
   // lane that parses spec's "ℹ tests N" (`fetlife`, at the v0.28.0 gate) — a change to what
   // an existing caller already gets (sb7q). So visibility is a documented REQUIRED flag.
-  if (a === '--tap') human = 'tap';
-  else if (a === '--spec') human = 'spec';
+  if (a === '--tap') { human = 'tap'; explicitHuman = true; }
+  else if (a === '--spec') { human = 'spec'; explicitHuman = true; }
   else if (a === '--serial') passthrough.push('--test-concurrency=1');
   else if (a === '--allow-plain-scripts') env.WEBCTL_STRICT_ALLOW_PLAIN_SCRIPTS = '1';
   else passthrough.push(a);
 }
 
+// A caller that passes its OWN stdout reporter (the v0.27-era way to keep TAP visible,
+// before --tap existed) keeps it: adding ours too streamed every test TWICE, which the
+// gate's scan double-counts (`substack`). Refusing it would break callers that already work
+// (sb7q), so the runner DEFERS to it — and refuses only the new conflict: --tap/--spec AND
+// a passed-through stdout reporter.
+const callerStdout = passthrough.some((a, i) => a === '--test-reporter-destination=stdout'
+  || (a === '--test-reporter-destination' && passthrough[i + 1] === 'stdout'));
+if (callerStdout && explicitHuman) {
+  process.stderr.write(`run-tests-strict: --${human} REPLACES --test-reporter=… --test-reporter-destination=stdout; `
+    + 'do not pass both (every test would stream twice). Remove the pass-through reporter.\n');
+  process.exit(3);
+}
+
 const r = spawnSync(process.execPath, [
   '--test',
-  `--test-reporter=${human}`, '--test-reporter-destination=stdout',
+  ...(callerStdout ? [] : [`--test-reporter=${human}`, '--test-reporter-destination=stdout']),
   `--test-reporter=${reporter}`, '--test-reporter-destination=stderr',
   ...passthrough,
 ], { stdio: 'inherit', env });

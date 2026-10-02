@@ -207,6 +207,14 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## Unreleased
+
+* `run-tests-strict`: a caller's own stdout reporter is kept and the runner adds none, so
+  TAP streams once; `--tap`/`--spec` beside one is refused (exit 3, "replace, don't add").
+  Each stdout reporter repeated every test, which double-counted in the gate's scan
+  (`substack`). README: a visibility guard measures the contract's STDOUT, not its log
+  (`grok`).
+
 ## v0.28.0 — 2026-10-02
 
 ### Added — `run-tests-strict` compatibility (from `linkedin` and `gemini`)

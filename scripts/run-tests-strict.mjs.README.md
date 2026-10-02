@@ -14,6 +14,14 @@ node vendor/base-webctl/scripts/run-tests-strict.mjs "test/**/*.test.{js,mjs,cjs
   and reported it. (The default stays spec because a lane already parses spec's `ℹ tests N`;
   flipping it broke that lane at the v0.28.0 gate.) Prove it in your contract: FAIL if no
   TAP line streamed (`substack`'s arm).
+  * ⛔ **Measure STDOUT, not your log.** A contract that tees TAP only into its log passes
+    any log-reading check while the gate sees nothing. The honest arm runs the contract
+    and counts TAP lines on its **stdout**, with a log-only mutant as the control (`grok`:
+    T1, and T1m → 0 lines on stdout).
+  * ⛔ **`--tap` REPLACES `--test-reporter=tap --test-reporter-destination=stdout`; do not
+    add it beside them.** Both together would stream every test twice and double-count in
+    the gate's scan, so the runner refuses that combination (exit 3). A pass-through stdout
+    reporter **alone** still works: the runner then adds none of its own.
 * Fails on any `test:fail` event (TODO/SKIP excepted), **including a suite whose
   `describe()` threw while registering** — which plain node reports as `# fail 0`,
   exit 0.
