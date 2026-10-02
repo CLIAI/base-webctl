@@ -371,3 +371,61 @@ test('⛔ a test per LISTED source — and a source not listed is not a source',
     assert.equal(/** @type {any} */ (r).code, 'no-target');
   }
 });
+
+// ── nl0c §3a: an explicit --port is a DEFINED, attach-only flag target ───────
+test('✅ --port alone resolves as LOOPBACK, source flag:port, ATTACH-ONLY — control: no flags is no-target', () => {
+  const r = /** @type {any} */ (resolveTarget([{ source: 'flag', port: 4877 }]));
+  assert.equal(r.verdict, 'resolved');
+  assert.equal(r.source, 'flag:port');
+  assert.equal(r.host, '127.0.0.1');
+  assert.equal(r.port, 4877);
+  assert.equal(r.value, '127.0.0.1:4877');
+  assert.equal(r.attachOnly, true, 'a port says where to CONNECT, never where to RUN');
+  // control: the same call without the port is the refusal it always was
+  assert.equal(/** @type {any} */ (resolveTarget([])).code, 'no-target');
+  // a numeric string from argv is the same port
+  assert.equal(/** @type {any} */ (resolveTarget([{ source: 'flag', port: '4877' }])).port, 4877);
+});
+
+test('⛔ --port is a FLAG-layer thing only: an env or config port alone is not a location', () => {
+  for (const source of ['env', 'config']) {
+    const r = /** @type {any} */ (resolveTarget([{ source: /** @type {any} */ (source), port: 4877 }]));
+    assert.equal(r.code, 'no-target', source);
+  }
+});
+
+test('--port beats env/config locations (flag wins) and reports what it shadowed', () => {
+  const r = /** @type {any} */ (resolveTarget([{ source: 'config', value: 'host-c' }, { source: 'flag', port: 4877 }]));
+  assert.equal(r.source, 'flag:port');
+  assert.deepEqual(r.shadowed, ['config']);
+});
+
+test('beside a location flag, --port QUALIFIES it — not a second location, not ambiguous', () => {
+  const r = /** @type {any} */ (resolveTarget([{ source: 'flag', value: 'workstation' }, { source: 'flag', port: 9222 }]));
+  assert.equal(r.verdict, 'resolved');
+  assert.equal(r.source, 'flag');
+  assert.equal(r.value, 'workstation');
+  assert.equal(r.port, 9222);
+  assert.equal(r.attachOnly, undefined, 'a named target carries its own lifecycle field');
+});
+
+test('⛔ --port refusals: not a port, two ports, a non-loopback host (value never echoed)', () => {
+  for (const port of [0, 65536, -1, 'abc', '12x', 1.5]) {
+    assert.equal(/** @type {any} */ (resolveTarget([{ source: 'flag', port }])).code, 'invalid-port', String(port));
+  }
+  assert.equal(/** @type {any} */ (resolveTarget([{ source: 'flag', port: 1 }, { source: 'flag', port: 2 }])).code, 'ambiguous');
+  const r = /** @type {any} */ (resolveTarget([{ source: 'flag', port: 4877, host: 'workstation-x' }]));
+  assert.equal(r.code, 'non-loopback-host');
+  assert.ok(!r.reason.includes('workstation-x'), 'the host is not echoed');
+  assert.match(r.reason, /--ssh/);
+  // 'localhost' is a NAME and resolves; only literals are accepted
+  assert.equal(/** @type {any} */ (resolveTarget([{ source: 'flag', port: 1, host: 'localhost' }])).code, 'non-loopback-host');
+  // control: the loopback literals are accepted
+  assert.equal(/** @type {any} */ (resolveTarget([{ source: 'flag', port: 1, host: '::1' }])).value, '[::1]:1');
+  assert.equal(/** @type {any} */ (resolveTarget([{ source: 'flag', port: 1, host: '127.0.0.1' }])).verdict, 'resolved');
+});
+
+test('needsTarget:false with a --port still resolves (the port was stated), and without one is not-needed', () => {
+  assert.equal(resolveTarget([{ source: 'flag', port: 4877 }], { needsTarget: false }).verdict, 'resolved');
+  assert.equal(resolveTarget([], { needsTarget: false }).verdict, 'not-needed');
+});

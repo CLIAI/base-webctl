@@ -99,6 +99,46 @@ opaque `profile_id`, no leading-dash ssh alias). A file not mode 600 is refused
   an ssh alias — matching the variable the first implementing lane already uses, so no
   lane invents one and migrates later.
 
+## 3a. ✅ RULED: an explicit `--port` is a DEFINED, attach-only target
+
+*Raised by `cgwc` and `webctl:mgr`:* the family's unattended timers (an LRU janitor, a TTL
+GC, a selector canary — in two lanes) locate the browser **only** by `--port N`, with no
+target env. Read strictly, §3 would refuse them all; they would go FAILED and be visible
+only to someone who pulls.
+
+⇒ **`--port N` with no location flag is a flag-layer UNNAMED target, and its meaning is
+DEFINED, not assumed:**
+
+* **CDP at loopback `127.0.0.1:N` on the invoking machine**, source **`flag:port`**. The
+  person wrote the port; the loopback host is the flag's documented meaning, not a
+  fallback. Greg's rule forbids *inventing* a location — a port written in a unit file is a
+  stated one.
+* ⛔ **ATTACH-ONLY.** A port says where to **connect**, never where to **run**. A
+  `flag:port` target never starts, builds, restarts or re-mints a browser or container; if
+  nothing answers, the command fails. *This is the half of Greg's rule — "should not
+  assume where containers [are] running" — that a port alone cannot answer, so it is not
+  allowed to.*
+* `--host`, if given, must be a **loopback literal** (`127.0.0.1`, `::1`; not `localhost`,
+  which is a name and resolves). CDP never leaves loopback (`btg4` §5): a browser on another
+  machine is `--ssh <alias>` or `--target <name>`. Refused with code `non-loopback-host`,
+  the value not echoed.
+* **Beside a location flag, `--port` qualifies that location** (e.g. the remote's CDP
+  port) — it is not a second location and is not `ambiguous`.
+* **Only the flag layer carries a port.** An env or config port **alone** is not a
+  location and refuses as `no-target`; a declared location in config is a named target.
+* No flags at all still refuses as `no-target`.
+
+⚠ **Identity is NOT the listener's argv — measured while ruling this.** The QA rule in §5.5
+(LISTEN form + the pid's argv) is for **signalling**. For **driving**, it cannot work: on a
+docker-published port the listening socket belongs to a process the invoking user **cannot
+read** (`ss -ltnp` shows the socket and no pid), so an argv check would refuse exactly these
+timers. ⇒ Before a signal: listener + argv, and an unreadable pid means **no signal**. Before
+driving: the ownership claim (`ow9k`) where the lane has one — not a process-table guess.
+
+*Tested:* `--port` alone → resolved, `flag:port`, attach-only; no flags → `no-target`; env or
+config port alone → `no-target`; out-of-range / non-numeric / two ports / non-loopback host
+→ refused with their own codes; `--port` beside `--target` → qualifier.
+
 ## 4. `lf4f` is superseded in part
 
 `infra-client-profile-registry-lf4f` (draft, earlier) is the `--client <profile>` registry
@@ -147,7 +187,7 @@ Its idea — named profiles referred to by name — is kept, and is this documen
 | `targetEnvKey` — the one env-name pattern | ✅ base |
 | `findHostLiterals` — the no-literal check, given names and files | ✅ base |
 | `validateTarget`, `checkConfigMode` | ✅ base (v0.19.0+) |
-| reading the flag/env/config layers; supplying host names | the lane |
+| reading the flag/env/config layers (incl. `--port` as `{source:'flag', port}`); supplying host names; honouring `attachOnly` | the lane |
 | auditing every lane, dormant ones included | `webctl:mgr` |
 
 ## 7. ⛔ The FAMILY causes live in base — PLAN, not yet changed
