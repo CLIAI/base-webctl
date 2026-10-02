@@ -465,3 +465,15 @@ test('portFlag: the refusal spells the port flag the way THIS tool does — cont
   assert.doesNotMatch(r.instructions, /--port <n>/);
   assert.match(/** @type {any} */ (resolveTarget([], { supports: ['port'] })).instructions, /--port <n>/);
 });
+
+test('configKey: the refusal names the config key THIS tool reads — control: default default_target; junk throws', () => {
+  const r = /** @type {any} */ (resolveTarget([], { supports: ['config'], configKey: 'browser_location' }));
+  assert.match(r.instructions, /declare a browser_location in/i);
+  assert.doesNotMatch(r.instructions, /default_target/);
+  assert.match(/** @type {any} */ (resolveTarget([], { configKey: 'browser_location' })).instructions, /browser_location/,
+    'the generic text honours it too');
+  assert.match(/** @type {any} */ (resolveTarget([], { supports: ['config'] })).instructions, /default_target/);
+  const ok = [{ source: /** @type {const} */ ('flag'), value: 'w' }];
+  assert.throws(() => resolveTarget(ok, { configKey: 'a b' }), /configKey must be/);
+  assert.throws(() => resolveTarget(ok, { configKey: /** @type {any} */ (5) }), /configKey must be/);
+});
