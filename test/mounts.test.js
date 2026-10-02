@@ -38,7 +38,7 @@ const SLUG = 'testslug';
 
 test('createMounts: validates C by default; surfaces the expected functions', () => {
   assert.throws(() => createMounts(/** @type {any} */ ({})), /Invalid client-config constants/);
-  const m = createMounts(fakeC());
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
   for (const fn of ['cacheRoot', 'expandHomePath', 'profileDir', 'ensureProfileDir',
     'resolveChromiumProfile', 'migrationBannerMarker', 'names', 'chromiumMounts',
     'xpraMounts', 'dockerfilesDir', 'dockerfilePath', 'normalizeBase']) {
@@ -56,7 +56,7 @@ test('CONTAINER_UPLOAD_DIR is base-owned and fixed', () => {
 // ── names() reads the injected constants ──────────────────────────────────
 
 test('names: artifact names carry C.ARTIFACT_PREFIX; images from C', () => {
-  const m = createMounts(fakeC());
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
   const n = m.names(SLUG, 'debian');
   assert.equal(n.xpraContainer, 'demo-webctl-xpra-testslug');
   assert.equal(n.chromiumContainer, 'demo-webctl-chromium-testslug');
@@ -67,7 +67,7 @@ test('names: artifact names carry C.ARTIFACT_PREFIX; images from C', () => {
 });
 
 test('names: defaults slug + base', () => {
-  const m = createMounts(fakeC());
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
   const n = m.names(null);
   assert.equal(n.slug, 'default');
   assert.equal(n.base, 'debian');
@@ -77,7 +77,7 @@ test('names: defaults slug + base', () => {
 // ── chromiumMounts: the upload-mount gate (the file-staging-agnostic core) ──
 
 test('chromiumMounts: profile + X11 socket, no uploads without uploadHostPath', () => {
-  const m = createMounts(fakeC());
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
   const mounts = m.chromiumMounts({ profileHostPath: '/host/profile', xpraSocketVolume: 'demo-x11' });
   assert.equal(mounts.length, 2);
   assert.ok(mounts.find(x => x[0] === '/host/profile' && x[1] === '/home/user/.config/chromium' && x[2] === 'rw'));
@@ -86,7 +86,7 @@ test('chromiumMounts: profile + X11 socket, no uploads without uploadHostPath', 
 });
 
 test('chromiumMounts: adds dedicated read-only /cliai-uploads mount when uploadHostPath set', () => {
-  const m = createMounts(fakeC());
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
   const mounts = m.chromiumMounts({
     profileHostPath: '/host/profile',
     xpraSocketVolume: 'demo-x11',
@@ -99,7 +99,7 @@ test('chromiumMounts: adds dedicated read-only /cliai-uploads mount when uploadH
 });
 
 test('xpraMounts: only the X11 socket', () => {
-  const m = createMounts(fakeC());
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
   const mounts = m.xpraMounts({ xpraSocketVolume: 'demo-x11' });
   assert.equal(mounts.length, 1);
   assert.equal(mounts[0][1], '/tmp/.X11-unix');
@@ -108,7 +108,7 @@ test('xpraMounts: only the X11 socket', () => {
 // ── normalizeBase ─────────────────────────────────────────────────────────
 
 test('normalizeBase: defaults + validation', () => {
-  const m = createMounts(fakeC());
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
   assert.equal(m.normalizeBase(null), 'debian');
   assert.equal(m.normalizeBase(''), 'debian');
   assert.equal(m.normalizeBase('UBUNTU'), 'ubuntu');
@@ -119,7 +119,7 @@ test('normalizeBase: defaults + validation', () => {
 // ── path helpers read C.CACHE_DIRNAME ─────────────────────────────────────
 
 test('cacheRoot + profileDir: under ~/.cache/CLIAI/<CACHE_DIRNAME>', () => {
-  const m = createMounts(fakeC());
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
   const root = m.cacheRoot();
   assert.ok(root.endsWith(path.join('.cache', 'CLIAI', 'demo-webctl')), `got ${root}`);
   assert.ok(m.profileDir('alice').endsWith(path.join('profiles', 'alice', 'chromium')));
@@ -127,7 +127,7 @@ test('cacheRoot + profileDir: under ~/.cache/CLIAI/<CACHE_DIRNAME>', () => {
 });
 
 test('expandHomePath: expands leading ~', () => {
-  const m = createMounts(fakeC());
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
   const oldHome = process.env.HOME;
   try {
     process.env.HOME = '/tmp/fake-home';
@@ -140,7 +140,7 @@ test('expandHomePath: expands leading ~', () => {
 });
 
 test('resolveChromiumProfile: honours explicit userDataDir, mkdir -p', () => {
-  const m = createMounts(fakeC());
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webctl-mounts-'));
   try {
     const explicit = path.join(tmp, 'explicit', 'profile');
@@ -167,9 +167,19 @@ test('dockerfilesDir: accepts a thunk resolver', () => {
   assert.equal(m.dockerfilesDir(), '/lazy/dockerfiles');
 });
 
-test('dockerfilesDir: without injection falls back to module-relative ../../dockerfiles', () => {
-  const m = createMounts(fakeC());
-  // base ships no dockerfiles dir; the fallback still RESOLVES (consumers vendoring
-  // base MUST inject their own — see the JSDoc). We only assert the shape here.
-  assert.ok(m.dockerfilesDir().endsWith('dockerfiles'));
+test('⛔ dockerfilesDir OMITTED refuses construction, naming the option — control: injected or null constructs', () => {
+  // The old test here asserted only that the fallback "ends with dockerfiles" — a
+  // check that could not fail, blessing a path that exists in no layout (base ships
+  // no dockerfiles). A shim that forgot the option then ran stale images silently.
+  for (const opts of [{}, { dockerfilesDir: undefined }, { dockerfilesDir: '' }, { dockerfilesDir: 42 }]) {
+    assert.throws(() => createMounts(fakeC(), /** @type {any} */ (opts)), /opts\.dockerfilesDir is required/,
+      JSON.stringify(opts));
+  }
+  assert.throws(() => createMounts(fakeC()), /opts\.dockerfilesDir is required/, 'no opts at all');
+  // controls
+  assert.equal(createMounts(fakeC(), { dockerfilesDir: '/c/dockerfiles' }).dockerfilesDir(), '/c/dockerfiles');
+  const none = createMounts(fakeC(), { dockerfilesDir: null });
+  // null = "builds no images": constructs, and a build that needs Dockerfiles throws on USE
+  assert.throws(() => none.dockerfilesDir(), /builds no\s+images/);
+  assert.throws(() => none.dockerfilePath('chromium', 'debian'), /builds no\s+images/);
 });

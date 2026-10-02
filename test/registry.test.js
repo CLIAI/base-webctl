@@ -29,14 +29,14 @@ function fakeC(overrides = {}) {
 
 test('createRegistry: validates C; surfaces the registry API', () => {
   assert.throws(() => createRegistry(/** @type {any} */ ({})), /Invalid client-config constants/);
-  const r = createRegistry(fakeC());
+  const r = createRegistry(fakeC(), { dockerfilesDir: null });
   for (const k of ['REGISTRY', 'listModes', 'listAvailableModes', 'isKnown', 'getFactory']) {
     assert.ok(k in r, `expected export ${k}`);
   }
 });
 
 test('createRegistry: known modes + null future-stubs', () => {
-  const r = createRegistry(fakeC());
+  const r = createRegistry(fakeC(), { dockerfilesDir: null });
   assert.ok(r.isKnown('localhost-direct'));
   assert.ok(r.isKnown('chromium-docker-xpra-debian-latest'));
   assert.ok(r.isKnown('chromium-docker-xpra-ubuntu-latest'));
@@ -48,7 +48,7 @@ test('createRegistry: known modes + null future-stubs', () => {
 });
 
 test('createRegistry: listAvailableModes excludes the null future-stubs', () => {
-  const r = createRegistry(fakeC());
+  const r = createRegistry(fakeC(), { dockerfilesDir: null });
   const avail = r.listAvailableModes();
   assert.ok(avail.includes('localhost-direct'));
   assert.ok(avail.includes('chromium-docker-xpra-debian-latest'));
@@ -59,7 +59,7 @@ test('createRegistry: listAvailableModes excludes the null future-stubs', () => 
 });
 
 test('createRegistry: docker-xpra factories are base-pinned + create drivers', () => {
-  const r = createRegistry(fakeC());
+  const r = createRegistry(fakeC(), { dockerfilesDir: null });
   const f = r.getFactory('chromium-docker-xpra-arch-latest');
   assert.equal(f.base, 'arch');
   assert.equal(f.MODE, 'chromium-docker-xpra-arch-latest');
@@ -68,7 +68,7 @@ test('createRegistry: docker-xpra factories are base-pinned + create drivers', (
 });
 
 test('createRegistry: localhost-direct factory is the constants-free driver module', () => {
-  const r = createRegistry(fakeC());
+  const r = createRegistry(fakeC(), { dockerfilesDir: null });
   const ld = r.getFactory('localhost-direct');
   assert.equal(ld.MODE, 'localhost-direct');
   assert.equal(typeof ld.createDriver, 'function');
@@ -76,6 +76,6 @@ test('createRegistry: localhost-direct factory is the constants-free driver modu
 
 test('createRegistry: opts.driver injection is honoured (test seam)', () => {
   const fakeDriver = { factoryForBase: (b) => ({ MODE: `m-${b}`, base: b, createDriver: () => ({}) }) };
-  const r = createRegistry(fakeC(), { driver: fakeDriver });
+  const r = createRegistry(fakeC(), { driver: fakeDriver, dockerfilesDir: null });
   assert.equal(r.getFactory('chromium-docker-xpra-debian-latest').MODE, 'm-debian');
 });
