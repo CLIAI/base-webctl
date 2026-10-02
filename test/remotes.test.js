@@ -226,3 +226,19 @@ test('no container means stale is NOT APPLICABLE (null), never false', () => {
   assert.equal(r.stale, null, 'nothing running is not "up to date"');
   assert.equal(r.running, null);
 });
+
+test('⛔ an xq too old for `app version` is named as such — not as a swallowed argument', () => {
+  // Built from the REAL argparse text of the installed xq (`xq app nosuchverb`), with the
+  // rejected verb set to 'version' and 'version' dropped from the choices — exactly what an
+  // xq predating the verb prints. Measured live on two hosts by a lane.
+  const old = 'usage: xq <subcommand> [...]    (try `xq --help`) app [-h] [--help-for-agents]\n'
+    + '                                                      {run,stop,ls,exec,rm,logs} ...\n'
+    + "xq <subcommand> [...]    (try `xq --help`) app: error: argument app_verb: invalid choice: 'version' "
+    + '(choose from run, stop, ls, exec, rm, logs)\n';
+  const r = parseAppVersion(old);
+  assert.equal(r.verdict, 'unknown');
+  assert.match(r.reason, /xq too old/);
+  // controls: other non-JSON keeps the general reason; real JSON still parses
+  assert.match(parseAppVersion('ZONE APP VERSION\nz chromium 155').reason, /argument was probably swallowed/);
+  assert.equal(parseAppVersion(appv()).verdict, 'ok');
+});
