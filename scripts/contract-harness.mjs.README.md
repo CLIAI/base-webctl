@@ -171,6 +171,23 @@ deliberately not from comparing the declared pin against the worktree — which 
 the comparison it is testing. A guard and a claim that read the same input cannot
 disagree.
 
+## ⛔ Contract checklist: a green exit is not a green run
+
+* **Run your suite through `scripts/run-tests-strict.mjs`** (or add
+  `scripts/strict-reporter.mjs` as a second reporter). node:test lets a `describe()`
+  that throws while registering **vanish** — `not ok`, `# fail 0`, exit 0 — and a
+  zero-test guard does not catch it, because the tests that did register still count.
+  The strict reporter fails on the failure EVENT, fails a file that registers zero
+  tests (node counts one as a pass), and strips `NODE_TEST_CONTEXT` for nested runs.
+* **The gate also scans your output:** exit 0 with a TAP `not ok` (TODO/SKIP excepted)
+  or spec's `✖ failing tests:` is a **FAIL**, named.
+* **Read your own `"test"` script.** `echo "No tests yet" && exit 0` over a real suite
+  (measured in a lane) never reaches node, so no reporter or scan can see it.
+* **Restrict discovery to test files.** Bare `node --test` runs every `.js`/`.mjs`
+  under `test/`, helpers included — base ran three helper scripts as "tests", one of
+  them taking a real lock in the real `~/.cache`. Pass a glob such as
+  `"test/**/*.test.{js,mjs,cjs}"`.
+
 ## ⭐ A contract's last line is API
 
 The release gate captures the **trailing block** of your output as the FAIL

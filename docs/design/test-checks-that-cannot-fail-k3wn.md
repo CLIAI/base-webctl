@@ -759,3 +759,29 @@ A shared library fixes future duplication. It does **not** fix the lanes already
 carrying old copies, and **you cannot find those by diffing**, because rot and
 legitimate per-lane customisation look identical in a diff. ⇒ They need a
 **version marker**.
+
+## Green with fewer tests than last time
+
+node:test lets a `describe()` that throws while **registering** vanish: it prints
+`not ok N - <suite>`, then `# fail 0`, and **exits 0** (node v22, reproduced). A
+fixture missing on a fresh clone — kept out of git by a local `.gitignore` — makes a
+whole block disappear from a run that stays green. *Found by `chatgpt`: a fresh clone
+ran 1475 tests and the live tree 1481, both green.* Zero-test guards do not catch it,
+because the tests that DID register still count.
+
+⚠ **Base met it twice before naming it.** (1) Reproducing a lane's red in a scratch
+clone, base saw the vanished block's `not ok` beside `# fail 0` and wrote it off as "a
+clone artefact, not counted" — which **is** the defect, described accurately and
+dismissed. (2) When base's own suite moved behind the strict runner, it found node's
+default discovery running **three helper scripts as tests**: they registered nothing,
+each counted as a pass, and one acquired a real lock under the user's real `~/.cache`
+on every `npm test`.
+
+⇒ **Fail on the failure EVENT, not on the summary or the exit code**
+(`scripts/strict-reporter.mjs`, `scripts/run-tests-strict.mjs`); the release gate also
+fails any contract that exits 0 while printing a TAP `not ok` or spec's "failing
+tests". And a file that registers nothing is a failure, not a pass.
+
+⚠ **Its sibling, which no reporter can see:** a `"test": "echo No tests yet && exit 0"`
+over a 114-test suite (`fetlife`). Node never runs. Only reading the test SCRIPT finds
+it.
