@@ -67,7 +67,7 @@ test('attach: when xpra absent, hint interpolates the parameterized html5Port (l
   assert.match(captured, /http:\/\/127\.0\.0\.1:20099\//, 'hint shows the passed html5Port, not a hardcode');
 });
 
-test('attach: html5Port defaults to port+1 when omitted', async () => {
+test('⛔ attach: html5Port defaults to the SAME port — html5 rides the bind-tcp socket (was port+1, a dead URL)', async () => {
   const x = createXpraAttach(fakeC());
   const origPath = process.env.PATH;
   const origWrite = process.stderr.write;
@@ -81,5 +81,19 @@ test('attach: html5Port defaults to port+1 when omitted', async () => {
     process.stderr.write = origWrite;
     process.env.PATH = origPath;
   }
-  assert.match(captured, /http:\/\/127\.0\.0\.1:14501\//, 'default html5Port = port+1');
+  assert.match(captured, /http:\/\/127\.0\.0\.1:14500\//, 'default html5Port = port');
+  assert.doesNotMatch(captured, /14501/, 'the derived +1 port is gone — nothing listens there');
+});
+
+test('attachArgs: scaling maps to --desktop-scaling — control: absent adds nothing; junk throws', () => {
+  const x = createXpraAttach(fakeC());
+  assert.deepEqual(x.attachArgs({ port: 20000, scaling: 1.5 }),
+    ['attach', 'tcp://127.0.0.1:20000/', '--desktop-scaling=1.5']);
+  assert.deepEqual(x.attachArgs({ port: 20000, scaling: '1.5' }).slice(-1), ['--desktop-scaling=1.5']);
+  assert.deepEqual(x.attachArgs({ port: 20000, scaling: 'auto' }).slice(-1), ['--desktop-scaling=auto']);
+  assert.deepEqual(x.attachArgs({ port: 20000 }), ['attach', 'tcp://127.0.0.1:20000/'], 'control');
+  for (const bad of [0, -1, 11, NaN, 'big', '1.5; rm -rf', '--x']) {
+    assert.throws(() => x.attachArgs({ port: 20000, scaling: bad }), /scaling must be/, String(bad));
+  }
+  assert.equal(x.attachCommand({ port: 20000, scaling: 1.5 }), 'xpra attach tcp://127.0.0.1:20000/ --desktop-scaling=1.5');
 });
