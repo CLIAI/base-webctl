@@ -207,6 +207,48 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.25.0 — 2026-10-02
+
+### ⛔ BREAKING — harness generation 4: drift under the gate now FAILS
+
+* **v0.24.0's `pin` passed real drift under the gate.** It decided "swapped" from
+  `WEBCTL_DECLARED_PIN ≠ worktree`, and since v0.24 the gate sets the declared pin on
+  **every** run, so a gate run that had NOT swapped (`WEBCTL_GATE_SWAPPED=0`) still read as
+  *"the release gate has swapped this submodule"*. The verdict was NO VERDICT, under a false
+  sentence. This voided generation 3's drift FAIL for every lane delegating to `pin`.
+  Found in hand-written contracts by `fetlife`, then in base's harness by `gemini` and
+  `chatgpt`; base measured it in its own gen 3 before fixing. **Now the only swap signal is
+  `WEBCTL_GATE_SWAPPED=1`.** Lanes that scrubbed `DECLARED_PIN` as an interim workaround can
+  drop the scrub at generation 4.
+* **`require-generation <N>`** — a version floor that fails CLOSED, including on harnesses that
+  predate it. The harness lives inside the submodule, so drifting to an older base also
+  downgrades the checker (`substack`). A **flag** (`generation --min N`) was measured to
+  fail OPEN: generation 2 ignores it and exits 0. An unknown **verb** exits 3 everywhere.
+  `generation` now refuses arguments. ⇒ **Contracts: put `require-generation 4` first, and
+  treat ANY non-zero as FAIL.** The test runs base's real generation-2 harness from v0.22.0.
+
+### Fixed
+
+* `xpra-attach`: `html5Port` defaulted to `port + 1`, the dead derivation the family
+  removed in v0.6/v0.7 (html5 rides the same bind-tcp socket). Now it defaults to `port`.
+  A base test had **enshrined** the +1. *(From `chatgpt`'s re-shim.)*
+
+### Added
+
+* `xpra-attach` `scaling` → `--desktop-scaling` (a positive number or `auto|on|off`; junk
+  throws). It replaces three lanes' local `--scaling` mappings.
+* `resolveTarget` `hints.portFlag`: the refusal spells the port flag the way the tool does
+  (`fetlife`: `--remote-debugging-port`). Hints are validated on **every** call, so a typo
+  in `supports` surfaces on a run that resolves, not only on a refusal.
+
+### ⛔ What this does NOT cover
+
+* **Base cannot make a lane call `require-generation`.** Only the lane's contract survives a
+  downgrade. A gate-side downgrade probe is described in the harness DEV_NOTES; it is not
+  built.
+* `xpra-attach` still falls back to port `14500` when `port` is unstated. That is nl0c §7 #6,
+  which is circulated before it changes.
+
 ## v0.24.0 — 2026-10-02
 
 ### ⛔ BREAKING — three things that used to pass silently now refuse
