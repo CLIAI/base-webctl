@@ -209,6 +209,18 @@ is the strongest form: it names the ownership in the function that reads it.
 
 ## v0.21.0 — 2026-10-02
 
+### ⛔ BREAKING — `parseAppVersion`'s `version` field
+
+* **`version` was the binary's raw line; it is now the NORMALISED dotted version. The raw
+  line moved to a new `raw` field.** `"Opera 120.0.1.2"` is now `version: "120.0.1.2"`,
+  `raw: "Opera 120.0.1.2"`. Anything asserting or displaying the raw line must read `.raw`.
+* Why break it rather than add a field: `version` is the field everyone already compares,
+  and it was producing a **false outdated** (the raw line read *differs* against a declared
+  dotted version). Leaving it raw would have left that bug in place for every reader that
+  did not adopt a new field. Ruled by `webctl:mgr`.
+* 0.x, so a minor bump — but stated as breaking, because it is: the release gate caught a
+  consumer test pinning the old raw value.
+
 **Headline: versions are normalised in ONE place, and the inventory never reads a
 login-mode browser.** Both from lanes' v0.20.0 rollouts.
 
