@@ -219,15 +219,26 @@ is the strongest form: it names the ownership in the function that reads it.
   empty-file guard for that run. A non-zero exit and a vanished `describe()` still fail;
   an inherited env var cannot enable it.
 
-* ⛔ **stdout is now TAP by default** (`--spec` for the human format). v0.27.0 defaulted to
-  spec, and `gemini` and `substack` each measured **zero TAP lines** after adopting it:
-  green locally, dark to the gate's line scan. (Spec's `✖ failing tests:` is matched too,
-  but a TAP stream is what the gate can read whole.)
+* ⛔ **`--tap` — REQUIRED in a gate contract.** With spec on stdout, `gemini` and
+  `substack` each measured **zero TAP lines** after adopting the runner: green locally,
+  dark to the gate's line scan. ⚠ The default stays **spec**. A candidate of this release
+  flipped it to TAP, and the gate went red on `fetlife`, whose contract parses spec's
+  `ℹ tests N`. That broke the rule this repo wrote the same day: a change must not alter
+  what an existing caller already gets. Visibility is therefore a documented required flag,
+  and a contract should FAIL if no TAP line streamed.
 * A run of **only** `skip`/`todo` tests fails as "ZERO tests ran"; a placeholder-only
   file run alone goes red on adoption (`chatgpt`, `substack`). Documented.
 * A file pattern that matches **nothing** fails with a message naming the pattern (plain
   node exits 0). Base's `*.test.*` glob is base's: lanes pass their own (`gemini` names
   files `*-test.js`).
+
+### Fixed
+
+* **Gate false red (v0.27.0):** spec lists failing **TODO** tests under `✖ failing tests:`
+  even at `fail 0`, and the gate matched the header alone. Every lane with deliberate
+  failing TODOs read FAIL at exit 0 (`ccew`, whose prompt-injection todos fail by
+  design). The gate now judges the entries under the header and exempts `# TODO` and
+  `# SKIP`.
 
 ### ⛔ What this does NOT cover
 

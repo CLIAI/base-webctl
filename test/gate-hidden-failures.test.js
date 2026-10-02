@@ -77,3 +77,12 @@ test('TODO and SKIP `not ok` lines are not failures', () => {
   assert.equal(r.status, 0, r.out);
   assert.match(r.out, /PASS {2}fake-webctl/, 'must reach a verdict — a SKIP would pass this vacuously');
 });
+
+test('a spec run whose ONLY failures are TODOs PASSES — the header alone is not a failure (ccew false red)', () => {
+  const r = runGate('✔ real\n✖ injection probe # TODO\nℹ fail 0\n\n✖ failing tests:\n\ntest at x.js:3:1\n✖ injection probe (0.2ms) # TODO\n  Error: known\n', 0);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /PASS {2}fake-webctl/);
+  // control: a real entry beside the TODO still fails
+  const bad = runGate('✖ failing tests:\n\n✖ injection probe (0.2ms) # TODO\n✖ real failure (0.1ms)\n', 0);
+  assert.equal(bad.status, 1, bad.out);
+});

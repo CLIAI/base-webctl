@@ -416,7 +416,10 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # a run that exited 0 is a FAIL, named. TODO/SKIP lines are not failures.
   if [ "$rc" = "0" ]; then
     hidden="$(grep -E '^[[:space:]]*not ok [0-9]+ ' "$run_log" | grep -viE '#[[:space:]]*(TODO|SKIP)' || true)"
-    spec_fail="$(grep -E '^✖ failing tests:' "$run_log" || true)"
+    # Spec lists failing TODOs under "✖ failing tests:" too, even at "fail 0" — each entry
+    # suffixed "# TODO". Judge the ENTRIES after the header, not the header (a v0.27.0
+    # false red on `ccew`, whose prompt-injection todos fail by design).
+    spec_fail="$(awk '/^✖ failing tests:/{f=1; next} f && /^✖ / && !/#[[:space:]]*(TODO|SKIP)[[:space:]]*$/{print; exit}' "$run_log" || true)"
     if [ -n "$hidden" ] || [ -n "$spec_fail" ]; then
       n="$(printf '%s\n' "$hidden" | grep -c 'not ok' || true)"
       first="$(printf '%s\n' "$hidden" | head -2 | sed -e 's/^[[:space:]]*//' | tr '\n' ';' | cut -c1-160)"
