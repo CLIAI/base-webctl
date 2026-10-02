@@ -92,7 +92,9 @@ live on:
     `arch-browser-targets-btg4` (a TARGET says where a browser is and how to
     reach it; a PROFILE is the Chromium user-data dir — local, docker, or remote
     over ssh), `arch-coincident-fields-t2wf` (two fields holding one value are
-    indistinguishable from one field).
+    indistinguishable from one field), `arch-login-mode-clean-signin-lg1n` (a
+    clean, exclusive, non-retrying window for a human sign-in; "clean" is MEASURED
+    from the running browser's argv, never assumed from flags).
   * **test** — `test-cross-repo-consumer-loop-xrl4` (the `test-against-base.sh`
     contract + `consumers.jsonc` + the release gate),
     `test-checks-that-cannot-fail-k3wn` (verification discipline, led by base's
