@@ -128,6 +128,16 @@ base-webctl/
   * **minor** — additive (new export / new optional param).
   * **major** — breaking API change; **every** consumer must pass the cross-repo
     gate before the major is cut (see `xrl4`).
+* ⛔ **"Additive" is judged from the CALLER's side, not base's.** A new optional
+  parameter is additive only if no existing caller already passes a field of that
+  name. Consumers wrap base and forward their own option objects, so a name base
+  newly reads can be one a lane already sends with its own meaning. *Measured at the
+  v0.25.0 candidate:* base added `scaling` to `xpra-attach`; `chatgpt` already
+  forwarded its own `scaling` and appended the flag itself, so the flag went out
+  **twice** and a value the lane accepted threw. The release gate went red, and base
+  renamed its option `desktopScaling`. ⇒ **A new base option must not change what an
+  existing caller already gets.** Before naming one, grep the consumers for the name;
+  prefer the underlying tool's own word.
 * The **per-repo seam stays per-repo**: `lib/client-config.constants.js`
   (PROJECT / ARTIFACT_PREFIX / DEFAULT_CDP_PORT / ZOOM_DEFAULT_HOST / ENV_PREFIX)
   is *never* shared (Greg-approved co-design contract, 2026-05-30). base ships
