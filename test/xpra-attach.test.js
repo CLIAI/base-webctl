@@ -85,15 +85,24 @@ test('⛔ attach: html5Port defaults to the SAME port — html5 rides the bind-t
   assert.doesNotMatch(captured, /14501/, 'the derived +1 port is gone — nothing listens there');
 });
 
-test('attachArgs: scaling maps to --desktop-scaling — control: absent adds nothing; junk throws', () => {
+test('attachArgs: desktopScaling maps to --desktop-scaling, in every form xpra accepts — junk throws', () => {
   const x = createXpraAttach(fakeC());
-  assert.deepEqual(x.attachArgs({ port: 20000, scaling: 1.5 }),
+  assert.deepEqual(x.attachArgs({ port: 20000, desktopScaling: 1.5 }),
     ['attach', 'tcp://127.0.0.1:20000/', '--desktop-scaling=1.5']);
-  assert.deepEqual(x.attachArgs({ port: 20000, scaling: '1.5' }).slice(-1), ['--desktop-scaling=1.5']);
-  assert.deepEqual(x.attachArgs({ port: 20000, scaling: 'auto' }).slice(-1), ['--desktop-scaling=auto']);
-  assert.deepEqual(x.attachArgs({ port: 20000 }), ['attach', 'tcp://127.0.0.1:20000/'], 'control');
-  for (const bad of [0, -1, 11, NaN, 'big', '1.5; rm -rf', '--x']) {
-    assert.throws(() => x.attachArgs({ port: 20000, scaling: bad }), /scaling must be/, String(bad));
+  for (const v of ['1.5', '3/2', '1024x768', '2x1.5', 'auto', 'on', 'off']) {
+    assert.deepEqual(x.attachArgs({ port: 20000, desktopScaling: v }).slice(-1), [`--desktop-scaling=${v}`], v);
   }
-  assert.equal(x.attachCommand({ port: 20000, scaling: 1.5 }), 'xpra attach tcp://127.0.0.1:20000/ --desktop-scaling=1.5');
+  assert.deepEqual(x.attachArgs({ port: 20000 }), ['attach', 'tcp://127.0.0.1:20000/'], 'control');
+  for (const bad of [0, -1, NaN, 'big', '1.5; rm -rf', '--x', '3/', 'x2']) {
+    assert.throws(() => x.attachArgs({ port: 20000, desktopScaling: bad }), /desktopScaling must be/, String(bad));
+  }
+  assert.equal(x.attachCommand({ port: 20000, desktopScaling: '3/2' }), 'xpra attach tcp://127.0.0.1:20000/ --desktop-scaling=3/2');
+});
+
+test('⛔ a caller\'s OWN `scaling` field is untouched — base adds nothing for it (the v0.25 gate red)', () => {
+  // Lanes pass their own `scaling` through and append the flag themselves. A base option
+  // of the same name emitted it TWICE, and threw on '3/2', which the lane accepts.
+  const x = createXpraAttach(fakeC());
+  assert.deepEqual(x.attachArgs({ port: 20000, scaling: '3/2' }), ['attach', 'tcp://127.0.0.1:20000/']);
+  assert.equal(x.attachCommand({ port: 20000, scaling: 2 }), 'xpra attach tcp://127.0.0.1:20000/');
 });

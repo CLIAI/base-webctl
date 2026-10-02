@@ -235,8 +235,14 @@ is the strongest form: it names the ownership in the function that reads it.
 
 ### Added
 
-* `xpra-attach` `scaling` → `--desktop-scaling` (a positive number or `auto|on|off`; junk
-  throws). It replaces three lanes' local `--scaling` mappings.
+* `xpra-attach` **`desktopScaling`** → `--desktop-scaling`, accepting every form `xpra
+  attach` takes: decimal `1.5`, fraction `3/2`, pixels `1024x768`, per-axis `2x1.5`,
+  `on|off|auto` (forms as measured by `chatgpt`). Junk throws. Lanes drop their local
+  mapping by renaming their field to `desktopScaling`.
+  ⚠ **It is NOT named `scaling`, and the release gate is why.** The first candidate
+  (`095c13b`) took `scaling`. Lanes already pass their own `scaling` through and append the
+  flag, so chatgpt's suite went red: the flag was emitted twice, and base threw on `3/2`.
+  A new base option must not change what an existing caller already gets.
 * `resolveTarget` `hints.portFlag`: the refusal spells the port flag the way the tool does
   (`fetlife`: `--remote-debugging-port`). Hints are validated on **every** call, so a typo
   in `supports` surfaces on a run that resolves, not only on a refusal.
