@@ -219,9 +219,12 @@ is the strongest form: it names the ownership in the function that reads it.
   empty-file guard for that run. A non-zero exit and a vanished `describe()` still fail;
   an inherited env var cannot enable it.
 
-* **`--tap`** — TAP instead of spec on stdout (from `gemini`). Spec already carries the
-  `✖ failing tests:` marker the gate scans, so adopting the runner does not blind the gate;
-  `--tap` keeps a TAP stream for contracts that had one.
+* ⛔ **stdout is now TAP by default** (`--spec` for the human format). v0.27.0 defaulted to
+  spec, and `gemini` and `substack` each measured **zero TAP lines** after adopting it:
+  green locally, dark to the gate's line scan. (Spec's `✖ failing tests:` is matched too,
+  but a TAP stream is what the gate can read whole.)
+* A run of **only** `skip`/`todo` tests fails as "ZERO tests ran"; a placeholder-only
+  file run alone goes red on adoption (`chatgpt`, `substack`). Documented.
 * A file pattern that matches **nothing** fails with a message naming the pattern (plain
   node exits 0). Base's `*.test.*` glob is base's: lanes pass their own (`gemini` names
   files `*-test.js`).

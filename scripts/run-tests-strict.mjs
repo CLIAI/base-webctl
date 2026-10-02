@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // run-tests-strict.mjs — run `node --test` so a vanished test block FAILS.
 //
-// Human output (spec) on stdout; the strict reporter on stderr. Any arguments
+// TAP on stdout (--spec for the human format); the strict reporter on stderr. Any arguments
 // are passed through to `node --test` (files, globs, --test-name-pattern, …).
 //
 // ⛔ NODE_TEST_CONTEXT is REMOVED from the child's environment. When a runner is
@@ -29,12 +29,14 @@ delete env.NODE_TEST_CONTEXT;
 // ⛔ Only the FLAG enables it: an inherited variable would switch the guard off unseen.
 delete env.WEBCTL_STRICT_ALLOW_PLAIN_SCRIPTS;
 const passthrough = [];
-let human = 'spec';
+let human = 'tap';
 for (const a of process.argv.slice(2)) {
-  // --tap: TAP instead of spec on stdout, for a contract whose output the release gate
-  // reads line by line. (Spec's "✖ failing tests:" is ALSO matched by the gate, so spec
-  // does not hide failures from it; --tap is for lanes that want the TAP stream itself.)
+  // ⛔ TAP ON STDOUT BY DEFAULT. The release gate reads contract output line by line; a
+  // runner defaulting to spec left two lanes streaming ZERO TAP lines after adopting it
+  // (`gemini`, `substack`, measured independently) — green locally, dark to the gate.
+  // `--spec` opts into the human format; `--tap` is accepted and is the default.
   if (a === '--tap') human = 'tap';
+  else if (a === '--spec') human = 'spec';
   else if (a === '--serial') passthrough.push('--test-concurrency=1');
   else if (a === '--allow-plain-scripts') env.WEBCTL_STRICT_ALLOW_PLAIN_SCRIPTS = '1';
   else passthrough.push(a);

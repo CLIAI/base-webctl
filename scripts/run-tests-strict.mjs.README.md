@@ -6,7 +6,10 @@ Run `node --test` so that a **vanished** test block fails the run.
 node vendor/base-webctl/scripts/run-tests-strict.mjs "test/**/*.test.{js,mjs,cjs}"
 ```
 
-* Human output (spec) on stdout; the strict verdict on stderr.
+* **TAP on stdout by default** (`--spec` for the human format); the strict verdict on
+  stderr. TAP is the default because the release gate reads contract output line by
+  line — a spec default left two adopting lanes streaming zero TAP lines, green locally
+  and dark to the gate.
 * Fails on any `test:fail` event (TODO/SKIP excepted), **including a suite whose
   `describe()` threw while registering** — which plain node reports as `# fail 0`,
   exit 0.
@@ -18,9 +21,9 @@ node vendor/base-webctl/scripts/run-tests-strict.mjs "test/**/*.test.{js,mjs,cjs
   **fails** here ("ZERO tests ran … the file pattern matched NOTHING"), where plain node
   exits 0.
 * Arguments pass through to `node --test`, except three of its own:
-  * **`--tap`** — TAP instead of spec on stdout. The release gate scans contract output
-    for TAP `not ok` **and** for spec's `✖ failing tests:`, so spec does not hide a
-    failure from it; use `--tap` if your contract streams TAP and you want to keep that.
+  * **`--spec`** — the human format instead of TAP. The gate also matches spec's
+    `✖ failing tests:`, but it cannot count spec's passes; prefer TAP in a contract.
+    (`--tap` is accepted and is the default.)
   * **`--serial`** = `--test-concurrency=1`, and it wins over an earlier concurrency
     flag. node runs test **files** concurrently by default; suites that spawn processes,
     bind listeners or take lock dirs can collide.
@@ -31,6 +34,14 @@ node vendor/base-webctl/scripts/run-tests-strict.mjs "test/**/*.test.{js,mjs,cjs
     so run direct scripts separately from node:test suites. A script that exits
     non-zero, and a vanished `describe()`, still fail. Only the flag enables it; an
     inherited `WEBCTL_STRICT_ALLOW_PLAIN_SCRIPTS` is ignored.
+
+## ⚠ Adopting: three ways a lane goes red (correctly) on day one
+
+* **Your file pattern matches nothing** — base's glob is base's; pass your own.
+* **A placeholder file of only `todo`/`skip` tests, run alone** fails as "ZERO tests
+  ran". One real passing test anywhere in the run is enough; a run of only placeholders
+  tested nothing.
+* **Direct-script suites** need `--allow-plain-scripts` (see above).
 
 To keep your own runner, add the reporter beside your human one:
 
