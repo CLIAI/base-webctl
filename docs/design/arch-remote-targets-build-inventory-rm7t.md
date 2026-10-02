@@ -157,6 +157,17 @@ file**: the hosts layer exists, and a second one is exactly the drift above.
 * **"Needs update" compares a reading against a DECLARED target, and names both** — the
   base tag a consumer pins, the browser's package candidate. *"outdated"* alone is not
   actionable; *"reads 154.0.8037.92, declared 155.0.8102.4"* is.
+* ⛔ **A target in LOGIN MODE is never read** *(found by `gemini` during rollout)*. The
+  `running` reading is taken by `exec` into the container, and login mode's window belongs
+  to the human signing in (`lg1n` §1). ⇒ It gets an UNKNOWN row **saying why**. The
+  instrument's own side effect is the reason: an inventory is read-only toward the
+  *config*, but `exec` is not read-only toward the *browser's moment*.
+* **Versions are normalised in ONE place.** The binary prints a raw line (*"Chromium
+  152.0.7977.82 built on Debian GNU/Linux 12 (bookworm)"*); compared as-is against the
+  declared version it reads *differs* — a false outdated — and lanes had begun
+  normalising it themselves, differently. `normalizeVersion` extracts the dotted version
+  (cut at *"built on"*, then exactly one dotted token, else UNKNOWN) and keeps the raw line
+  beside it.
 * ⛔ **No new listeners** (D8). The inventory reads over the same ssh connection; nothing
   binds a port to answer it.
 

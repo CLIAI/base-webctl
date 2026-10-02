@@ -207,6 +207,40 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.21.0 — 2026-10-02
+
+**Headline: versions are normalised in ONE place, and the inventory never reads a
+login-mode browser.** Both from lanes' v0.20.0 rollouts.
+
+### ⛔ What this headline does NOT cover
+
+* ⚠ **`parseAppVersion`'s `version` field CHANGES:** it is now the normalised dotted
+  version (`152.0.7977.82`), with the binary's raw line moved to a new `raw` field. A
+  lane that normalised the raw line itself should find its normaliser idempotent on the
+  clean value — but check, and then delete it, which is the point.
+* `normalizeVersion` returns **null** (UNKNOWN) when a line has no dotted version or more
+  than one outside its *"built on"* part. It never guesses; a browser whose line has an
+  unusual shape reads UNKNOWN until someone adds a fixture from its real text.
+* Unchanged: no live login-mode reader for base's own driver; hardware acceleration in
+  login mode not achieved.
+
+### Added
+
+* `normalizeVersion(raw)` — cut at *"built on"* (the distro part can carry a dotted
+  number, e.g. Ubuntu `24.04`), then exactly one dotted token. Fixtures are REAL lines read
+  from the local images' binaries (Chromium, Opera) plus the zone-manager lane's measured
+  Firefox line.
+* `inventoryRows(targets, readings, { loginMode })` — a target in login mode gets an
+  UNKNOWN row saying why, never a reading: the `running` reading is taken by `exec` into
+  the container, and login mode's window belongs to the human signing in.
+* `parseAppVersion` names an **xq too old** for `app version` (its argparse *"invalid
+  choice: 'version'"*) instead of blaming a swallowed argument.
+
+### Fixed
+
+* A false **outdated**: the raw line (*"Chromium 152.0.7977.82 built on Debian…"*)
+  compared as-is against `152.0.7977.82` read *differs*.
+
 ## v0.20.0 — 2026-10-02
 
 **Headline: `parseAppVersion` — base reads the zone manager's `xq app version --json`,

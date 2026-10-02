@@ -242,3 +242,44 @@ test('⛔ an xq too old for `app version` is named as such — not as a swallowe
   assert.match(parseAppVersion('ZONE APP VERSION\nz chromium 155').reason, /argument was probably swallowed/);
   assert.equal(parseAppVersion(appv()).verdict, 'ok');
 });
+
+// ── version normalisation + login-mode inventory (next release) ───────────────
+import { normalizeVersion } from '../lib/remotes.js';
+
+test('⛔ REAL version lines normalise to their dotted version, raw kept beside it', () => {
+  // Read from the local images' own binaries (chromium, opera); Firefox as measured by the
+  // zone-manager lane.
+  const c = normalizeVersion('Chromium 152.0.7977.82 built on Debian GNU/Linux 12 (bookworm)');
+  assert.deepEqual(c, { version: '152.0.7977.82', raw: 'Chromium 152.0.7977.82 built on Debian GNU/Linux 12 (bookworm)' });
+  assert.equal(normalizeVersion('136.0.6008.22').version, '136.0.6008.22');
+  assert.equal(normalizeVersion('Mozilla Firefox 156.0.1').version, '156.0.1');
+  // the false-outdated it fixes: raw line vs declared now compares as current
+  const rd = { value: c.version || '', instrument: 'chromium --version', at: 'T' };
+  assert.equal(versionVerdict({ reading: rd, declared: '152.0.7977.82' }).verdict, 'current');
+});
+
+test('⛔ a dotted number in the DISTRO part does not confuse it — and ambiguity is UNKNOWN', () => {
+  assert.equal(normalizeVersion('Chromium 154.0.8037.92 built on Ubuntu 24.04.1 LTS').version, '154.0.8037.92');
+  // control: no anchor and two candidates → never a guess
+  assert.equal(normalizeVersion('Chromium 154.0.8037.92 Ubuntu 24.04').version, null);
+  assert.equal(normalizeVersion('Chromium (unknown build)').version, null);
+  assert.equal(normalizeVersion(null).version, null);
+});
+
+test('parseAppVersion carries the normalised version AND the raw line', () => {
+  const r = /** @type {any} */ (parseAppVersion(appv({ next: { image_id: 'x', source: 'binary',
+    version: 'Chromium 155.0.1 built on Debian GNU/Linux 12 (bookworm)' } })));
+  assert.equal(r.next.version, '155.0.1');
+  assert.match(r.next.raw, /built on Debian/);
+});
+
+test('⛔ inventory never reads a LOGIN-MODE target — an UNKNOWN row with the reason', () => {
+  const rows = inventoryRows(['a', 'b'], {
+    a: { value: '154', instrument: 'xq app version', at: 'T' },
+    b: { value: '154', instrument: 'xq app version', at: 'T' },
+  }, { loginMode: ['b'] });
+  assert.equal(rows[0].state, 'read', 'control: a target not in login mode is read');
+  assert.equal(rows[1].state, 'unknown');
+  assert.equal(rows[1].reading, null, 'even a reading that exists is not used');
+  assert.match(rows[1].reason, /login mode — never read/);
+});
