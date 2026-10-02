@@ -81,6 +81,16 @@ opaque `profile_id`, no leading-dash ssh alias). A file not mode 600 is refused
 * ⛔ The refusal **names the three ways to fix it** and **never echoes a value**.
 * The resolved value then goes through `validateTarget` — resolution decides *which*
   record; validation decides whether it is *acceptable*.
+* ⛔ **Refuse only where the browser will actually be contacted.** A verb that never
+  touches CDP — help, `--dry-run`, a worklist, config inspection — declares
+  `needsTarget: false` and is **not** refused: refusing a run that had nothing to ask the
+  browser is a vacuous red. *(From `substack`'s fix; adopted as the helper's contract.)*
+* **Two locations in the same layer** (e.g. `--target` and `--ssh` on one command line)
+  are **refused**, never raced.
+* **The environment name is base's, not each lane's:** `targetEnvKey(tool, kind)` →
+  `CLIAI_<TOOL>_BROWSER_TARGET` for a named target, `CLIAI_<TOOL>_BROWSER_SSH_TARGET` for
+  an ssh alias — matching the variable the first implementing lane already uses, so no
+  lane invents one and migrates later.
 
 ## 4. `lf4f` is superseded in part
 
@@ -114,13 +124,41 @@ Its idea — named profiles referred to by name — is kept, and is this documen
 
 | piece | owner |
 |---|---|
-| `resolveTarget` — precedence, shadowing, refusal with instructions | ✅ base, `lib/remotes.js` |
+| `resolveTarget` — precedence, shadowing, refusal with instructions, `needsTarget` scope | ✅ base, `lib/remotes.js` |
+| `targetEnvKey` — the one env-name pattern | ✅ base |
 | `findHostLiterals` — the no-literal check, given names and files | ✅ base |
 | `validateTarget`, `checkConfigMode` | ✅ base (v0.19.0+) |
 | reading the flag/env/config layers; supplying host names | the lane |
 | auditing every lane, dormant ones included | `webctl:mgr` |
 
-## 7. What this does NOT do
+## 7. ⛔ The FAMILY causes live in base — PLAN, not yet changed
+
+`webctl:mgr` audited all 14 repos (read-only): **only one lane complies in code, and the
+causes everyone else inherits are in base's own `lib/`.** Each is a location the code
+assumes:
+
+| # | where in base | the assumption |
+|---|---|---|
+| 1 | `client-config.js` `buildDriverCfg` | a missing port resolves to `DEFAULT_CDP_PORT` with source `default`, and `portOrigin` classifies `default` as legitimate |
+| 2 | `client-config.js` | a `DEFAULT_HOST` fallback |
+| 3 | `client-config.js`, `chromium-docker-xpra.js` | an xpra port *derived* from that defaulted CDP port |
+| 4 | `client-config.js`, `mounts.js`, the driver | an implicit `default` client and profile slug |
+| 5 | `browser-location/index.js` | `DEFAULT_MODE`: local docker unless told otherwise |
+| 6 | `chromium-docker-xpra.js`, `xpra-attach.js` | literal port fallbacks (`cfg.port \|\| 4327`, `\|\| 14500`) — one lane's port living in the shared lib |
+| 7 | `cdp-client.js` | `host = '127.0.0.1'` default, since copied into two lanes |
+
+⇒ **The direction for each:** return *unstated* (`null`, source `unstated`) rather than a
+fallback; keep `DEFAULT_CDP_PORT` as a **port reservation**, never a value a running
+command uses; and let `resolveTarget` refuse at the top.
+
+⛔ **Why this is a plan and not a commit:** every wired consumer calls `client-config`,
+and several still carry **divergent copies** of `browser-location` from much older pins, so
+a base fix reaches them only after they re-shim. Changing these returns is a breaking change
+for each consumer that silently relied on the fallback. Per this repo's rule it is
+**circulated before `lib/` changes**, then lands in one release whose notes lead with it as
+breaking.
+
+## 8. What this does NOT do
 
 * **It does not choose a location for anyone.** That is the point.
 * **It does not migrate existing configs.** A lane whose users relied on an implicit

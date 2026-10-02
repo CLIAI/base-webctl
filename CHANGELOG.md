@@ -232,6 +232,10 @@ human is using (`lg1n`).** Both from Greg's rulings today; the second after an i
 * `resolveTarget(layers, hints)` — flag > env > config, reporting the winning layer and
   what it shadowed; nothing set ⇒ **refused with instructions naming all three fixes**,
   never echoing a value. A default is allowed only where a person declared it in config.
+* `resolveTarget` scope: a caller that will not contact the browser passes `needsTarget:
+  false` and gets `not-needed`, never a refusal; two locations in one layer are refused.
+* `targetEnvKey(tool, kind)` — the family's one env-name pattern
+  (`CLIAI_<TOOL>_BROWSER_TARGET` / `_SSH_TARGET`).
 * `findHostLiterals(files, names)` — the "no host literal in code" check; refuses with no
   names or no files rather than reporting clean.
 * `lifecycleGuard({mode, viewerCount, humanOverride})` — a restart, stop or re-mint is

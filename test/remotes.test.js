@@ -322,3 +322,26 @@ test('⛔ the no-host-literal check finds a PLANTED literal — and refuses to s
   assert.equal(findHostLiterals(files, []).verdict, 'refused');
   assert.equal(findHostLiterals([], ['workstation-a']).verdict, 'refused');
 });
+
+// ── resolveTarget scope + env naming (lane feedback) ─────────────────────────
+import { targetEnvKey } from '../lib/remotes.js';
+
+test('⛔ a verb that never contacts the browser is NOT refused — control: a CDP verb is', () => {
+  // Refusing a run that had nothing to ask the browser is a vacuous red.
+  assert.equal(resolveTarget([], { needsTarget: false }).verdict, 'not-needed');
+  assert.equal(resolveTarget([]).verdict, 'refused', 'control: needsTarget defaults to true');
+  assert.equal(resolveTarget([], { needsTarget: true }).verdict, 'refused');
+});
+
+test('⛔ two locations in the SAME layer (e.g. --target and --ssh) are refused, not raced', () => {
+  const r = resolveTarget([{ source: 'flag', value: 'a' }, { source: 'flag', value: 'b' }]);
+  assert.equal(r.verdict, 'refused');
+  assert.match(r.reason, /two locations given in the flag layer/);
+  assert.ok(!r.reason.includes(' a ') && !/\bb\b/.test(r.reason.replace('give', '')), 'values are not echoed');
+});
+
+test('targetEnvKey: one family pattern, matching the first lane exactly', () => {
+  assert.equal(targetEnvKey('grok-webctl', 'ssh'), 'CLIAI_GROK_WEBCTL_BROWSER_SSH_TARGET');
+  assert.equal(targetEnvKey('substack-webctl'), 'CLIAI_SUBSTACK_WEBCTL_BROWSER_TARGET');
+  assert.throws(() => targetEnvKey(''));
+});
