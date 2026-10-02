@@ -6,10 +6,12 @@ Run `node --test` so that a **vanished** test block fails the run.
 node vendor/base-webctl/scripts/run-tests-strict.mjs "test/**/*.test.{js,mjs,cjs}"
 ```
 
-* **TAP on stdout by default** (`--spec` for the human format); the strict verdict on
-  stderr. TAP is the default because the release gate reads contract output line by
-  line — a spec default left two adopting lanes streaming zero TAP lines, green locally
-  and dark to the gate.
+* Spec on stdout by default; the strict verdict on stderr.
+* ⛔ **In a gate contract, pass `--tap`.** The release gate reads contract output line by
+  line; with spec, two adopting lanes streamed **zero TAP lines** — green locally, dark to
+  the gate. (The default stays spec because a lane already parses spec's `ℹ tests N`;
+  flipping it broke that lane at the v0.28.0 gate.) Prove it in your contract: FAIL if no
+  TAP line streamed (`substack`'s arm).
 * Fails on any `test:fail` event (TODO/SKIP excepted), **including a suite whose
   `describe()` threw while registering** — which plain node reports as `# fail 0`,
   exit 0.
@@ -21,9 +23,8 @@ node vendor/base-webctl/scripts/run-tests-strict.mjs "test/**/*.test.{js,mjs,cjs
   **fails** here ("ZERO tests ran … the file pattern matched NOTHING"), where plain node
   exits 0.
 * Arguments pass through to `node --test`, except three of its own:
-  * **`--spec`** — the human format instead of TAP. The gate also matches spec's
-    `✖ failing tests:`, but it cannot count spec's passes; prefer TAP in a contract.
-    (`--tap` is accepted and is the default.)
+  * **`--tap`** — TAP instead of spec on stdout. Required for gate visibility (above).
+    (`--spec` is accepted and is the default.)
   * **`--serial`** = `--test-concurrency=1`, and it wins over an earlier concurrency
     flag. node runs test **files** concurrently by default; suites that spawn processes,
     bind listeners or take lock dirs can collide.

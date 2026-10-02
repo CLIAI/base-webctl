@@ -179,18 +179,19 @@ test('⛔ a file pattern that matches NOTHING fails, naming the pattern — cont
   } finally { fs.rmSync(fx.dir, { recursive: true, force: true }); }
 });
 
-test('⛔ stdout is TAP BY DEFAULT, so an adopting lane stays visible to the gate — --spec opts out', () => {
+test('⛔ --tap streams TAP for the gate; the default stays spec (a lane parses it) — both show failures', () => {
   const fx = fixture('v.test.cjs', VANISH);
   try {
-    const tap = spawnSync(process.execPath, [RUNNER, fx.file], { encoding: 'utf8', env });
+    const tap = spawnSync(process.execPath, [RUNNER, '--tap', fx.file], { encoding: 'utf8', env });
     assert.equal(tap.status, 1);
-    assert.match(tap.stdout, /^not ok \d+ - needs a fixture/m, 'default stdout streams TAP the gate reads');
+    assert.match(tap.stdout, /^not ok \d+ - needs a fixture/m, '--tap streams TAP the gate reads');
     assert.match(tap.stdout, /^ok \d+ - survivor/m);
-    assert.doesNotMatch(tap.stdout, /✔/, 'TAP, not spec');
-    const spec = spawnSync(process.execPath, [RUNNER, '--spec', fx.file], { encoding: 'utf8', env });
+    assert.doesNotMatch(tap.stdout, /✔/, '--tap replaces spec, it does not stack on it');
+    const spec = spawnSync(process.execPath, [RUNNER, fx.file], { encoding: 'utf8', env });
     assert.equal(spec.status, 1);
-    assert.match(spec.stdout, /^✖ failing tests:/m, '--spec still carries the marker the gate also matches');
-    assert.doesNotMatch(spec.stdout, /^not ok /m, '--spec replaces TAP, it does not stack on it');
+    assert.match(spec.stdout, /^ℹ tests \d+/m, 'the DEFAULT is spec — fetlife parses this line');
+    assert.match(spec.stdout, /^✖ failing tests:/m, 'spec still carries the marker the gate also matches');
+    assert.doesNotMatch(spec.stdout, /^not ok /m);
   } finally { fs.rmSync(fx.dir, { recursive: true, force: true }); }
 });
 

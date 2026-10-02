@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // run-tests-strict.mjs — run `node --test` so a vanished test block FAILS.
 //
-// TAP on stdout (--spec for the human format); the strict reporter on stderr. Any arguments
+// spec on stdout (--tap for TAP — REQUIRED in a gate contract); the strict reporter on stderr. Any arguments
 // are passed through to `node --test` (files, globs, --test-name-pattern, …).
 //
 // ⛔ NODE_TEST_CONTEXT is REMOVED from the child's environment. When a runner is
@@ -29,12 +29,13 @@ delete env.NODE_TEST_CONTEXT;
 // ⛔ Only the FLAG enables it: an inherited variable would switch the guard off unseen.
 delete env.WEBCTL_STRICT_ALLOW_PLAIN_SCRIPTS;
 const passthrough = [];
-let human = 'tap';
+let human = 'spec';
 for (const a of process.argv.slice(2)) {
-  // ⛔ TAP ON STDOUT BY DEFAULT. The release gate reads contract output line by line; a
-  // runner defaulting to spec left two lanes streaming ZERO TAP lines after adopting it
-  // (`gemini`, `substack`, measured independently) — green locally, dark to the gate.
-  // `--spec` opts into the human format; `--tap` is accepted and is the default.
+  // ⛔ PASS --tap IN A CONTRACT. The release gate reads contract output line by line, and
+  // with spec on stdout two adopting lanes streamed ZERO TAP lines (`gemini`, `substack`)
+  // — green locally, dark to the gate. The DEFAULT stays spec: flipping it to TAP broke a
+  // lane that parses spec's "ℹ tests N" (`fetlife`, at the v0.28.0 gate) — a change to what
+  // an existing caller already gets (sb7q). So visibility is a documented REQUIRED flag.
   if (a === '--tap') human = 'tap';
   else if (a === '--spec') human = 'spec';
   else if (a === '--serial') passthrough.push('--test-concurrency=1');
