@@ -345,3 +345,29 @@ test('targetEnvKey: one family pattern, matching the first lane exactly', () => 
   assert.equal(targetEnvKey('substack-webctl'), 'CLIAI_SUBSTACK_WEBCTL_BROWSER_TARGET');
   assert.throws(() => targetEnvKey(''));
 });
+
+test('a refusal is a REASON OBJECT with a machine code — lanes map it to their own exit table', () => {
+  const r = /** @type {any} */ (resolveTarget([], { envKey: 'X_TARGET' }));
+  assert.equal(r.code, 'no-target');
+  assert.match(r.instructions, /X_TARGET/);
+  assert.equal(r.exitCode, undefined, 'base does not choose an exit code');
+  assert.equal(/** @type {any} */ (resolveTarget([{ source: 'env', value: 'a' }, { source: 'env', value: 'b' }])).code, 'ambiguous');
+});
+
+test('⛔ a test per LISTED source — and a source not listed is not a source', () => {
+  // The doc names exactly three: flag, env, config. Each, ALONE, must resolve and report itself.
+  for (const source of ['flag', 'env', 'config']) {
+    const r = /** @type {any} */ (resolveTarget([{ source, value: `host-${source}` }]));
+    assert.equal(r.verdict, 'resolved', source);
+    assert.equal(r.value, `host-${source}`);
+    assert.equal(r.source, source);
+    assert.deepEqual(r.shadowed, []);
+  }
+  // A layer the code invents — a literal "default", a guessed "local" — is NOT a fourth
+  // source: alone it is refused as no-target, exactly as if nothing were given.
+  for (const source of ['default', 'local', 'fallback']) {
+    const r = resolveTarget([{ source, value: 'localhost' }]);
+    assert.equal(r.verdict, 'refused', `${source} must not resolve`);
+    assert.equal(/** @type {any} */ (r).code, 'no-target');
+  }
+});

@@ -234,6 +234,11 @@ human is using (`lg1n`).** Both from Greg's rulings today; the second after an i
   never echoing a value. A default is allowed only where a person declared it in config.
 * `resolveTarget` scope: a caller that will not contact the browser passes `needsTarget:
   false` and gets `not-needed`, never a refusal; two locations in one layer are refused.
+* `resolveTarget` refusals are a **reason object** — `{verdict:'refused', code, reason,
+  instructions}`, `code` ∈ `no-target` | `ambiguous` — never an exit code: each lane maps
+  the code to its own exit table. Only flag, env and config are sources; a layer named
+  anything else (`default`, `local`) is ignored, so it refuses as `no-target` (tested per
+  source).
 * `targetEnvKey(tool, kind)` — the family's one env-name pattern
   (`CLIAI_<TOOL>_BROWSER_TARGET` / `_SSH_TARGET`).
 * `findHostLiterals(files, names)` — the "no host literal in code" check; refuses with no
@@ -243,6 +248,14 @@ human is using (`lg1n`).** Both from Greg's rulings today; the second after an i
   explicit boolean human override proceeds. Its refusal **says a human is signing in**:
   in the incident the reason was misread, and sabotage showed a verdict-only test could
   not catch a generic reason.
+
+### Fixed
+
+* The docker-up **port-conflict hint** printed `lsof -i :<port>`, which also lists every
+  process *connected* to the port; a lane acting on that form SIGTERM'd its own test
+  process. It now prints the listener form, `lsof -nP -iTCP:<port> -sTCP:LISTEN`. This path
+  had no test; `test/port-conflict-hint.test.js` now holds two real ports to reach it, and
+  a sabotage run with the old form fails it.
 
 ### Docs
 

@@ -87,6 +87,13 @@ opaque `profile_id`, no leading-dash ssh alias). A file not mode 600 is refused
   browser is a vacuous red. *(From `substack`'s fix; adopted as the helper's contract.)*
 * **Two locations in the same layer** (e.g. `--target` and `--ssh` on one command line)
   are **refused**, never raced.
+* ⛔ **A refusal is a REASON OBJECT, never an exit code.** `resolveTarget` returns
+  `{verdict: 'refused', code, reason, instructions}` with a machine `code` —
+  `no-target` or `ambiguous` — and each lane maps the code onto **its own** exit table.
+  Base choosing a number would collide with lanes whose tables already disagree.
+* ⛔ **The helper documents ONLY the sources it implements** — flag, environment,
+  config — **with a test per listed source.** A source named in a doc and absent from
+  the code is a claim nothing checks; a lane reads the doc, not the function body.
 * **The environment name is base's, not each lane's:** `targetEnvKey(tool, kind)` →
   `CLIAI_<TOOL>_BROWSER_TARGET` for a named target, `CLIAI_<TOOL>_BROWSER_SSH_TARGET` for
   an ssh alias — matching the variable the first implementing lane already uses, so no
@@ -109,8 +116,12 @@ Its idea — named profiles referred to by name — is kept, and is this documen
 ## 5. QA — every item executes, each with its control
 
 1. **No flag, env or config ⇒ every browser-touching command exits non-zero before any
-   ssh/docker.** *Control:* a target in config ⇒ it proceeds. Proven by a fake `ssh` and
-   `docker` on `PATH` that record whether they were called.
+   ssh/docker.** ⭐ **The QA shape:** *recording stubs* — a fake `ssh`, `docker` and
+   browser launcher on `PATH` — prove **zero** calls on the refused run, **and a control
+   on the same stubs shows they DO record when a target is stated.** Without that control
+   a stub that never records (wrong `PATH`, a tool that resolves binaries absolutely)
+   proves "zero calls" vacuously. *(Shape from `webctl:mgr`'s audit of the lanes'
+   adoptions.)*
 2. **Precedence flag > env > config, proven with THREE DISTINCT hosts**, one per layer —
    with one host the test cannot tell which layer won.
 3. **No host literal in code.** `findHostLiterals` scans the repo for the lane's known host
@@ -119,6 +130,14 @@ Its idea — named profiles referred to by name — is kept, and is this documen
    *Control:* a planted literal is found. *Vacuity:* no names supplied, or no files
    examined, refuses rather than reporting clean.
 4. **The target file is mode 600 and passes `validateTarget`.** *Control:* 644 is refused.
+5. ⛔ **"The browser on a port" is the port's LISTENER, and nothing is signalled on a port
+   number alone.** `lsof -i :<port>` lists every *client* connected to the port as well; a
+   lane took a pid from that output and SIGTERM'd its own test process. ⇒ Any helper that
+   finds the browser by port uses the listener form (`lsof -nP -iTCP:<port> -sTCP:LISTEN`,
+   or `-ti` for pids) **and checks the pid's argv** is the browser it expects before any
+   signal. Base ships **no** kill-by-port helper; its port-conflict hint prints the
+   listener form, tested in `test/port-conflict-hint.test.js` (with a sabotage run showing
+   the old `-i :<port>` form fails it).
 
 ## 6. What base ships, and what the lanes do
 
