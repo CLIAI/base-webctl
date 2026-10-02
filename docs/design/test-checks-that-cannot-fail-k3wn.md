@@ -514,6 +514,24 @@ attempt proved nothing — the gate refuses a dirty tree, so it exited 2 before
 reaching the probe, and *"the gate did not block"* and *"the gate never ran"* look
 alike in an exit code nobody read carefully.
 
+## ⛔ A `pgrep -f` waiter matches ITS OWN command line — and so never finishes
+
+base's own, twice in one week. A background wait was written as *"until the tree is
+clean **and** `! pgrep -f 'sabotage-controls.mjs'`"*. The waiter's own `bash -c` command
+line **contains that string**, so `pgrep` always found a match — itself — and the
+condition could never become true. It reported *"runner STILL running"* while the real
+runner had already exited, and a later spot check printed *"a REAL runner exists"* for
+the same reason.
+
+⇒ **A wait condition that can never be satisfied is the mirror of a check that can
+never fail**: one reports "not yet" forever, the other "fine" forever, and both look
+like information. ⚠ It surfaced only because the result contradicted another reading
+(the tree was clean, and the gate actually ran the lane).
+
+⇒ **Fix:** the bracket idiom, `pgrep -f '[n]ode QA/tools/…'`. The regex still matches the
+real process, while the literal text in the caller's own command line no longer does.
+Or match on something the caller cannot contain: a pid file, or `/proc/<pid>/cwd`.
+
 ## ⛔ A DOC ASSEMBLED UNDER REVIEW CONTRADICTS ITSELF, AND NOTHING CHECKS PROSE
 
 base's own, 2026-09-27. A design doc was revised **eight times in one afternoon** as
