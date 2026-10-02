@@ -377,9 +377,19 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # declaration rather than leaving each contract to compute it — during the
   # one moment it cannot.
   declared_pin="$(git -C "$repo_dir" ls-tree HEAD "$submodulePath" 2>/dev/null | awk '{print $3}')"
+  # ⭐ WEBCTL_GATE_SWAPPED — the gate's OWN knowledge of whether it swapped this
+  # consumer, handed to the contract and everything it runs (unit suites included):
+  #   "1" the gate swapped the submodule to the candidate · "0" the gate ran, no
+  #   swap · unset: not running under the gate at all.
+  # ⛔ Added after a lane's UNIT tests derived "the pin" from the submodule worktree
+  # and so failed against EVERY release candidate — blocking v0.17.0. Their contract
+  # layer handled the swap correctly; the unit suite had no way to know. ⇒ A test
+  # should not have to re-derive "am I under a swap?" from the very comparison it is
+  # testing; the gate knows, so the gate says. Same reason gate-probe needed it.
   ( cd "$repo_dir" \
       && WEBCTL_BASE_DIR="$BASE_ROOT" \
          WEBCTL_DECLARED_PIN="${declared_pin:-}" \
+         WEBCTL_GATE_SWAPPED="${swapped_now:-0}" \
          eval "$testCmd" ) 2>&1 | tee "$run_log" >&2
   rc=${PIPESTATUS[0]}
   set -e

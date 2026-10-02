@@ -235,8 +235,34 @@ launch line and so cannot assume "clean" from the flags it asked for.
 * **Ownership re-mint is specified, not implemented** — it depends on `ow9k`, which
   remains a design.
 
+### ⛔ RELEASE-GATE EXCEPTION — recorded, scoped, not a waiver
+
+**Ruled by webctl:mgr 2026-10-02.** This release was tagged over a RED gate.
+
+* **Lane:** `perplexity-webctl`. **Tests:** #112 `versionInfo: … a DERIVED base tag`,
+  #307 `the pin is a tag, and the tag peels (^{commit}) to the submodule HEAD`, #308
+  `scanner controls: the tag and a sha prefix are found; a near-miss is not`, #309
+  `no tracked or new file outside the dated snapshots restates the pin` — 4 of 602.
+* **Cause:** those unit tests derive "the pin" from the **submodule worktree**
+  (`git describe --tags --exact-match HEAD` / `rev-parse HEAD`). During the gate's swap
+  that HEAD is the untagged **candidate**, so they fail against **any** candidate.
+  Their **contract** layer handled the swap correctly (`pin` returned NO VERDICT); the
+  defect is one layer down. Not a base regression: the same suite is **602/602** in
+  their repo at their real pin, and the four fail only at a real git checkout of the
+  candidate — separated with that instrument, after a `git archive` reproduction
+  first suggested, wrongly, that they were failing at the pin too.
+* **Scope:** **these 4 tests, this lane, this release only.** Not a standing waiver.
+  At the next release they pass or are ruled on again.
+* **Why not wait:** the lane is paused until further notice, and as written the defect
+  blocks every base release, so waiting would fix nothing structurally.
+
 ### Added
 
+* **Gate: `WEBCTL_GATE_SWAPPED` is now passed to contracts** (`"1"` swapped, `"0"` no
+  swap, unset = not under the gate), beside `WEBCTL_DECLARED_PIN`. A lane's unit tests
+  can now learn they are under a swap from the gate itself rather than re-deriving it
+  from the comparison they are testing — the change that would have prevented the
+  exception above.
 * `lib/login-mode.js`, exported as `loginMode`: `classifyLoginArgv` (CLEAN | VIOLATIONS
   | UNKNOWN, advisories separate), `classifyControlArgv` (the control arm, which must
   FIND CDP), `pickBrowserProcess`, `parseListeningPorts` (`ss -ltn` WITH its header),
