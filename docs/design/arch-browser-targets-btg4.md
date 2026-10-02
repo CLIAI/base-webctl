@@ -801,7 +801,7 @@ configured at all.
 * **It does not build the remote mechanics.** A separate **zone-manager** tool owns
   the remote-execution capability; base owns the **convention**. ⇒ Coordinate rather than implement
   twice.
-* **It does not decide `--client` vs `--target`.** ⚠ `--client` already means
+* ✅ **`--client` vs `--target` is now DECIDED in `nl0c` §2**: `--target` is the location flag; `--client` may survive only as a synonym, never as a second way to choose a location. *(Original note follows.)* **It did not decide `--client` vs `--target`.** ⚠ `--client` already means
   *driver cfg slug* in at least one lane; reusing it for a location is a second
   noun collision, which is what this document exists to avoid. Recommending
   `--target`, and flagging it as a question for the lanes that ship `--client`.

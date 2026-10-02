@@ -283,3 +283,42 @@ test('⛔ inventory never reads a LOGIN-MODE target — an UNKNOWN row with the 
   assert.equal(rows[1].reading, null, 'even a reading that exists is not used');
   assert.match(rows[1].reason, /login mode — never read/);
 });
+
+// ── nl0c: never assume where the browser runs ────────────────────────────────
+import { resolveTarget, findHostLiterals } from '../lib/remotes.js';
+
+test('⛔ nothing set ⇒ REFUSED with instructions naming all three fixes', () => {
+  const r = resolveTarget([{ source: 'flag' }, { source: 'env', value: '  ' }, { source: 'config', value: '' }],
+    { tool: 'demo-webctl', envKey: 'DEMO_WEBCTL_TARGET', configPath: '~/.config/webctl/demo.toml' });
+  assert.equal(r.verdict, 'refused');
+  assert.match(r.reason, /never assumes one/);
+  assert.match(r.reason, /--target <name>/);
+  assert.match(r.reason, /DEMO_WEBCTL_TARGET/);
+  assert.match(r.reason, /default_target/);
+  // control: a declared config default resolves
+  assert.equal(resolveTarget([{ source: 'config', value: 'workstation' }]).verdict, 'resolved');
+});
+
+test('⭐ precedence flag > env > config, proven with THREE DISTINCT hosts', () => {
+  const L = [{ source: 'config', value: 'host-c' }, { source: 'env', value: 'host-b' }, { source: 'flag', value: 'host-a' }];
+  const all = /** @type {any} */ (resolveTarget(L));
+  assert.equal(all.value, 'host-a');
+  assert.deepEqual(all.shadowed, ['env', 'config']);
+  assert.equal(/** @type {any} */ (resolveTarget(L.slice(0, 2))).value, 'host-b', 'env beats config');
+  assert.equal(/** @type {any} */ (resolveTarget(L.slice(0, 1))).value, 'host-c', 'config alone');
+});
+
+test('⛔ the no-host-literal check finds a PLANTED literal — and refuses to scan for nothing', () => {
+  const files = [
+    { path: 'lib/a.js', text: "const host = 'workstation-a';\nconst x = 1;" },
+    { path: 'lib/b.js', text: '// remote: workstation-ab is unrelated\nnothing here' },
+  ];
+  const r = findHostLiterals(files, ['workstation-a']);
+  assert.equal(r.verdict, 'found');
+  assert.deepEqual(r.hits, [{ path: 'lib/a.js', line: 1, name: 'workstation-a' }], 'whole-word: workstation-ab is not a hit');
+  // control: clean files are clean
+  assert.equal(findHostLiterals([{ path: 'c.js', text: 'const n = 2;' }], ['workstation-a']).verdict, 'clean');
+  // vacuity
+  assert.equal(findHostLiterals(files, []).verdict, 'refused');
+  assert.equal(findHostLiterals([], ['workstation-a']).verdict, 'refused');
+});

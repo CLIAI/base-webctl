@@ -35,6 +35,14 @@ the human's viewer off. After a restart **without** CDP the site answered *"we
 temporarily limited your login"*. ⇒ The rate limit appeared with CDP already off:
 either it was earned earlier, or it is not CDP-related.
 
+⚠ **UPDATED 2026-10-02 — a second attempt makes CDP UNLIKELY as the cause.** The human's
+second sign-in ran in login mode with CDP **measured off** (`classifyLoginArgv` → CLEAN)
+and was **still blocked** — every sign-in path did nothing — while the same account's
+sign-in on a phone worked. ⇒ Remaining candidates, **neither proven**: per-browser or
+per-device protection on the site's side, and the **missing WebGL** (§2: the browser
+host has no GPU, so a fingerprinting page sees none). Login mode stays justified by its
+guarantees; it should no longer be read as a fix for this incident.
+
 ⇒ **So login mode is justified by what it guarantees, not by what it is proven to
 fix:**
 
@@ -68,6 +76,15 @@ STOPPED ──login──▶ LOGIN ──(human: "done")──▶ STOPPED ──
   `type`/`click`/`key` verbs, and `gui attach` by anything but the human's viewer,
   while the target is in login mode.
 * ⛔ **No automated retry of anything** while in login mode.
+* ⛔ **NO LIFECYCLE ACTION while the target is in login mode OR any viewer is attached**
+  — no restart, no stop, no re-mint cycle. *(Incident: an agent's live test cycle
+  restarted a browser **twice** while the human was attached and signing in; its own
+  inventory had reported "login mode" first, and it misread that as its own bug.
+  Proposed by `grok`, endorsed by `webctl:mgr`.)* "Viewer attached" is a **reading** —
+  the display server's client count — never an assumption, and an **unknown** count
+  **refuses**. Only an explicit human override proceeds. `lifecycleGuard` implements it,
+  and its refusal **says a human is signing in**: the reason is the point, because the
+  incident was a misread reason.
 * ⚠ **The browser can EXIT during login mode** — measured: exit 0 mid-attempt, most
   likely the human closing its window. ⇒ That is an **observed state**,
   `EXITED_DURING_LOGIN`, reported as such — not left for a status command to infer, and
@@ -295,6 +312,9 @@ Each item is an assertion with a control. *(`gu1d`'s ruling: a checklist a contr
    reported as weaker.
 6. **Exclusivity:** an agent input verb issued during login mode is **refused**.
 7. **Advisories are reported**, never silently passed.
+8. **Lifecycle refusal:** a restart with a viewer attached, or in login mode, is
+   **refused**, and an unknown viewer count refuses. *Control:* control mode with zero
+   viewers, both read, is allowed.
 
 ⚠ **The one item that stays prose:** *whether the site accepted the human's sign-in
 without trouble.* That is a human judgement about a third party's behaviour, and it is

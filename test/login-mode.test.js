@@ -210,3 +210,38 @@ test('⛔ socket arm: Docker embedded DNS is NAMED, not read as CDP — and a re
   assert.ok(v6.listeners.some((l) => l.address === '127.0.0.53'));
   assert.equal(classifySockets('', 9222).verdict, 'unknown');
 });
+
+// ── lifecycle guard: never restart a browser a human is using (incident rule) ──
+import { lifecycleGuard } from '../lib/login-mode.js';
+
+test('⭐ CONTROL: control mode with zero viewers (both READ) allows a restart', () => {
+  assert.equal(lifecycleGuard({ mode: 'control', viewerCount: 0 }).verdict, 'allowed');
+});
+
+test('⛔ a viewer attached REFUSES a restart', () => {
+  const r = lifecycleGuard({ mode: 'control', viewerCount: 1 });
+  assert.equal(r.verdict, 'refused');
+  assert.match(r.reason, /1 viewer\(s\) attached/);
+});
+
+test('⛔ LOGIN MODE refuses a restart even with no viewer — and SAYS a human is signing in', () => {
+  const r = lifecycleGuard({ mode: 'login', viewerCount: 0 });
+  assert.equal(r.verdict, 'refused');
+  // ⇒ The REASON is the point, not just the verdict: in the incident the agent saw
+  // "login mode" and misread it as its own bug. A generic "mode unknown" refusal would
+  // pass a verdict-only assertion and teach nothing — sabotage proved exactly that.
+  assert.match(r.reason, /LOGIN MODE: a human is signing in/);
+});
+
+test('⛔ an UNKNOWN viewer count or mode refuses — never assumed safe', () => {
+  assert.equal(lifecycleGuard({ mode: 'control' }).verdict, 'refused', 'count not read');
+  assert.equal(lifecycleGuard({ mode: 'control', viewerCount: -1 }).verdict, 'refused');
+  assert.equal(lifecycleGuard({ viewerCount: 0 }).verdict, 'refused', 'mode not read');
+  assert.equal(lifecycleGuard().verdict, 'refused');
+});
+
+test('only an EXPLICIT human override proceeds', () => {
+  assert.equal(lifecycleGuard({ mode: 'login', viewerCount: 2, humanOverride: true }).verdict, 'allowed');
+  assert.equal(lifecycleGuard({ mode: 'login', viewerCount: 2, humanOverride: /** @type {any} */ ('yes') }).verdict,
+    'refused', 'a truthy non-boolean is not an override');
+});

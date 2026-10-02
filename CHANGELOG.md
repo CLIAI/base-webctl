@@ -207,6 +207,47 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.22.0 — 2026-10-02
+
+**Headline: never assume where the browser runs (`nl0c`), and never restart a browser a
+human is using (`lg1n`).** Both from Greg's rulings today; the second after an incident.
+
+### ⛔ What this headline does NOT cover
+
+* **Base does not migrate anyone.** A lane whose users relied on an implicit location will
+  start refusing once it adopts `resolveTarget`; the refusal's instructions are the
+  migration path, and that lane's own release notes must say so.
+* **`findHostLiterals` needs the lane's host names** (from its own machine list). Base ships
+  no list — it is public, and a list of hosts to forbid would publish them.
+* **`lifecycleGuard` needs a READ viewer count.** Base does not read the display server;
+  the lane does, and an unread count refuses.
+* ⚠ **lg1n §0 is revised:** a second sign-in with CDP measured OFF was still blocked, so
+  CDP is now unlikely to be the cause. Per-device protection and the missing WebGL remain
+  candidates; neither is proven.
+* Unchanged: no live login-mode reader for base's own driver; hardware acceleration in
+  login mode not achieved.
+
+### Added
+
+* `resolveTarget(layers, hints)` — flag > env > config, reporting the winning layer and
+  what it shadowed; nothing set ⇒ **refused with instructions naming all three fixes**,
+  never echoing a value. A default is allowed only where a person declared it in config.
+* `findHostLiterals(files, names)` — the "no host literal in code" check; refuses with no
+  names or no files rather than reporting clean.
+* `lifecycleGuard({mode, viewerCount, humanOverride})` — a restart, stop or re-mint is
+  **refused in login mode or with any viewer attached**; an unknown count refuses; only an
+  explicit boolean human override proceeds. Its refusal **says a human is signing in**:
+  in the incident the reason was misread, and sabotage showed a verdict-only test could
+  not catch a generic reason.
+
+### Docs
+
+* New: `arch-target-resolution-no-implicit-location-nl0c` — named targets on the
+  `~/.ssh/config` model; **`--target` is THE location flag, `--client` survives only as
+  a synonym** (closing `btg4`'s open question); executable QA with controls.
+* `lf4f` marked **superseded in part**: its implicit `default`, its `user_data_dir` path and
+  its stored `port` contradict later rules.
+
 ## v0.21.0 — 2026-10-02
 
 ### ⛔ BREAKING — `parseAppVersion`'s `version` field

@@ -12,6 +12,12 @@ depends_on: [f868]
 expands: [v7m2]
 similar_to: []
 ---
+> ⛔ **SUPERSEDED IN PART by `arch-target-resolution-no-implicit-location-nl0c`
+> (2026-10-02).** Three rules below contradict later decisions: an omitted `--client`
+> silently meaning `default` (now: nothing implied, unset is refused), a profile storing
+> `user_data_dir` (now: an opaque `profile_id`, never a path), and storing `port` (now:
+> ports are read live). The idea of named profiles referred to by name is kept — in nl0c.
+
 
 # Client Profile Registry: Multi-Browser Management
 
