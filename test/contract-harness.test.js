@@ -80,27 +80,32 @@ test('⭐ pin: PASSES on a tagged gitlink, FAILS on a bare commit', () => {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('⛔ pin: NO VERDICT under the gate\'s swap, keyed on the DECLARED pin', () => {
-  // Not on WEBCTL_BASE_DIR, which is a proxy the gate sets on every run — so
-  // keying the skip on it skips a computable check every time. The declared pin
-  // differing from the worktree is the actual signal, and it is the one the
-  // gate can supply precisely because the swap takes it away.
+test('⛔ pin: NO VERDICT only when the gate SAYS it swapped (WEBCTL_GATE_SWAPPED=1)', () => {
+  // Generation 3 keyed this on "WEBCTL_DECLARED_PIN set and != worktree". Since v0.24
+  // the gate sets DECLARED_PIN on EVERY run, so that is a declaration, not a swap —
+  // the gate's own SWAPPED flag is the only signal. (Before it, WEBCTL_BASE_DIR was
+  // the proxy; this is the fifth keying, and the first that asks the swapper.)
   const { dir, g } = fixture();
   try {
     g(['add', 'vendor/base-webctl']);
     g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
 
-    const swapped = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: 'deadbeef'.repeat(5) });
+    const swapped = run(['pin', '--repo', dir],
+      { WEBCTL_DECLARED_PIN: 'deadbeef'.repeat(5), WEBCTL_GATE_SWAPPED: '1' });
     assert.equal(swapped.status, 2, 'a swapped submodule must be NO VERDICT, never a FAIL');
     assert.match(swapped.stderr, /release gate has swapped/);
 
-    // ⚠ And the carve-out must NOT fire merely because the variable is set to
-    // the value already checked out — otherwise it skips on every gated run.
+    // ⚠ DECLARED_PIN differing from the worktree WITHOUT the gate saying it swapped is
+    // not a swap: here the worktree IS the gitlink, at a tag, so it is an ordinary pass.
+    const declaredOnly = run(['pin', '--repo', dir],
+      { WEBCTL_DECLARED_PIN: 'deadbeef'.repeat(5), WEBCTL_GATE_SWAPPED: '0' });
+    assert.equal(declaredOnly.status, 0, 'DECLARED_PIN is a declaration, not a swap');
+
+    // and SWAPPED=1 with nothing actually moved is not a swap either
     const declared = execFileSync('git', ['ls-tree', 'HEAD', 'vendor/base-webctl'],
       { cwd: dir, encoding: 'utf8' }).split(/\s+/)[2];
-    const notSwapped = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: declared });
-    assert.equal(notSwapped.status, 0,
-      'the variable being SET is not the signal — only declared != worktree is');
+    const notMoved = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: declared, WEBCTL_GATE_SWAPPED: '1' });
+    assert.equal(notMoved.status, 0, 'only declared != worktree under SWAPPED=1 is the carve-out');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -123,15 +128,23 @@ test('⛔ pin: DRIFT — worktree != gitlink with NO gate signal FAILS; control:
     g(['-C', sub, 'add', '.']);
     g(['-C', sub, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'drift']);
 
-    const drift = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: '' });
+    const drift = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: '', WEBCTL_GATE_SWAPPED: '' });
     assert.equal(drift.status, 1, `drift must FAIL; got ${drift.status}\n${drift.stderr}`);
     assert.match(drift.stderr, /DRIFT/);
     assert.match(drift.stderr, new RegExp(declared.slice(0, 7)));
 
     // the SAME tree under the gate's swap is NO VERDICT, not a drift failure
-    const gated = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: declared });
+    const gated = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: declared, WEBCTL_GATE_SWAPPED: '1' });
     assert.equal(gated.status, 2, 'the gate swapping on purpose is not drift');
     assert.match(gated.stderr, /release gate has swapped/);
+
+    // ⛔ THE fetlife ARM: under the gate, DECLARED_PIN set, but the gate did NOT swap
+    // (SWAPPED=0). Generation 3 called this "the release gate has swapped" and gave NO
+    // VERDICT — real drift passing, under a false statement. It is drift.
+    const gateNoSwap = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: declared, WEBCTL_GATE_SWAPPED: '0' });
+    assert.equal(gateNoSwap.status, 1, `drift under a non-swapping gate run must FAIL; got ${gateNoSwap.status}\n${gateNoSwap.stderr}`);
+    assert.match(gateNoSwap.stderr, /DRIFT/);
+    assert.doesNotMatch(gateNoSwap.stderr, /release gate has swapped/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -158,6 +171,40 @@ test('⛔ pin: a plain vendored DIRECTORY is not a gitlink (ls-tree prints a TRE
     assert.notEqual(r.status, 0, `a copied directory has no pin to pass; got ${r.status}\n${r.stderr}`);
     assert.doesNotMatch(r.stderr + r.stdout, /declared gitlink/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ require-generation: a FLOOR that fails closed — including on harnesses that predate it', () => {
+  const ok = run(['require-generation', '1']);
+  assert.equal(ok.status, 0);
+  assert.match(ok.stderr, /above the floor 1/, 'above the floor warns, so a stale floor is visible');
+  const exact = run(['generation']);
+  const gen = Number(JSON.parse(exact.stdout).generation);
+  assert.equal(run(['require-generation', String(gen)]).status, 0, 'control: the exact generation passes');
+  const below = run(['require-generation', String(gen + 1)]);
+  assert.equal(below.status, 1, 'a floor above this harness FAILS');
+  assert.match(below.stderr, /BELOW the required/);
+  for (const bad of [[], ['0'], ['x'], ['3', 'extra']]) {
+    assert.equal(run(['require-generation', ...bad]).status, 3, JSON.stringify(bad));
+  }
+});
+
+test('⛔ DOWNGRADE: the floor fails closed on a generation-2 harness; a --min FLAG would have passed', () => {
+  // The harness lives inside the submodule, so a downgrade replaces the checker too.
+  // This runs base's REAL generation-2 harness (v0.22.0), from git, not a mock.
+  const old = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-gen2-'));
+  try {
+    const src = execFileSync('git', ['show', 'v0.22.0:scripts/contract-harness.mjs'], { cwd: ROOT, encoding: 'utf8' });
+    const file = path.join(old, 'contract-harness.mjs');
+    fs.writeFileSync(file, src);
+    const runOld = (/** @type {string[]} */ a) => spawnSync(process.execPath, [file, ...a], { encoding: 'utf8' });
+    assert.match(runOld(['generation']).stdout, /"generation":2/, 'premise: this IS generation 2');
+    // the VERB: unknown on gen 2 -> usage, non-zero -> a contract fails closed
+    assert.equal(runOld(['require-generation', '4']).status, 3);
+    // the FLAG that was proposed: gen 2 ignores it and passes. This is why it is a verb.
+    assert.equal(runOld(['generation', '--min', '4']).status, 0, 'measured: a flag fails OPEN on old harnesses');
+    // and the current harness refuses the flag form, so nobody adopts it
+    assert.equal(run(['generation', '--min', '4']).status, 3);
+  } finally { fs.rmSync(old, { recursive: true, force: true }); }
 });
 
 test('⭐ no-revendor: catches THE SHAPE THAT SHIPPED — a vendor path in a COMMENT', () => {

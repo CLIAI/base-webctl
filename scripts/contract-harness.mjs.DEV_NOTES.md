@@ -169,3 +169,12 @@ should land with the ownership work rather than alone.
 * **The ESM/CJS arm from a consumer.** base uses this natively; a CJS lane
   invokes it as a subprocess, so there is no loader question — but no lane has
   run it yet.
+* **A floor the GATE enforces, so a lane cannot forget it.** `require-generation`
+  fails closed on old harnesses, but only a contract that *calls* it is protected,
+  and base cannot make a lane call it. The gate is the one piece of base that is
+  never downgraded (it runs from base HEAD). It could open a **downgrade window**:
+  point each consumer at a generation-2 tag, run its contract, and require a FAIL
+  whose reason names `require-generation`. A green there means the lane has no
+  floor. Not built yet: a consumer's suite on an old base can fail for unrelated
+  API reasons, so the probe must judge the *reason*, not the exit code, and that
+  needs the JSONL `check` field rather than prose.

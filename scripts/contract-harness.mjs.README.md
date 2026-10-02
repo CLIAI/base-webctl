@@ -25,8 +25,42 @@ than by any lane reading its own.
 
 ## The checks
 
-`pin`, `no-revendor` and `generation` are for your contract; `gate-probe` is for
-the release gate (see below).
+`require-generation`, `pin`, `no-revendor` and `generation` are for your contract;
+`gate-probe` is for the release gate (see below).
+
+## ⛔ LOAD-BEARING: the checker lives INSIDE the thing it checks
+
+The harness is `vendor/base-webctl/scripts/contract-harness.mjs` — **inside the
+submodule.** So drifting a lane to an **older** base also **downgrades the checker**
+meant to catch that drift. *Measured by `substack`:* its first drift control reported
+`"generation":2` PASS, because the drift had replaced generation 3 with generation 2.
+
+⇒ **Every fix in a newer harness protects only a contract that ENFORCES a floor.**
+Recording `CONTRACT_HARNESS_GENERATION` in a comment is not enforcing it. Put this
+first in your contract, and treat **any** non-zero as FAIL:
+
+```bash
+node "$H" require-generation 4 || { echo "FAIL: base harness below generation 4 (downgraded submodule?)"; exit 1; }
+```
+
+* ⭐ **Why a VERB, not `generation --min N`.** Measured: every harness before
+  generation 4 **ignores unknown flags** — generation 2 answers `generation --min 3` with
+  "generation 2", exit 0. A floor spelled as a flag **fails open on exactly the
+  downgraded harness it exists to catch.** An unknown **verb** exits 3 on every older
+  harness, so `require-generation` fails **closed** even where it does not exist.
+  Generation 4+ refuses `generation <args>` so nobody adopts the flag form.
+* ⚠ **Base cannot make you call it.** Base's code is what gets downgraded; only your
+  contract, which lives in your repo, survives. ⇒ Prove it with a **downgrade arm**.
+
+**Reference arms** (`substack`'s `test/pin-drift-test.js`, the shape every lane proves):
+
+| arm | set-up | expected |
+|---|---|---|
+| control | worktree = gitlink = a tag | PASS |
+| same-generation drift | worktree moved to another commit of the same generation | FAIL — `pin` DRIFT |
+| ⛔ **downgrade drift** | worktree moved to an **older** base whose harness is a lower generation | FAIL — **`require-generation`**, because the old `pin` cannot see it |
+| undeclared | a checkout with no committed gitlink | FAIL — `pin` UNDECLARED |
+| swap signal | `WEBCTL_DECLARED_PIN` set, `WEBCTL_GATE_SWAPPED=0`, drift | FAIL — DRIFT (see below) |
 
 ### `pin`
 
@@ -42,11 +76,19 @@ it** — there is no version in which "my base does not export it yet" is a
 reason to skip it. *(One lane deferred exactly on those grounds, which is the
 likeliest reason the correct key was used zero times in four attempts.)*
 
-⛔ **The carve-out is keyed on `WEBCTL_DECLARED_PIN`, not `WEBCTL_BASE_DIR`.**
-The directory variable is a *proxy* — the gate sets it every run, so keying the
-skip on it skips a computable check every time. Under a swap the check returns
-**no verdict**, never a fail: a candidate is not yet tagged, and failing there
-is a vacuous RED. *A gate that always blocks gets overridden.*
+⛔ **THE ONLY SWAP SIGNAL IS `WEBCTL_GATE_SWAPPED=1`. `WEBCTL_DECLARED_PIN` is a
+declaration, not a swap.** Since v0.24 the gate sets the declared pin on **every**
+run, swapped or not. A carve-out keyed on "DECLARED_PIN is set" — or, as base's own
+generation 3 did, on "DECLARED_PIN ≠ worktree" — **passes real drift under the gate**:
+`fetlife` measured it in its contract, and base then measured the same defect in its
+own harness (`SWAPPED=0` + drift ⇒ *"the release gate has swapped this submodule"*, NO
+VERDICT — a false sentence). Fixed in generation 4. *(Keyings so far: `WEBCTL_BASE_DIR`,
+then `DECLARED_PIN`, then declared ≠ worktree; the fifth asks the one party that knows
+— the swapper.)*
+
+Under a real swap the check returns **no verdict**, never a fail: a candidate is
+not yet tagged, and failing there is a vacuous RED. *A gate that always blocks gets
+overridden.*
 
 ### `no-revendor`
 
@@ -71,10 +113,22 @@ shape that let the original grep pass.
 
 ### `generation`
 
-⚠ **Now 2.** Bumped because the meaning of a `no-revendor` pass changed — which is
-exactly what the marker is for. A sweep should ask *"who is below 2?"*; a contract
-still recording generation 1 was written against a check that could not see a copy
-in a subdirectory.
+⚠ **Now 4.** History, each a change in what a verdict MEANS:
+
+* **2** — `no-revendor` sees copies in subdirectories and under new names.
+* **3** — `pin` FAILS on drift and on an undeclared submodule; only a mode-160000
+  entry is a gitlink (`substack`).
+* **4** — the swap carve-out keys on `WEBCTL_GATE_SWAPPED=1` only (`fetlife`);
+  `require-generation` added; `generation` refuses arguments.
+
+A sweep asks *"who is below 4?"* — and, since generation 4, *"whose contract does not
+call `require-generation`?"*, because a recorded number nobody checks protects nothing.
+
+### `require-generation <N>`
+
+Exit 0 when this harness is generation ≥ N (with a note on stderr when above, so a
+stale floor is visible), **1 when below**, 3 for a bad N — and **3 on every harness
+older than generation 4**, which does not know the verb. ⇒ **ANY non-zero = FAIL.**
 
 
 Prints `HARNESS_GENERATION`. A consumer records the generation it was written

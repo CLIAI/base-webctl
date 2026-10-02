@@ -522,12 +522,17 @@ v0.22.0; reproduced by base in a fixture before fixing — the new tests fail on
 
 | state | verdict |
 |---|---|
-| gate signal, declared ≠ worktree | NO VERDICT (the gate's swap) — unchanged |
-| no gate signal, worktree ≠ gitlink | ⛔ **FAIL: DRIFT** |
+| `WEBCTL_GATE_SWAPPED=1`, declared ≠ worktree | NO VERDICT (the gate's swap) |
+| no swap signal (incl. `DECLARED_PIN` set with `SWAPPED=0`), worktree ≠ gitlink | ⛔ **FAIL: DRIFT** — *generation 4; gen 3 read `DECLARED_PIN ≠ worktree` as a swap and passed drift under the gate (`fetlife`)* |
 | no gitlink, a checkout present | ⛔ **FAIL: UNDECLARED** — the worktree never stands in for a declaration (`gitlink \|\| worktree` did, and was reported as "declared") |
 | `vendor/base-webctl` committed as a plain **directory** | not a gitlink: `ls-tree` prints a **tree** sha in the same field, and only mode `160000` is read now |
 | gitlink declared, nothing checked out | NO VERDICT |
 | worktree = gitlink = a tag | PASS — the control |
+
+⛔ **And the checker is downgraded with the submodule** (`substack`): drift to an older
+base replaces the harness with an older generation that cannot see the drift. Only a
+contract that calls **`require-generation <N>`** — a verb, so it exits non-zero on every
+harness that predates it — is protected. Arms and rationale: the harness README.
 
 **Output:** emit JSONL typed envelopes per the machine-interface spec (`lszd`),
 one per suite: `{type, ts, consumer, suite, result, reason?}` where `result ∈

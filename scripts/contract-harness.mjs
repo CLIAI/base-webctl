@@ -35,6 +35,7 @@
 //
 // Usage:
 //   node <base>/scripts/contract-harness.mjs generation
+//   node <base>/scripts/contract-harness.mjs require-generation 4    # the floor; ANY non-zero = FAIL
 //   node <base>/scripts/contract-harness.mjs pin         --repo . --sub vendor/base-webctl
 //   node <base>/scripts/contract-harness.mjs no-revendor --repo . --sub vendor/base-webctl
 //
@@ -53,7 +54,7 @@ import { createHash } from 'node:crypto';
  * wording. A consumer records the generation it was written against; a sweep
  * then asks "who is below N?" rather than diffing five divergent copies.
  */
-export const HARNESS_GENERATION = 3;
+export const HARNESS_GENERATION = 4;
 
 /**
  * ⚠ NOT BUMPED BY `gate-probe`, DELIBERATELY. The marker answers "who is
@@ -156,7 +157,13 @@ function judgePin(repo, sub) {
         + '(git submodule update --init); nothing runs against it here' };
   }
 
-  const swapped = !!declaredEnv && !!worktree && declaredEnv !== worktree;
+  // ⛔ THE ONLY SWAP SIGNAL IS `WEBCTL_GATE_SWAPPED=1`. Since v0.24 the gate sets
+  // WEBCTL_DECLARED_PIN on EVERY run, swapped or not — it is a DECLARATION, not a
+  // swap. Generation 3 keyed the carve-out on "declared != worktree", so real drift
+  // under a gate run that had NOT swapped (`SWAPPED=0`) read as "the release gate has
+  // swapped this submodule" — NO VERDICT, a false statement, and the drift passed.
+  // (Raised from `fetlife`'s adoption; measured in base's own gen 3 before fixing.)
+  const swapped = process.env.WEBCTL_GATE_SWAPPED === '1' && declaredEnv !== worktree;
   if (swapped) {
     // ⇒ A pin check under the gate is a VACUOUS RED: the gate deliberately
     // points at a release candidate, which by definition is not yet tagged.
@@ -169,7 +176,7 @@ function judgePin(repo, sub) {
       extra: { declared: declaredEnv, worktree } };
   }
 
-  if (!declaredEnv && worktree !== gitlink) {
+  if (worktree !== gitlink) {
     // ⛔ DRIFT. With no gate signal nobody swapped this submodule on purpose, so a
     // checkout that differs from the declaration means the suite is about to run
     // against code the repo does not declare. This used to PASS — judging only the
@@ -177,7 +184,8 @@ function judgePin(repo, sub) {
     // `substack` at v0.22.0: a worktree at another commit, "PASS pin", exit 0.)
     return { code: EXIT.fail,
       reason: `DRIFT: the declared gitlink is ${gitlink.slice(0, 7)} but '${sub}' has `
-        + `${worktree.slice(0, 7)} checked out, and no release gate says it swapped it. `
+        + `${worktree.slice(0, 7)} checked out, and no release gate says it swapped it `
+        + '(WEBCTL_GATE_SWAPPED is not 1). '
         + 'The suite would run against an undeclared base: git submodule update, or commit the bump.',
       extra: { declared: gitlink, worktree } };
   }
@@ -192,6 +200,43 @@ function judgePin(repo, sub) {
   }
   return { code: EXIT.pass, reason: `declared gitlink ${pin.slice(0, 7)} is tag ${tag}`,
     extra: { declared: pin, tag } };
+}
+
+/**
+ * `require-generation <N>` — the floor a contract enforces, and the one defence that
+ * survives a DOWNGRADE of the submodule.
+ *
+ * ⛔ The harness lives INSIDE the submodule, so drifting a lane to an older base also
+ * downgrades the checker meant to catch the drift (`substack` measured it: a drift
+ * control reported `"generation":2` PASS). Base cannot make a lane call this — base's
+ * code is what got downgraded. What it can do is make the call FAIL CLOSED on every
+ * older harness: those exit 3 (usage) on an unknown VERB. ⇒ A contract treats ANY
+ * non-zero from this verb as FAIL; exit 3 here means "the harness predates this verb".
+ *
+ * Exit 0 when this harness's generation is ≥ N (a warning on stderr when above: the
+ * contract may be recording a stale floor), 1 when below, 3 on a bad N.
+ * @param {string[]} args
+ */
+function checkRequireGeneration(args) {
+  const raw = args[0];
+  if (!raw || !/^[1-9]\d*$/.test(raw) || args.length > 1) {
+    process.stderr.write('usage: contract-harness.mjs require-generation <N>   (a positive integer, nothing else)\n');
+    return EXIT.usage;
+  }
+  const need = Number(raw);
+  if (HARNESS_GENERATION < need) {
+    return report('require-generation', EXIT.fail,
+      `harness generation ${HARNESS_GENERATION} is BELOW the required ${need}: the submodule was `
+        + 'downgraded or never bumped, and the checks it runs predate fixes your contract relies on',
+      { generation: HARNESS_GENERATION, required: need });
+  }
+  if (HARNESS_GENERATION > need) {
+    process.stderr.write(`note: harness generation ${HARNESS_GENERATION} is above the floor ${need}; `
+      + 'raise the floor once your contract is re-recorded against it\n');
+  }
+  return report('require-generation', EXIT.pass,
+    `harness generation ${HARNESS_GENERATION} >= required ${need}`,
+    { generation: HARNESS_GENERATION, required: need });
 }
 
 /** The `pin` verb: judge, then report. @param {string} repo @param {string} sub */
@@ -438,15 +483,25 @@ const libDir = opt(args, 'lib', 'lib');
 let code;
 switch (cmd) {
   case 'generation':
+    if (args.length) {
+      // ⛔ `generation --min N` was proposed — and every harness before this one
+      // IGNORES unknown flags: generation 2 printed "generation 2", exit 0, for
+      // `generation --min 3`. A floor spelled as a flag fails OPEN on exactly the
+      // downgraded harness it exists to catch. Refused here so nobody adopts it.
+      process.stderr.write('generation takes no arguments. To enforce a floor use the VERB: '
+        + 'require-generation <N> — an unknown verb exits 3 on every older harness, so it fails closed.\n');
+      code = EXIT.usage; break;
+    }
     process.stdout.write(`${JSON.stringify({ type: 'harness', generation: HARNESS_GENERATION })}\n`);
     process.stderr.write(`contract-harness generation ${HARNESS_GENERATION}\n`);
     code = EXIT.pass; break;
+  case 'require-generation': code = checkRequireGeneration(args); break;
   case 'pin': code = checkPin(repo, sub); break;
   case 'no-revendor': code = checkNoRevendor(repo, sub, libDir); break;
   case 'gate-probe': code = checkGateProbe(repo, sub); break;
   default:
     process.stderr.write(
-      'usage: contract-harness.mjs <generation|pin|no-revendor|gate-probe> [--repo D] [--sub P] [--lib D]\n'
+      'usage: contract-harness.mjs <generation|require-generation N|pin|no-revendor|gate-probe> [--repo D] [--sub P] [--lib D]\n'
       + '⇒ exit 0 pass · 1 fail · 2 no verdict (reason on the last line) · 3 usage\n');
     code = EXIT.usage;
 }
