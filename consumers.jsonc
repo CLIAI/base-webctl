@@ -259,7 +259,13 @@
       //
       // Will pin v0.16.0 at Phase B (tag object cd5fda5 -> commit ab7d635,
       // HARNESS_GENERATION 2 at the tag), the same pin the template takes.
-      "wired": false
+      // ✅ FLIPPED false -> true 2026-10-02, verified here rather than on report:
+      // gitlink 52ca453 is exactly v0.17.0, working tree clean, contract present,
+      // and lib/base.mjs imports base (not a mount with no consumer). The lane's
+      // contract passes at its HEAD with harness generation 2 and five sabotages each
+      // red; the gate will confirm independently. ⇒ The stale-entry detector would have
+      // named this entry from the moment it mounted — the reason it reads the mount.
+      "wired": true
     },
     {
       "name": "substack-webctl",

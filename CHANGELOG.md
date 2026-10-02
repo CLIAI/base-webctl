@@ -207,6 +207,47 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.17.1 — 2026-10-02
+
+**Headline: two traps that lanes hit in LIVE login-mode readings, now handled in base,
+plus a value/reason mismatch of my own.** The first two consumers of `loginMode`
+(grok, gemini) read real browsers within hours of v0.17.0 and found what fixtures
+built from expectations had not.
+
+### ⛔ What this headline does NOT cover
+
+* **Base's own driver still has no live reader** — unchanged from v0.17.0. Lanes on
+  base's driver still cannot prove login mode.
+* **Hardware acceleration in login mode is still NOT achieved** — unchanged.
+* **`joined: true` means reduced fidelity:** a setproctitle-joined argv is split on
+  whitespace, so a switch value containing spaces is not reproduced exactly. Switch
+  *presence* is reliable; such *values* are not.
+* `pickBrowserRoot` identifies Chromium by executable basename. A browser renamed to
+  something else is not found — it reads as UNKNOWN, not as clean.
+
+### Added
+
+* `pickBrowserRoot(procs)` — the browser by **parentage** (`{pid, ppid, argv}`):
+  exactly one Chromium root, else UNKNOWN. *(gemini: setproctitle-joined children made
+  `--type` unusable — ~10 "browsers".)*
+* `normalizeArgv` — undoes a setproctitle join and reports `joined`.
+* `classifySockets(ssOutput, cdpPort)` and `DOCKER_EMBEDDED_DNS` — keyed on address +
+  port, naming `127.0.0.11` as `docker-dns`. *(grok: Docker's resolver listens inside
+  the container.)* `parseListeningPorts` now also returns `listeners` with addresses.
+
+### Fixed
+
+* **Advisories are value-conditional.** An empty `--load-extension=` (loads nothing)
+  was reported as extension code running; `--disable-blink-features` was flagged for
+  *any* feature while its own reason said *AutomationControlled*. A reason that
+  disagrees with its code is a claim nobody checked.
+* `pickBrowserProcess` normalises setproctitle-joined argvs before checking `--type`.
+
+### Registry
+
+* `grok-webctl` flipped to `wired: true` — verified: gitlink is exactly v0.17.0, tree
+  clean, contract present, and its own code imports base.
+
 ## v0.17.0 — 2026-10-02
 
 **Headline: login mode (`lg1n`) — a clean, exclusive, non-retrying window for a
@@ -251,9 +292,13 @@ a real gate-validity defect and it was fixed rather than waived.
   **The premise was stale:** the lane was live and committed the fix before the tag —
   the pin now read from `WEBCTL_DECLARED_PIN` or the committed gitlink, never the
   worktree, with a sabotage control that turns red if it regresses.
-* ⚠ A second gate run came back green **only because perplexity was SKIPPED** (its
-  working tree was dirty mid-run). A skip is untested, not passed, so that run was not
-  used.
+* ⚠ A second gate run came back green **only because perplexity was SKIPPED**: its
+  working tree was dirty, because the lane had checked out this base's untagged master
+  in its real submodule to reproduce the gate, alongside uncommitted edits. A skip is
+  untested, not passed, so that run was not used. ⚠ *Corrected after tagging:* I first
+  attributed the dirty tree to the lane's sabotage runner patching files. It does not —
+  it works in a temp copy and never touches the live tree (verified by `webctl:mgr`).
+  An inference, stated as a cause, about another lane's tooling.
 * The **final** run, at this release's commit: `pass=5 skip=5 fail=0`, perplexity
   **PASS**.
 

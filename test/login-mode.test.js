@@ -134,3 +134,79 @@ test('same profile across both restarts, by path identity', () => {
   assert.equal(u.verdict, 'unknown');
   assert.match(u.reason, /DEFAULT profile/);
 });
+
+// ── reader-side traps found by lanes in LIVE use (v0.17.1) ─────────────────────
+import { pickBrowserRoot, normalizeArgv, classifySockets } from '../lib/login-mode.js';
+
+test('⛔ advisories are VALUE-conditional: an EMPTY --load-extension= loads nothing', () => {
+  // Measured in a lane's live login mode: `--load-extension=` (empty) was reported
+  // as "extension code running". Control: a real path still is.
+  assert.equal(classifyLoginArgv([...CLEAN, '--load-extension=']).advisories.length, 0);
+  assert.equal(classifyLoginArgv([...CLEAN, '--load-extension=/ext/a']).advisories.length, 1);
+  assert.equal(classifyLoginArgv([...CLEAN, '--disable-extensions-except=']).advisories.length, 0);
+});
+
+test('⛔ disable-blink-features is an advisory ONLY for AutomationControlled, as its reason says', () => {
+  assert.equal(classifyLoginArgv([...CLEAN, '--disable-blink-features=AutomationControlled']).advisories.length, 1);
+  assert.equal(classifyLoginArgv([...CLEAN, '--disable-blink-features=Foo,AutomationControlled']).advisories.length, 1);
+  assert.equal(classifyLoginArgv([...CLEAN, '--disable-blink-features=SomethingElse']).advisories.length, 0,
+    'the reason names AutomationControlled; flagging any feature contradicted it');
+  // no-sandbox stays unconditional
+  assert.equal(classifyLoginArgv([...CLEAN, '--no-sandbox']).advisories.length, 1);
+});
+
+test('⛔ setproctitle-joined children: exactly ONE browser by parentage', () => {
+  // Measured: Chromium 154 children rewrite /proc cmdline into one space-joined
+  // string, so --type is no longer a separate arg and ~10 "browsers" appeared.
+  const procs = [
+    { pid: 1, ppid: 0, argv: ['/bin/sh', '/entrypoint.sh'] },
+    { pid: 50, ppid: 1, argv: ['/usr/lib/chromium/chromium', '--user-data-dir=/p', '--no-first-run'] },
+    { pid: 51, ppid: 50, argv: ['/usr/lib/chromium/chromium --type=zygote --no-zygote-sandbox'] },
+    { pid: 60, ppid: 51, argv: ['/usr/lib/chromium/chromium --type=renderer --lang=en'] },
+    { pid: 61, ppid: 51, argv: ['/usr/lib/chromium/chromium --type=renderer --lang=en'] },
+    { pid: 70, ppid: 50, argv: ['/usr/lib/chromium/chromium --type=gpu-process'] },
+    { pid: 80, ppid: 1, argv: ['/usr/lib/chromium/chrome_crashpad_handler', '--database=/x'] },
+  ];
+  const r = /** @type {any} */ (pickBrowserRoot(procs));
+  assert.equal(r.verdict, 'found', r.reason);
+  assert.equal(r.pid, 50, 'the shell parent and the reparented crashpad handler are not the browser');
+  assert.equal(classifyLoginArgv(r.argv).verdict, 'clean');
+
+  // The old --type picker also copes now, because it normalises first.
+  assert.equal(pickBrowserProcess(procs.slice(1, 6).map((p) => p.argv)).verdict, 'found');
+});
+
+test('⛔ CONTROL: two Chromium ROOTS is UNKNOWN, not a guess', () => {
+  const r = pickBrowserRoot([
+    { pid: 50, ppid: 1, argv: ['/usr/lib/chromium/chromium', '--user-data-dir=/p'] },
+    { pid: 90, ppid: 1, argv: ['/usr/lib/chromium/chromium', '--user-data-dir=/q'] },
+  ]);
+  assert.equal(r.verdict, 'unknown');
+  assert.match(/** @type {any} */ (r).reason, /2 Chromium roots/);
+  assert.equal(pickBrowserRoot([]).verdict, 'unknown');
+});
+
+test('normalizeArgv reports that a joined argv was split, i.e. fidelity was reduced', () => {
+  assert.deepEqual(normalizeArgv(['/c --type=renderer --x']), { argv: ['/c', '--type=renderer', '--x'], joined: true });
+  assert.equal(normalizeArgv(['/c', '--a']).joined, false);
+  assert.equal(normalizeArgv(['--a --b']).joined, false, 'a leading switch is not a joined program line');
+});
+
+test('⛔ socket arm: Docker embedded DNS is NAMED, not read as CDP — and a real CDP is still caught', () => {
+  const H = 'State  Recv-Q Send-Q Local Address:Port Peer Address:Port\n';
+  // the measured case: docker-dns on a random port, nothing else
+  const login = classifySockets(H + 'LISTEN 0 4096 127.0.0.11:41237 0.0.0.0:*\n', 9222);
+  assert.equal(login.verdict, 'no-cdp');
+  assert.equal(login.listeners[0].kind, 'docker-dns');
+  // even if its random port COLLIDES with the CDP port
+  assert.equal(classifySockets(H + 'LISTEN 0 4096 127.0.0.11:9222 0.0.0.0:*\n', 9222).verdict, 'no-cdp');
+  // CONTROL: a real CDP listener is still caught, beside docker-dns
+  const control = classifySockets(H + 'LISTEN 0 4096 127.0.0.11:41237 0.0.0.0:*\n'
+    + 'LISTEN 0 10 127.0.0.1:9222 0.0.0.0:*\n', 9222);
+  assert.equal(control.verdict, 'cdp-listening');
+  // interface suffix and IPv6 brackets stripped from the address
+  const v6 = classifySockets(H + 'LISTEN 0 10 [::1]:9222 [::]:*\nLISTEN 0 10 127.0.0.53%lo:53 0.0.0.0:*\n', 9222);
+  assert.equal(v6.verdict, 'cdp-listening');
+  assert.ok(v6.listeners.some((l) => l.address === '127.0.0.53'));
+  assert.equal(classifySockets('', 9222).verdict, 'unknown');
+});

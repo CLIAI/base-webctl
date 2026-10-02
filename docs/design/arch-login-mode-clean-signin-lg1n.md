@@ -147,6 +147,49 @@ WebDriver process — not by looking for a BiDi flag that does not exist.
 `--type=…`. The verdict is about the **browser process** — the one without `--type`.
 Zero or more than one such process is **UNKNOWN**, not clean.
 
+### ✅ Ruled: why `no-sandbox` and `load-extension` are ADVISORIES, not violations
+
+Asked after the first live reading reported exactly these two. **Violations define
+login mode** — they are the control surface. **Advisories make it less clean without
+adding control**, and some are needed for the browser to start at all:
+
+* **`--no-sandbox`** is often *required* inside a container. Making it a violation
+  would make login mode **unstartable** on those lanes, which helps nobody. It stays an
+  advisory, and whether a lane can drop it is a per-lane measurement (§10).
+* **`--load-extension`** is an advisory **only when it loads something.** The live
+  reading that raised this carried an **empty** `--load-extension=`, which loads
+  nothing — and the first version flagged it anyway. Advisories are now
+  **value-conditional**, and the same fix corrected `--disable-blink-features`, which
+  was flagged for *any* feature while its own reason said *AutomationControlled*.
+
+## 2b. ⛔ Reader-side traps found by lanes in LIVE use — now handled in base
+
+Two lanes reading real browsers hit two traps in one day. Both are in base so a third
+lane does not rediscover them.
+
+**(a) Chromium's children rewrite their command line** *(`gemini`, Chromium 154)*.
+Child processes use setproctitle to turn their `/proc` cmdline into **one
+space-joined string**, so `--type=` is no longer a separate argument. Picking "the
+process without `--type`" then saw **~10 browsers** and returned UNKNOWN.
+⇒ **Base rule: pick the browser by PARENTAGE** — `pickBrowserRoot`: among Chromium
+processes, the one whose parent is not another Chromium process. Exactly one root →
+found; two → UNKNOWN. The crashpad handler is excluded, since it can be reparented
+and would read as a second root. The joined string is split for classification, and
+the result says `joined: true`, because splitting is **lossy** for values containing
+spaces.
+
+**(b) Docker's embedded DNS listens inside the container** *(`grok`)*. On a
+user-defined network, `ss -ltn` shows a listener on **`127.0.0.11:<random port>`**,
+which belongs to Docker, not the browser. A check for "anything listening" reads it as
+CDP, and a port-only check misfires the day the random port collides. ⇒
+`classifySockets` keys on **address + port**, **names** `127.0.0.11` as `docker-dns`
+and excludes it. *Control:* a real CDP listener beside it is still caught.
+
+⚠ Both share a shape worth naming: **the reading contained something that LOOKED
+like the thing being measured.** A child looked like a browser; a resolver looked
+like a listener. Each is caught by a fixture built from a live reading, not from what
+we expected the reading to contain.
+
 ## 3. ⛔ Prove the absence as a MEASUREMENT, with a control
 
 *(`webctl:mgr`'s constraint, adopted as stated.)* Login mode is verified by **two
@@ -224,7 +267,7 @@ is the human's; the tool observes its effect.
 
 | piece | owner |
 |---|---|
-| the verdict functions (§2–§4): argv → CLEAN/VIOLATIONS/UNKNOWN, socket listing → listening ports, same-profile check | ✅ **base**, `lib/login-mode.js`, pure and zero-dependency |
+| the verdict functions (§2–§4): `pickBrowserRoot`, argv → CLEAN/VIOLATIONS/UNKNOWN, `classifySockets`, same-profile check | ✅ **base**, `lib/login-mode.js`, pure and zero-dependency |
 | starting a browser with no CDP | ✅ **base driver already**: `containerEnv: { LWC_CDP_PORT: null }` (portless mode) |
 | reading the live argv and sockets from base's own driver | base — **next**, after this circulates |
 | reading them from a lane's own containers or zone manager | the lane, feeding base's verdict functions |
