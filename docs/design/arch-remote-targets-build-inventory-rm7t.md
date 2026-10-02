@@ -55,11 +55,27 @@ tailnet**. It changes *how ssh gets there*, never *what is exposed*.
 `~/.config/xq/machines.toml` (named machines, each with an ssh destination) and owns
 image builds for the lanes that use it.
 
-⇒ **Proposed, pending the zone-manager lane's answer:** the zone manager's machine list
-is the **single source of truth for HOSTS**. webctl **reads** it — preferably through a
-command such as `xq machines ls --json` rather than its file format, because a command
-is an interface and a file is an implementation detail — and never writes or mirrors
-it.
+✅ **RESOLVED with the zone-manager lane, 2026-10-02:** its machine list is the
+**single source of truth for HOSTS**, and webctl reads it **through the command, never
+the file**: `xq machine ls --json`. The lane built that interface in answer to this
+proposal.
+
+```
+{"schema": 1, "path": "...", "present": true|false,
+ "machines": [{"alias", "ssh", "shadows_local_zone", "reachable"?}]}
+```
+
+* **`schema` IS the contract.** An unknown value is **UNKNOWN and refused** — the lane
+  adopted base's fail-closed rule as its documented one. The file itself carries no
+  version and is promised nothing: one versioned surface, not two that can disagree.
+* **Only what the zone manager RESOLVES is exposed** (alias → ssh). A machine's
+  description is not part of the contract; descriptions belong in webctl's target
+  records, where webctl owns them.
+* ⛔ **`reachable` appears ONLY when the command is run with `--check`. An ABSENT key
+  means "not checked", never "unreachable"** — reading one as the other is the
+  absence-is-not-a-zero error this family keeps meeting.
+* `present: false` with an empty list means **no file**, which is a valid state, not an
+  error.
 
 ⇒ webctl adds only what that list does not model: the **target** — which browser, which
 profile, which transport, which owner — in `~/.config/webctl/targets/<name>.toml`, and a
@@ -84,9 +100,30 @@ file**: the hosts layer exists, and a second one is exactly the drift above.
 
 * ⛔ **It goes through the ownership claim** (`ow9k`, template spec §5.5): never build or
   replace a container you did not claim. A shared host is not a sandbox.
-* **Images are per host** — the uid is baked in at build time, so an image built on one
-  machine fails on another (measured: a moved image ran as the wrong uid and chromium
-  exited 133). Build **on the target**, never ship an image to it.
+* **Images are per host — but the REASON differs by lane, and I first stated it
+  wrongly for all of them.**
+  * **Base's own driver** passes `UID`/`GID` as build arguments, so its images *are*
+    uid-baked: a moved image ran as the wrong uid and chromium exited 133 (measured).
+  * ⚠ **Zone-manager lanes are NOT uid-baked any more.** Since that lane's `088bcbe`,
+    every container runs as the **invoking** uid, so one image serves every user
+    (verified against another user's image, 16/16). Its images are still per host only
+    because **each docker daemon holds its own** — and they **drift with build time**:
+    measured the same day, one host's Chromium read 152, another's 154.
+  * ⇒ Either way, build **on the target**; and treat "same image name" as saying
+    nothing about "same browser version" across hosts.
+* On zone-manager lanes the fresh-packages refresh is **`xq build app <app> [<distro>]
+  --pull --no-cache`**. ⚠ `--pull` alone refreshes only the **base image**: the package
+  layer is cached on the *text* of its `RUN` line, so an unchanged line reuses the old
+  layer and exits 0 — verified by the zone-manager lane on the property (with
+  `--no-cache` only the base stayed cached and the package layer re-ran), not on the
+  flag.
+* ⚠ **Two different version readings, and a refresh needs the right one.** The
+  *image that would run next* (`docker run --rm --entrypoint chromium <image> --version`)
+  is what a **refresh** must verify. The *container that is running now* is what the
+  **inventory** must report — and after a rebuild the two differ until a restart.
+  Neither is an image label, which is a build-time claim. A versioned
+  `xq app version --json`, resolving the image exactly as `xq up` would, is requested from
+  that lane as the contract in place of a recipe.
 * On zone-manager lanes, build/refresh **delegates to the zone manager**, which owns
   images there. Base does not build what it does not own.
 * ⛔ **"Refresh" means FRESH PACKAGES, and it is verified by a READING.** Measured by
@@ -134,12 +171,16 @@ uses it) is an operator judgement and stays one.
 |---|---|
 | validators: target schema (incl. the tailscale refusal and opaque `profile_id`), config-file mode, version verdict, inventory completeness | ✅ **base**, `lib/remotes.js`, pure and zero-dependency |
 | reading versions over ssh; delegating builds | the lane, or the zone manager on its lanes |
-| the host list | the zone manager (pending, §2) |
+| the host list | the zone manager, via `xq machine ls --json` (§2, resolved) |
 | the `targets` / `gui build|refresh` verbs | the lane, uniformly; the template carries the shape |
 
 ## 7. What this does NOT do, and what is open
 
-* **Open — the registry decision** (§2) waits on the zone-manager lane.
+* ✅ **Resolved — the registry decision** (§2): `xq machine ls --json`, schema 1.
+* **Open — `xq app version --json`** as the version contract, requested.
+* **Open, Greg's — the host list's own file is world-readable** (mode 644, while the ssh
+  config it partly republishes is 600). The zone-manager lane is putting that to Greg
+  rather than changing a working machine unilaterally.
 * **Out of scope — tailnet viewing** (D7).
 * **Open — remote build for base-driver lanes.** Base's driver builds locally today;
   "build on the target" for those lanes needs the target transport first.

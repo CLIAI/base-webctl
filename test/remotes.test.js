@@ -72,3 +72,122 @@ test('⛔ inventory: an unreachable target is an UNKNOWN row, never omitted — 
   assert.equal(rows.length, 3, 'every target gets a row');
   assert.deepEqual(rows.map((r) => r.state), ['read', 'unknown', 'unknown']);
 });
+
+// ── the zone manager's host list (rm7t §2, resolved) ─────────────────────────
+import { parseMachineList } from '../lib/remotes.js';
+
+test('CONTROL: a schema-1 host list parses', () => {
+  const r = parseMachineList(JSON.stringify({ schema: 1, path: '/x', present: true,
+    machines: [{ alias: 'ws', ssh: 'ws', shadows_local_zone: false, reachable: true }] }));
+  assert.equal(r.verdict, 'ok', r.reason);
+  assert.deepEqual(r.machines, [{ alias: 'ws', ssh: 'ws', reachability: 'reachable' }]);
+});
+
+test('⛔ an ABSENT reachable key is NOT CHECKED, never unreachable', () => {
+  const r = parseMachineList(JSON.stringify({ schema: 1, present: true, machines: [
+    { alias: 'a', ssh: 'a' }, { alias: 'b', ssh: 'b', reachable: false }] }));
+  assert.equal(r.machines[0].reachability, 'not-checked', 'absence is not a zero');
+  assert.equal(r.machines[1].reachability, 'unreachable');
+});
+
+test('⛔ an unknown schema is REFUSED, not guessed at', () => {
+  const r = parseMachineList(JSON.stringify({ schema: 2, present: true, machines: [{ alias: 'a', ssh: 'a' }] }));
+  assert.equal(r.verdict, 'unknown');
+  assert.match(r.reason, /refusing to guess/);
+  assert.equal(parseMachineList(JSON.stringify({ present: true, machines: [] })).verdict, 'unknown', 'missing schema');
+  assert.equal(parseMachineList('not json').verdict, 'unknown');
+});
+
+test('⛔ a malformed entry makes the list UNKNOWN rather than silently dropping a host', () => {
+  const r = parseMachineList(JSON.stringify({ schema: 1, present: true, machines: [{ alias: 'a', ssh: 'a' }, { alias: 'b' }] }));
+  assert.equal(r.verdict, 'unknown');
+  assert.equal(r.machines.length, 0);
+});
+
+test('present:false with an empty list is a VALID state — no host file', () => {
+  const r = parseMachineList(JSON.stringify({ schema: 1, path: '/x', present: false, machines: [] }));
+  assert.equal(r.verdict, 'ok');
+  assert.equal(r.present, false);
+  assert.match(r.reason, /valid state/);
+});
+
+// ── closed keys, enums, rules (v0.18.1) ──────────────────────────────────────
+// ⛔ v0.18.0 accepted any key and checked only the fields it looked at:
+// {role:'prod', placement:'cloud', zone:'..', bogus_key:1} read "valid".
+import { TARGET_ENUMS } from '../lib/remotes.js';
+
+/** gemini's REAL target shape — 4 targets, keyed by map key (no `name` field). */
+const gem = (over = {}) => ({ role: 'dev', placement: 'workstation', control: 'ssh', view: 'ssh',
+  ssh: 'example-host', zone: 'gemchrome', app: 'chromium', lifecycle: 'attach-only',
+  tunnel: 'per-invocation', profile_id: 'p-0123456789abcdef', ...over });
+
+test('⭐ REAL SHAPES stay valid: gemini\'s 4 targets, perplexity\'s, and btg4\'s example', () => {
+  const four = {
+    'gem-dev-chromium': gem(),
+    'gem-dev-opera': gem({ app: 'opera', zone: 'gemopera' }),
+    'gem-test-chromium': gem({ role: 'test', zone: 'gemtestchrome' }),
+    'gem-test-opera': gem({ role: 'test', app: 'opera', zone: 'gemtestopera' }),
+  };
+  for (const [name, t] of Object.entries(four)) {
+    const v = validateTarget(t, { name });
+    assert.equal(v.verdict, 'valid', `${name}: ${JSON.stringify(v.errors)}`);
+  }
+  const pplx = { control: 'ssh', ssh: 'example-host', zone: 'pplxchrome', app: 'chromium',
+    lifecycle: 'attach-only', local_cdp_port: 4837 };
+  assert.equal(validateTarget(pplx, { name: 'chromium' }).verdict, 'valid');
+  const btg4 = { name: 'workstation', control: 'ssh', view: ['ssh', 'tailscale-relay'], ssh: 'workstation',
+    kind: 'docker-xpra', slug: 'default', base: 'debian', profile_id: 'claude-main', lifecycle: 'owner' };
+  assert.equal(validateTarget(btg4).verdict, 'valid', JSON.stringify(validateTarget(btg4).errors));
+});
+
+test('⛔ CLOSED: an unknown key is refused BY NAME — and the error never echoes its value', () => {
+  const v = validateTarget(gem({ bogus_key: 'secret-host-value-xyz' }));
+  assert.equal(v.verdict, 'invalid');
+  assert.ok(v.errors.some((e) => e.field === 'bogus_key' && /unknown key/.test(e.message)));
+  assert.ok(!JSON.stringify(v.errors).includes('secret-host-value-xyz'), 'a value must never appear in a message');
+});
+
+test('⛔ every enum refuses an out-of-range value, each with a valid control', () => {
+  const bad = { role: 'prod', placement: 'cloud', lifecycle: 'nonsense', app: 'firefox',
+    tunnel: 'persistent', kind: 'vm', base: 'alpine', view: 'tcp' };
+  for (const [k, v] of Object.entries(bad)) {
+    assert.equal(validateTarget(gem({ [k]: v })).verdict, 'invalid', `${k}=${v} must be refused`);
+    assert.equal(validateTarget(gem({ [k]: TARGET_ENUMS[/** @type {keyof typeof TARGET_ENUMS} */ (k)][0] })).verdict,
+      'valid', `${k} control`);
+  }
+  assert.equal(validateTarget(gem({ view: [] })).verdict, 'invalid', 'an empty view list says nothing');
+});
+
+test('⛔ zone follows the zone-manager rule: `..` is refused', () => {
+  for (const z of ['..', 'Gem', '1gem', 'gem-chrome', 'a'.repeat(31)]) {
+    assert.equal(validateTarget(gem({ zone: z })).verdict, 'invalid', `zone "${z}"`);
+  }
+  assert.equal(validateTarget(gem({ zone: 'gemchrome' })).verdict, 'valid');
+});
+
+test('⛔ SECURITY: an ssh alias starting with "-" is refused — ssh would read it as an option', () => {
+  // `-oProxyCommand=…` passed through to ssh is command execution on the operator's machine.
+  for (const a of ['-oProxyCommand=touch /tmp/pwned', '-v', '--', 'host name', 'a;b']) {
+    const v = validateTarget(gem({ ssh: a }));
+    assert.equal(v.verdict, 'invalid', `ssh "${a}" must be refused`);
+    assert.ok(!JSON.stringify(v.errors).includes(a), 'and the refusal must not echo it');
+  }
+  assert.equal(validateTarget(gem({ ssh: 'example-host.lan' })).verdict, 'valid');
+  assert.equal(validateTarget(gem({ ssh: undefined, machine: '-oProxyCommand=x' })).verdict, 'invalid');
+});
+
+test('⛔ FORBIDDEN keys are refused WITH their reason, not as mere typos', () => {
+  for (const k of ['cdp_port', 'owner', 'user_data_dir', 'transport', 'host']) {
+    const v = validateTarget(gem({ [k]: 'x' }));
+    const e = v.errors.find((x) => x.field === k);
+    assert.ok(e && /^refused: /.test(e.message), `${k} must be refused with a reason`);
+  }
+});
+
+test('local_cdp_port is a stated integer in range; name is checked when given as a map key', () => {
+  assert.equal(validateTarget(gem({ local_cdp_port: 80 })).verdict, 'invalid');
+  assert.equal(validateTarget(gem({ local_cdp_port: '4827' })).verdict, 'invalid', 'a string is not a stated port');
+  assert.equal(validateTarget(gem({ local_cdp_port: 4827 })).verdict, 'valid');
+  assert.equal(validateTarget(gem(), { name: 'Gem Dev' }).verdict, 'invalid');
+  assert.equal(validateTarget(gem(), { name: 'gem-dev' }).verdict, 'valid');
+});

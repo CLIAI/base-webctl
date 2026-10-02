@@ -207,6 +207,55 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.19.0 — 2026-10-02
+
+**Headline: `validateTarget` is now CLOSED, and the zone manager's host list has a
+reader.** v0.18.0's validator accepted any key and checked only the fields it looked at
+— so `{role:'prod', placement:'cloud', zone:'..', bogus_key:1}` read "valid" (found by
+gemini, reproduced by webctl:mgr). Fixing it surfaced a **security** gap: an ssh alias
+beginning with `-` was accepted, and passed through to ssh, `-oProxyCommand=…` is
+command execution.
+
+### ⛔ What this headline does NOT cover
+
+* ⚠ **This TIGHTENS validation.** A config that v0.18.0 called valid may now be
+  refused: an unknown key, an out-of-range enum, a zone like `..`, an ssh alias starting
+  with `-`. That is the point, and it is why this is a minor release, not a patch.
+* The enums are the **superset of what lanes run on today**. A lane may narrow them (the
+  template's v0.1 does); a value no lane uses yet — e.g. a Firefox app, a persistent
+  tunnel — is refused until someone adds it deliberately.
+* `parseMachineList` judges the output of `xq machine ls --json`; **base does not run the
+  command**. Lanes do.
+* Base's own driver still has no live login-mode reader; hardware acceleration in login
+  mode is still not achieved (unchanged).
+
+### Changed
+
+* `validateTarget`: **closed key set** (`TARGET_KEYS`), with **forbidden keys refused
+  with their reason** (`FORBIDDEN_TARGET_KEYS`, incl. `owner` — ownership is state, not
+  config); enums for control, view, app, lifecycle, role, placement, tunnel, kind, base
+  (`TARGET_ENUMS`); rules for name, ssh, machine, zone, slug, profile_id, local_cdp_port.
+  `name` is now OPTIONAL in the record (lanes key targets by map key) and checked via
+  `opts.name`. **Messages name keys, never values.** Vocabulary taken from two lanes'
+  real code and btg4, and three real shapes are fixtures that must stay valid.
+* ⛔ **`ssh` / `machine` may not start with `-`.**
+
+### Added
+
+* `parseMachineList(text)` and `MACHINE_LIST_SCHEMA` — the reader for the zone
+  manager's `xq machine ls --json` (rm7t §2, **resolved** with that lane). Unknown
+  `schema` → UNKNOWN and refused; a malformed entry makes the list UNKNOWN rather than
+  silently dropping a host; an **absent `reachable` means NOT CHECKED, never
+  unreachable**; `present: false` is a valid state.
+
+### Docs
+
+* `rm7t` §2 resolved; §3 corrects my premise that images are per-host because of a baked
+  uid — true for base's own driver, **no longer true for zone-manager lanes**, whose
+  images are per-host only because each daemon holds its own, and which drift by build
+  time. Refresh is `xq build app … --pull --no-cache`; a refresh verifies the image that
+  would run, the inventory reports the container that is running — two readings.
+
 ## v0.18.0 — 2026-10-02
 
 **Headline: remote-target validators (`rm7t`), usable on their own.** `lib/remotes.js`:
