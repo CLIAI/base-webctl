@@ -207,6 +207,26 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.26.0 — 2026-10-02
+
+### ⛔ BREAKING — reading a config key off `loadJsoncConfig()`'s wrapper now THROWS
+
+* `loadJsoncConfig()` returns `{merged, layers}`. `chatgpt` passed that **wrapper** to
+  resolvers that read top-level keys, so every config value read as `undefined`, i.e.
+  "unset", silently. Hiding the wrapper's fields would not have helped: an absent key is
+  `undefined` either way. ⇒ Now reading any other string key off the wrapper, or `'k' in
+  wrapper`, **throws** *"read 'k' from .merged"*. `merged`, `layers`, destructuring, `await`,
+  `JSON.stringify`, spread and inspection keep working (tested).
+* Breaking only for code that already had the bug: it now crashes where it was silently
+  unset. ⇒ **Lanes:** grep for `loadJsoncConfig(` and check every consumer reads `.merged`.
+
+### Added
+
+* `resolveTarget` `hints.configKey`: the refusal names the config key the lane actually
+  reads (`chatgpt`: `browser_location`), validated on every call.
+* `sb7q`: "additive" is judged from the caller's side, so a new base option must not change
+  what an existing caller already gets (the v0.25.0 `scaling` red).
+
 ## v0.25.0 — 2026-10-02
 
 ### ⛔ BREAKING — harness generation 4: drift under the gate now FAILS
