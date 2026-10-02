@@ -448,3 +448,20 @@ test('⛔ refusal instructions name ONLY the knobs the lane declares — control
   assert.throws(() => resolveTarget([], { supports: ['tagret'] }), /unknown supports entry: tagret/);
   assert.throws(() => resolveTarget([], { supports: [] }), /supports is empty/);
 });
+
+test('⛔ hints are validated on EVERY call — a typo surfaces on a run that RESOLVES, not only on a refusal', () => {
+  const ok = [{ source: /** @type {const} */ ('flag'), value: 'workstation' }];
+  // control: valid hints on a resolving run are fine
+  assert.equal(resolveTarget(ok, { supports: ['target'], portFlag: '--remote-debugging-port' }).verdict, 'resolved');
+  assert.throws(() => resolveTarget(ok, { supports: ['tagret'] }), /unknown supports entry: tagret/);
+  assert.throws(() => resolveTarget(ok, { supports: /** @type {any} */ ('target') }), /must be an array/);
+  assert.throws(() => resolveTarget(ok, { portFlag: 'remote-debugging-port' }), /portFlag must be a long flag/);
+  assert.throws(() => resolveTarget(ok, { portFlag: '--x; rm' }), /portFlag must be a long flag/);
+});
+
+test('portFlag: the refusal spells the port flag the way THIS tool does — control: default --port', () => {
+  const r = /** @type {any} */ (resolveTarget([], { supports: ['port'], portFlag: '--remote-debugging-port' }));
+  assert.match(r.instructions, /--remote-debugging-port <n>/);
+  assert.doesNotMatch(r.instructions, /--port <n>/);
+  assert.match(/** @type {any} */ (resolveTarget([], { supports: ['port'] })).instructions, /--port <n>/);
+});
