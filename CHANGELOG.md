@@ -207,6 +207,27 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.23.0 — 2026-10-02
+
+**Headline: an explicit `--port` is a stated location (`nl0c` §3a), so the family's
+unattended timers keep running.** Ruled at `webctl:mgr`'s request before a lane adopted
+`resolveTarget`.
+
+### ⛔ What this headline does NOT cover
+
+* **`attachOnly` is a field, not an enforcement.** Base returns `attachOnly: true` for a
+  `flag:port` target; the lane must refuse to start, build or restart anything for it.
+* **No identity check ships here.** §3a says driving identity is the `ow9k` claim, which is
+  still blocked on its open question (guest liveness).
+
+### Added
+
+* `resolveTarget` accepts `{source: 'flag', port, host?}`: alone it resolves as loopback,
+  source `flag:port`, `attachOnly: true`; beside a location flag it qualifies it (`port`).
+  New refusal codes `invalid-port`, `non-loopback-host`; two ports are `ambiguous`. An env
+  or config port alone is still `no-target`.
+* `LOOPBACK_HOSTS` — the literals a `--port` target may name (`localhost` is not one).
+
 ## v0.22.0 — 2026-10-02
 
 **Headline: never assume where the browser runs (`nl0c`), and never restart a browser a
