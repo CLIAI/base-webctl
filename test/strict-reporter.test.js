@@ -207,3 +207,17 @@ test('a run of ONLY skipped or todo tests fails — it tested nothing; one passi
     fs.rmSync(onlySkip.dir, { recursive: true, force: true }); fs.rmSync(mixed.dir, { recursive: true, force: true });
   }
 });
+
+test('the "vanished suite" hint appears only when a SUITE failed — not for an ordinary failing test', () => {
+  const plainFail = fixture('f.test.cjs', "const { it } = require('node:test'); it('broken', () => { throw new Error('x'); });\n");
+  const vanish = fixture('v.test.cjs', VANISH);
+  try {
+    const r1 = spawnSync(process.execPath, [RUNNER, plainFail.file], { encoding: 'utf8', env });
+    assert.equal(r1.status, 1);
+    assert.doesNotMatch(r1.stderr, /describe\(\) threw while registering/);
+    const r2 = spawnSync(process.execPath, [RUNNER, vanish.file], { encoding: 'utf8', env });
+    assert.match(r2.stderr, /describe\(\) threw while registering/, 'control: the hint where it applies');
+  } finally {
+    fs.rmSync(plainFail.dir, { recursive: true, force: true }); fs.rmSync(vanish.dir, { recursive: true, force: true });
+  }
+});

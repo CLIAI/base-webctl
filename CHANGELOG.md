@@ -239,6 +239,9 @@ is the strongest form: it names the ownership in the function that reads it.
   failing TODOs read FAIL at exit 0 (`ccew`, whose prompt-injection todos fail by
   design). The gate now judges the entries under the header and exempts `# TODO` and
   `# SKIP`.
+* The strict reporter printed its "a describe() threw while registering" hint on every
+  failure; the first gate run that exercised it showed it misdirecting on an ordinary
+  failing test. It now appears only when a suite failed.
 
 ### ⛔ What this does NOT cover
 

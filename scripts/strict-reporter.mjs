@@ -56,7 +56,11 @@ export default async function* strictReporter(source) {
   if (failed.length) {
     yield `STRICT: ${failed.length} failure event(s) — the run FAILS even if the summary says "# fail 0":\n`;
     for (const f of failed) yield `  ✖ ${f}\n`;
-    yield '  A failing SUITE usually means a describe() threw while registering: its tests vanished.\n';
+    // Only when a SUITE failed: on an ordinary failing test the hint misdirects the reader
+    // (it did, on the first gate run that exercised it).
+    if (failed.some((f) => f.startsWith('suite '))) {
+      yield '  A failing SUITE usually means a describe() threw while registering: its tests vanished.\n';
+    }
     process.exitCode = 1;
   } else if (empty.length) {
     yield `STRICT: ${empty.length} test file(s) registered ZERO tests — node counts each as a pass:\n`;
