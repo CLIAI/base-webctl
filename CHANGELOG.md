@@ -207,6 +207,54 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.17.0 — 2026-10-02
+
+**Headline: login mode (`lg1n`) — a clean, exclusive, non-retrying window for a
+human sign-in, with its verdict functions in `lib/login-mode.js`.** Base owns the
+VERDICT; each lane owns the READING, because base does not own any lane's browser
+launch line and so cannot assume "clean" from the flags it asked for.
+
+### ⛔ What this headline does NOT cover
+
+* **The live reader for base's OWN driver is NOT implemented.** Base's driver can
+  *launch* without CDP (portless mode, `containerEnv: { LWC_CDP_PORT: null }`) but
+  cannot yet *read back* the running browser's argv and sockets to prove it. Lanes that
+  can already read their own browsers (zone-manager lanes) can use the verdicts now;
+  lanes on base's driver must wait for the reader.
+* ⛔ **Hardware acceleration in login mode is NOT currently achieved.** On the
+  family's xpra setup the browser renders on a virtual X server on a host with **no
+  GPU** (measured: WebGL1 blocklisted during a real sign-in). The viewer has GL; the
+  browser does not. Absent `--disable-gpu` is necessary, not sufficient, and the
+  viewer's GL check says nothing about what the page sees. Browser-side GPU is not yet
+  checked by anything.
+* **It does not prove CDP causes login failures.** The one measured incident was
+  confounded, and the site's rate limit appeared with CDP already off.
+* **It narrows D8 during sign-in only.** Control mode and the xpra port are untouched.
+* **The sign-in predicate is lane-owned** — base ships no "is signed in" check, by
+  design, since what signed-in looks like is per site.
+* **Ownership re-mint is specified, not implemented** — it depends on `ow9k`, which
+  remains a design.
+
+### Added
+
+* `lib/login-mode.js`, exported as `loginMode`: `classifyLoginArgv` (CLEAN | VIOLATIONS
+  | UNKNOWN, advisories separate), `classifyControlArgv` (the control arm, which must
+  FIND CDP), `pickBrowserProcess`, `parseListeningPorts` (`ss -ltn` WITH its header),
+  `sameProfile`. Handles Chromium's single-dash switch prefix, the `--` terminator, and
+  an argv without a program name — each proven by sabotage.
+* ⚠ **`CdpSession` fix — NEW in this release, not v0.16.0:** pending command and
+  `waitForEvent` timers are now cleared on socket close (a rejected call previously
+  held the process alive for the full command timeout), and the socket is injectable
+  via `WebSocketImpl`. A consumer on v0.16.0 still has the leak.
+* `contract-harness.mjs gate-probe` and `no-revendor` generation 2 shipped in v0.16.0;
+  unchanged here.
+
+### Docs
+
+* New: `arch-login-mode-clean-signin-lg1n`.
+* `ow9k`, `btg4`, `gu1d` (`docker-gl` attach mode ruled) and `k3wn` revised under
+  review since v0.16.0.
+
 ## v0.16.0 — 2026-09-27
 
 **Headline: `HARNESS_GENERATION` is 2, because `no-revendor` could not see the case

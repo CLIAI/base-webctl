@@ -45,8 +45,13 @@ fix:**
 * it is **non-retrying**: nothing automated presses anything twice, because a
   sign-in is the one place a retry earns a rate limit or a lock.
 
-*(`webctl:mgr`: it also shrinks D8 during the most sensitive window — it does not
-fix D8.)*
+⛔ **And it shrinks a real exposure during the most sensitive window, without fixing
+it.** `webctl:mgr`'s template spec records it as **D8**: CDP and xpra published on
+`127.0.0.1` are reachable by **every local account on that host**, and **CDP has no
+authentication**. Measured on two of the family's hosts, each had local accounts
+**without** container rights that could therefore reach a signed-in browser. ⇒ Login
+mode removes the CDP listener **during sign-in**. It does **not** touch control mode,
+and it does **not** touch the xpra port — so D8 is narrowed for one window, not closed.
 
 ## 1. The state machine — every transition is a human's
 
@@ -63,6 +68,10 @@ STOPPED ──login──▶ LOGIN ──(human: "done")──▶ STOPPED ──
   `type`/`click`/`key` verbs, and `gui attach` by anything but the human's viewer,
   while the target is in login mode.
 * ⛔ **No automated retry of anything** while in login mode.
+* ⚠ **The browser can EXIT during login mode** — measured: exit 0 mid-attempt, most
+  likely the human closing its window. ⇒ That is an **observed state**,
+  `EXITED_DURING_LOGIN`, reported as such — not left for a status command to infer, and
+  never treated as "done". *(`grok`.)*
 * The profile is **kept** across both restarts (§4). Login mode is not a fresh
   profile; it is the same profile with the control surface absent.
 
@@ -95,6 +104,33 @@ never silently passed:
 | `--no-sandbox` | often needed in containers; a weaker browser |
 | `--load-extension`, `--disable-extensions-except` | extension code running during sign-in |
 | `--disable-blink-features=AutomationControlled` | an anti-detection flag — not "clean", it is disguise |
+
+### ⛔ "With hardware acceleration" — WHICH SIDE has the GPU? Currently: not the browser
+
+*(`grok`, measured read-only during a real sign-in.)* The browser's own log, repeated
+throughout the attempt: `ContextResult::kFatalFailure: WebGL1 blocklisted`. The
+browser renders on **xpra's virtual X server on the browser host, which has no GPU**.
+Only the **viewer** — the machine the human looks from — has OpenGL.
+
+⇒ **Absent `--disable-gpu` is NOT the same as having a GPU.** The table above makes
+`--disable-gpu` a violation, which is right, but its absence is **necessary, not
+sufficient**, and I first wrote it as though it delivered hardware acceleration.
+
+⇒ **Two different GL questions that must not be conflated:**
+
+| side | what has GL | how it is checked |
+|---|---|---|
+| **viewer** (where the human looks) | the GL xpra client | `gu1d`'s `docker-gl` three-row pass |
+| **browser** (where the page runs) | the browser host's X server | ⚠ **not checked by anything yet** |
+
+⚠ A page that fingerprints WebGL sees **the browser's** side. So the viewer's
+glcheck passing says **nothing** about what a sign-in page sees.
+
+⇒ **Ruled:** the verdict reports the browser's GPU/WebGL state as an **advisory, read
+from the browser host** — never inferred from the viewer's glcheck. And Greg's
+*"with hardware acceleration"* is, on the family's current setup, **NOT MET** in login
+mode: say so rather than imply it. ⚠ A WebGL-less browser is a **plausible** cause of
+a sign-in that "does nothing" — it is **not proven**, exactly as CDP is not.
 
 ⚠ **BiDi has no switch of its own in Chromium.** It runs over the CDP transport via a
 mapper. ⇒ "no BiDi" is established by the CDP absence above **plus** the absence of a
