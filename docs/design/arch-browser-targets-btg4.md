@@ -171,7 +171,7 @@ transport choice, the slug. Those are not readings, and a rule phrased as
 contents.
 
 ```toml
-# ~/.config/CLIAI/webctl/targets/workstation.toml
+# ~/.config/webctl/targets/workstation.toml   (the sibling §3 chose — NOT ~/.config/CLIAI/webctl/)
 name       = "workstation"
 # ⛔ TRANSPORT IS PER-SURFACE, NOT PER-TARGET. See below.
 control    = "ssh"            # ssh | local      — CDP and X input. NEVER tailscale.

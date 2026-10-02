@@ -94,7 +94,10 @@ live on:
     over ssh), `arch-coincident-fields-t2wf` (two fields holding one value are
     indistinguishable from one field), `arch-login-mode-clean-signin-lg1n` (a
     clean, exclusive, non-retrying window for a human sign-in; "clean" is MEASURED
-    from the running browser's argv, never assumed from flags).
+    from the running browser's argv, never assumed from flags),
+    `arch-remote-targets-build-inventory-rm7t` (`--tailscale` reaches ssh only; remote
+    build/refresh behind the ownership claim, verified by a version READING; a
+    read-only inventory where unreachable is UNKNOWN, never omitted).
   * **test** — `test-cross-repo-consumer-loop-xrl4` (the `test-against-base.sh`
     contract + `consumers.jsonc` + the release gate),
     `test-checks-that-cannot-fail-k3wn` (verification discipline, led by base's
