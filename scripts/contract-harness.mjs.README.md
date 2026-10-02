@@ -180,7 +180,9 @@ disagree.
   The strict reporter fails on the failure EVENT, fails a file that registers zero
   tests (node counts one as a pass), and strips `NODE_TEST_CONTEXT` for nested runs.
 * **The gate also scans your output:** exit 0 with a TAP `not ok` (TODO/SKIP excepted)
-  or spec's `✖ failing tests:` is a **FAIL**, named.
+  or spec's `✖ failing tests:` is a **FAIL**, named. ⚠ It can only scan what you
+  PRINT: a contract that logs its suite and prints a summary gives it nothing to read
+  (5 of 7 at v0.27.0). That is fine — **if** the summarising step is itself strict.
 * **Read your own `"test"` script.** `echo "No tests yet" && exit 0` over a real suite
   (measured in a lane) never reaches node, so no reporter or scan can see it.
 * **Restrict discovery to test files.** Bare `node --test` runs every `.js`/`.mjs`

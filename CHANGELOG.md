@@ -238,8 +238,13 @@ while registering vanish: `not ok`, `# fail 0`, exit 0 (node v22, reproduced; fo
 * **A `"test"` script that never runs node** (`echo "No tests yet" && exit 0` over a
   114-test suite, measured by `fetlife`). No reporter or scan sees it; only reading the
   script does.
-* The gate's scan reads TAP and spec output. A contract using another reporter that
-  hides failures behind exit 0 is not detected.
+* ⚠ **The gate's scan only sees contracts that STREAM their test output — measured at
+  the tag: 2 of 7.** gemini (50 TAP lines) and substack (27) stream. linkedin, chatgpt,
+  fetlife, perplexity and grok log their suite and print a **summary**, so the scan read
+  no result lines for them and their clean result there is **vacuous**. For those lanes
+  the protection must be inside the contract (`run-tests-strict` or an equivalent), and
+  the gate cannot tell whether it is. *(Stated in the tag message; this line corrected
+  on master after tagging.)*
 
 ## v0.26.0 — 2026-10-02
 
