@@ -415,16 +415,28 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # use base's strict reporter, but it reads every contract's output: a failure line in
   # a run that exited 0 is a FAIL, named. TODO/SKIP lines are not failures.
   if [ "$rc" = "0" ]; then
+    # 1. The strict reporter's OWN verdict, when the contract used it, is authoritative: it
+    #    reads node's events, where TODO status is exact. A failure verdict in a run that
+    #    exited 0 means the contract swallowed it.
+    strict_bad="$(grep -E '^STRICT: ([1-9][0-9]* failure event|ZERO tests ran|[1-9][0-9]* test file\(s\) registered ZERO)' "$run_log" | head -1 || true)"
+    strict_ok="$(grep -cE '^STRICT: 0 failure events' "$run_log" || true)"
     hidden="$(grep -E '^[[:space:]]*not ok [0-9]+ ' "$run_log" | grep -viE '#[[:space:]]*(TODO|SKIP)' || true)"
-    # Spec lists failing TODOs under "✖ failing tests:" too, even at "fail 0" — each entry
-    # suffixed "# TODO". Judge the ENTRIES after the header, not the header (a v0.27.0
-    # false red on `ccew`, whose prompt-injection todos fail by design).
-    spec_fail="$(awk '/^✖ failing tests:/{f=1; next} f && /^✖ / && !/#[[:space:]]*(TODO|SKIP)[[:space:]]*$/{print; exit}' "$run_log" || true)"
-    if [ -n "$hidden" ] || [ -n "$spec_fail" ]; then
+    spec_fail=""
+    if [ -z "$strict_bad" ] && [ "${strict_ok:-0}" = "0" ]; then
+      # 2. Spec without the strict reporter. ⚠ Spec CANNOT mark a TODO reliably: a todo with
+      #    a reason prints "# <reason>" INSTEAD of "# TODO" (measured on ccew's by-design
+      #    todos — a second false red). So compare COUNTS: more "✖" entries under "failing
+      #    tests:" than the summary's "ℹ todo N" means at least one is a real failure or a
+      #    vanished suite.
+      entries="$(awk '/^✖ failing tests:/{f=1; next} f && /^✖ /{n++} END{print n+0}' "$run_log")"
+      todos="$(awk '/^ℹ todo [0-9]+/{t+=$3} END{print t+0}' "$run_log")"
+      [ "$entries" -gt "$todos" ] && spec_fail="$entries failing-tests entries, $todos todo"
+    fi
+    if [ -n "$strict_bad" ] || [ -n "$hidden" ] || [ -n "$spec_fail" ]; then
       n="$(printf '%s\n' "$hidden" | grep -c 'not ok' || true)"
-      first="$(printf '%s\n' "$hidden" | head -2 | sed -e 's/^[[:space:]]*//' | tr '\n' ';' | cut -c1-160)"
+      first="$(printf '%s\n' "${strict_bad:-$hidden}" | head -2 | sed -e 's/^[[:space:]]*//' | tr '\n' ';' | cut -c1-160)"
       rc=1
-      reason="exit 0, but the run REPORTED FAILURES (${n} TAP 'not ok'${spec_fail:+, spec 'failing tests'}): ${first:-see log}. A describe() that throws while registering vanishes from the counts — use base's scripts/run-tests-strict.mjs"
+      reason="exit 0, but the run REPORTED FAILURES (${n} TAP 'not ok'${spec_fail:+; spec: $spec_fail}${strict_bad:+; strict reporter}): ${first:-see log}. A describe() that throws while registering vanishes from the counts — use base's scripts/run-tests-strict.mjs"
     fi
   fi
   rm -f "$run_log"

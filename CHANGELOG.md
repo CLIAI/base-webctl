@@ -237,8 +237,12 @@ is the strongest form: it names the ownership in the function that reads it.
 * **Gate false red (v0.27.0):** spec lists failing **TODO** tests under `✖ failing tests:`
   even at `fail 0`, and the gate matched the header alone. Every lane with deliberate
   failing TODOs read FAIL at exit 0 (`ccew`, whose prompt-injection todos fail by
-  design). The gate now judges the entries under the header and exempts `# TODO` and
-  `# SKIP`.
+  design). ⚠ The first fix (exempt entries ending `# TODO`) was itself wrong, and the next
+  gate run showed it: **a TODO with a reason prints `# <reason>` INSTEAD of `# TODO` in
+  spec** (TAP keeps `# TODO <reason>`), so spec text cannot identify a TODO at all. Now:
+  the strict reporter's own verdict, when present, is authoritative (it reads events);
+  a strict failure verdict in a run that exited 0 is a FAIL (the contract swallowed it);
+  and without it, more `✖` entries than the summary's `ℹ todo N` is a FAIL.
 * The strict reporter printed its "a describe() threw while registering" hint on every
   failure; the first gate run that exercised it showed it misdirecting on an ordinary
   failing test. It now appears only when a suite failed.

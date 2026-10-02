@@ -69,7 +69,7 @@ test('⛔ exit 0 with a TAP `not ok` line is a FAIL, naming the line', () => {
 test('⛔ exit 0 with the spec reporter\'s "✖ failing tests:" is a FAIL too', () => {
   const r = runGate('✔ survivor\n✖ needs a fixture\n\n✖ failing tests:\n\n✖ needs a fixture\n', 0);
   assert.equal(r.status, 1, r.out);
-  assert.match(r.out, /spec 'failing tests'/);
+  assert.match(r.out, /spec: 1 failing-tests entries, 0 todo/);
 });
 
 test('TODO and SKIP `not ok` lines are not failures', () => {
@@ -79,10 +79,30 @@ test('TODO and SKIP `not ok` lines are not failures', () => {
 });
 
 test('a spec run whose ONLY failures are TODOs PASSES — the header alone is not a failure (ccew false red)', () => {
-  const r = runGate('✔ real\n✖ injection probe # TODO\nℹ fail 0\n\n✖ failing tests:\n\ntest at x.js:3:1\n✖ injection probe (0.2ms) # TODO\n  Error: known\n', 0);
+  const r = runGate('✔ real\n✖ injection probe # TODO\nℹ fail 0\nℹ todo 1\n\n✖ failing tests:\n\ntest at x.js:3:1\n✖ injection probe (0.2ms) # TODO\n  Error: known\n', 0);
   assert.equal(r.status, 0, r.out);
   assert.match(r.out, /PASS {2}fake-webctl/);
   // control: a real entry beside the TODO still fails
-  const bad = runGate('✖ failing tests:\n\n✖ injection probe (0.2ms) # TODO\n✖ real failure (0.1ms)\n', 0);
+  const bad = runGate('ℹ fail 0\nℹ todo 1\n\n✖ failing tests:\n\n✖ injection probe (0.2ms) # TODO\n✖ vanished suite (0.1ms)\n', 0);
   assert.equal(bad.status, 1, bad.out);
+});
+
+test('⛔ a TODO with a REASON loses its "# TODO" in spec — counts decide, so it still PASSES (ccew, 2nd false red)', () => {
+  // Measured: spec prints "✖ probe # BLOCKED ON PROBE 0" — the reason REPLACES the keyword.
+  const r = runGate('✔ real\nℹ fail 0\nℹ todo 1\n\n✖ failing tests:\n\n✖ probe (0.3ms) # BLOCKED ON PROBE 0\n', 0);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /PASS {2}fake-webctl/);
+});
+
+test('the strict reporter\'s verdict is authoritative: 0 failures PASSES; a failure verdict at exit 0 FAILS', () => {
+  // even with a spec header and no todo count, the event-based verdict wins
+  const ok = runGate('✖ failing tests:\n\n✖ probe # BLOCKED\nSTRICT: 0 failure events\n', 0);
+  assert.equal(ok.status, 0, ok.out);
+  assert.match(ok.out, /PASS {2}fake-webctl/);
+  // a contract that swallowed the strict reporter's failure
+  const swallowed = runGate('ok 1 - a\nSTRICT: 2 failure event(s) — the run FAILS even if the summary says "# fail 0":\n', 0);
+  assert.equal(swallowed.status, 1, swallowed.out);
+  assert.match(swallowed.out, /strict reporter/);
+  const zero = runGate('STRICT: ZERO tests ran — a run that tested nothing is not a pass.\n', 0);
+  assert.equal(zero.status, 1, zero.out);
 });
