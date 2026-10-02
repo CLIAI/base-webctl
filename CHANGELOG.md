@@ -207,6 +207,44 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.24.0 — 2026-10-02
+
+### ⛔ BREAKING — three things that used to pass silently now refuse
+
+* **`createMounts` requires `dockerfilesDir`** (path, thunk, or `null` = "builds no
+  images"). Omitting it **throws at construction**, and that reaches every factory that
+  builds mounts: `createChromiumDockerXpra(C, opts)` and `createRegistry(C, opts)`. There was
+  a fallback to `../../dockerfiles`, and **base ships no dockerfiles**, so it named a
+  directory that exists in no layout. A shim that forgot the option ran **stale images
+  silently** whenever the image already existed (measured by `linkedin`: a lost
+  browser-version assert, caught only by its docker-mode test). ⇒ **Every shim:** pass
+  `dockerfilesDir` (or `null` if the tool never builds).
+* **Docker up's profile lock is no longer forced, and a failed acquire stops the start**
+  (`ow9k`). Force only when the lock already names this container. A live foreign holder,
+  or a lock that cannot be written, ⇒ the containers this call started are removed and
+  `ensureRunning` throws. ⚠ A consumer test whose fake `profileLock.acquire` returns
+  something without `ok: true` now fails that start.
+* **Harness generation 3 — `pin` FAILS on drift** (no gate signal, worktree ≠ gitlink) and
+  on an **undeclared** submodule (a checkout with no gitlink); a plain vendored directory is
+  no longer read as a gitlink. The gate's swap is still NO VERDICT. *(Measured by
+  `substack`.)* ⇒ A lane mid-bump with an uncommitted pointer now sees red outside the gate.
+
+### Added
+
+* `resolveTarget` `hints.supports` — the refusal names only the knobs a lane has
+  (`TARGET_KNOBS`); unknown or empty `supports` throws. *(From `substack`.)*
+* nl0c §3b records `webctl:mgr`'s rulings for `fetlife`: an env port alone refuses; a named
+  target's `local_cdp_port` counts; precedence `--target`/`--ssh` > bare `--port` > env >
+  config.
+
+### ⛔ What this does NOT cover
+
+* **Lock-before-start is not done.** Step 9 now fails closed, but a container is still
+  started before the lock is taken; moving the acquire earlier needs every later failure
+  path to release it.
+* `null` for `dockerfilesDir` is a declaration the lane makes; base cannot check a lane
+  that declares it builds nothing and then calls `docker build` itself.
+
 ## v0.23.0 — 2026-10-02
 
 **Headline: an explicit `--port` is a stated location (`nl0c` §3a), so the family's
