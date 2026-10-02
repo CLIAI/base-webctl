@@ -207,6 +207,47 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.18.0 — 2026-10-02
+
+**Headline: remote-target validators (`rm7t`), usable on their own.** `lib/remotes.js`:
+`validateTarget` (with its own refusal for `control = "tailscale"`), `checkConfigMode`,
+`versionVerdict`, `inventoryRows`. Tagged now at `webctl:mgr`'s ruling, because lanes can
+only consume base through a tag.
+
+### ⛔ What this headline does NOT cover
+
+* **§2's host source of truth is PROPOSED, pending the zone-manager lane (xq:dev).
+  NO host-registry reader ships**, and no host-file schema. The open interface question
+  is whether webctl reads xq's machine list through a command (`xq machines ls --json`,
+  preferred: a command is an interface) or its file. ⇒ **Lanes must not build on the
+  registry-reading part** — it waits for that answer and a later tag.
+* **Nothing here builds, refreshes or reads anything remote.** These are validators for
+  what a lane reads; the transports and the `targets` / `gui build|refresh` verbs are
+  lane work.
+* `versionVerdict` compares dotted numeric versions; anything else is only checked for
+  equality (`differs`), never ordered.
+* Base's own driver still has no live login-mode reader, and hardware acceleration in
+  login mode is still not achieved (unchanged from v0.17.x).
+
+### Added
+
+* `lib/remotes.js`, exported as `remotes`:
+  * `validateTarget` — control `ssh | local`; `control = "tailscale"` refused **with its
+    own message** telling the operator to use `--tailscale` to reach ssh; view `ssh |
+    tailscale-relay`; `kind`; an opaque `profile_id` (a path is refused, `btg4` §2).
+  * `checkConfigMode` — refuses group/other access; an unreadable mode is refused, not
+    assumed to be 600.
+  * `versionVerdict` — current | outdated | ahead | differs | unknown, naming both the
+    reading and the declared target; **a reading without its instrument is UNKNOWN** (a
+    claim, not a measurement). Built because a rebuild was measured reproducing a stale
+    browser from a cached package layer: exit 0 is not a refresh.
+  * `inventoryRows` — every target gets a row; unreachable is UNKNOWN, never omitted.
+
+### Docs
+
+* New: `arch-remote-targets-build-inventory-rm7t`.
+* `btg4`: its example no longer shows the target path §3 had refused.
+
 ## v0.17.1 — 2026-10-02
 
 **Headline: two traps that lanes hit in LIVE login-mode readings, now handled in base,
