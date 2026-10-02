@@ -39,7 +39,12 @@ export default async function* strictReporter(source) {
       // would hide the empty run it is. Recognised by its name being the file's own path.
       const d = ev.data || {};
       if (d.nesting === 0 && d.file && (d.file === d.name || d.file.endsWith(`/${d.name}`)
-          || d.file.endsWith(`\\${d.name}`))) { empty.push(d.file); continue; }
+          || d.file.endsWith(`\\${d.name}`))) {
+        // A direct-script suite (asserts, no node:test) looks exactly like an empty file:
+        // zero registered tests, exit 0. Only the caller knows which it meant.
+        if (process.env.WEBCTL_STRICT_ALLOW_PLAIN_SCRIPTS === '1') { passed++; continue; }
+        empty.push(d.file); continue;
+      }
       passed++;
     }
     if (ev.type !== 'test:fail') continue;
@@ -56,12 +61,15 @@ export default async function* strictReporter(source) {
   } else if (empty.length) {
     yield `STRICT: ${empty.length} test file(s) registered ZERO tests — node counts each as a pass:\n`;
     for (const f of empty) yield `  ∅ ${f}\n`;
+    yield '  If these are direct-script suites (asserts, no node:test), run them with --allow-plain-scripts.\n';
     process.exitCode = 1;
   } else if (passed === 0) {
     // A run in which nothing passed and nothing failed tested nothing. (Not the only
     // vacuous green: a `"test": "echo No tests yet && exit 0"` never reaches node at all —
     // measured in a lane over a 114-test suite. Only the test SCRIPT can be checked for that.)
-    yield 'STRICT: ZERO tests ran — a run that tested nothing is not a pass\n';
+    yield 'STRICT: ZERO tests ran — a run that tested nothing is not a pass.\n'
+      + '  Most often the file pattern matched NOTHING (plain node exits 0 then): pass YOUR\n'
+      + '  lane\'s own pattern, e.g. "test/**/*.test.js" or "test/*-test.js".\n';
     process.exitCode = 1;
   } else {
     yield 'STRICT: 0 failure events\n';

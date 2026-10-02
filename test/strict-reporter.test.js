@@ -96,3 +96,98 @@ test('⛔ a test file that registers ZERO tests fails — node itself counts it 
     assert.match(r.stderr, /empty\.test\.cjs/);
   } finally { fs.rmSync(fx.dir, { recursive: true, force: true }); }
 });
+
+// ── linkedin's compat points: direct-script suites, and files that must not overlap ──
+
+const PLAIN_SCRIPT = "const assert = require('node:assert'); assert.equal(1 + 1, 2);\n";
+
+test('--allow-plain-scripts: a direct-script suite (no node:test) passes — control: without it, EMPTY fails', () => {
+  const fx = fixture('plain.test.cjs', PLAIN_SCRIPT);
+  try {
+    const strict = spawnSync(process.execPath, [RUNNER, fx.file], { encoding: 'utf8', env });
+    assert.equal(strict.status, 1, 'control: by default a zero-test file fails as EMPTY');
+    assert.match(strict.stderr, /--allow-plain-scripts/, 'and the refusal names the way out');
+    const allowed = spawnSync(process.execPath, [RUNNER, '--allow-plain-scripts', fx.file], { encoding: 'utf8', env });
+    assert.equal(allowed.status, 0, `allowed must pass; got ${allowed.status}\n${allowed.stderr}`);
+  } finally { fs.rmSync(fx.dir, { recursive: true, force: true }); }
+});
+
+test('--allow-plain-scripts still FAILS a script that exits non-zero, and a vanished describe()', () => {
+  const bad = fixture('bad.test.cjs', "process.exit(3);\n");
+  const van = fixture('v.test.cjs', VANISH);
+  try {
+    assert.equal(spawnSync(process.execPath, [RUNNER, '--allow-plain-scripts', bad.file], { encoding: 'utf8', env }).status, 1);
+    assert.equal(spawnSync(process.execPath, [RUNNER, '--allow-plain-scripts', van.file], { encoding: 'utf8', env }).status, 1);
+  } finally {
+    fs.rmSync(bad.dir, { recursive: true, force: true }); fs.rmSync(van.dir, { recursive: true, force: true });
+  }
+});
+
+test('⛔ an INHERITED WEBCTL_STRICT_ALLOW_PLAIN_SCRIPTS does not switch the empty-file guard off', () => {
+  const fx = fixture('empty.test.cjs', "require('node:test');\n");
+  try {
+    const r = spawnSync(process.execPath, [RUNNER, fx.file],
+      { encoding: 'utf8', env: { ...env, WEBCTL_STRICT_ALLOW_PLAIN_SCRIPTS: '1' } });
+    assert.equal(r.status, 1, 'only the flag may enable it');
+  } finally { fs.rmSync(fx.dir, { recursive: true, force: true }); }
+});
+
+test('--serial: two files contending for ONE lock pass serially — control: they collide in parallel', () => {
+  // Each file takes a lock dir, announces itself, waits, and fails if the OTHER announced
+  // meanwhile — the shape of a suite that spawns processes or takes a real lock.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'strict-serial-'));
+  const body = (/** @type {string} */ me, /** @type {string} */ other) => `const { test } = require('node:test');
+const fs = require('node:fs'); const path = require('node:path');
+const D = ${JSON.stringify(dir)};
+test('${me} holds the lock alone', async () => {
+  fs.mkdirSync(path.join(D, 'lock'));                  // throws EEXIST if the other holds it
+  fs.writeFileSync(path.join(D, '${me}'), '');
+  await new Promise((r) => setTimeout(r, 700));
+  const overlap = fs.existsSync(path.join(D, '${other}'));
+  fs.rmSync(path.join(D, '${me}')); fs.rmdirSync(path.join(D, 'lock'));
+  if (overlap) throw new Error('the other file ran at the same time');
+});
+`;
+  try {
+    const a = path.join(dir, 'a.test.cjs'); const b = path.join(dir, 'b.test.cjs');
+    fs.writeFileSync(a, body('A', 'B')); fs.writeFileSync(b, body('B', 'A'));
+    // `--serial` AFTER an explicit concurrency of 2: it must win, or on a one-core box the
+    // serial arm would pass merely because the default was already serial.
+    const serial = spawnSync(process.execPath, [RUNNER, '--test-concurrency=2', '--serial', a, b], { encoding: 'utf8', env });
+    assert.equal(serial.status, 0, `serial must pass; got ${serial.status}\n${serial.stderr}`);
+    // ⚠ The control FORCES concurrency. node's default is availableParallelism() - 1, and on
+    // a box reporting 1 the default never overlaps — the first draft returned early there,
+    // so its serial arm passed without any evidence that order mattered.
+    const parallel = spawnSync(process.execPath, [RUNNER, '--test-concurrency=2', a, b], { encoding: 'utf8', env });
+    assert.equal(parallel.status, 1,
+      'control: run concurrently, the same two files must collide — else this test cannot tell serial from lucky');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── gemini's compat points: a pattern that matches nothing; the gate's view ──────
+
+test('⛔ a file pattern that matches NOTHING fails, naming the pattern — control: a match runs', () => {
+  const fx = fixture('a-test.js', "const { it } = require('node:test'); it('a', () => {});\n");
+  try {
+    const none = spawnSync(process.execPath, [RUNNER, path.join(fx.dir, '*.test.js')], { encoding: 'utf8', env });
+    const plain = spawnSync(process.execPath, ['--test', path.join(fx.dir, '*.test.js')], { encoding: 'utf8', env });
+    assert.equal(plain.status, 0, 'premise: plain node passes a pattern that matched nothing');
+    assert.equal(none.status, 1, `zero matches must FAIL; got ${none.status}\n${none.stderr}`);
+    assert.match(none.stderr, /file pattern matched NOTHING/);
+    const some = spawnSync(process.execPath, [RUNNER, path.join(fx.dir, '*-test.js')], { encoding: 'utf8', env });
+    assert.equal(some.status, 0, `control: the lane's own pattern runs; got ${some.status}\n${some.stderr}`);
+  } finally { fs.rmSync(fx.dir, { recursive: true, force: true }); }
+});
+
+test('the gate can still SEE failures: spec prints "✖ failing tests:"; --tap streams TAP instead', () => {
+  const fx = fixture('v.test.cjs', VANISH);
+  try {
+    const spec = spawnSync(process.execPath, [RUNNER, fx.file], { encoding: 'utf8', env });
+    assert.match(spec.stdout, /^✖ failing tests:/m, 'spec on stdout carries the marker the gate matches');
+    const tap = spawnSync(process.execPath, [RUNNER, '--tap', fx.file], { encoding: 'utf8', env });
+    assert.equal(tap.status, 1);
+    assert.match(tap.stdout, /^not ok \d+ - needs a fixture/m, '--tap streams TAP the gate reads line by line');
+    assert.match(tap.stdout, /^ok \d+ - survivor/m);
+    assert.doesNotMatch(tap.stdout, /✔/, '--tap replaces spec, it does not stack on it');
+  } finally { fs.rmSync(fx.dir, { recursive: true, force: true }); }
+});
