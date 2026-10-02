@@ -209,12 +209,23 @@ is the strongest form: it names the ownership in the function that reads it.
 
 ## v0.19.0 — 2026-10-02
 
+### ⛔ SECURITY — read this first
+
+* **An ssh alias beginning with `-` was ACCEPTED by `validateTarget` (v0.18.0), and is
+  now refused.** An alias is passed *through* to ssh, and ssh reads a leading-dash
+  argument as an **option**: `-oProxyCommand=…` there is **command execution on the
+  operator's machine**. A lane's own config already refused it; base did not. The same
+  rule now applies to `machine`. If you validated a target with v0.18.0 and then passed
+  its `ssh` value to ssh, re-validate it on this release.
+* **Refusals never echo the value.** Every message names the key and the rule, never
+  the offending value — a config value can be a host, and an error message is the
+  most-copied text a tool prints. Tested by planting a distinctive value and asserting
+  it appears in no error.
+
 **Headline: `validateTarget` is now CLOSED, and the zone manager's host list has a
 reader.** v0.18.0's validator accepted any key and checked only the fields it looked at
 — so `{role:'prod', placement:'cloud', zone:'..', bogus_key:1}` read "valid" (found by
-gemini, reproduced by webctl:mgr). Fixing it surfaced a **security** gap: an ssh alias
-beginning with `-` was accepted, and passed through to ssh, `-oProxyCommand=…` is
-command execution.
+gemini, reproduced by webctl:mgr). Closing it is what exposed the alias hole above.
 
 ### ⛔ What this headline does NOT cover
 
