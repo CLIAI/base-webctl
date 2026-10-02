@@ -34,6 +34,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_ROOT="$(cd "$HERE/.." && pwd)"
 CONSUMERS_DIR="${WEBCTL_CONSUMERS_DIR:-$HOME/github/CLIAI}"
+# WEBCTL_CONSUMERS_FILE overrides the registry (default: base's consumers.jsonc) —
+# for the gate's own tests, which must run against fake consumers, never the fleet.
 
 AGAINST_HEAD=0
 for arg in "$@"; do
@@ -405,6 +407,23 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   reason="$(awk 'BEGIN{n=0} {if ($0 ~ /^[[:space:]]*$/) {n=0; next} lines[n++]=$0; if (n>3) {for(i=0;i<n-1;i++) lines[i]=lines[i+1]; n=3}}
                  END{for(i=0;i<n;i++) printf "%s ", lines[i]}' "$run_log" \
              | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//' | cut -c1-300)"
+
+  # ⛔ A GREEN EXIT IS NOT A GREEN RUN. node:test lets a describe() that throws while
+  # REGISTERING vanish: it prints `not ok N - <suite>` (spec: "✖ failing tests:"), then
+  # "# fail 0", and EXITS 0 (node v22, reproduced; found by `chatgpt` — a fresh clone
+  # ran 6 fewer tests than the live tree, both "green"). The gate cannot make a contract
+  # use base's strict reporter, but it reads every contract's output: a failure line in
+  # a run that exited 0 is a FAIL, named. TODO/SKIP lines are not failures.
+  if [ "$rc" = "0" ]; then
+    hidden="$(grep -E '^[[:space:]]*not ok [0-9]+ ' "$run_log" | grep -viE '#[[:space:]]*(TODO|SKIP)' || true)"
+    spec_fail="$(grep -E '^✖ failing tests:' "$run_log" || true)"
+    if [ -n "$hidden" ] || [ -n "$spec_fail" ]; then
+      n="$(printf '%s\n' "$hidden" | grep -c 'not ok' || true)"
+      first="$(printf '%s\n' "$hidden" | head -2 | sed -e 's/^[[:space:]]*//' | tr '\n' ';' | cut -c1-160)"
+      rc=1
+      reason="exit 0, but the run REPORTED FAILURES (${n} TAP 'not ok'${spec_fail:+, spec 'failing tests'}): ${first:-see log}. A describe() that throws while registering vanishes from the counts — use base's scripts/run-tests-strict.mjs"
+    fi
+  fi
   rm -f "$run_log"
 
   if [ "$AGAINST_HEAD" = "1" ] && [ -n "$orig_sha" ]; then
@@ -427,7 +446,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
        echo "FAIL  $name (exit $rc): ${reason:-no reason stated}" >&2
        fail=$((fail + 1)); fails+=("$name") ;;
   esac
-done < <(node "$HERE/read-consumers.mjs")
+done < <(node "$HERE/read-consumers.mjs" ${WEBCTL_CONSUMERS_FILE:+"$WEBCTL_CONSUMERS_FILE"})
 
 echo "----- gate summary: pass=$pass skip=$skip fail=$fail -----" >&2
 if [ "$stale" -gt 0 ]; then

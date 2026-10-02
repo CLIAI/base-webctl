@@ -1,0 +1,79 @@
+// gate-hidden-failures.test.js — the release gate FAILS a contract that exits 0
+// while its output reports failures.
+//
+// node:test lets a describe() that throws while registering vanish: `not ok N -
+// <suite>`, then "# fail 0", exit 0. The gate cannot make a contract use base's
+// strict reporter, but it reads every contract's output. Runs against FAKE
+// consumers through WEBCTL_CONSUMERS_FILE — never the fleet.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const GATE = path.join(ROOT, 'scripts', 'test-all-consumers.sh');
+
+/**
+ * One fake consumer whose contract prints `output` and exits `code`.
+ * @param {string} output @param {number} code
+ */
+function runGate(output, code) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-hidden-'));
+  try {
+    const repo = path.join(dir, 'fake-webctl');
+    fs.mkdirSync(repo);
+    fs.writeFileSync(path.join(repo, 'out.txt'), output);
+    fs.writeFileSync(path.join(repo, 'test-against-base.sh'),
+      `#!/usr/bin/env bash\ncat out.txt\nexit ${code}\n`, { mode: 0o755 });
+    const g = (/** @type {string[]} */ a, cwd = repo) => execFileSync('git', a, { cwd, stdio: 'ignore' });
+    // a mounted base: a nested repo committed as a gitlink, as a real consumer has it
+    const sub = path.join(repo, 'vendor', 'base-webctl');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, 'README.md'), 'fake base\n');
+    g(['init', '-q'], sub); g(['add', '.'], sub);
+    g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'base'], sub);
+    g(['init', '-q']); g(['add', '.']);
+    g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'fake']);
+    const reg = path.join(dir, 'consumers.jsonc');
+    fs.writeFileSync(reg, JSON.stringify({ consumers: [{
+      name: 'fake-webctl', submodulePath: 'vendor/base-webctl', testCmd: './test-against-base.sh',
+      tier: 'full', wired: true, localDir: repo,
+    }] }));
+    const env = { ...process.env, WEBCTL_CONSUMERS_FILE: reg, WEBCTL_CONSUMERS_DIR: dir };
+    delete env.NODE_TEST_CONTEXT;
+    const r = spawnSync('bash', [GATE], { encoding: 'utf8', env });
+    return { status: r.status, out: (r.stdout || '') + (r.stderr || '') };
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+const VANISHED_TAP = 'not ok 1 - needs a fixture\nok 2 - survivor\n# tests 1\n# pass 1\n# fail 0\n';
+
+test('CONTROL: a clean exit-0 contract PASSES — the fixture reaches the verdict at all', () => {
+  const r = runGate('ok 1 - a\n# tests 1\n# pass 1\n# fail 0\n', 0);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /PASS {2}fake-webctl/);
+});
+
+test('⛔ exit 0 with a TAP `not ok` line is a FAIL, naming the line', () => {
+  const r = runGate(VANISHED_TAP, 0);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /FAIL {2}fake-webctl/);
+  assert.match(r.out, /REPORTED FAILURES/);
+  assert.match(r.out, /not ok 1 - needs a fixture/);
+});
+
+test('⛔ exit 0 with the spec reporter\'s "✖ failing tests:" is a FAIL too', () => {
+  const r = runGate('✔ survivor\n✖ needs a fixture\n\n✖ failing tests:\n\n✖ needs a fixture\n', 0);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /spec 'failing tests'/);
+});
+
+test('TODO and SKIP `not ok` lines are not failures', () => {
+  const r = runGate('not ok 1 - later # TODO\nnot ok 2 - off # SKIP\nok 3 - a\n', 0);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /PASS {2}fake-webctl/, 'must reach a verdict — a SKIP would pass this vacuously');
+});
