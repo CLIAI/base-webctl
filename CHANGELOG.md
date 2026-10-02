@@ -207,7 +207,36 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
-## Unreleased
+## v0.29.0 — 2026-10-03
+
+**Headline: one loader for the shared `~/.config/webctl/` (nl0c §1a).** Greg: every
+lane "sources from shared ~/.config/webctl/", with a declared default browser host.
+
+### Added
+
+* `sharedConfig.loadSharedWebctlConfig({home})`. It reads `config.toml`
+  (`default_target`) and `targets/<name>.toml`, and returns the default as a **config
+  layer** for `resolveTarget`, so a stated flag or env still wins, plus every valid record
+  and an error per bad file.
+  * A file wider than mode 600 is refused, not read.
+  * A record failing `validateTarget` is refused, naming the key, never the value.
+  * A `default_target` naming no valid record, and an unknown key in `config.toml`, are
+    errors.
+  * No directory is an ordinary state: no default, and the loader **never creates** it
+    (tests prove no write).
+* `sharedConfig.parseTomlSubset` — `key = "string" | integer | bool | ["str"]` and
+  comments; anything else is refused with its line number. Zero dependencies.
+
+### ⛔ What this does NOT cover
+
+* **It does not make a lane use it.** Each lane must call it and feed `configLayer` to
+  `resolveTarget`. Lanes that today read a per-tool config only are not switched over by
+  this release.
+* The record says WHERE (`ssh`, `kind`); reaching it — the ssh transport and running the
+  driver remotely — is still per lane (btg4 §5, rm7t §7 "remote build for base-driver
+  lanes" is open).
+
+### Also in this release (from v0.28.0 adopters)
 
 * `run-tests-strict`: a caller's own stdout reporter is kept and the runner adds none, so
   TAP streams once; `--tap`/`--spec` beside one is refused (exit 3, "replace, don't add").
