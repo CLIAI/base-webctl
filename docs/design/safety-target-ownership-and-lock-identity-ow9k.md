@@ -354,6 +354,29 @@ written.
 refusing API needs a **consumer that checks**, and no return value or exception can
 compel one.
 
+### ✅ FIXED IN BASE'S OWN DRIVER — the pattern had moved there
+
+⚠ **The quoted pattern did not stay in `linkedin`.** When lanes re-shimmed onto base's
+driver it became **base's** code: `chromium-docker-xpra.js` step 9 forced the acquire and
+logged-and-continued on any error (raised by `webctl:mgr` from `linkedin`'s re-shim).
+Fixed, and the rule for every driver:
+
+* **No force by default.** Force only when the existing lock already names **this**
+  container — the idempotent re-`up` of our own stack. Step 0's holder check is a
+  **read**; between it and step 9 another runner can take the lock, and `force` overwrote
+  that live claim.
+* **A failed acquire STOPS the start.** `{ok:false}` (a live holder) or a throw (the lock
+  cannot be written) ⇒ the containers **this call started** are removed and the start is
+  refused, naming the holder. A browser no lock describes is invisible to every other
+  runner.
+* *Tested* (`test/docker-up-lock-fails-closed.test.js`): free lock ⇒ acquired without
+  force; a holder appearing mid-bring-up ⇒ refused and both containers removed; an
+  unwritable lock ⇒ refused; own container ⇒ force. Sabotage (`force: true` restored)
+  fails the first two.
+* ⚠ **Still open:** the ideal order is **lock BEFORE start**, so nothing is started under a
+  lock that might be refused. Step 9 now fails closed; moving the acquire to step 0 also
+  needs every later failure path to release it, and is not done.
+
 ### ✅ RULED: `{ok:false}` for the OLD verdicts, THROW for the NEW ones
 
 `linkedin` asked which, because the check they must add differs. **Neither form is
