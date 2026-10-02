@@ -53,7 +53,7 @@ import { createHash } from 'node:crypto';
  * wording. A consumer records the generation it was written against; a sweep
  * then asks "who is below N?" rather than diffing five divergent copies.
  */
-export const HARNESS_GENERATION = 2;
+export const HARNESS_GENERATION = 3;
 
 /**
  * ⚠ NOT BUMPED BY `gate-probe`, DELIBERATELY. The marker answers "who is
@@ -129,12 +129,31 @@ function report(check, code, reason, extra = {}) {
  */
 function judgePin(repo, sub) {
   const declaredEnv = process.env.WEBCTL_DECLARED_PIN || '';
-  const gitlink = git(['ls-tree', 'HEAD', sub], repo).split(/\s+/)[2] || '';
+  // ⚠ Only a mode-160000 COMMIT entry is a gitlink. `ls-tree` on a plain vendored
+  // DIRECTORY prints a TREE sha in the same field, and reading field 2 regardless
+  // judged a tree as if it were a declared pin.
+  const [mode, type, sha] = git(['ls-tree', 'HEAD', sub], repo).split(/\s+/);
+  const gitlink = mode === '160000' && type === 'commit' ? (sha || '') : '';
   const worktree = git(['rev-parse', 'HEAD'], path.join(repo, sub));
 
   if (!gitlink && !worktree) {
     return { code: EXIT.noVerdict, extra: {},
       reason: `no submodule found at '${sub}' — this contract cannot judge a pin that is not mounted` };
+  }
+  if (!gitlink) {
+    // ⛔ UNDECLARED is its own verdict. The worktree used to stand in for the
+    // missing declaration — `gitlink || worktree` — and was then reported as
+    // "declared gitlink … is tag", a declaration nobody made. A sibling cloning
+    // this repo gets no base at all.
+    return { code: EXIT.fail,
+      reason: `UNDECLARED: '${sub}' has a checkout (${worktree.slice(0, 7)}) but no committed gitlink. `
+        + 'A sibling cloning this repo gets no pin; commit the submodule.',
+      extra: { declared: null, worktree } };
+  }
+  if (!worktree) {
+    return { code: EXIT.noVerdict, extra: { declared: gitlink },
+      reason: `the gitlink ${gitlink.slice(0, 7)} is declared but '${sub}' is not checked out `
+        + '(git submodule update --init); nothing runs against it here' };
   }
 
   const swapped = !!declaredEnv && !!worktree && declaredEnv !== worktree;
@@ -150,7 +169,20 @@ function judgePin(repo, sub) {
       extra: { declared: declaredEnv, worktree } };
   }
 
-  const pin = gitlink || worktree;
+  if (!declaredEnv && worktree !== gitlink) {
+    // ⛔ DRIFT. With no gate signal nobody swapped this submodule on purpose, so a
+    // checkout that differs from the declaration means the suite is about to run
+    // against code the repo does not declare. This used to PASS — judging only the
+    // gitlink — which is exactly the drift `pin` exists to catch. (Measured by
+    // `substack` at v0.22.0: a worktree at another commit, "PASS pin", exit 0.)
+    return { code: EXIT.fail,
+      reason: `DRIFT: the declared gitlink is ${gitlink.slice(0, 7)} but '${sub}' has `
+        + `${worktree.slice(0, 7)} checked out, and no release gate says it swapped it. `
+        + 'The suite would run against an undeclared base: git submodule update, or commit the bump.',
+      extra: { declared: gitlink, worktree } };
+  }
+
+  const pin = gitlink;
   const tag = git(['describe', '--tags', '--exact-match', pin], path.join(repo, sub));
   if (!tag) {
     return { code: EXIT.fail,

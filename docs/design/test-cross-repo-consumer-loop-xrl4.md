@@ -512,6 +512,23 @@ This is the vacuous-green failure inverted — a **vacuous red**: a verdict that
 is guaranteed regardless of the state it claims to measure. It is not the safer
 direction. A gate that always blocks gets overridden, and then it is not a gate.
 
+### ⛔ …but OUTSIDE the gate, the pin check must compare the declaration with the checkout
+
+The carve-out above is the **gate's** case. With **no gate signal**, nobody swapped the
+submodule on purpose — and the harness's `pin` (generation 2) judged only the gitlink, so
+a worktree at **another commit** still read *"PASS pin: declared gitlink … is tag"*, exit 0,
+and the suite then ran against code the repo did not declare. *(Measured by `substack` at
+v0.22.0; reproduced by base in a fixture before fixing — the new tests fail on generation 2.)* **Harness generation 3:**
+
+| state | verdict |
+|---|---|
+| gate signal, declared ≠ worktree | NO VERDICT (the gate's swap) — unchanged |
+| no gate signal, worktree ≠ gitlink | ⛔ **FAIL: DRIFT** |
+| no gitlink, a checkout present | ⛔ **FAIL: UNDECLARED** — the worktree never stands in for a declaration (`gitlink \|\| worktree` did, and was reported as "declared") |
+| `vendor/base-webctl` committed as a plain **directory** | not a gitlink: `ls-tree` prints a **tree** sha in the same field, and only mode `160000` is read now |
+| gitlink declared, nothing checked out | NO VERDICT |
+| worktree = gitlink = a tag | PASS — the control |
+
 **Output:** emit JSONL typed envelopes per the machine-interface spec (`lszd`),
 one per suite: `{type, ts, consumer, suite, result, reason?}` where `result ∈
 {pass,fail,skip}` and `reason` is a human-readable string — the consumer's own

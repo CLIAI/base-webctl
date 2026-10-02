@@ -104,6 +104,62 @@ test('⛔ pin: NO VERDICT under the gate\'s swap, keyed on the DECLARED pin', ()
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('⛔ pin: DRIFT — worktree != gitlink with NO gate signal FAILS; control: equal passes, gate swap is NO VERDICT', () => {
+  // Measured by `substack` at v0.22.0: a worktree at another commit, no gate env,
+  // and the result was "PASS pin: declared gitlink … is tag", exit 0. The suite
+  // then ran against code the repo did not declare — the drift `pin` exists for.
+  const { dir, sub, g } = fixture();
+  try {
+    g(['add', 'vendor/base-webctl']);
+    g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
+    const declared = execFileSync('git', ['ls-tree', 'HEAD', 'vendor/base-webctl'],
+      { cwd: dir, encoding: 'utf8' }).split(/\s+/)[2];
+
+    // control: worktree == gitlink (a tag) passes
+    assert.equal(run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: '' }).status, 0);
+
+    // move ONLY the checkout; the declaration still names the tag
+    fs.writeFileSync(path.join(sub, 'lib', 'drift.js'), 'export const z = 3;\n');
+    g(['-C', sub, 'add', '.']);
+    g(['-C', sub, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'drift']);
+
+    const drift = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: '' });
+    assert.equal(drift.status, 1, `drift must FAIL; got ${drift.status}\n${drift.stderr}`);
+    assert.match(drift.stderr, /DRIFT/);
+    assert.match(drift.stderr, new RegExp(declared.slice(0, 7)));
+
+    // the SAME tree under the gate's swap is NO VERDICT, not a drift failure
+    const gated = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: declared });
+    assert.equal(gated.status, 2, 'the gate swapping on purpose is not drift');
+    assert.match(gated.stderr, /release gate has swapped/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ pin: UNDECLARED is its own verdict — a worktree never stands in for a missing gitlink', () => {
+  const { dir } = fixture();
+  try {
+    // the sub repo exists and is at a TAG, but nothing is committed in the parent
+    const r = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: '' });
+    assert.equal(r.status, 1, `undeclared must FAIL; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /UNDECLARED/);
+    assert.doesNotMatch(r.stderr + r.stdout, /declared gitlink [0-9a-f]{7} is tag/,
+      'it must not claim a declaration nobody made');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ pin: a plain vendored DIRECTORY is not a gitlink (ls-tree prints a TREE sha there)', () => {
+  const { dir, sub, g } = fixture();
+  try {
+    // commit the files as a directory, not as a submodule
+    fs.rmSync(path.join(sub, '.git'), { recursive: true, force: true });
+    g(['add', 'vendor/base-webctl']);
+    g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'vendored-copy']);
+    const r = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: '' });
+    assert.notEqual(r.status, 0, `a copied directory has no pin to pass; got ${r.status}\n${r.stderr}`);
+    assert.doesNotMatch(r.stderr + r.stdout, /declared gitlink/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('⭐ no-revendor: catches THE SHAPE THAT SHIPPED — a vendor path in a COMMENT', () => {
   // The original check was `grep -q "$BASE_DIR" lib/client-config.js`, which
   // matched the string inside the shim's own explanatory comment and returned
