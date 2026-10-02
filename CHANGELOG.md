@@ -207,6 +207,32 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.28.0 — 2026-10-02
+
+### Added — `run-tests-strict` compatibility (from `linkedin` and `gemini`)
+
+* **`--serial`** = `--test-concurrency=1`, and it wins over an earlier concurrency flag.
+  node runs test files concurrently; suites that spawn processes or take lock dirs collide.
+* **`--allow-plain-scripts`** for direct-script suites (asserts, no node:test). v0.27.0
+  failed every such file as EMPTY, because it is indistinguishable from a file that
+  registered nothing, and linkedin has 32. The flag accepts them at the cost of the
+  empty-file guard for that run. A non-zero exit and a vanished `describe()` still fail;
+  an inherited env var cannot enable it.
+
+* **`--tap`** — TAP instead of spec on stdout (from `gemini`). Spec already carries the
+  `✖ failing tests:` marker the gate scans, so adopting the runner does not blind the gate;
+  `--tap` keeps a TAP stream for contracts that had one.
+* A file pattern that matches **nothing** fails with a message naming the pattern (plain
+  node exits 0). Base's `*.test.*` glob is base's: lanes pass their own (`gemini` names
+  files `*-test.js`).
+
+### ⛔ What this does NOT cover
+
+* ⚠ **v0.27.0's runner fails direct-script suites.** A lane with them must use v0.28.0's
+  flag (or keep its own runner) before switching.
+* Tested on a box reporting `availableParallelism() = 1`; the tests force concurrency so
+  both arms are falsifiable here, but multi-core behaviour was not run.
+
 ## v0.27.0 — 2026-10-02
 
 **Headline: a green exit is not a green run.** node:test lets a `describe()` that throws
