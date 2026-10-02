@@ -191,3 +191,38 @@ test('local_cdp_port is a stated integer in range; name is checked when given as
   assert.equal(validateTarget(gem(), { name: 'Gem Dev' }).verdict, 'invalid');
   assert.equal(validateTarget(gem(), { name: 'gem-dev' }).verdict, 'valid');
 });
+
+// ── `xq app version --json` (rm7t §3/§4) ─────────────────────────────────────
+import { parseAppVersion } from '../lib/remotes.js';
+
+const appv = (over = {}) => JSON.stringify({ schema: 1, zone: 'z', app: 'chromium',
+  next: { image: 'xq-app-chromium-debian', distro: 'debian', image_id: 'c608ea0', version: 'Chromium 155', source: 'binary' },
+  running: { container: 'c', image_id: '19ff6bb', is_running: true, version: 'Chromium 154', source: 'binary' },
+  stale: true, ...over });
+
+test('CONTROL: both readings parse, labelled, and staleness is carried as given', () => {
+  const r = /** @type {any} */ (parseAppVersion(appv()));
+  assert.equal(r.verdict, 'ok', r.reason);
+  assert.equal(r.next.imageId, 'c608ea0');
+  assert.equal(r.running.imageId, '19ff6bb');
+  assert.equal(r.stale, true);
+  assert.equal(r.next.measured, true);
+});
+
+test('⛔ a version from an image LABEL is a claim, not a measurement', () => {
+  const r = /** @type {any} */ (parseAppVersion(appv({ next: { image_id: 'x', version: '155', source: 'label' } })));
+  assert.equal(r.next.measured, false);
+  assert.match(r.reason, /not measured/);
+});
+
+test('⛔ non-JSON (an argument swallowed, the human table printed) and unknown schema are UNKNOWN', () => {
+  assert.equal(parseAppVersion('ZONE  APP  VERSION\nz  chromium  155').verdict, 'unknown');
+  assert.equal(parseAppVersion(appv({ schema: 2 })).verdict, 'unknown');
+});
+
+test('no container means stale is NOT APPLICABLE (null), never false', () => {
+  const r = /** @type {any} */ (parseAppVersion(appv({ running: null, stale: null })));
+  assert.equal(r.verdict, 'ok');
+  assert.equal(r.stale, null, 'nothing running is not "up to date"');
+  assert.equal(r.running, null);
+});

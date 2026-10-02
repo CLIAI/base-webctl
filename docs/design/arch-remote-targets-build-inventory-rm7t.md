@@ -121,9 +121,20 @@ file**: the hosts layer exists, and a second one is exactly the drift above.
   *image that would run next* (`docker run --rm --entrypoint chromium <image> --version`)
   is what a **refresh** must verify. The *container that is running now* is what the
   **inventory** must report — and after a rebuild the two differ until a restart.
-  Neither is an image label, which is a build-time claim. A versioned
-  `xq app version --json`, resolving the image exactly as `xq up` would, is requested from
-  that lane as the contract in place of a recipe.
+  Neither is an image label, which is a build-time claim.
+  ✅ **Now a contract, built by the zone-manager lane:** `xq app version <zone>/<app>
+  --json` (schema 1) reports **both** readings, each labelled — `next` (resolved exactly
+  as `xq up` would) and `running` (read by `exec` into the live container) — plus
+  `stale`, and exits 3 when stale. Base reads it with `parseAppVersion`.
+* ⭐ **STALENESS IS AN IDENTITY QUESTION, NOT A VERSION ONE** *(zone-manager lane)*. It
+  compares **image IDs**: two builds can print the same version string and still differ,
+  so *"would a restart change what runs"* cannot be answered by comparing versions. ⇒ A
+  refresh is therefore verified on **two** axes: the `next` version against the declared
+  candidate (`versionVerdict`), **and** `stale` against the running container (identity).
+  Version equality alone would call a refreshed-but-not-restarted browser current.
+* Every version carries a `source`: `binary` (the binary was run and answered) is a
+  measurement; `label` is the image's own build-time **claim**, a fallback, and base
+  reports it as **not measured**.
 * On zone-manager lanes, build/refresh **delegates to the zone manager**, which owns
   images there. Base does not build what it does not own.
 * ⛔ **"Refresh" means FRESH PACKAGES, and it is verified by a READING.** Measured by

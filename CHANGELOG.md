@@ -207,6 +207,30 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.20.0 — 2026-10-02
+
+**Headline: `parseAppVersion` — base reads the zone manager's `xq app version --json`,
+which reports the image that WOULD run and the container that IS running, separately.**
+Built by the zone-manager lane in answer to rm7t's distinction.
+
+### ⛔ What this headline does NOT cover
+
+* ⛔ **`versionVerdict` alone does NOT verify a refresh.** It compares version strings;
+  staleness is an **identity** question (image IDs), because two builds can print the
+  same version and differ. A refresh needs both: `versionVerdict` on `next`, and
+  `stale` from `parseAppVersion`.
+* A version whose source is an image **label** is a build-time claim; `parseAppVersion`
+  reports it as `measured: false` rather than treating it as a reading.
+* Base does not run `xq`; lanes do. Unchanged: no live login-mode reader for base's own
+  driver; hardware acceleration in login mode not achieved.
+
+### Added
+
+* `parseAppVersion(text)` and `APP_VERSION_SCHEMA` — `next` / `running` / `stale`, each
+  version with `measured`; unknown schema or non-JSON → UNKNOWN (the zone manager's
+  documented bug class is an argument swallowed and the HUMAN table printed with exit 0);
+  no container → `stale: null`, never `false`.
+
 ## v0.19.0 — 2026-10-02
 
 ### ⛔ SECURITY — read this first
