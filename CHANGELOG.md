@@ -207,6 +207,40 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.27.0 — 2026-10-02
+
+**Headline: a green exit is not a green run.** node:test lets a `describe()` that throws
+while registering vanish: `not ok`, `# fail 0`, exit 0 (node v22, reproduced; found by
+`chatgpt`). Zero-test guards miss it, because the tests that did register still count.
+
+### Added
+
+* `scripts/strict-reporter.mjs` + `scripts/run-tests-strict.mjs`. They fail on any
+  failure EVENT (TODO/SKIP excepted), including a vanished suite. They fail a test file
+  that registers zero tests (node counts it as a pass), and they strip `NODE_TEST_CONTEXT`
+  for nested runs. One implementation for the family; lanes with their own runners
+  (`grok`, `chatgpt`, `fetlife`, `gemini`) can fold into it.
+* **Release gate:** a contract that exits 0 while printing a TAP `not ok` (TODO/SKIP
+  excepted) or spec's `✖ failing tests:` is a **FAIL**, named. `WEBCTL_CONSUMERS_FILE`
+  overrides the registry, for the gate's own tests against fake consumers.
+
+### Fixed — in base itself
+
+* Base's own `npm test` was bare `node --test`. Behind the strict runner it failed at
+  once: default discovery ran **three helper scripts as tests**. They registered nothing
+  and each counted as a pass. One (`mutex-worker.mjs`, given no arguments) took a lock in
+  the real `~/.cache/CLIAI/demo-webctl/locks` on every run. Now `npm test` passes an
+  explicit `test/**/*.test.{js,mjs,cjs}` glob through the strict runner. The real test
+  count is 416, not the 419 reported before.
+
+### ⛔ What this does NOT cover
+
+* **A `"test"` script that never runs node** (`echo "No tests yet" && exit 0` over a
+  114-test suite, measured by `fetlife`). No reporter or scan sees it; only reading the
+  script does.
+* The gate's scan reads TAP and spec output. A contract using another reporter that
+  hides failures behind exit 0 is not detected.
+
 ## v0.26.0 — 2026-10-02
 
 ### ⛔ BREAKING — reading a config key off `loadJsoncConfig()`'s wrapper now THROWS
