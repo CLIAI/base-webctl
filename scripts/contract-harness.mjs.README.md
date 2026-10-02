@@ -86,6 +86,12 @@ VERDICT — a false sentence). Fixed in generation 4. *(Keyings so far: `WEBCTL_
 then `DECLARED_PIN`, then declared ≠ worktree; the fifth asks the one party that knows
 — the swapper.)*
 
+⚠ **A test that scrubs the gate's variables must scrub ALL of them** —
+`WEBCTL_GATE_SWAPPED`, `WEBCTL_DECLARED_PIN` and `WEBCTL_BASE_DIR`. Scrubbing the
+declared pin but not the swap flag leaks `SWAPPED=1` into a local fixture under the
+gate (measured in a lane at the v0.26.0 candidate: its control arm went NO VERDICT).
+`pin` names that state *INCONSISTENT gate signal* rather than calling it a swap.
+
 Under a real swap the check returns **no verdict**, never a fail: a candidate is
 not yet tagged, and failing there is a vacuous RED. *A gate that always blocks gets
 overridden.*

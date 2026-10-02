@@ -163,6 +163,16 @@ function judgePin(repo, sub) {
   // under a gate run that had NOT swapped (`SWAPPED=0`) read as "the release gate has
   // swapped this submodule" — NO VERDICT, a false statement, and the drift passed.
   // (Raised from `fetlife`'s adoption; measured in base's own gen 3 before fixing.)
+  if (process.env.WEBCTL_GATE_SWAPPED === '1' && !declaredEnv) {
+    // ⚠ An INCONSISTENT signal: a swap with no declared pin. The gate never produces it
+    // (gate-probe flags it as a gate defect); a test that scrubs DECLARED_PIN but not
+    // SWAPPED does — measured in a lane's fixture under the gate. Say THAT, rather
+    // than "the release gate has swapped (declared , …)", which reads as a swap.
+    return { code: EXIT.noVerdict, extra: { declared: null, worktree },
+      reason: 'INCONSISTENT gate signal: WEBCTL_GATE_SWAPPED=1 but WEBCTL_DECLARED_PIN is empty. '
+        + 'A test that scrubs the gate\'s variables must scrub BOTH (and WEBCTL_BASE_DIR); '
+        + 'a gate never sends one without the other.' };
+  }
   const swapped = process.env.WEBCTL_GATE_SWAPPED === '1' && declaredEnv !== worktree;
   if (swapped) {
     // ⇒ A pin check under the gate is a VACUOUS RED: the gate deliberately

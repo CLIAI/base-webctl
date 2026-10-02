@@ -173,6 +173,22 @@ test('⛔ pin: a plain vendored DIRECTORY is not a gitlink (ls-tree prints a TRE
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('⚠ pin: SWAPPED=1 with NO declared pin is named INCONSISTENT, never reported as a swap', () => {
+  // A lane's fixture scrubbed DECLARED_PIN but not SWAPPED, under the gate; the old
+  // reason read "the release gate has swapped (declared , worktree …)".
+  const { dir, g } = fixture();
+  try {
+    g(['add', 'vendor/base-webctl']);
+    g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
+    const r = run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: '', WEBCTL_GATE_SWAPPED: '1' });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /INCONSISTENT gate signal/);
+    assert.doesNotMatch(r.stderr, /release gate has swapped/);
+    // control: the same fixture with the variables scrubbed BOTH ways is an ordinary pass
+    assert.equal(run(['pin', '--repo', dir], { WEBCTL_DECLARED_PIN: '', WEBCTL_GATE_SWAPPED: '' }).status, 0);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('⛔ require-generation: a FLOOR that fails closed — including on harnesses that predate it', () => {
   const ok = run(['require-generation', '1']);
   assert.equal(ok.status, 0);
