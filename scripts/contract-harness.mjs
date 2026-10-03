@@ -38,6 +38,10 @@
 //   node <base>/scripts/contract-harness.mjs require-generation 4    # the floor; ANY non-zero = FAIL
 //   node <base>/scripts/contract-harness.mjs pin         --repo . --sub vendor/base-webctl
 //   node <base>/scripts/contract-harness.mjs no-revendor --repo . --sub vendor/base-webctl
+//   node <base>/scripts/contract-harness.mjs isolated -- <cmd> [args…]   # every mutation arm (xrl4)
+//   node <base>/scripts/contract-harness.mjs isolated -- node <base>/scripts/contract-harness.mjs isolation-check <port>…
+//   node <base>/scripts/contract-harness.mjs sandbox-port [--bare]
+//   node <base>/scripts/contract-harness.mjs guard-live-port <port> [--pin-verified]
 //
 // Exit: 0 pass · 1 fail · 2 NO VERDICT (reason printed as its last line) · 3 usage
 //
@@ -48,6 +52,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+// ⇩ for the network-isolation verbs (isolated / sandbox-port / guard-live-port)
+import net from 'node:net';
+import os from 'node:os';
+import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 /**
  * ⭐ THE GENERATION MARKER. Bump when a check's BEHAVIOUR changes, never for
@@ -484,7 +494,482 @@ function normHash(src) {
 }
 
 
+// ── network isolation for mutation arms (xrl4 "NO HOST NETWORK") ──────────────
+//
+// ⛔ INCIDENT (2026-10-02, a consumer lane's mutation control): the mutant planted
+// "the default port is a location", the arm ATTACHED to the real signed-in browser
+// listening on the host's loopback, closed its last tab, and Chromium exited.
+// Correct code refuses; A MUTANT DOES NOT REFUSE — that is what makes it a mutant.
+// The family's sandboxes isolated HOME, CWD, env and PATH. Not the network.
+//
+// ⇒ `isolated` puts the arm in a private user+network namespace (`unshare -rn`)
+// whose only interface is its OWN loopback, so the host's listeners do not exist.
+// It FAILS CLOSED: there is no path on which the command runs on the host.
+
+const SELF = fileURLToPath(import.meta.url);
+const ISOLATED_INNER = '__isolated-inner';
+
+/**
+ * Forward termination signals to a child, so killing the harness kills the arm
+ * rather than orphaning it. @param {import('node:child_process').ChildProcess} child
+ */
+function forwardSignals(child) {
+  for (const s of /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM', 'SIGHUP'])) {
+    process.on(s, () => { try { child.kill(s); } catch { /* already gone */ } });
+  }
+}
+
+/** @param {number|null} code @param {NodeJS.Signals|null} signal */
+function exitCodeOf(code, signal) {
+  if (code != null) return code;
+  const n = signal ? os.constants.signals[signal] : undefined;
+  return 128 + (n || 1);
+}
+
+/**
+ * `isolated -- <cmd> [args…]` — run <cmd> in a private network namespace.
+ *
+ * The outer half spawns `unshare -rn <node> <this file> __isolated-inner <netns> -- <cmd…>`
+ * with an extra pipe on fd 3. The inner half proves the isolation (below), then
+ * writes `started` on fd 3 and runs the command; any refusal is written as
+ * `fail <reason>` instead. ⇒ The outer half can tell "isolation was refused" from
+ * "the command exited 1", and reports the former ONCE, as FAIL, with the reason.
+ *
+ * ⛔ NEVER FALLS BACK TO THE HOST. No unshare, userns disabled, no `ip`/`ifconfig`,
+ * a loopback that will not come up, a namespace that still sees a non-loopback
+ * interface or a listener — each is FAIL, and the command is not started.
+ *
+ * argv goes through as an ARRAY: no shell sees the user command.
+ * @param {string[]} a
+ * @returns {Promise<number>}
+ */
+function runIsolated(a) {
+  if (a[0] !== '--' || a.length < 2) {
+    process.stderr.write('usage: contract-harness.mjs isolated -- <cmd> [args…]\n');
+    return Promise.resolve(EXIT.usage);
+  }
+  const command = a.slice(1);
+  // ⛔ NESTED CALL: "already inside" is proven from the KERNEL. The marker alone is
+  // trusted input — set on the host it would skip isolation entirely — so a marker
+  // whose proof fails is REFUSED (no verdict, exit 2) before anything runs.
+  if (process.env[HOST_NETNS_ENV] !== undefined) {
+    const proof = kernelInsideProof();
+    if (!proof.inside) {
+      return Promise.resolve(report('isolated', EXIT.noVerdict,
+        `REFUSED, nothing run: ${HOST_NETNS_ENV} is set, claiming we are already inside an isolated `
+          + `namespace, but the kernel says otherwise — ${proof.why}. Unset it on the host; only `
+          + '`isolated` sets it.', { command, namespace: proof.facts }));
+    }
+    return runCommand(command); // provably inside already: do not unshare again
+  }
+  let hostNs = '';
+  try { hostNs = fs.readlinkSync('/proc/self/ns/net'); } catch (e) {
+    return Promise.resolve(report('isolated', EXIT.fail,
+      `cannot read this process's network namespace (/proc/self/ns/net: ${errMsg(e)}), so `
+      + 'isolation cannot be PROVEN; refusing to run the command on the host'));
+  }
+  return new Promise((resolve) => {
+    /** @type {import('node:child_process').ChildProcess} */
+    let child;
+    try {
+      child = spawn('unshare', ['-rn', process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
+        { stdio: ['inherit', 'inherit', 'inherit', 'pipe'], env: { ...process.env, [HOST_NETNS_ENV]: hostNs } });
+    } catch (e) {
+      resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
+      return;
+    }
+    forwardSignals(child);
+    let status = '';
+    child.stdio[3]?.on('data', (d) => { status += String(d); });
+    child.stdio[3]?.on('error', () => { /* inner closed it */ });
+    let spawnErr = '';
+    child.on('error', (e) => { spawnErr = errMsg(e); });
+    child.on('close', (code, signal) => {
+      const started = /^started$/m.test(status);
+      const fail = status.match(/^fail (.*)$/m);
+      if (started) { resolve(exitCodeOf(code, signal)); return; }
+      const why = fail ? fail[1]
+        : spawnErr ? `unshare could not be started (${spawnErr}) — is util-linux installed`
+          : `unshare exited ${code ?? signal} before the isolated side reported in — unprivileged `
+            + 'user namespaces may be disabled (kernel.unprivileged_userns_clone / '
+            + 'user.max_user_namespaces); unshare\'s own message, if any, is above';
+      resolve(report('isolated', EXIT.fail,
+        `NOT RUN: ${why}. The command was NOT started, and is never run on the host as a fallback.`,
+        { command }));
+    });
+  });
+}
+
+/** @param {unknown} e */
+function errMsg(e) { return e instanceof Error ? e.message : String(e); }
+
+/**
+ * The half that runs INSIDE the namespace. Proves the PROPERTY — no host network —
+ * not its proxy ("unshare exited 0"):
+ *
+ *   1. the network namespace differs from the caller's;
+ *   2. the namespace's ONLY interface is `lo` (/proc/self/net/dev is per-netns);
+ *   3. nothing LISTENS on TCP here (/proc/self/net/tcp{,6} — the host's browser
+ *      would appear here if this were the host's namespace);
+ *   4. `lo` is brought up (`ip`, else `ifconfig`) and a self-connect on
+ *      127.0.0.1 works, so local fakes and stubs still run.
+ *
+ * ⇒ (2) and (3) also make this verb useless as a bypass: called directly on the
+ * host it refuses, whatever namespace id it is handed.
+ * @param {string[]} a
+ * @returns {Promise<number>}
+ */
+async function runIsolatedInner(a) {
+  /** @param {string} line */
+  const tell = (line) => { try { fs.writeSync(3, `${line}\n`); return true; } catch { return false; } };
+  const refuse = (/** @type {string} */ why) => {
+    if (!tell(`fail ${why}`)) process.stderr.write(`isolated: ${why}\n`);
+    return EXIT.fail;
+  };
+  const [hostNs, sep, ...command] = a;
+  if (!hostNs || sep !== '--' || command.length === 0) return refuse('internal: malformed inner invocation');
+
+  let ns = '';
+  try { ns = fs.readlinkSync('/proc/self/ns/net'); } catch (e) {
+    return refuse(`cannot read the namespace id inside (${errMsg(e)})`);
+  }
+  if (ns === hostNs) {
+    return refuse(`still in the CALLER'S network namespace (${ns}) — whatever ran as 'unshare' did not `
+      + 'isolate the network');
+  }
+  const extra = extraInterfaces();
+  if (extra !== 0) {
+    return refuse(extra < 0 ? 'cannot list interfaces (/proc/self/net/dev unreadable)'
+      : `the namespace has ${extra} interface(s) besides 'lo' — it is not a private network `
+        + 'namespace and can reach beyond itself');
+  }
+  if (uidMapKind() !== 'mapped') {
+    return refuse(`/proc/self/uid_map is ${uidMapKind()}, not a user-namespace mapping — this is not `
+      + "the namespace 'unshare -rn' creates");
+  }
+  let listeners = 0;
+  for (const f of ['/proc/self/net/tcp', '/proc/self/net/tcp6']) {
+    let txt = '';
+    try { txt = fs.readFileSync(f, 'utf8'); } catch { continue; } // tcp6 may be absent (ipv6 off)
+    listeners += txt.split('\n').slice(1).filter((l) => l.trim().split(/\s+/)[3] === '0A').length;
+  }
+  if (listeners > 0) {
+    return refuse(`${listeners} TCP listener(s) are visible inside — this is not a fresh namespace`);
+  }
+
+  const up = bringLoUp();
+  if (up) return refuse(up);
+  try { await loopbackSelfTest(); } catch (e) {
+    return refuse(`the namespace loopback does not work after bringing it up (${errMsg(e)})`);
+  }
+
+  if (!tell('started')) return refuse('internal: the status channel (fd 3) is missing — run via `isolated`');
+  try { fs.closeSync(3); } catch { /* the command must not inherit it */ }
+
+  return runCommand(command);
+}
+
+/**
+ * Run the user command with the caller's env/cwd/stdio; resolve with its exit code
+ * (128+signal when killed, 127 when it cannot be started).
+ * @param {string[]} command @returns {Promise<number>}
+ */
+function runCommand(command) {
+  return new Promise((resolve) => {
+    const child = spawn(command[0], command.slice(1), { stdio: 'inherit' });
+    forwardSignals(child);
+    child.on('error', (e) => {
+      process.stderr.write(`isolated: cannot run '${command[0]}': ${errMsg(e)}\n`);
+      resolve(127);
+    });
+    child.on('close', (code, signal) => resolve(exitCodeOf(code, signal)));
+  });
+}
+
+// ── kernel facts: "am I inside?" is read from the KERNEL, never from env alone ──
+//
+// ⛔ A lane's own isolation used an env marker (`…_IN_NETNS=1`) to mean "already
+// inside"; setting it on the HOST skipped isolation and the whole suite ran on the
+// host network. ⇒ `isolated` exports WEBCTL_HOST_NETNS (the host netns id it saw at
+// entry), but that id can be FABRICATED, so it is only one of THREE facts:
+//
+//   1. /proc/self/ns/net DIFFERS from the recorded host id;
+//   2. /proc/self/uid_map is NOT the identity map ("0 0 4294967295") — env-free;
+//   3. /proc/self/net/dev lists ONLY 'lo'                              — env-free.
+//
+// ⚠ (2) alone proves only a USER namespace: `unshare -r` WITHOUT -n passes it. And
+// (1)+(2) together are still beaten by `unshare -r` plus a fabricated id that merely
+// differs from the current one — measured while building this. (3) is what closes it:
+// it is a fact about the NETWORK, which is the thing being claimed.
+
+const HOST_NETNS_ENV = 'WEBCTL_HOST_NETNS';
+
+/** @returns {'identity'|'mapped'|'unreadable'} */
+function uidMapKind() {
+  let txt = '';
+  try { txt = fs.readFileSync('/proc/self/uid_map', 'utf8'); } catch { return 'unreadable'; }
+  const lines = txt.trim().split('\n').map((l) => l.trim().split(/\s+/).join(' ')).filter(Boolean);
+  if (lines.length === 0) return 'unreadable';
+  return lines.length === 1 && lines[0] === '0 0 4294967295' ? 'identity' : 'mapped';
+}
+
+/**
+ * Interfaces other than 'lo' in THIS network namespace (/proc/self/net is per-netns).
+ * ⚠ A count, never names: interface names describe the host, and refusals get pasted.
+ * @returns {number} -1 when unreadable
+ */
+function extraInterfaces() {
+  try {
+    return fs.readFileSync('/proc/self/net/dev', 'utf8').split('\n').slice(2)
+      .map((l) => l.split(':')[0].trim()).filter((n) => n && n !== 'lo').length;
+  } catch { return -1; }
+}
+
+/**
+ * Is this process provably inside a private network namespace that `isolated` made?
+ * All three facts must hold; every one that fails is named.
+ * @returns {{inside: boolean, why: string, facts: Record<string, any>}}
+ */
+function kernelInsideProof() {
+  const recorded = process.env[HOST_NETNS_ENV];
+  let netns = '';
+  try { netns = fs.readlinkSync('/proc/self/ns/net'); } catch { /* named below */ }
+  const uidMap = uidMapKind();
+  const extra = extraInterfaces();
+  /** @type {string[]} */
+  const fails = [];
+  if (!netns) fails.push('/proc/self/ns/net is unreadable');
+  if (!recorded) fails.push(`${HOST_NETNS_ENV} is not set, so there is no recorded host namespace to differ from`);
+  else if (netns === recorded) fails.push(`the current network namespace ${netns} EQUALS the recorded host one`);
+  if (uidMap !== 'mapped') fails.push(`/proc/self/uid_map is ${uidMap} (no user namespace)`);
+  if (extra !== 0) {
+    fails.push(extra < 0 ? '/proc/self/net/dev is unreadable'
+      : `${extra} interface(s) besides 'lo' are visible (the host's network)`);
+  }
+  return { inside: fails.length === 0, why: fails.join('; '),
+    facts: { netns, recorded: recorded ?? null, uidMap, extraInterfaces: extra } };
+}
+
+/**
+ * `isolation-check <port>…` — the PRECONDITION a lane runs INSIDE `isolated` before
+ * its runner-spawning arms: "my real default port is unreachable from in here; my
+ * own fake is reachable."
+ *
+ *   * each named port: a connect to 127.0.0.1:<port> must fail with EXACTLY
+ *     ECONNREFUSED. ⛔ Not "any error": with lo DOWN the connect fails ENETUNREACH,
+ *     which looks like isolation — and then every in-namespace fake fails for the
+ *     wrong reason. Refused means lo is UP in our own namespace and nothing listens.
+ *   * a control listener this verb opens on the namespace loopback must be REACHABLE;
+ *   * the kernel proof (kernelInsideProof) must hold — otherwise a host on which the
+ *     browser merely happens to be DOWN right now would pass, and it may come back.
+ *
+ * FAIL names every condition that failed.
+ * @param {string[]} a @returns {Promise<number>}
+ */
+async function checkIsolation(a) {
+  if (a.length === 0 || a.some((x) => !/^\d+$/.test(x) || Number(x) < 1 || Number(x) > 65535)) {
+    process.stderr.write('usage: contract-harness.mjs isolation-check <port 1-65535>…   '
+      + '(run it INSIDE: contract-harness.mjs isolated -- node contract-harness.mjs isolation-check <port>…)\n');
+    return EXIT.usage;
+  }
+  /** @type {string[]} */
+  const fails = [];
+  /** @type {{port: number, error: string}[]} */
+  const ports = [];
+  for (const p of a.map(Number)) {
+    const error = await connectOutcome(p);
+    ports.push({ port: p, error });
+    if (error === 'CONNECTED') fails.push(`127.0.0.1:${p} is REACHABLE from here`);
+    else if (error === 'ENETUNREACH') fails.push(`127.0.0.1:${p} → ENETUNREACH: the loopback is DOWN, not isolated-and-up`);
+    else if (error !== 'ECONNREFUSED') fails.push(`127.0.0.1:${p} → ${error}, not ECONNREFUSED`);
+  }
+  let control = 'reachable';
+  try { await loopbackSelfTest(); } catch (e) {
+    control = /** @type {NodeJS.ErrnoException} */ (e).code || errMsg(e);
+    fails.push(`the control listener on the namespace loopback is NOT reachable (${control})`);
+  }
+  const proof = kernelInsideProof();
+  if (!proof.inside) fails.push(`not provably inside a private network namespace: ${proof.why}`);
+
+  const portsTxt = ports.map((x) => `127.0.0.1:${x.port} → ${x.error}`).join(', ');
+  const extra = { ports, control, namespace: proof.facts };
+  if (fails.length) {
+    return report('isolation-check', EXIT.fail, `${fails.join('; ')}. (${portsTxt}; control: ${control})`, extra);
+  }
+  return report('isolation-check', EXIT.pass,
+    `${portsTxt}; control listener on the namespace loopback: reachable; inside a private network namespace`,
+    extra);
+}
+
+/**
+ * Connect to 127.0.0.1:port and name the outcome: 'CONNECTED', the errno, or 'TIMEOUT'.
+ * @param {number} port @param {number} [ms] @returns {Promise<string>}
+ */
+function connectOutcome(port, ms = 800) {
+  return new Promise((resolve) => {
+    const s = net.connect(port, '127.0.0.1');
+    const t = setTimeout(() => { s.destroy(); resolve('TIMEOUT'); }, ms);
+    s.on('connect', () => { clearTimeout(t); s.destroy(); resolve('CONNECTED'); });
+    s.on('error', (e) => { clearTimeout(t); resolve(/** @type {NodeJS.ErrnoException} */ (e).code || errMsg(e)); });
+  });
+}
+
+/**
+ * Bring the namespace's loopback up. `ip` (iproute2), else `ifconfig` (net-tools);
+ * neither → refuse. @returns {string} '' on success, else the reason
+ */
+function bringLoUp() {
+  /** @type {string[]} */
+  const tried = [];
+  for (const [bin, argv] of /** @type {[string, string[]][]} */ ([
+    ['ip', ['link', 'set', 'lo', 'up']], ['ifconfig', ['lo', 'up']]])) {
+    try {
+      execFileSync(bin, argv, { stdio: ['ignore', 'ignore', 'pipe'] });
+      return '';
+    } catch (e) {
+      const err = /** @type {NodeJS.ErrnoException & {stderr?: Buffer}} */ (e);
+      tried.push(err.code === 'ENOENT' ? `${bin}: not found`
+        : `${bin}: ${String(err.stderr || err.message).trim()}`);
+    }
+  }
+  return `cannot bring the namespace loopback up (${tried.join('; ')}) — install iproute2`;
+}
+
+/** Listen on 127.0.0.1:0 and connect to it. @returns {Promise<void>} */
+function loopbackSelfTest() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer((s) => s.destroy());
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const port = /** @type {net.AddressInfo} */ (srv.address()).port;
+      const c = net.connect(port, '127.0.0.1');
+      c.on('connect', () => { c.destroy(); srv.close(); resolve(); });
+      c.on('error', (e) => { srv.close(); reject(e); });
+    });
+  });
+}
+
+/**
+ * Try a TCP connect to 127.0.0.1:port.
+ * @param {number} port @param {number} [ms]
+ * @returns {Promise<'yes'|'no'|'unknown'>} unknown = timed out (not proof of absence)
+ */
+function probeListening(port, ms = 800) {
+  return new Promise((resolve) => {
+    const s = net.connect(port, '127.0.0.1');
+    const t = setTimeout(() => { s.destroy(); resolve('unknown'); }, ms);
+    s.on('connect', () => { clearTimeout(t); s.destroy(); resolve('yes'); });
+    s.on('error', (e) => {
+      clearTimeout(t);
+      resolve(/** @type {NodeJS.ErrnoException} */ (e).code === 'ECONNREFUSED' ? 'no' : 'unknown');
+    });
+  });
+}
+
+/**
+ * Does 127.0.0.1:port answer `GET /json/version` with 200?
+ * @param {number} port @param {number} [ms] @returns {Promise<boolean>}
+ */
+function probeCdp(port, ms = 1500) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/json/version', timeout: ms }, (res) => {
+      res.resume();
+      resolve(res.statusCode === 200);
+    });
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.on('error', () => resolve(false));
+  });
+}
+
+/**
+ * `sandbox-port [--bare]` — a port with NOTHING behind it, for a lane to export
+ * into its PORT variable so every port DERIVED from it is dead too.
+ *
+ * Bind 127.0.0.1:0, read the port, close, then ASSERT a connect is refused (a
+ * port freed is not a port nobody took). `--bare` prints only the number on
+ * stdout, for `PORT=$(…)`.
+ * @param {string[]} a @returns {Promise<number>}
+ */
+async function checkSandboxPort(a) {
+  const bare = a.includes('--bare');
+  if (a.some((x) => x !== '--bare')) {
+    process.stderr.write('usage: contract-harness.mjs sandbox-port [--bare]\n');
+    return EXIT.usage;
+  }
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const port = await new Promise((resolve, reject) => {
+      const srv = net.createServer();
+      srv.on('error', reject);
+      srv.listen(0, '127.0.0.1', () => {
+        const p = /** @type {net.AddressInfo} */ (srv.address()).port;
+        srv.close(() => resolve(p));
+      });
+    }).catch(() => 0);
+    if (!port) continue;
+    if (await probeListening(Number(port)) !== 'no') continue; // someone took it — try another
+    if (bare) {
+      process.stdout.write(`${port}\n`);
+      process.stderr.write(`PASS  sandbox-port: 127.0.0.1:${port} refuses connections\n`);
+      return EXIT.pass;
+    }
+    return report('sandbox-port', EXIT.pass,
+      `127.0.0.1:${port} was free and refuses connections — export it so derived ports are dead`,
+      { port: Number(port) });
+  }
+  return report('sandbox-port', EXIT.fail,
+    'could not obtain a port that stays dead after release in 5 attempts');
+}
+
+/**
+ * `guard-live-port <port> [--pin-verified]` — defence in depth where `isolated`
+ * is not used. REFUSES when 127.0.0.1:<port> LISTENS or answers CDP, unless the
+ * caller has verified its sandbox pin. Names BOTH facts either way.
+ *
+ * ⚠ A listener with a dead browser behind it (docker-proxy) still counts: the
+ * browser may come back mid-run. A connect that TIMES OUT is not proof of
+ * absence, so it refuses too.
+ * @param {string[]} a @returns {Promise<number>}
+ */
+async function checkGuardLivePort(a) {
+  const pinVerified = a.includes('--pin-verified');
+  const rest = a.filter((x) => x !== '--pin-verified');
+  const port = Number(rest[0]);
+  if (rest.length !== 1 || !/^\d+$/.test(rest[0]) || port < 1 || port > 65535) {
+    process.stderr.write('usage: contract-harness.mjs guard-live-port <port 1-65535> [--pin-verified]\n');
+    return EXIT.usage;
+  }
+  const listening = await probeListening(port);
+  const cdp = listening === 'yes' && await probeCdp(port);
+  const facts = `listening: ${listening}, CDP answering: ${cdp ? 'yes' : 'no'}`;
+  const extra = { port, listening, cdp, pinVerified };
+  if (listening === 'no') {
+    return report('guard-live-port', EXIT.pass, `127.0.0.1:${port} — ${facts}`, extra);
+  }
+  if (pinVerified) {
+    return report('guard-live-port', EXIT.pass,
+      `127.0.0.1:${port} — ${facts}; proceeding ONLY because --pin-verified was given`, extra);
+  }
+  return report('guard-live-port', EXIT.fail,
+    `REFUSED 127.0.0.1:${port} — ${facts}. A mutation arm aimed here can reach a LIVE browser `
+      + '(a mutant does not refuse). Run the arm under `isolated`, point it at `sandbox-port`, '
+      + 'or pass --pin-verified once the sandbox pin is verified.', extra);
+}
+
 // ── entry ─────────────────────────────────────────────────────────────────────
+/**
+ * ⛔ IMPORTING THIS MODULE MUST NEVER RUN A VERB. The dispatch below used to run at
+ * module top level unconditionally, so an `import` of this file (a test reading
+ * HARNESS_GENERATION) would dispatch on the IMPORTER's argv — at best usage + exit 3,
+ * at worst a real verb. ⇒ Dispatch only when this file IS the entry script; both
+ * sides realpath'd, because node's argv[1] keeps a symlinked path while
+ * import.meta.url is the resolved one.
+ */
+function isEntryScript() {
+  try { return !!process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(SELF); } catch { return false; }
+}
+// ⚠ Body deliberately NOT re-indented: keeps this guard a two-line diff against
+// concurrent edits to the dispatch.
+if (isEntryScript()) {
 const [, , cmd, ...args] = process.argv;
 const repo = path.resolve(opt(args, 'repo', '.'));
 const sub = opt(args, 'sub', 'vendor/base-webctl');
@@ -509,10 +994,18 @@ switch (cmd) {
   case 'pin': code = checkPin(repo, sub); break;
   case 'no-revendor': code = checkNoRevendor(repo, sub, libDir); break;
   case 'gate-probe': code = checkGateProbe(repo, sub); break;
+  // ⇩ network isolation for mutation arms — additive, generation unchanged (see DEV_NOTES)
+  case 'isolated': code = await runIsolated(args); break;
+  case ISOLATED_INNER: code = await runIsolatedInner(args); break;
+  case 'sandbox-port': code = await checkSandboxPort(args); break;
+  case 'guard-live-port': code = await checkGuardLivePort(args); break;
+  case 'isolation-check': code = await checkIsolation(args); break;
   default:
     process.stderr.write(
       'usage: contract-harness.mjs <generation|require-generation N|pin|no-revendor|gate-probe> [--repo D] [--sub P] [--lib D]\n'
+      + '       contract-harness.mjs isolated -- <cmd> [args…] | isolation-check <port>… | sandbox-port [--bare] | guard-live-port <port> [--pin-verified]\n'
       + '⇒ exit 0 pass · 1 fail · 2 no verdict (reason on the last line) · 3 usage\n');
     code = EXIT.usage;
 }
 process.exit(code);
+}
