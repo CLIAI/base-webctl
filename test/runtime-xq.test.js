@@ -326,3 +326,18 @@ test('readCapabilities: spawn THROWING synchronously ⇒ xq-failed, never a thro
     child_process.spawn = orig;
   }
 });
+
+// ── xq evolves ADDITIVELY: a newer schema-1 document must still parse ─────────
+test('⛔ an additive field in a newer xq (per-verb "schemas") is tolerated — schema 1 still parses', () => {
+  // Measured from xq after X6/X7: verbs carry "schemas": [...] and firefox declares bidi.
+  // A reader that refused unknown keys would turn every newer xq into UNKNOWN.
+  const text = fs.readFileSync(new URL('./fixtures/xq-capabilities.schema1.additive.measured.json', import.meta.url), 'utf8');
+  assert.ok(/"schemas"/.test(text), 'premise: the fixture really carries the additive field');
+  const caps = /** @type {any} */ (parseCapabilities(text));
+  assert.equal(caps.verdict, 'ok', caps.reason);
+  assert.equal(hasVerb(caps, 'wait-ready', { jsonSchema: 1 }), true);
+  assert.equal(hasVerb(caps, 'forward', { jsonSchema: 1 }), true);
+  const ff = controlFor(caps, 'firefox', { distro: 'ubuntu' });
+  assert.equal(ff.state, 'declared');
+  assert.deepEqual(ff.controls.map((c) => c.adapter), ['bidi']);
+});
