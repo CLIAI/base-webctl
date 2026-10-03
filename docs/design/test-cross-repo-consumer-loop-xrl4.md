@@ -407,6 +407,35 @@ RECOVERABILITY, and the two come apart exactly where an argument is malformed.
 When the only options are a loud stop and an irreversible one, prefer the loud
 stop even where a silence argument otherwise holds.
 
+### ⛔ Mutation arms run with NO HOST NETWORK — sandboxes isolated everything but the network
+
+*INCIDENT, 2026-10-02 18:43 UTC (verified with docker inspect by `webctl:mgr`):* a lane's
+mutation control planted "the default port is a location". The arms then ATTACHED to the
+REAL signed-in browser listening on the host's loopback, closed its last tab, and Chromium
+exited. Correct code refuses, so green runs were safe; **a mutant does not refuse — that is
+what makes it a mutant** — so every mutation control that perturbs target resolution can
+reach a live browser on the same host. The family's sandboxes isolated HOME, CWD, env and
+PATH. Not the network.
+
+⇒ **Structural, not a convention.** Measured on the operator machine: an unprivileged
+network namespace (`unshare -rn`) works, and inside it `127.0.0.1:<live browser port>` is
+*Network is unreachable* — a fresh namespace has its own loopback and none of the host's
+listeners. The harness provides:
+
+* **`isolated -- <cmd…>`** — runs the command in a private network namespace with its OWN
+  loopback brought up (local fakes and stubs still work; the host's listeners are absent).
+  Unavailable isolation **fails closed** (exit non-zero), never silently runs on the host.
+  Every runner-spawning mutation arm runs under it.
+* **`sandbox-port`** — binds port 0, reads it, closes it, asserts nothing listens: a port the
+  lane exports into its PORT variable so any port derived from it is dead.
+* **`guard-live-port <port> [--pin-verified]`** — defence in depth where isolation is not
+  used: REFUSES when the port LISTENS **or** answers CDP, and the sandbox pin is not
+  verified — naming both facts. *(A listener with a dead browser behind it — docker-proxy —
+  still counts: the browser may come back mid-run.)* Over-refusal costs nothing once pinned.
+* *QA:* a mutant that re-derives the default port, with a FAKE listener on the host default
+  → under `isolated` the fake sees **zero** connections; *control:* the same mutant without
+  `isolated` reaches the fake (proving the arm can fail).
+
 ### ⛔ A contract MUST keep TWO directory variables
 
 `WEBCTL_BASE_DIR` names the base **under test**. A contract that hardcodes
