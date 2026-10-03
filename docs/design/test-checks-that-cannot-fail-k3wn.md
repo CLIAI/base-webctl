@@ -785,3 +785,13 @@ tests". And a file that registers nothing is a failure, not a pass.
 ⚠ **Its sibling, which no reporter can see:** a `"test": "echo No tests yet && exit 0"`
 over a 114-test suite (`fetlife`). Node never runs. Only reading the test SCRIPT finds
 it.
+
+## An option the library does not honour
+
+A factory that destructures the options it knows and silently drops the rest turns every
+misspelled or unsupported option into a no-op. When the dropped option is a GUARD
+(`readOnly`), the caller holds an unguarded object that looks guarded — and no test of the
+caller can see it, because the call succeeded. *Measured by `ccew` on base's cdp-client.*
+⇒ **Refuse unknown options, naming them.** The same rule base applies to resolver hints
+(`supports`, `portFlag`, `configKey` throw on a typo) — it was simply never applied to the
+oldest module.

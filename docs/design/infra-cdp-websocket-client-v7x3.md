@@ -262,6 +262,28 @@ performance degradation during long automation runs.
 * [ ] Actionable `ECONNREFUSED` error messages
 * [ ] Optional: performance monitoring hook
 
+## ⛔ An option the library does not honour is REFUSED, never ignored
+
+*Measured by `ccew` (via `webctl:mgr`), 2026-10-03:* `connectBrowser({readOnly: true})`
+returned an ordinary session that still sent `Storage.getCookies`. The factories
+(`connectBrowser`, `openPage`, `navigate`, `listTargetsCorroborated`) destructure the
+options they know and silently drop the rest — so a caller passing a GUARD got an
+unguarded session that looked guarded. The worst silent default there is.
+
+⇒ **Rule:** every factory validates its options object against the keys it honours and
+**throws on an unknown key, naming it**. This is also why the earlier exclusion of the
+observer-only posture (header of `lib/cdp-client.js`) is now VISIBLE rather than silent:
+asking for `readOnly` fails loudly instead of being dropped.
+
+### The per-method policy HOOK — a mechanism, not a posture
+
+Base still imposes no capability posture (the exclusion stands: most consumers drive by
+design). It offers a **hook**: an optional `policy(method, params) → true | false | string`
+threaded through every factory to the session, consulted before each CDP call; `false` or a
+string refuses the call with that reason. A lane that needs an observer-only or
+credential-deny posture supplies its own policy — `ccew`'s subclass and wrappers collapse
+into one option — and no lane inherits a default it did not choose.
+
 ## Security Considerations
 
 * **Local-only binding** -- The browser's debugging port should bind to
