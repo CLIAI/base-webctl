@@ -55,14 +55,20 @@ From a read-only survey of xq and xq's own lane:
   serves all users. Base bakes `UID`/`GID` into the image — the defect class `rm7t` §3
   measured (chromium exiting 133 on a mismatch). xq is ahead here.
 * **Control surfaces** are image labels (`xq.app.control.<name>.{kind,internal_port,
-  adapter,default_external_port}`): chromium and opera declare `cdp`; **firefox declares
-  none**. The mechanism is protocol-agnostic, so a `bidi` surface is a recipe change.
+  adapter,default_external_port}`). ⛔ **Vocabulary:** in xq, `kind` is the TRANSPORT
+  (`tcp`) and **`adapter` is the PROTOCOL** (`cdp`, `raw`). Chromium and opera declare adapter
+  `cdp`; **firefox declares none**. A `bidi` adapter is a recipe change. Labels exist only
+  on a **built image**: an unbuilt app's control is `null` = UNKNOWN, never `[]` = NONE, and
+  controls can differ by distro.
 * **Firefox removed CDP in version 141** (140 ESR is the last with it); its automation
   protocol is WebDriver BiDi (Mozilla's CDP-retirement notice; Selenium's removal notice;
   Mozilla bug 1882096). ⇒ Base's CDP client drives chromium and opera, **not** firefox.
-* **Remote is PARTIAL by xq's own account**: never run end-to-end against a real host;
-  remote `up` drops `--control` and app args and does not create the zone; no version-skew
-  guard; the remote machine needs xq and uv on its non-interactive ssh PATH.
+* **Remote is PARTIAL by xq's own account**: never run end-to-end against a real host; no
+  version-skew guard; the remote machine needs xq and uv on its non-interactive ssh PATH.
+  ⚠ *Corrected by xq's lane against its code:* remote `up` forwards `--control` since
+  e4d46ca (the survey read was stale), and "does not create the zone / takes no app args"
+  is not remote-specific — LOCAL `up` behaves the same, by design: creating a zone fixes its
+  template, mounts and netvm, so it is an explicit act.
 * **`forward`** is a foreground `ssh -N -L` the caller must kill; a second call fails on the
   local bind. Not owned.
 * **Profiles**: xq's profile always lives under its data dir (or the whole host home);
@@ -93,12 +99,18 @@ From a read-only survey of xq and xq's own lane:
 ## 4. The seam — what base calls, what xq must answer
 
 ```
-capabilities()        -> {schema, verbs:[{verb, json_schema}], apps:[{app, control:[{name, kind}]}]}
-ensureApp(target)     -> zone/app up (idempotent), with the named control surface enabled
-controlEndpoint(...)  -> {name, kind: "cdp"|"bidi", host: "127.0.0.1", port}   (JSON, not prose)
+capabilities()        -> {schema, verbs:[{verb, json_schema}],
+                          apps:[{app, images:[{distro, scope, built, control: [...] | null}]}]}
+ensureApp(target)     -> `xq zone create` (idempotent on identical config, REFUSED on a
+                         different one — never implicit) then `xq up`, control enabled
+controlEndpoint(...)  -> {name, kind: "tcp", adapter: "cdp"|"bidi", host: "127.0.0.1", port}
 ownedForward(...)     -> a tunnel with a handle: started, reported, torn down by its owner
 appVersion(...)       -> the existing schema-1 contract
 ```
+
+⛔ **The seam keys on xq's `adapter`, using xq's own field names** — a field renamed to
+base's vocabulary is a copy that drifts (xq's lane). Base picks its CDP or BiDi backend
+from `adapter`.
 
 Base adds the **control protocol layer** above `controlEndpoint`: one operation surface
 (navigate, evaluate, screenshot, tabs) with a **CDP backend** (exists) and a **BiDi
@@ -113,10 +125,10 @@ design doc, before any lane writes firefox code.
 | X2 | `wait-ready --json` → the control endpoint `{name, kind, host, port}` | the seam |
 | X3 | an **owned** forward (handle, idempotent, teardown) | any remote control |
 | X4 | remote `up` honouring `--control`, creating the zone; one real end-to-end proof; a skew guard (compare remote capabilities) | remote by default |
-| X5 | a caller-chosen profile dir (`--profile-dir`) | migrating signed-in lanes **without moving their profiles** |
+| X5 | a caller-chosen profile dir (`--profile-dir`) — ✅ accepted, with two refusals: the path must be owned by the invoking uid, and a profile another live container holds is refused (two chromiums on one profile corrupt it) | migrating signed-in lanes **without moving their profiles** |
 | X6 | a firefox **`bidi`** control surface (Firefox serves BiDi on `--remote-debugging-port`) | firefox |
 | X7 | a `schema` on `zone ls --json` | inventory |
-| X8 | `--no-sandbox` is always passed: `lg1n` would flag it in login mode — rule whether login mode may drop it | login mode on xq |
+| X8 | `--no-sandbox`: ⚠ **not a flag — Greg's security decision** (§7). Chromium's sandbox inside docker needs CAP_SYS_ADMIN or an unconfined seccomp profile, i.e. WIDER container privileges. xq's counter-proposal, adopted: xq declares the boundary in an image label ("the sandbox is the container"), `lg1n` reads that label, Greg rules; until then the flag stays | login mode on xq |
 | X9 | ✅ ANSWERED by xq's lane (read AT the fork commit): see §5a | patching base meanwhile |
 | X10 | the **GL-docker attach** for the human viewer (ssh → 0700 socket → relay → GL client, with desktop scaling) — copied in 4 lanes + one kit | attach is xq's side (§1); retires the lane copies |
 | X11 | `app inspect --argv --listeners --json` — the in-container READING | login mode on xq: xq reads, base's `lg1n` judges |
@@ -169,6 +181,8 @@ Judged by xq's lane by reading xq **as it stood at 64e5f9d**, not from memory:
   via the capability check above.
 * **Public base depending on a private xq** — either xq becomes public, or base keeps xq
   behind the seam (recommended) so public base stays usable without it.
+* **Login mode without Chromium's own sandbox** (X8): accept "the container is the sandbox"
+  for a human sign-in, or grant the container the privileges Chromium's sandbox needs.
 
 ## 8. What this does NOT do
 
