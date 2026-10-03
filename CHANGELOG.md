@@ -244,8 +244,9 @@ before minting", was right for an unattended browser and is superseded.
   ⛔ Only a literal `true` from `has()` vouches; a `has()` that returns a Promise (an async,
   db- or file-backed ledger) is REFUSED — a Promise is truthy and would vouch for any id.
   Resolve the ledger first (e.g. into a `Set`).
-* A reused target must exist and be a `page` (checked on `Target.getTargets`); otherwise
-  refused, naming the id.
+* A reused target must exist and be a `page` with no `subtype` (checked on
+  `Target.getTargets`); otherwise refused, naming the id. A `subtype`'d page (a prerender) is
+  not a tab, and does not count toward the last-page rule either.
 * **`onMinted(id)`** is awaited after the mint and BEFORE the first attach. If it throws,
   the tab is closed (or blanked, if it is the last page) and `openPage` refuses, carrying
   the hook's error (`cause`). Likewise, if the first ATTACH to a minted tab fails, the error

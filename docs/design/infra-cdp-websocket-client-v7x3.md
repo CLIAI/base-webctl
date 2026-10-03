@@ -313,6 +313,10 @@ inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
   adds it to `ownedTargets`. An adoption lasts for that call only.
 * Whatever the owner, the target must exist and be a `page`; otherwise it is refused, naming
   the id.
+* ⛔ **A tab is a `page` with no `subtype`.** CDP marks a prerendered page `{type: 'page',
+  subtype: 'prerender'}`; it is not a window. It is excluded from the last-page count
+  (counted, it would make our real last tab look like one of two, and closing it would exit
+  Chromium) and refused for reuse, naming its subtype *(the review)*.
 * **Mint in the background:** `Target.createTarget({url, background: true, newWindow:
   false})`. A foreground mint steals focus in the human's xpra window. Measured hidden on
   Opera by `perplexity`.

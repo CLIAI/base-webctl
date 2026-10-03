@@ -336,6 +336,23 @@ test('⛔ QA7: two of OUR tabs closed CONCURRENTLY — one closes, the other is 
   });
 });
 
+test('⛔ QA7: a PRERENDER (type page + subtype) is not a tab — it does not count as a second page', async () => {
+  const PRERENDER = { id: 'PRE-1', type: 'page', subtype: 'prerender', url: 'https://work.example.test/next' };
+  await withFake({ targets: [PRERENDER] }, async (fake) => {
+    const n = await openPage(fake.base);
+    assert.deepEqual(await n.close(), { closed: false, reason: 'last-page' },
+      'ours is the last TAB; closing it would exit Chromium');
+    assert.ok(fake.targets.has(n.targetId));
+    assert.equal(fake.state.browserExited, false);
+  });
+  // Control: a real second tab beside the prerender -> ours is closed.
+  await withFake({ targets: [PRERENDER, HUMAN] }, async (fake) => {
+    const n = await openPage(fake.base);
+    assert.deepEqual(await n.close(), { closed: true });
+    assert.equal(fake.state.browserExited, false);
+  });
+});
+
 test('QA7 control: with a second page present, ours IS closed', async () => {
   await withFake({ targets: [HUMAN] }, async (fake) => {
     const n = await navigate(fake.base, WORK_URL, NAV);
@@ -440,6 +457,20 @@ test('⛔ QA9: a targetId naming an ABSENT id, or a non-page target, is refused,
     // Control: the same call with an existing page is accepted.
     const ok = await openPage(fake.base, { targetId: 'HUMAN-1', owner: 'adopted' });
     assert.equal(ok.targetId, 'HUMAN-1');
+    await ok.close();
+  });
+});
+
+test('⛔ QA9: a page target with a SUBTYPE (prerender) is not a tab — refused for reuse, naming it', async () => {
+  const PRERENDER = { id: 'PRE-1', type: 'page', subtype: 'prerender', url: 'https://work.example.test/next' };
+  await withFake({ targets: [HUMAN, PRERENDER] }, async (fake) => {
+    await assert.rejects(() => openPage(fake.base, { targetId: 'PRE-1', owner: 'adopted' }),
+      (e) => /PRE-1/.test(e.message) && /prerender/.test(e.message));
+    await assert.rejects(() => openPage(fake.base,
+      { targetId: 'PRE-1', owner: 'minted', ownedTargets: new Set(['PRE-1']) }), /prerender/);
+    assert.equal(fake.pageAttaches().length, 0);
+    // Control: the plain page beside it is accepted.
+    const ok = await openPage(fake.base, { targetId: 'HUMAN-1', owner: 'adopted' });
     await ok.close();
   });
 });

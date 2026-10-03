@@ -32,7 +32,8 @@ import { createHash } from 'node:crypto';
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 /**
- * @typedef {{id: string, type?: string, url?: string, title?: string}} FakeTarget
+ * `subtype` (e.g. 'prerender') rides on a type:'page' target that is NOT a tab.
+ * @typedef {{id: string, type?: string, url?: string, title?: string, subtype?: string}} FakeTarget
  * @typedef {{t: string, [k: string]: any}} LogEntry
  */
 
@@ -119,7 +120,7 @@ export async function startFakeBrowser(opts = {}) {
   /** @type {Map<string, Required<FakeTarget>>} */
   const targets = new Map();
   for (const t of opts.targets || []) {
-    targets.set(t.id, { id: t.id, type: t.type || 'page', url: t.url || 'about:blank', title: t.title || '' });
+    targets.set(t.id, { id: t.id, type: t.type || 'page', url: t.url || 'about:blank', title: t.title || '', subtype: t.subtype || '' });
   }
   const cfg = {
     createTarget: opts.createTarget !== false,
@@ -151,7 +152,7 @@ export async function startFakeBrowser(opts = {}) {
   /** @param {string} url */
   const mint = (url) => {
     state.minted += 1;
-    const t = { id: `MINTED-${state.minted}`, type: 'page', url, title: '' };
+    const t = { id: `MINTED-${state.minted}`, type: 'page', url, title: '', subtype: '' };
     targets.set(t.id, t);
     return t;
   };
@@ -161,7 +162,8 @@ export async function startFakeBrowser(opts = {}) {
     const had = targets.delete(id);
     // A real Chromium EXITS when its last page closes — the failure the last-page
     // rule exists to prevent. Record it so a test can assert it did not happen.
-    if (had && ![...targets.values()].some((t) => t.type === 'page')) state.browserExited = true;
+    // A subtype'd page (a prerender) is not a window, so it does not keep it alive.
+    if (had && ![...targets.values()].some((t) => t.type === 'page' && !t.subtype)) state.browserExited = true;
     return had;
   };
 
@@ -251,9 +253,12 @@ export async function startFakeBrowser(opts = {}) {
       if (msg.method === 'Target.getTargets') {
         // The snapshot is taken NOW, at receipt; only the reply is delayed. That is
         // the check-then-act window of a real browser, widened.
-        const infos = [...targets.values()].map((t) => ({ targetId: t.id, type: t.type, url: t.url, title: t.title, attached: false }));
+        const infos = [...targets.values()].map((t) => ({
+          targetId: t.id, type: t.type, url: t.url, title: t.title, attached: false,
+          ...(t.subtype ? { subtype: t.subtype } : {}),
+        }));
         if (cfg.getTargetsDelayMs) { setTimeout(() => ok({ targetInfos: infos }), cfg.getTargetsDelayMs); return; }
-        return ok({ targetInfos: [...targets.values()].map((t) => ({ targetId: t.id, type: t.type, url: t.url, title: t.title, attached: false })) });
+        return ok({ targetInfos: infos });
       }
       return err(-32601, `'${msg.method}' wasn't found`);
     }
