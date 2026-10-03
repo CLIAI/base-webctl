@@ -207,6 +207,91 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.32.0 — (unreleased)
+
+**Headline: base drives only a tab base opened — `openPage()` / `navigate()` MINT a
+background tab by default and never drive the human's tab unless told whose it is**
+(`v7x3` §"base drives only a tab base opened"). Plus: an option a CDP factory does not
+honour is REFUSED, naming it, never silently dropped.
+
+### ⛔ BREAKING — `openPage()` no longer reuses the first page target
+
+*Incident, 2026-10-03:* `openPage()` took `listPageTargets()[0]` → `reused: true`, and a
+consumer's mutation arm navigated the human's ONLY tab in a signed-in browser. The tab a
+person is reading is, by construction, the first page target. The old decision 1, "reuse
+before minting", was right for an unattended browser and is superseded.
+
+| caller passes | `openPage` does | `reused` | `close()` closes the tab |
+|---|---|---|---|
+| nothing (the default) | **mints a new target, in the background** | `false` | yes, unless `keep: true` |
+| `{targetId, owner: 'minted'}` | drives it only if `ownedTargets.has(targetId)`; else refused | `true` | no, unless `close: true` |
+| `{targetId, owner: 'adopted'}` | drives a tab base did NOT mint, for this call only | `true` | **never** |
+| `{targetId}` with no `owner`, or any other value | **refused**, naming both choices | — | — |
+
+* **Mint:** `Target.createTarget({url, background: true, newWindow: false})` over the
+  browser endpoint — no `browserContextId` (a fresh context lacks the sign-in). Fallback:
+  `/json/new` PUT, then GET. Both dial the caller's **rewritten** authority, never the raw
+  one `/json/version` prints from behind an ssh forward.
+* **If both mint paths fail, `openPage` REFUSES** with the opt-in hint
+  (`{targetId, owner: 'adopted'}`). It never falls back to an existing tab.
+* **`ownedTargets`** (any object with `has(id)`; a `Set` works) defaults to the ids THIS
+  process minted. A lane with a durable ledger passes its own. Adopting never adds to it.
+* A reused target must exist and be a `page` (checked on `Target.getTargets`); otherwise
+  refused, naming the id.
+* **`onMinted(id)`** is awaited after the mint and BEFORE the first attach. If it throws,
+  the tab is closed (or blanked, if it is the last page) and `openPage` refuses, carrying
+  the hook's error (`cause`).
+* **`close()` is now on `openPage()`'s result too**, and returns `{closed: true}` or
+  `{closed: false, reason}` with reason `'keep' | 'owned-reuse' | 'adopted' | 'last-page' |
+  'close-failed'`. ⛔ **The LAST page target is never closed** — closing it exits Chromium;
+  it is navigated to `about:blank` instead (`reason: 'last-page'`). "Last" is read from the
+  browser endpoint at close time.
+* `navigate(base, url, opts)` passes `targetId` / `owner` / `ownedTargets` / `keep` /
+  `close` / `onMinted` (and now `defaultTimeout`) through, returns `openPage()`'s result,
+  and closes a minted tab if the navigation itself fails.
+* No "this tab is blank, so it is free" heuristic, anywhere.
+
+**Migration.** A caller that uses `openPage()` only to get a session for BROWSER-level
+calls (e.g. `Storage.getCookies`) must switch to `connectBrowser()`. Under mint-by-default,
+every such call would otherwise open, and possibly leave, a blank tab.
+
+Where reuse was meant, say whose tab it is: record the id from a `keep: true` mint (in
+`onMinted`), pass your ledger as `ownedTargets`, and reuse with `{targetId, owner:
+'minted'}`. Lanes adopt this deliberately: it changes what a signed-in browser shows.
+
+### ⛔ BREAKING — unknown options are refused
+
+`openPage`, `navigate`, `connectBrowser` and `listTargetsCorroborated` throw a
+`TypeError` naming any option key they do not honour. Measured by `ccew`:
+`connectBrowser({readOnly: true})` returned an ordinary session that still sent
+`Storage.getCookies` — a guard that looked applied. A stale `openPage({reuse: true})` is
+now told so. Contradictory combinations are refused too: `keep` + `close`, `close: true`
+on an adopted tab, `onMinted` or `owner` without a mint/`targetId` respectively.
+
+### Tests
+
+* `test/cdp-open-page-own-tab.test.js`: the nine `v7x3` QA arms, each with its control,
+  against a recording fake CDP browser (`test/helpers/fake-cdp-browser.mjs`, ephemeral
+  ports, a trap that records any dial of the raw authority).
+* `test/cdp-client-lifecycle.test.js`: arm 1 ("an existing page is REUSED") and the
+  reuse half of arm 3 asserted the old default; both now assert the new one.
+
+### Fixed/Docs since v0.31.0
+
+* the home-under-/run-or-/tmp refusal applies on the host path too, not only under an
+  outer `unshare -r` (a CI image whose passwd home is under /tmp is refused)
+
+### ⛔ What this does NOT cover
+
+* The per-method **policy hook** (`v7x3` §"An option the library does not honour is
+  REFUSED") is not implemented — only the refusal of unknown keys is.
+* `closePage(base, id)` is unchanged: a low-level primitive with no ownership check and no
+  last-page rule. Use the `close()` that `openPage()` / `navigate()` return.
+* Unknown-key refusal covers the four factories above, not `getVersion`, `listTargets`,
+  `listPageTargets` or `listTargetsViaBrowser`.
+* Nothing here was run against a real browser; the arms use a fake that implements only
+  the CDP surface listed in its header.
+
 ## v0.31.0 — 2026-10-03
 
 **Headline: the docker driver never touches, reuses or restarts a container that is not
