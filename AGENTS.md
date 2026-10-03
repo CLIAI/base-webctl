@@ -109,7 +109,9 @@ live on:
     `test-checks-that-cannot-fail-k3wn` (verification discipline, led by base's
     OWN shipped defects).
   * **infra** — `infra-directory-structure-f868`, `infra-browser-configuration-v7m2`,
-    `infra-cdp-websocket-client-v7x3`, `infra-client-profile-registry-lf4f`,
+    `infra-cdp-websocket-client-v7x3`, `infra-webdriver-bidi-client-bd1x` (firefox over
+    WebDriver BiDi; four constraints measured on Firefox 156: Host header through a tunnel,
+    privileged about:home, one session at a time, readiness is a real upgrade), `infra-client-profile-registry-lf4f`,
     `infra-config-precedence-2fc5`, `infra-dotenv-configuration-r7m3`,
     `infra-logging-output-sazn`, `infra-storage-path-resolution-v59v`,
     `infra-xpra-remote-access-gateway-f6rd`.
