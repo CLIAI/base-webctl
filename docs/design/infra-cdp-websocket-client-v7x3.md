@@ -3,7 +3,7 @@ id: v7x3
 title: "WebSocket CDP Client: Zero-Dependency Browser Automation RPC"
 category: infra
 created: "2026-03-03"
-updated: "2026-03-03"
+updated: "2026-10-03"
 status: draft
 tags: [websocket, cdp, chrome-devtools-protocol, rfc-6455, zero-dep, rpc]
 tech:
@@ -283,6 +283,55 @@ threaded through every factory to the session, consulted before each CDP call; `
 string refuses the call with that reason. A lane that needs an observer-only or
 credential-deny posture supplies its own policy — `ccew`'s subclass and wrappers collapse
 into one option — and no lane inherits a default it did not choose.
+
+## ⛔ base drives only a tab base opened — never the human's tab by default (v0.32.0)
+
+*Incident, 2026-10-03:* a mutation arm in a consumer lane navigated the human's ONLY tab in
+a signed-in browser. The mechanism is `openPage()`'s default: `existing = listPageTargets();
+target = existing[0]` → `reused: true`. The tab the human is reading is, by construction,
+the first page target. A lane reported it on 09-27; another lane already WITHHOLDS
+`openPage`/`navigate` from its own code for exactly this reason. So "reuse before minting"
+was a hard-won rule for an unattended browser, and it was carried over as the default for a
+browser a person is using.
+
+⇒ **Rule.** `openPage()` drives a tab that base did not open ONLY when the caller names it:
+
+| caller passes | `openPage` does | `reused` | `close()` closes the tab |
+|---|---|---|---|
+| nothing (the default) | **mints a new target** | `false` | yes |
+| `{targetId}` | drives THAT target (must exist and be a `page`, else refused, naming the id) | `true` | **no** |
+
+* **Minting order.** Primary: `Target.createTarget` over the browser endpoint
+  (`/json/version` → `webSocketDebuggerUrl`). Fallback: `/json/new` with PUT, then GET.
+  Old decision 2 stands: `/json/new` is restricted in some builds. That is why it is not
+  the only path.
+* ⛔ **If minting fails, REFUSE.** Never fall back to an existing tab. The error says how to
+  opt in: pass `{targetId}` from `listPageTargets()`. A fallback to `existing[0]` would
+  rebuild the incident on exactly the builds where minting is broken.
+* **Why not a `reuse: true` convenience.** "Reuse which?" is the question that matters.
+  `{targetId}` makes the caller answer it. Long runs keep the tab-leak fix (old decision 1):
+  keep the `targetId` that the first `openPage()` returned and pass it back. That tab is
+  provably base's, because base minted it and handed over the id.
+* A **ledger** that proves a tab was minted earlier (the `1wsg` activity ledger) may later
+  stand in for an explicit id. Until such a ledger exists in `lib/`, it is not a path.
+* `navigate(base, url, {targetId})` passes the id through. `close()` keeps its rule: it
+  closes only a tab this call minted.
+* Unknown option keys are refused (the rule above). A caller passing a stale `reuse: true`
+  is told so, never silently given a new tab.
+
+**BREAKING.** A caller that relied on the default reusing the first tab now gets a new tab.
+Where reuse was meant, it must pass `{targetId}`. Lanes adopt this deliberately: it changes
+what a signed-in browser shows.
+
+**QA, each with its control:**
+
+1. A browser with one pre-existing (human) tab: `openPage()` creates a new target. The
+   human tab's URL is unchanged after a `navigate()` through it. *Control:* with
+   `{targetId: <human tab>}` that tab IS driven, and `close()` leaves it open.
+2. Minting unavailable (both paths fail): refused with the opt-in hint. *Control:* the
+   human tab's URL is unchanged, and no target was attached to.
+3. `{targetId}` naming an absent id, or a non-page target: refused, naming it.
+4. `openPage(base, {reuse: true})`: refused as an unknown option.
 
 ## Security Considerations
 
