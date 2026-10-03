@@ -202,6 +202,22 @@ scratch_begin() {
     fi
   fi
   rm -f "$log"
+  # ⛔ DEPENDENCIES. A clone has no node_modules (it is gitignored), and the contract
+  # runs with NO network, so it cannot install one. A lane with npm dependencies
+  # then failed every test with "Cannot find package" (measured on the first real
+  # scratch run). ⇒ COPY the live tree's installed node_modules. Not a symlink: a link
+  # would put the live tree within the arm's reach, and one under /tmp would dangle
+  # inside `isolated`'s fresh /tmp. What runs is the live tree's INSTALLED copy, which
+  # is what the lane runs too; it is named in the output so nobody reads it as a
+  # fresh `npm ci`.
+  SCRATCH_DEPS=""
+  if [ -z "$SCRATCH_ERR" ] && [ -d "$live/node_modules" ] && [ ! -e "$dst/node_modules" ]; then
+    if cp -a -- "$live/node_modules" "$dst/node_modules" 2>/dev/null; then
+      SCRATCH_DEPS="node_modules copied from the live tree (its installed copy, not a fresh npm ci)"
+    else
+      SCRATCH_ERR="could not copy the live tree's node_modules into the clone"
+    fi
+  fi
   if [ -z "$SCRATCH_ERR" ]; then
     # ⛔ Assert the VALUES, not that the commands exited 0.
     got="$(git -C "$dst" rev-parse HEAD 2>/dev/null || echo none)"
@@ -280,7 +296,12 @@ mkdir -p "$GATE_LOG_ROOT"
 RUN_LOG_DIR="$(mktemp -d "$GATE_LOG_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-${BASE_HEAD:0:12}-XXXXXX")"
 chmod 700 "$RUN_LOG_DIR"
 # The whole run as well: stdout (the JSONL) and stderr (the human report) each copied.
-exec > >(tee -a "$RUN_LOG_DIR/gate.jsonl") 2> >(tee -a "$RUN_LOG_DIR/gate.err" >&2)
+# ⚠ The tees IGNORE TERM/HUP/INT: they are the gate's own output, and a signal to the
+# process group killed them first, so the gate's last lines (its own report of the
+# interrupt) were lost and it exited 141 (SIGPIPE) instead of by the signal (final
+# review). They still exit at EOF, when the gate does.
+exec > >(trap '' TERM HUP INT; exec tee -a "$RUN_LOG_DIR/gate.jsonl") \
+     2> >(trap '' TERM HUP INT; exec tee -a "$RUN_LOG_DIR/gate.err" >&2)
 echo "gate logs: $RUN_LOG_DIR" >&2
 
 pass=0 fail=0 skip=0 stale=0
@@ -497,6 +518,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     run_home="$SCRATCH_TMP/repo-home"
     echo "SCRATCH $name: clone of $repo_dir at ${live_head:0:7}; $submodulePath = base ${BASE_HEAD:0:7}; live tree untouched" >&2
     echo "        $tested_note" >&2
+    if [ -n "$SCRATCH_DEPS" ]; then echo "        deps: $SCRATCH_DEPS" >&2; fi
   fi
   contract_script="${testCmd%% *}"
   if [ ! -x "$run_dir/$contract_script" ]; then
@@ -654,7 +676,13 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     # the arm a fresh /tmp. A contract running `rm -rf /tmp/*` then deleted the
     # marker, and a contract that really ran was reported as a gate fault (final
     # review). Output already written through tee cannot be taken back, and no
-    # keep is needed: the cwd and a $HOME under /tmp are kept by `isolated` itself.
+    # keep is needed for it.
+    #
+    # ⛔ --keep "$run_home": `isolated` keeps a $HOME only when it is under /tmp. With
+    # TMPDIR under the user's home, the throwaway HOME sat inside the READ-ONLY home,
+    # and a contract that writes $HOME (npm) went false RED (measured by the final
+    # review). The throwaway HOME is the gate's own, so keeping it writable exposes
+    # nothing of the host.
     started_nonce="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
     started_line="WEBCTL-GATE-CONTRACT-STARTED $started_nonce"
     # shellcheck disable=SC2016  # $1/$2 belong to the inner bash
@@ -663,7 +691,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
         && WEBCTL_BASE_DIR="$run_base_dir" \
            WEBCTL_DECLARED_PIN="${declared_pin:-}" \
            WEBCTL_GATE_SWAPPED="${swapped_now:-0}" \
-           node "$BASE_ROOT/scripts/contract-harness.mjs" isolated -- \
+           node "$BASE_ROOT/scripts/contract-harness.mjs" isolated --keep "$run_home" -- \
              bash -c 'l="$2"; c="$1"; set --; printf "%s\n" "$l" >&2; eval "$c"' \
              webctl-gate-contract "$testCmd" "$started_line" ) 2>&1 | tee "$run_log" >&2
     rc=${PIPESTATUS[0]}

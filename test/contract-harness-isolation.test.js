@@ -491,6 +491,22 @@ test('nesting CONTROL: a real nested `isolated` inside `isolated` proceeds WITHO
   assert.equal(innerMnt, outerMnt, 'the nested call made another mount namespace');
 });
 
+test('nesting: the kernel proof holds from inside the uid-mapped CHILD user namespace — and from a nested call\'s', needsIsolation, async () => {
+  // The command's uid_map is now the child's (real uid → outer root, count 1), not the
+  // outer `unshare -r` one; the netns, mntns and pidns facts are those of the outer level.
+  // `isolation-check` runs kernelInsideProof at both levels: both must PASS.
+  const r = await run(['isolated', '--', 'sh', '-c',
+    'awk \'{print "MAPLINES", NR, ($3 == 1 ? "count1" : "other")}\' /proc/self/uid_map; '
+    + '"$0" "$1" isolation-check 1 >/dev/null && echo "CHILD-PROOF ok"; '
+    + '"$0" "$1" isolated -- "$0" "$1" isolation-check 1 >/dev/null && echo "NESTED-PROOF ok"',
+    process.execPath, TOOL]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^MAPLINES 1 count1$/m, 'the command is not in a single-id child user namespace');
+  assert.doesNotMatch(r.stdout, /^MAPLINES 2/m);
+  assert.match(r.stdout, /^CHILD-PROOF ok$/m, `the kernel proof failed in the child namespace:\n${r.stderr}`);
+  assert.match(r.stdout, /^NESTED-PROOF ok$/m, `the kernel proof failed under a nested call:\n${r.stderr}`);
+});
+
 // ── no host UNIX SOCKETS ─────────────────────────────────────────────────────
 //
 // ⛔ `unshare -rn` hides TCP listeners but not PATH unix sockets — they are files.
@@ -991,25 +1007,50 @@ test('⛔ nesting: every OLD fact satisfied (netns, mntns, our tmpfs on /run+/tm
 //
 // ⛔ Measured by the final review: inside `isolated` the command was namespace root with
 // CapEff 000001ffffffffff — `umount -l /tmp` and `umount <covered socket>` re-exposed host
-// sockets, and CAP_DAC_OVERRIDE read a chmod-000 file. ⇒ setpriv drops every set.
+// sockets, and CAP_DAC_OVERRIDE read a chmod-000 file.
+// ⛔ The first fix (setpriv dropping every capability set, a28b280) REGRESSED the release
+// gate: a capless namespace ROOT cannot write a nested user namespace's uid_map, so a lane
+// self-isolating with `unshare -rn` failed and Chromium's sandbox could not start.
+// ⇒ The command runs in a CHILD user namespace as the REAL uid/gid (no_new_privs, read back):
+// no capabilities over the masks, yet free to make namespaces of its own.
 // Each CONTROL runs the same act in a raw `unshare` WITH capabilities, to show it works
 // there — so the arm's refusal is the privilege drop, not some other accident.
 
 /** `unshare -rnm` + a fresh /tmp, NOT via the harness: namespace root with every cap. */
 const RAW_NS = ['unshare', '-rnm', '--propagation=private', 'sh', '-c'];
-const PRINT_CAPS = 'grep -E "^(CapEff|CapBnd|NoNewPrivs):" /proc/self/status | tr "\\t" " "';
+const PRINT_CAPS = 'grep -E "^(CapInh|CapPrm|CapEff|CapAmb|NoNewPrivs):" /proc/self/status | tr "\\t" " "';
+/** Prints `LOOP ok` when a listener + client on 127.0.0.1 work in this network namespace. */
+const LOOP_SELF_TEST = `
+const net = require('node:net');
+const srv = net.createServer((s) => s.destroy()).listen(0, '127.0.0.1', () => {
+  const c = net.connect(srv.address().port, '127.0.0.1');
+  c.on('connect', () => { console.log('LOOP ok'); c.destroy(); srv.close(); });
+  c.on('error', (e) => { console.log('LOOP ' + e.code); srv.close(); });
+});`;
 
-test('⭐ ARM: inside `isolated` CapEff, CapBnd are 0 and NoNewPrivs is 1', needsIsolation, async () => {
+test('⭐ ARM: inside `isolated` CapInh, CapPrm, CapEff, CapAmb are 0 and NoNewPrivs is 1', needsIsolation, async () => {
   const r = await run(['isolated', '--', 'sh', '-c', PRINT_CAPS]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /^CapEff: 0{16}$/m, `the command holds capabilities:\n${r.stdout}`);
-  assert.match(r.stdout, /^CapBnd: 0{16}$/m);
+  for (const k of ['CapInh', 'CapPrm', 'CapEff', 'CapAmb']) {
+    assert.match(r.stdout, new RegExp(`^${k}: 0{16}$`, 'm'), `the command holds capabilities (${k}):\n${r.stdout}`);
+  }
   assert.match(r.stdout, /^NoNewPrivs: 1$/m);
 });
 
 test('⭐ CONTROL: a raw `unshare -rnm` gives the command EVERY capability (what the arm removes)', needsIsolation, async () => {
   const r = await runRaw([...RAW_NS, PRINT_CAPS]);
   assert.doesNotMatch(r.stdout, /^CapEff: 0{16}$/m, r.stdout + r.stderr);
+});
+
+test('⭐ ARM: `id -u`/`id -g` inside are the REAL uid/gid (compared here, never printed) — CONTROL: raw unshare is 0', needsIsolation, async () => {
+  // ⚠ assertion messages carry stderr only: stdout holds the ids, and test logs get pasted
+  const r = await run(['isolated', '--', 'sh', '-c', 'id -u; id -g']);
+  assert.equal(r.status, 0, r.stderr);
+  const [uid, gid] = r.stdout.trim().split('\n');
+  assert.ok(uid === String(process.getuid?.()), 'the command does not run as the real uid inside');
+  assert.ok(gid === String(process.getgid?.()), 'the command does not run as the real gid inside');
+  const c = await runRaw([...RAW_NS, 'id -u']);
+  assert.equal(c.stdout.trim(), '0', `CONTROL: namespace root should be uid 0:\n${c.stderr}`);
 });
 
 test('⭐ ARM: `umount -l /tmp` FAILS inside, and a host socket under an unkept /tmp dir stays ENOENT', needsIsolation, async () => {
@@ -1021,7 +1062,7 @@ test('⭐ ARM: `umount -l /tmp` FAILS inside, and a host socket under an unkept 
       'umount -l /tmp; echo "UMOUNT $?"; "$0" -e "$1" "$2"', process.execPath, UNIX_CONNECT, sock]);
     await settle();
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.doesNotMatch(r.stdout, /^UMOUNT 0$/m, 'the command could unmount the /tmp mask');
+    assert.match(r.stdout, /^UMOUNT [1-9]\d*$/m, 'the command could unmount the /tmp mask');
     assert.equal(outcomeOf(r.stdout), 'ENOENT');
     assert.equal(srv.count(), 0, 'the host socket was reached from inside');
   } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
@@ -1061,22 +1102,51 @@ test('⭐ CONTROL: WITH capabilities, a ro bind of the home CAN be remounted rw 
   assert.match(r.stdout, /^REMOUNT 0$/m, r.stdout + r.stderr);
 });
 
-test('⛔ a NESTED `unshare -rm` + `umount -l /tmp` inside still cannot reach the host socket (measured, not assumed)', needsIsolation, async () => {
-  // Inherited mounts are LOCKED in a child user namespace — and, measured here, a capless
-  // process cannot even write the child's uid_map. Either way: no route back to the host.
+test('⛔ LOCKING: a NESTED `unshare -rnm` IS made, yet its `umount -l /tmp` and `remount,bind,rw <home>` are refused', needsIsolation, async () => {
+  // The command CAN now make a nested user+mount namespace (it is root with every cap
+  // there) — so this is no longer vacuous: the inherited mounts are LOCKED in a mount
+  // namespace owned by a less privileged user namespace. `NESTED-IN` proves it ran.
   const dir = tmpdir();
   const sock = path.join(dir, 's.sock');
   const srv = await unixServer(sock);
+  const target = path.join(PW_HOME, probeName());
   try {
     const r = await run(['isolated', '--', 'sh', '-c',
-      'unshare -rm sh -c \'umount -l /tmp; "$0" -e "$1" "$2"\' "$0" "$1" "$2"; echo "NESTED $?"; '
-      + 'unshare -Um sh -c \'umount -l /tmp; "$0" -e "$1" "$2"\' "$0" "$1" "$2"; echo "NESTED-U $?"',
-      process.execPath, UNIX_CONNECT, sock]);
+      'unshare -rnm sh -c \'echo NESTED-IN; umount -l /tmp; echo "UMOUNT $?"; "$0" -e "$1" "$2"; '
+      + 'mount -o remount,bind,rw "$5"; echo "REMOUNT $?"; "$0" -e "$3" "$4"\' "$0" "$1" "$2" "$3" "$4" "$5"; echo "NESTED $?"',
+      process.execPath, UNIX_CONNECT, sock, TRY_CREATE, target, PW_HOME]);
     await settle();
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.doesNotMatch(r.stdout, /OUTCOME CONNECTED/, `a nested namespace re-exposed the host socket:\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /^NESTED-IN$/m, `the nested namespace was not even made (vacuous):\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /^UMOUNT [1-9]\d*$/m, 'a nested namespace could unmount the /tmp mask');
+    assert.equal(outcomeOf(r.stdout), 'ENOENT');
     assert.equal(srv.count(), 0);
-  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+    assert.match(r.stdout, /^REMOUNT [1-9]\d*$/m, 'a nested namespace could remount the home read-write');
+    assert.equal(writeOf(r.stdout), 'EROFS');
+    assert.equal(fs.existsSync(target), false);
+  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(target, { force: true }); }
+});
+
+test('⭐ REGRESSION ARM: a nested `unshare -rn` WORKS inside and brings its own lo UP (lanes self-isolate; Chromium needs a userns)', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'unshare', '-rn', 'sh', '-c',
+    '(ip link set lo up 2>/dev/null || ifconfig lo up) && echo LO-UP; "$0" -e "$1"', process.execPath, LOOP_SELF_TEST]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^LO-UP$/m, `a nested network namespace could not bring its lo up:\n${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /^LOOP ok$/m);
+});
+
+test('⭐ CONTROL: under a28b280\'s `setpriv --bounding-set=-all` drop, that nested `unshare -rn` FAILS (why it was replaced)', needsIsolation, async (t) => {
+  if (spawnSync('sh', ['-c', 'command -v setpriv']).status !== 0) { t.skip('SKIP (host): no setpriv here'); return; }
+  const r = await runRaw([...RAW_NS, 'setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- '
+    + 'unshare -rn true; echo "NESTED $?"']);
+  assert.match(r.stdout, /^NESTED [1-9]\d*$/m, r.stdout + r.stderr);
+  assert.match(r.stderr, /uid_map/, r.stderr);
+});
+
+test('⭐ ARM: a nested PID namespace works inside (`unshare -Ur --pid --fork --mount-proc` → pid 1)', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'unshare', '-Ur', '--pid', '--fork', '--mount-proc', 'sh', '-c', 'echo "PID $$"']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^PID 1$/m, r.stdout + r.stderr);
 });
 
 test('⭐ ARM: a chmod-000 file is NOT readable inside (no CAP_DAC_OVERRIDE: no false greens) — CONTROL: raw unshare reads it', needsIsolation, async () => {
@@ -1094,38 +1164,152 @@ test('⭐ ARM: a chmod-000 file is NOT readable inside (no CAP_DAC_OVERRIDE: no 
   } finally { fs.chmodSync(f, 0o600); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+/** Run `isolated --keep <dir> -- <write a marker>` with PATH set; resolve with the result + whether it ran. */
+async function markerRun(/** @type {string} */ dir, /** @type {string} */ PATH) {
+  const marker = path.join(dir, 'RAN');
+  const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e',
+    `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH });
+  return { ...r, ran: fs.existsSync(marker) };
+}
+const which = (/** @type {string} */ b) => spawnSync('sh', ['-c', `command -v ${b}`], { encoding: 'utf8' }).stdout.trim();
+
 test('⛔ fail closed: no `setpriv` → FAIL naming it, command NOT run (never with capabilities)', needsIsolation, async () => {
   // ⚠ the PATH dir lives in a throwaway HOME dir: one under /tmp vanishes while /tmp is
   // masked, and `mount` itself would go missing first (measured)
   const dir = tmpdir();
-  const marker = path.join(dir, 'RAN');
   const binHome = homeTmpdir();
   const bin = path.join(binHome, 'bin');
   fs.mkdirSync(bin);
-  const which = (/** @type {string} */ b) => spawnSync('sh', ['-c', `command -v ${b}`], { encoding: 'utf8' }).stdout.trim();
   for (const b of ['unshare', 'mount', which('ip') ? 'ip' : 'ifconfig']) fs.symlinkSync(which(b), path.join(bin, b));
   try {
-    const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e',
-      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: bin });
+    const r = await markerRun(dir, bin);
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot drop capabilities: 'setpriv' not found/);
-    assert.equal(fs.existsSync(marker), false, 'the command ran with capabilities');
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot enter the uid-mapped child user namespace: 'setpriv' not found/);
+    assert.equal(r.ran, false, 'the command ran with capabilities');
   } finally { for (const d of [dir, binHome]) fs.rmSync(d, { recursive: true, force: true }); }
 });
 
-test('⛔ fail closed: a `setpriv` that does NOT drop (runs its argv as-is) → FAIL, command NOT run (the property is checked)', needsIsolation, async () => {
+test('⛔ fail closed: a `setpriv` that ignores its flags (runs its argv as-is) → FAIL naming NoNewPrivs, command NOT run', needsIsolation, async () => {
   const dir = tmpdir();
-  const marker = path.join(dir, 'RAN');
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, 'setpriv'), '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done; shift\nexec "$@"\n', { mode: 0o755 });
   try {
-    const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e',
-      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: `${bin}:${process.env.PATH}` });
+    const r = await markerRun(dir, `${bin}:${process.env.PATH}`);
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /after setpriv the command would still hold CapPrm, CapEff, CapBnd/);
-    assert.equal(fs.existsSync(marker), false, 'the command ran with capabilities');
+    assert.match(r.stderr, /after entering the uid-mapped child user namespace, NoNewPrivs is not set/);
+    assert.equal(r.ran, false, 'the command ran without no_new_privs');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: a too-old `unshare` (no --map-user) → FAIL naming util-linux, command NOT run, no id printed', needsIsolation, async () => {
+  // the fake passes every OTHER call (the outer -rnm) to the real unshare
+  const dir = tmpdir();
+  const bin = path.join(dir, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'unshare'), `#!/bin/sh
+for a in "$@"; do case "$a" in --map-user*) echo "unshare: unrecognized option '$a'" >&2; exit 1;; --) break;; esac; done
+exec ${JSON.stringify(which('unshare'))} "$@"
+`, { mode: 0o755 });
+  try {
+    const r = await markerRun(dir, `${bin}:${process.env.PATH}`);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot enter the uid-mapped child user namespace: .* exited 1 .*util-linux ≥ 2\.38/);
+    assert.ok(!new RegExp(`\\b${process.getuid?.()}\\b`).test(r.stderr), 'the refusal printed the real uid');
+    assert.equal(r.ran, false, 'the command ran without the child user namespace');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: an `unshare` that accepts --map-user but makes NO child namespace → FAIL (the property is read back)', needsIsolation, async () => {
+  const dir = tmpdir();
+  const bin = path.join(dir, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'unshare'), `#!/bin/sh
+case " $* " in *" --map-user "*) while [ "$1" != "--" ]; do shift; done; shift; exec "$@";; esac
+exec ${JSON.stringify(which('unshare'))} "$@"
+`, { mode: 0o755 });
+  try {
+    const r = await markerRun(dir, `${bin}:${process.env.PATH}`);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /after entering the uid-mapped child user namespace, it would still hold CapPrm, CapEff; its uid\/gid are not the real ones; its uid_map\/gid_map are not exactly the one expected mapping/);
+    assert.equal(r.ran, false, 'the command ran as namespace root');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: a NESTED call without the recorded real ids (WEBCTL_HOST_IDS unset) → FAIL, nothing run', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'sh', '-c',
+    'env -u WEBCTL_HOST_IDS "$0" "$1" isolated -- echo RAN-NESTED; echo "NESTED $?"', process.execPath, TOOL]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^NESTED 1$/m, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /^RAN-NESTED$/m); // (the JSONL record names the command)
+  assert.match(r.stderr, /the real uid\/gid were not recorded at entry/);
+});
+
+// ── WHO the arm runs as, under an OUTER `unshare -r` ────────────────────────
+//
+// ⛔ Measured by the final review: lanes self-isolate with `unshare -rn` and may call
+// `isolated` inside it. There getuid() is 0 and os.userInfo() is ROOT, so the "read-only
+// home" was root's and a file appeared in the REAL home. ⇒ realIdentity(): the ids from the
+// OUTSIDE of /proc/self/{uid,gid}_map, the home from passwd for that uid.
+
+test('⭐ ARM: `isolated` inside `unshare -r` → a write into the REAL home is EROFS (absent on the host), uid is the real one, nesting still works — CONTROL: the same write without `isolated` lands', needsIsolation, async () => {
+  const dir = homeTmpdir(); // a throwaway dir under the real home — removed in finally
+  const target = path.join(dir, 'arm');
+  const ctl = path.join(dir, 'control');
+  try {
+    const r = await runRaw(['unshare', '-r', process.execPath, TOOL, 'isolated', '--', 'sh', '-c',
+      '"$0" -e "$1" "$2"; id -u; unshare -rn sh -c "(ip link set lo up 2>/dev/null || ifconfig lo up) && echo NESTED-RN-OK"',
+      process.execPath, TRY_CREATE, target], { cwd: ROOT });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(writeOf(r.stdout), 'EROFS', `a write into the real home was not EROFS under an outer unshare -r:\n${r.stderr}`);
+    assert.equal(fs.existsSync(target), false, 'the file appeared in the real home');
+    assert.ok(r.stdout.split('\n').includes(String(process.getuid?.())), 'the command does not run as the real uid');
+    assert.match(r.stdout, /^NESTED-RN-OK$/m, r.stderr);
+    const c = await runRaw(['unshare', '-r', process.execPath, '-e', TRY_CREATE, ctl]);
+    assert.equal(writeOf(c.stdout), 'ok', `CONTROL: inside the same unshare -r the write should land:\n${c.stderr}`);
+    assert.equal(fs.existsSync(ctl), true);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: inside a STACK of `unshare -r` (the real uid is two levels up) → FAIL, nothing run', needsIsolation, async () => {
+  const dir = tmpdir();
+  const marker = path.join(dir, 'RAN');
+  try {
+    const r = await runRaw(['unshare', '-r', 'unshare', '-r', process.execPath, TOOL, 'isolated', '--keep', dir, '--',
+      process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { cwd: ROOT });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot resolve the real uid: this user namespace maps uid 0 onto uid 0 of its PARENT/);
+    assert.equal(fs.existsSync(marker), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: the real uid has NO passwd entry → FAIL (the home cannot be protected), nothing run', needsIsolation, async (t) => {
+  // an empty file bound over /etc/passwd in a throwaway `unshare -rm`; skipped when NSS
+  // (LDAP, sssd…) still answers for the uid, since then there IS an entry
+  const dir = tmpdir();
+  const empty = path.join(dir, 'passwd');
+  fs.writeFileSync(empty, '');
+  const marker = path.join(dir, 'RAN');
+  try {
+    const r = await runRaw(['unshare', '-rm', '--propagation=private', 'sh', '-c',
+      'mount --bind "$0" /etc/passwd || exit 9; getent passwd "$1" >/dev/null && { echo NSS-STILL-ANSWERS; exit 0; }; shift; exec "$@"',
+      empty, String(process.getuid?.()), process.execPath, TOOL, 'isolated', '--keep', dir, '--',
+      process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { cwd: ROOT });
+    if (/NSS-STILL-ANSWERS/.test(r.stdout)) { t.skip('SKIP (host): NSS answers for this uid without /etc/passwd'); return; }
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: the real user has NO passwd entry/);
+    assert.equal(fs.existsSync(marker), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ ARM: the command cannot bind a port below 1024 (the netns belongs to the OUTER user namespace) — EACCES', needsIsolation, async (t) => {
+  const BIND = `const s = require('net').createServer().on('error', (e) => console.log('BIND ' + e.code))
+  .listen(Number(process.argv[1]), '127.0.0.1', () => { console.log('BIND ok'); s.close(); });`;
+  const r = await run(['isolated', '--', 'sh', '-c', 'cat /proc/sys/net/ipv4/ip_unprivileged_port_start; "$0" -e "$1" 80',
+    process.execPath, BIND]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  if (Number(r.stdout.split('\n')[0]) <= 80) { t.skip('SKIP (host): ip_unprivileged_port_start allows port 80 here'); return; }
+  assert.match(r.stdout, /^BIND EACCES$/m, r.stdout + r.stderr);
 });
 
 // ── signals and exit codes reach through the namespaces ─────────────────────
@@ -1164,6 +1348,66 @@ test('⭐ CONTROL: the same trapper WITHOUT `isolated` → GOT-TERM, rc 7', asyn
 test('isolated: a command killed by a signal → 128+signal (143 for SIGTERM)', needsIsolation, async () => {
   const r = await run(['isolated', '--', 'sh', '-c', 'kill -TERM $$']);
   assert.equal(r.status, 143, r.stdout + r.stderr);
+});
+
+/**
+ * A parent BASH runs `shape` (which starts `isolated` in the foreground); once READY shows,
+ * INT goes to the whole process group (Ctrl-C). Resolves with how bash ended + stdout.
+ * @param {string} shape bash source; `H …` runs the harness, `$N`/`$T` are node and the harness path @param {boolean} sendInt
+ */
+function bashParent(shape, sendInt) {
+  return /** @type {Promise<{status: number|null, signal: string|null, stdout: string}>} */ (new Promise((resolve) => {
+    const c = spawn('bash', ['-c', `N="$0"; T="$1"; H() { "$N" "$T" "$@"; }; ${shape}`, process.execPath, TOOL],
+      { env: cleanEnv(), cwd: ROOT, detached: true });
+    let stdout = ''; let sent = false;
+    c.stdout.on('data', (d) => {
+      stdout += d;
+      if (sendInt && !sent && /READY/.test(stdout)) {
+        sent = true;
+        setTimeout(() => { try { process.kill(-(c.pid ?? 0), 'SIGINT'); } catch { /* gone */ } }, 300);
+      }
+    });
+    c.on('close', (status, signal) => resolve({ status, signal, stdout }));
+  }));
+}
+const SLEEPER = `sh -c 'echo READY; exec sleep 20'`;
+
+// ⛔ Ctrl-C: `isolated` forwarded SIGINT and then EXITED NORMALLY with 130. bash's
+// wait-and-cooperative-exit rule reads that as "the child HANDLED the INT", so a parent
+// script WITHOUT an INT trap carried on to its next command (measured: `AFTER rc=130`).
+// ⚠ A parent WITH an INT trap runs it either way on bash 5.3 (measured) — that arm is not
+// the discriminating one. And a gate started as an async job (`setsid bash … &` from a
+// script) has INT IGNORED from entry: its trap cannot even be installed.
+
+test('⭐ Ctrl-C: INT to the group → `isolated` DIES BY SIGINT, so a parent bash without a trap stops too (no next command)', needsIsolation, async () => {
+  const r = await bashParent(`H isolated -- ${SLEEPER}; echo "AFTER rc=$?"`, true);
+  assert.doesNotMatch(r.stdout, /AFTER rc=/, `the parent carried on as if the command had merely exited:\n${r.stdout}`);
+  assert.equal(r.signal, 'SIGINT', `the parent did not die by SIGINT (status ${r.status})`);
+});
+
+test('⭐ Ctrl-C, the GATE\'s shape `( isolated … ) 2>&1 | tee` → the parent stops by SIGINT', needsIsolation, async () => {
+  const r = await bashParent(`( H isolated -- ${SLEEPER} ) 2>&1 | cat; echo "AFTER rc=\${PIPESTATUS[0]}"`, true);
+  assert.doesNotMatch(r.stdout, /AFTER rc=/, r.stdout);
+  assert.equal(r.signal, 'SIGINT');
+});
+
+test('⭐ Ctrl-C on the NESTED path (runCommand) → the parent stops by SIGINT', needsIsolation, async () => {
+  const r = await bashParent(`H isolated -- "$N" "$T" isolated -- ${SLEEPER}; echo "AFTER rc=$?"`, true);
+  assert.doesNotMatch(r.stdout, /AFTER rc=/, r.stdout);
+  assert.equal(r.signal, 'SIGINT');
+});
+
+test('Ctrl-C, the gate\'s shape WITH its INT trap → the trap runs (true with or without the fix on bash 5.3)', needsIsolation, async () => {
+  const r = await bashParent(`trap 'echo TRAPPED-INT; exit 42' INT; ( H isolated -- ${SLEEPER} ) 2>&1 | cat; `
+    + 'echo "AFTER rc=${PIPESTATUS[0]}"', true);
+  assert.match(r.stdout, /^TRAPPED-INT$/m, r.stdout);
+  assert.equal(r.status, 42);
+});
+
+test('⭐ CONTROL: a command that EXITS 130 with no signal → `isolated` returns 130 and the parent carries on', needsIsolation, async () => {
+  const r = await bashParent(`H isolated -- sh -c 'exit 130'; echo "AFTER rc=$?"`, false);
+  assert.match(r.stdout, /^AFTER rc=130$/m, r.stdout);
+  assert.equal(r.status, 0);
 });
 
 // ── no host PROCESSES: a private PID namespace ───────────────────────────────

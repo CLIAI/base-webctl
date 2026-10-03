@@ -281,7 +281,8 @@ contract's output when it is used.
   refusals used to be a bare `isolated: …` line; the gate's grep missed them and blamed
   unshare / user namespaces.)*
 * ⛔ **`isolated` fails CLOSED.** No `unshare`, unprivileged user namespaces disabled, no
-  `ip`/`ifconfig`, no `mount`, no `setpriv` (or one that leaves a capability), a loopback that will not come up, a mask that fails, a home
+  `ip`/`ifconfig`, no `mount`, no `setpriv`, an `unshare` without `--map-user` (or a child
+  namespace that leaves a capability), a loopback that will not come up, a mask that fails, a home
   (or any submount of it) that cannot be made read-only, a host
   socket that still answers after masking → FAIL, reason printed (counts, never socket
   paths), command not run. **There is no path on which it runs the command on the host.**
@@ -325,17 +326,34 @@ contract's output when it is used.
   `unshare -rn` passes all three network facts and is refused by the tmpfs fact; the
   previous `isolated` — full mask, writable home — is refused by the home fact. All are
   tested.)*
-* ⚠ **The command runs as mapped root WITH NO CAPABILITIES** (uid 0 inside the namespace —
-  `unshare -r` — then `setpriv --no-new-privs --bounding-set=-all --inh-caps=-all
-  --ambient-caps=-all`). ⛔ Without the drop it held **every** capability (CapEff
+* ⚠ **The command runs as YOUR uid/gid, WITH NO CAPABILITIES** — in a child user namespace
+  (`setpriv --no-new-privs -- unshare -U --map-user <your uid> --map-group <your gid>`)
+  inside the isolating one. ⛔ As namespace root it held **every** capability (CapEff
   `000001ffffffffff`, measured by the final review) and could `umount -l /tmp`, unmount a
   `/dev/null` cover or `remount,bind,rw` the home — every mask undone by one call. The drop is
-  **checked**, not trusted: the same prefix prints its own `/proc/self/status` first, and any
-  non-zero CapXxx (or no NoNewPrivs) — or no `setpriv` at all — is a FAIL, nothing run.
-  Consequences for your arm: files it creates are owned by you on disk; a **chmod-000 file is
-  NOT readable** (no CAP_DAC_OVERRIDE — before the drop it was, so an `EACCES` assertion went
-  false-red only under the gate); no port below 1024; a tool that refuses root (Chromium
-  without `--no-sandbox`) refuses here. A mutation arm should not launch a real browser anyway.
+  **checked**, not trusted: the same prefix reports its own `/proc/self/status`, ids and
+  uid_map/gid_map first; any non-zero CapInh/Prm/Eff/Amb, no NoNewPrivs, other ids or another
+  mapping — or no `setpriv`, or an `unshare` older than util-linux 2.38 — is a FAIL, nothing run.
+  ⛔ **Why not simply drop every capability with `setpriv`** (the first fix): measured, it
+  breaks **nested namespaces** — a capless namespace *root* cannot map uid 0 into a nested
+  user namespace — so a lane self-isolating with `unshare -rn` failed under the gate, a netns
+  probe went inconclusive, and Chromium ("CDP never came up") could not start its sandbox.
+  Consequences for your arm: `id -u` is your real uid; files it creates are owned by you on
+  disk; a **chmod-000 file is NOT readable** (no CAP_DAC_OVERRIDE — as namespace root it was,
+  so an `EACCES` assertion went false-red only under the gate); no port below 1024; it MAY
+  make its own namespaces — `unshare -rn` (and bring that `lo` up), a pid ns, Chromium's
+  sandbox — but a nested mount namespace cannot unmount or remount what it inherited (the
+  mounts are locked).
+* ⭐ **Calling `isolated` from inside your own `unshare -r` / `unshare -rn` works**, and protects
+  YOUR home: the real uid/gid are read from the outside of `/proc/self/{uid,gid}_map` and the
+  home from passwd for that uid, accepted only if the kernel shows it owned by us. ⛔ Before,
+  getuid() was 0 there and the "read-only home" was root's — the real one stayed writable
+  (measured). A STACK of `unshare -r` (the real uid two levels up), no passwd entry, or a
+  home not owned by us → FAIL, nothing run.
+* ⭐ **Ctrl-C stops your script.** When a signal `isolated` forwarded ended the command, it
+  re-raises it and dies BY it, so a parent bash without an INT trap stops instead of carrying
+  on with `$? = 130` (bash's cooperative-exit rule). A command that HANDLES the signal and
+  picks its own exit code keeps that code; a plain `exit 130` stays an exit.
 * ⚠ **A harness older than these verbs exits 3 on `isolated`** — which, since your
   contract must treat it as FAIL, fails closed too. Do NOT write `isolated … || <run it
   anyway>`: that is the host fallback this verb exists to remove.

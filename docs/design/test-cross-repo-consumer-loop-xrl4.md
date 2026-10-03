@@ -473,12 +473,28 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
   forwards termination signals to unshare's CHILD — the inner half — not to unshare.
 * **No capabilities.** *Measured by the final review:* the command was namespace root with
   **every** capability, so `umount -l /tmp` or unmounting a `/dev/null` cover re-exposed host
-  sockets (ENOENT/ECONNREFUSED → CONNECTED). ⇒ It runs under `setpriv --no-new-privs
-  --bounding-set=-all --inh-caps=-all --ambient-caps=-all`, on the nested path too, and the
-  drop is **checked** by reading the prefix's own `/proc/self/status` (all CapXxx 0,
-  NoNewPrivs 1); no `setpriv` ⇒ refused. A nested `unshare -rm` from inside cannot write its
-  uid_map, and even with capabilities the inherited mounts are **locked** (`umount -l /tmp`
-  → "not mounted") — measured, both.
+  sockets (ENOENT/ECONNREFUSED → CONNECTED). ⇒ It runs in a **child user namespace as the
+  real uid/gid**: `setpriv --no-new-privs -- unshare -U --map-user <uid> --map-group <gid>`
+  (ids read on the host side, passed in the masking plan / `WEBCTL_HOST_IDS`), on the nested
+  path too. A non-root uid loses every capability on execve, and the masks belong to the
+  OUTER user namespace. The drop is **checked** from inside the child: CapInh/Prm/Eff/Amb 0,
+  NoNewPrivs 1, the real ids, and exactly one uid_map/gid_map line; a missing `setpriv`, a
+  too-old `unshare` (no `--map-user`, util-linux < 2.38), or a real uid 0 ⇒ refused.
+  ⛔ **Not `setpriv --bounding-set=-all`** (the first fix): it broke **nested namespaces**,
+  which lanes and Chromium need. A capless namespace-*root* cannot write a nested userns's
+  uid_map (mapping uid 0 needs CAP_SETFCAP), so under the real gate a lane self-isolating
+  with `unshare -rn` FAILED, a netns probe went INCONCLUSIVE, and Chromium never brought
+  CDP up. As a non-root uid, a nested `unshare -rn` (+ `lo` up), a nested pid ns and
+  Chromium's sandbox all work (measured), while a nested `unshare -rnm`'s inherited mounts
+  stay **locked**: `umount -l /tmp` and `remount,bind,rw` are refused there.
+* **The real user, under an outer `unshare -r` too.** Lanes self-isolate with
+  `unshare -rn` and may call `isolated` inside it, where getuid() is 0 and os.userInfo() is
+  root: the review measured a write landing in the REAL home. ⇒ The ids come from the
+  outside of `/proc/self/{uid,gid}_map`, the home from passwd for that uid, accepted only if
+  the kernel shows it owned by us. A stack of `unshare -r`, no passwd entry ⇒ refused.
+* **Ctrl-C stops the caller.** A forwarded signal that ended the command is re-raised, so
+  `isolated` dies BY it and bash's cooperative-exit rule stops a trap-less parent (before:
+  it carried on with `$? = 130`).
 * **Env scrub** on the fresh and the nested path: `DISPLAY`, `WAYLAND_DISPLAY`,
   `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `XDG_RUNTIME_DIR` unset;
   `TMPDIR=/tmp`, so an inherited value cannot name a directory the mask hid.
