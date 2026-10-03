@@ -332,7 +332,9 @@ while the live pair has the old ones) — `inspect().legacy` comes in the next r
 * `isolated` covers what a lane RUNS UNDER IT. A lane's arm that is not wrapped is not
   isolated; adopting it is each lane's change. It masks host unix sockets present when the
   arm starts, not ones created on the host afterwards. It needs unprivileged user namespaces
-  (refused, never bypassed, where they are off).
+  (refused, never bypassed, where they are off). ⚠ It is NOT a filesystem sandbox: outside
+  /run and /tmp, the user's files (home dir, live repos) stay readable and writable from
+  inside. The `--scratch` gate catches a live-tree write by fingerprint; it does not prevent it.
 * The gate's default and plain `--against-head` modes are NOT isolated and still swap in
   place; only `--scratch` gives both guarantees.
 * **openPage() currently drives the first existing tab; v0.32.0 changes the default to a new
