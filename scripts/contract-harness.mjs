@@ -1045,17 +1045,27 @@ function parentIdOf(file, id) {
  * The passwd home of `uid`: `getent passwd <uid>` (NSS: LDAP/sssd/homed users too), else
  * /etc/passwd parsed directly. '' when there is no entry. ⚠ Not os.userInfo(): under an outer
  * `unshare -r` that answers for uid 0 — root's home.
- * @param {number} uid @returns {string}
+ * @param {number} uid @returns {{home: string, conflict: boolean}}
  */
 function passwdHomeOf(uid) {
   /** @param {string} l */
   const homeOf = (l) => { const f = l.split(':'); return f.length >= 7 && f[2] === String(uid) ? f[5] : ''; };
-  const r = spawnSync('getent', ['passwd', String(uid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  const viaNss = r.status === 0 ? homeOf(String(r.stdout).split('\n')[0]) : '';
-  if (viaNss) return viaNss;
-  try {
-    return fs.readFileSync('/etc/passwd', 'utf8').split('\n').map(homeOf).find(Boolean) || '';
-  } catch { return ''; }
+  // ⛔ getent by ABSOLUTE path, never by PATH: under an outer \`unshare -r\`, a \`getent\` earlier
+  // on PATH that answered a self-owned dir under /tmp made the REAL home writable — the
+  // "home" was then dropped as hidden by the mask, so nothing was protected (measured by
+  // the final review). And the two sources are CROSS-CHECKED: where both answer, they must
+  // agree, or nobody can say whose home this is.
+  let viaNss = '';
+  for (const bin of ['/usr/bin/getent', '/bin/getent']) {
+    if (!fs.existsSync(bin)) continue;
+    const r = spawnSync(bin, ['passwd', String(uid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    viaNss = r.status === 0 ? homeOf(String(r.stdout).split('\n')[0]) : '';
+    break;
+  }
+  let viaFile = '';
+  try { viaFile = fs.readFileSync('/etc/passwd', 'utf8').split('\n').map(homeOf).find(Boolean) || ''; } catch { /* none */ }
+  if (viaNss && viaFile && viaNss !== viaFile) return { home: '', conflict: true };
+  return { home: viaNss || viaFile, conflict: false };
 }
 
 /**
@@ -1109,7 +1119,11 @@ function realIdentity() {
   }
   let entries = 0;
   for (const c of cands) {
-    const home = passwdHomeOf(c.uid);
+    const { home, conflict } = passwdHomeOf(c.uid);
+    if (conflict) {
+      return none('the passwd database and /etc/passwd DISAGREE about the real user\'s home, so it is unknown '
+        + 'which directory to make read-only');
+    }
     if (!home) continue;
     entries++;
     try {
@@ -1148,7 +1162,15 @@ function protectedRoots(home) {
       return { home, roots: [], sensitive, refuse: `${r === home ? 'the home directory' : 'a sensitive home directory\'s real path'} `
         + 'CONTAINS /run or /tmp, so it cannot be made read-only without undoing the socket masking' };
     }
-    if (all.some((m) => isWithin(r, m))) continue; // hidden by the mask already
+    if (all.some((m) => isWithin(r, m))) {
+      // ⛔ A HOME under /run or /tmp would protect NOTHING: the mask hides it, and the real
+      // files are elsewhere. That is the signature of a wrong passwd answer, so refuse.
+      if (r === home) {
+        return { home, roots: [], sensitive, refuse: 'the resolved home directory lies under /run or /tmp, so '
+          + 'making it read-only would protect nothing — refusing rather than leaving the real home writable' };
+      }
+      continue; // a sensitive dir's real path hidden by the mask already
+    }
     if (!roots.some((o) => isWithin(r, o))) roots.push(r);
   }
   return { home, roots, sensitive };
