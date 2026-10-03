@@ -705,3 +705,195 @@ test('⛔ byName is MULTI-VALUED: a shim of EITHER of two same-named base module
     assert.equal(r.status, 0, `a shim of lib/${d}/util.js must PASS; got ${r.status}\n${r.stderr}`);
   }
 });
+
+// ── no-revendor: the lexer fails CLOSED (re-review of generation 5) ──────────
+//
+// ⛔ THE FIRST LEXER FAILED OPEN. It read every `/` after `)`, `}` or `${` as
+// division, so a regex holding a quote or a backtick opened a PHANTOM string or
+// template: comment text became code (a fake specifier), real code vanished (a
+// hidden `function` made a file "define nothing"), and a comment stayed in the
+// content hash. Its own comment called that limit a false FAIL. ⇒ Every probe
+// the re-review sent is an arm here, with the verdict it SHOULD get, verbatim.
+
+/** The re-review's base: index → two modules. */
+const PROBE_BASE = {
+  'index.js': "export * from './cdp-client.js'; export * from './cdp-rewrite.js';\n",
+  'cdp-rewrite.js': 'export function rewrite(){ return 2 }\n',
+  'cdp-client.js': 'export function createCdpClient(){ return 1 }\n',
+};
+
+/**
+ * Lay `local` (lib-relative -> source) beside a vendored `base`, run no-revendor,
+ * clean up. @param {Record<string,string>} local @param {Record<string,string>} [base]
+ */
+function probe(local, base = PROBE_BASE) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'revendor-probe-'));
+  try {
+    for (const [root, files] of [[path.join(dir, 'vendor', 'base-webctl', 'lib'), base], [path.join(dir, 'lib'), local]]) {
+      for (const [rel, src] of Object.entries(files)) {
+        fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+        fs.writeFileSync(path.join(root, rel), src);
+      }
+    }
+    return run(['no-revendor', '--repo', dir]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+/** A same-named EDITED copy: it requires a base SIBLING, never its own module. */
+const HEAD = "const { rewrite } = require('../vendor/base-webctl/lib/cdp-rewrite.js');\n"
+  + 'function createCdpClient(){ return rewrite() + 41 }\n'
+  + 'module.exports = { createCdpClient };\n';
+const SAME = "require('../vendor/base-webctl/lib/cdp-client.js')";
+const IDX = "require('../vendor/base-webctl/lib/index.js')";
+const SPREAD = (/** @type {string} */ extra) => `module.exports = { ...${IDX}, ${extra} };\n`;
+
+/** Each probe: [expected exit, source of lib/cdp-client.js]. */
+const PROBES = {
+  // a — prose that names the same module: never a specifier.
+  a1: [1, `${HEAD.replace('{ createCdpClient };', `{ createCdpClient }; // forked from ${SAME}`)}`],
+  a2: [1, `${HEAD}const note = "forked from ${SAME}";\n`],
+  a3: [1, `${HEAD}/* forked from\n   ${SAME} */\n`],
+  a4: [1, HEAD + 'const note = `forked from ' + SAME + ' ${1}`;\n'],
+  a5: [1, HEAD + 'const note = `x ${"' + SAME + '"}`;\n'],
+  // b — a regex where the old lexer saw division (b1–b4), and lexer controls (b5–b9).
+  b1: [1, HEAD + "if (process.env.X) /'/.test('a') // ' ; " + SAME + '\n'],
+  b2: [1, HEAD + "if (process.env.X) /`/.test('a') // ` ; " + SAME + ' /* `\n'],
+  b3: [1, HEAD + "const s = `${/'/.test(k) ? 1 : 2}`; // ' ; " + SAME + '\n'],
+  b4: [1, HEAD + "{ } /\"/.test('a') // \" ; " + SAME + '\n'],
+  b5: [1, "const re = /['\"`]/g; const r2 = /\\/\\//;\n" + HEAD],
+  b6: [1, 'const t = `${`${1}`}`;\n' + HEAD],
+  b7: [1, '#!/usr/bin/env node\n' + HEAD],
+  b8: [1, 'const u = import.meta.url;\n' + HEAD],
+  b9: [1, 'const m = import(p);\n' + HEAD],
+  // c — "defines nothing", so the barrel exception: only c1 and c9 own no logic.
+  c0: [1, `const base = ${IDX};\nfunction q(s) { if (s.includes('x')) /[\`]/.test(s); return s; }\n`
+    + 'function createCdpClient(url) { return base.rewrite(url) + 41; }\n'
+    + "module.exports = { createCdpClient, label: `cdp ${q('a')}` };\n"],
+  // c0b: NO prose at all — a backtick in a regex hid the function AND the class.
+  c0b: [1, `const base = ${IDX};\nconst name = process.env.CDP_NAME || '';\n`
+    + 'if (name) /[`]/.test(name) && console.log(name);\n'
+    + 'function createCdpClient(url) { return base.rewrite(url) + 41; }\n'
+    + 'class Session { send() { return 1; } }\nmodule.exports = { createCdpClient, Session, label: `cdp` };\n'],
+  'c0b-control': [1, `const base = ${IDX};\nconst name = process.env.CDP_NAME || '';\n`
+    + 'function createCdpClient(url) { return base.rewrite(url) + 41; }\n'
+    + 'class Session { send() { return 1; } }\nmodule.exports = { createCdpClient, Session, label: `cdp` };\n'],
+  c1: [0, `module.exports = { ...${IDX}.x, extra: 1 };\n`],
+  c2: [1, SPREAD('f() { return 1 }')],
+  c3: [1, SPREAD('f: function(){ return 1 }')],
+  c4: [1, SPREAD('f: x => x')],
+  c5: [1, SPREAD("['createCdpClient']() { return 42 }")],
+  c6: [1, SPREAD("'createCdpClient'(u) { return 42 }")],
+  c7: [1, SPREAD("createCdpClient: new Function('u', 'return 42')")],
+  c8: [1, SPREAD("get ['x']() { return 42 }")],
+  c9: [0, SPREAD('f: Math.max.bind(null, 41)')],
+};
+
+test('⛔ RE-REVIEW PROBES: every one gets the verdict it should — none passes by a misread', () => {
+  for (const [id, [want, src]] of Object.entries(PROBES)) {
+    const r = probe({ 'cdp-client.js': /** @type {string} */ (src) });
+    assert.equal(r.status, want, `${id}: want exit ${want}, got ${r.status}\n${src}\n${r.stderr}`);
+  }
+});
+
+test('⛔ h1: a COMMENT after a regex is stripped from the HASH, so a renamed copy is still a copy', () => {
+  // The old lexer read `/'/` after `)` as division; the `'` opened a phantom
+  // string that KEPT the comment, so changing the comment changed the hash.
+  const r = probe({ 'other.js': "if (a) /'/.test(b) // ' different comment\nexport function z(){}\n" },
+    { ...PROBE_BASE, 'cdp-rewrite.js': "if (a) /'/.test(b) // ' x\nexport function z(){}\n" });
+  assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /lib\/other\.js <- lib\/cdp-rewrite\.js \(identical after normalisation\)/);
+});
+
+test('⛔ h1 after a `}`: a copy matching base under its SECOND reading only is still a copy', () => {
+  // `{ } /'/…` forks. The first (division) reading keeps the comment, so the
+  // copy's changed comment changes that hash; the regex reading strips it, and
+  // matches. ⇒ Every reading's hash is compared, on both sides.
+  const r = probe({ 'other.js': "{ } /'/.test(b) // ' different comment\nexport function z(){}\n" },
+    { ...PROBE_BASE, 'cdp-rewrite.js': "{ } /'/.test(b) // ' x\nexport function z(){}\n" });
+  assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /lib\/other\.js <- lib\/cdp-rewrite\.js \(identical after normalisation\)/);
+});
+
+test('⛔ an AMBIGUOUS same-named file gets NO exception, and the FAIL names the line and the fix', () => {
+  // `{ } /"/…` — a block then a regex, or an object then a division: undecidable
+  // from tokens, so both readings are taken. One sees a require of the same
+  // module (inside what is really a comment); they disagree ⇒ no shim excuse.
+  const r = probe({ 'cdp-client.js': PROBES.b4[1] });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /AMBIGUOUS at line 4/);
+  assert.match(r.stderr, /assign the regex to a variable first/);
+});
+
+test('⭐ CONTROL: an ambiguous point whose two readings AGREE is judged normally', () => {
+  // `{ } /x/.test('a')` reads as block+regex or object+division — but nothing
+  // in it is a quote, a comment or a definition, so every derived fact agrees.
+  const r = probe({ 'cdp-client.js': `module.exports = ${SAME};\n{ } /x/.test('a');\n` });
+  assert.equal(r.status, 0, `a real shim must PASS; got ${r.status}\n${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /AMBIGUOUS|more than one way/);
+});
+
+test('⭐ an ambiguous file NOT named like a base module still passes — and the reason names it', () => {
+  const r = probe({ 'own.js': "{ } /\"/.test('a') // \" ;\nexport const mine = 1;\n" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /1 file\(s\) read more than one way \(lib\/own\.js line 1\)/);
+});
+
+test('⭐ CONTROL: a legitimate wrapper full of DIVISION and regex is not a false FAIL', () => {
+  // Precision arms: each line is decided from tokens, so none of them forks.
+  // Mutating the bracket stack, the `${` rule or `++` turns one of them red.
+  const wrappers = {
+    'division after a paren': `const base = ${SAME};\nconst mid = (a, b) => (a + b) / 2;\n`
+      + 'const ratio = (mid(1, 3) - 1) / (2) / 3;\nmodule.exports = { ...base, mid, ratio };\n',
+    'regex after if (…)': `const base = ${SAME};\n`
+      + "function q(s) { if (s) /['\"]/.test(s) && console.log(s); return s; } // don't\n"
+      + 'module.exports = { ...base, q };\n',
+    'regex after ${': `const base = ${SAME};\nconst k = 'a';\n`
+      + "const label = `${/'/.test(k) ? 'q' : ''}`;\nmodule.exports = { ...base, label };\n",
+    'division after ++': `const base = ${SAME};\nlet n = 4;\nconst half = n++ / 2;\nmodule.exports = { ...base, half };\n`,
+    'regex in a normal position': `const base = ${SAME};\nconst re = /['"\`]/g;\nmodule.exports = { ...base, re };\n`,
+    // Here the division reading is VALID too (it keeps the comment), so reading
+    // `)` both ways instead of deciding it would disagree and false-FAIL.
+    'regex after if (…), apostrophe in a trailing comment': `const base = ${SAME};\n`
+      + "if (process.env.Q) /'/.test('a') && console.log('x'); // it's\nmodule.exports = base;\n",
+    // A `}` fork whose regex reading is fine and whose division reading opens a
+    // string that cannot close on the line (and swallows the comment): invalid
+    // JS, so it is dropped rather than counted as a disagreeing reading.
+    'a fork with one invalid reading': `const base = ${SAME};\n`
+      + "function f(s) { if (s) { s = 1 } /'/.test(s) && console.log(\"it's\"); } // x\n"
+      + 'module.exports = { ...base, f };\n',
+  };
+  for (const [what, src] of Object.entries(wrappers)) {
+    const r = probe({ 'cdp-client.js': src });
+    assert.equal(r.status, 0, `${what}: a real wrapper must PASS; got ${r.status}\n${src}\n${r.stderr}`);
+  }
+});
+
+test('⛔ HTML-like comments are read BOTH ways: a comment in CommonJS, code in an ES module', () => {
+  // Node runs a .js CommonJS file as a script, where `<!--` and a line-leading
+  // `-->` start a comment (Annex B). A specifier after one is NOT code there.
+  for (const [what, src] of Object.entries({
+    '<!--': `${HEAD}x <!-- ${SAME}\n`,
+    '-->': `${HEAD}--> ${SAME}\n`,
+  })) {
+    const r = probe({ 'cdp-client.js': src });
+    assert.equal(r.status, 1, `${what}: must FAIL; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /AMBIGUOUS at line 4/, what);
+  }
+});
+
+test('⛔ "defines nothing" is not fooled by escapes or string-to-code routes', () => {
+  // `\u0046unction` IS `Function` — escapes are legal in identifiers.
+  for (const [what, extra] of Object.entries({
+    'escaped Function': "f: new \\u0046unction('return 42')",
+    'eval by string key': "f: globalThis['eval']('1')",
+    'constructor chain': "f: [].constructor.constructor('return 42')",
+    'data: import': "f: import('data:text/javascript,export default 42')",
+    'computed import': "f: import('da' + 'ta:text/javascript,1')",
+  })) {
+    const r = probe({ 'cdp-client.js': SPREAD(extra) });
+    assert.equal(r.status, 1, `${what}: must FAIL; got ${r.status}\n${r.stderr}`);
+  }
+  // …and an escaped `require` IS require: a real shim, so it passes.
+  const r = probe({ 'cdp-client.js': `module.exports = \\u0072equire('../vendor/base-webctl/lib/cdp-client.js');\n` });
+  assert.equal(r.status, 0, `an escaped require is a require; got ${r.status}\n${r.stderr}`);
+});

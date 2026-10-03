@@ -378,7 +378,9 @@ function checkNoRevendor(repo, sub, libDir) {
   const byName = new Map();
   for (const abs of baseFiles) {
     const rel = path.relative(baseLib, abs);
-    byHash.set(normHash(fs.readFileSync(abs, 'utf8')), rel);
+    // Every reading's hash: a base module that reads two ways is matched by a
+    // copy under either (the copy reads the same two ways).
+    for (const h of analyse(fs.readFileSync(abs, 'utf8')).hashes) if (!byHash.has(h)) byHash.set(h, rel);
     const list = byName.get(path.basename(abs)) || [];
     list.push({ rel, real: fs.realpathSync(abs) });
     byName.set(path.basename(abs), list);
@@ -417,12 +419,18 @@ function checkNoRevendor(repo, sub, libDir) {
 
   /** @type {{local:string, base:string, how:string}[]} */
   const found = [];
+  /** @type {{local:string, lines:number[], why:string}[]} files that read more than one way */
+  const ambiguous = [];
+  /** @param {number[]} ls */
+  const atLines = (ls) => (ls.length ? `line ${ls.slice(0, 5).join(', ')}` : 'no single line');
   for (const abs of localFiles) {
     const rel = path.relative(repo, abs);
-    const raw = fs.readFileSync(abs, 'utf8');
+    const a = analyse(fs.readFileSync(abs, 'utf8'));
+    if (a.ambiguous) ambiguous.push({ local: rel, ...a.ambiguous });
 
-    // (1) CONTENT — a copy is a copy under any name, in any directory.
-    const hit = byHash.get(normHash(raw));
+    // (1) CONTENT — a copy is a copy under any name, in any directory. ⇒ For a
+    // file that reads more than one way, a match under ANY reading is a copy.
+    const hit = a.hashes.map((h) => byHash.get(h)).find(Boolean);
     if (hit) {
       found.push({ local: rel, base: hit, how: 'identical after normalisation' });
       continue;
@@ -456,9 +464,23 @@ function checkNoRevendor(repo, sub, libDir) {
     //        shares base's barrel's name and nothing else.
     // ⛔ A file that imports base's index.js AND defines code is still judged by
     // the main rule: the barrel reaches every sibling, so a copy can import it.
+    //
+    // ⛔ AND AN AMBIGUOUS FILE GETS NO EXCEPTION AT ALL — not the shim excuse, not
+    // either barrel excuse. If its readings disagree, at least one of them is a
+    // misreading, and every excuse above is a fact read from the tokens.
     const named = byName.get(path.basename(abs));
-    if (named) {
-      const facts = moduleFacts(raw);
+    if (named && !a.facts) {
+      const amb = /** @type {NonNullable<typeof a.ambiguous>} */ (a.ambiguous);
+      found.push({
+        local: rel,
+        base: named.map((n) => n.rel).join(' | '),
+        how: `same module name, and it is AMBIGUOUS at ${atLines(amb.lines)}: ${amb.why} — `
+          + 'so no shim or barrel exception can be granted',
+      });
+      continue;
+    }
+    if (named && a.facts) {
+      const facts = a.facts;
       const reals = facts.specifiers.map((s) => resolveSpec(abs, s));
       const want = new Set(named.map((n) => n.real));
       const wraps = reals.some((r) => r && want.has(r));
@@ -477,7 +499,17 @@ function checkNoRevendor(repo, sub, libDir) {
     }
   }
 
+  // Files that read more than one way but needed no exception (not named like a
+  // base module) are still NAMED, so a reader knows what the hash compared.
+  const ambNote = ambiguous.length === 0 ? ''
+    : ` ⚠ ${ambiguous.length} file(s) read more than one way (`
+      + ambiguous.map((x) => `${x.local} ${atLines(x.lines)}`).join('; ')
+      + '); every reading\'s hash was compared, and none was granted an exception.';
   if (found.length > 0) {
+    const ambAdvice = found.some((f) => f.how.includes('AMBIGUOUS'))
+      ? ' ⇒ For an AMBIGUOUS file: simplify the named line so it reads one way only — e.g. '
+        + 'assign the regex to a variable first (`const re = /…/;`), or end the block before it with `;`.'
+      : '';
     return report('no-revendor', EXIT.fail,
       `${found.length} local file(s) re-vendor base: `
       + found.map((f) => `${f.local} <- lib/${f.base} (${f.how})`).join('; ')
@@ -485,8 +517,8 @@ function checkNoRevendor(repo, sub, libDir) {
       + 'shim that imports its same-named base module (importing a DIFFERENT base module does '
       + 'not count: a copy imports its siblings too), or a pure re-export through base\'s '
       + 'lib/index.js that defines no function or class of its own; or, if this is an '
-      + 'unrelated module that only shares a name with base\'s, rename it.',
-      { found, examined: localFiles.length, baseModules: baseFiles.length });
+      + 'unrelated module that only shares a name with base\'s, rename it.' + ambAdvice + ambNote,
+      { found, ambiguous, examined: localFiles.length, baseModules: baseFiles.length });
   }
   return report('no-revendor', EXIT.pass,
     `${localFiles.length} local file(s) examined against ${baseFiles.length} base module(s); `
@@ -495,8 +527,8 @@ function checkNoRevendor(repo, sub, libDir) {
     + 'lib/index.js or (as a local index.js) local modules. ⚠ NOT covered: an EDITED copy '
     + 'under a DIFFERENT name is not detected by this check (whole-file hashing cannot see '
     + 'it); and a same-named file that does import its base module is treated as a wrapper, '
-    + 'however much else it defines.',
-    { examined: localFiles.length, baseModules: baseFiles.length });
+    + 'however much else it defines.' + ambNote,
+    { ambiguous, examined: localFiles.length, baseModules: baseFiles.length });
 }
 
 /**
@@ -533,106 +565,211 @@ function insideAny(p, roots) {
 // in prose. Measured in review, 2026-10-03, exit 0 on both. ⇒ Specifiers are
 // now read from TOKENS: a string literal counts only in a module-syntax
 // position, and comments / other strings / template text are never searched.
-// Zero dependencies, so this is a lexer, not a parser — its limits are stated
-// at moduleFacts and in DEV_NOTES.
+//
+// ⛔ AND THE FIRST LEXER FAILED OPEN. It read every `/` after `)`, `}` or a
+// template's `${` as DIVISION, so a regex holding a quote or a backtick there
+// opened a PHANTOM string or template. Measured in re-review, 2026-10-03, all
+// exit 0: the comment after such a regex was lexed as code, so
+// `if (x) /'/.test(a) // ' ; require('<the same base module>')` was a shim; with
+// no prose at all, `if (n) /[\`]/.test(n)` hid the file's `function` and `class`
+// inside a phantom template, so the file "defined nothing" and the barrel
+// exception excused it; and a phantom string KEPT a comment in the content hash,
+// so a re-commented copy under a new name escaped. The old comment here called
+// this limit a false FAIL. It was a false PASS.
+//
+// ⇒ Two changes, both in the direction of failing CLOSED:
+//   1. PRECISION. A bracket stack: a `)` closing `if`/`while`/`for`/`with` is
+//      followed by a regex, every other `)` by division; `${` by a regex; `]`,
+//      `++`, `--` by division. Each of these is decidable from the tokens.
+//   2. WHAT IS STILL UNDECIDABLE IS READ BOTH WAYS, NOT GUESSED. A `/` after a
+//      `}` (block → regex, object or function expression → division) or after a
+//      contextual keyword (`of`, `yield`, `await` — also legal variable names),
+//      and an HTML-like comment (`<!--`, or `-->` leading a line: a comment in a
+//      CommonJS script, CODE in an ES module), are FORK points. readJs() lexes
+//      every combination (capped at MAX_READINGS), drops only readings that are
+//      not lexically valid JS, and analyse() trusts a fact only when every
+//      remaining reading agrees on it. ⇒ A file whose readings disagree is
+//      AMBIGUOUS, and no-revendor grants it no exception.
+//
+// Zero dependencies, so this is a lexer, not a parser. Its remaining limits, and
+// which way each one fails, are listed at analyse() and in DEV_NOTES.
 
-/** @typedef {{k:'id'|'str'|'tpl'|'re'|'num'|'p', v:string}} Tok */
+/** @typedef {{k:'id'|'str'|'tpl'|'re'|'num'|'p', v:string, open?:boolean, stmt?:boolean}} Tok */
+/**
+ * ONE way of reading a source. `forks` holds the offset of every point at which a
+ * second reading was possible; `bad` is set when this reading is not lexically
+ * valid JS (an unterminated string, template, comment or regex, bad regex flags,
+ * unbalanced brackets) — `bad.forks` is how many forks preceded that point.
+ * @typedef {{toks: Tok[], code: string, forks: number[],
+ *   bad: null | {at: number, forks: number, why: string}}} Reading
+ */
 
-/** Keywords after which `/` starts a regex rather than a division. */
-const REGEX_AFTER = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete',
-  'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+/** Reserved words after which `/` starts a regex. Reserved, so never a variable. */
+const REGEX_AFTER = new Set(['return', 'typeof', 'instanceof', 'in', 'new', 'delete',
+  'void', 'throw', 'case', 'do', 'else', 'default']);
+/** Contextual keywords: also legal variable names, so a `/` after one is FORKED. */
+const SLASH_CONTEXTUAL = new Set(['of', 'yield', 'await']);
+/** Statement heads: the `)` closing their `( … )` is followed by a statement. */
+const STMT_PAREN = new Set(['if', 'while', 'for', 'with']);
+/** Valid regex flags: each of d g i m s u v y, at most once. */
+const REGEX_FLAGS = /^(?!.*(.).*\1)[dgimsuvy]*$/;
+const ID_START = /[A-Za-z_$#\u0080-￿]/;
+const ID_PART = /[\w$\u0080-￿]/;
+/** `\uXXXX` / `\u{X…}` — legal inside an identifier, and `require` IS `require`. */
+const ID_ESCAPE = /^\\u(?:\{([0-9a-fA-F]{1,6})\}|([0-9a-fA-F]{4}))/;
 
 /**
- * Tokenise `src`: strings (' " and templates, with `${…}` nesting), regex
- * literals, comments (line, trailing and block — all dropped), identifiers,
- * numbers, punctuation. Also returns the source with every comment replaced by
- * a space, which is what the content hash reads.
+ * Read `src` ONE way: strings (' " and templates, with `${…}` nesting), regex
+ * literals, comments (line, trailing, block and HTML-like — all dropped),
+ * identifiers (escapes decoded), numbers, punctuation. Also returns the source
+ * with every comment replaced by whitespace, which is what the content hash reads.
  *
- * @param {string} src @returns {{toks: Tok[], code: string}}
+ * At the f-th fork point the reading takes the SECOND branch (regex; HTML-like
+ * comment) iff `choices[f]`; past the end of `choices`, the first (division; code).
+ *
+ * @param {string} src @param {boolean[]} [choices] @returns {Reading}
  */
-function lexJs(src) {
+function lexJs(src, choices = []) {
   /** @type {Tok[]} */
   const toks = [];
   let code = '';
+  /** @type {number[]} */
+  const forks = [];
+  /** @type {Reading['bad']} */
+  let bad = null;
+  /** @param {number} at @param {string} why */
+  const invalid = (at, why) => { if (!bad) bad = { at, forks: forks.length, why }; };
+  /** Record a fork point; true = take the second branch. @param {number} at */
+  const fork = (at) => { const f = forks.length; forks.push(at); return !!choices[f]; };
+
   const n = src.length;
   let i = 0;
   if (src.startsWith('#!')) { const e = src.indexOf('\n'); i = e < 0 ? n : e; }
-  /** brace depths at which an open `${` will close */
-  /** @type {number[]} */
-  const tpl = [];
-  let depth = 0;
+  /**
+   * Open brackets — `(` (stmt: it heads if/while/for/with), `[`, `{`, and a
+   * template's `${`, which the next unmatched `}` resumes.
+   * @type {{t: string, stmt?: boolean}[]}
+   */
+  const open = [];
+  /** @param {number} back */
+  const tok = (back) => toks[toks.length - back];
+  /** Is the token `back` from the end preceded by `.`? @param {number} back */
+  const dotted = (back) => { const x = tok(back + 1); return !!x && x.k === 'p' && x.v === '.'; };
 
-  const regexAllowed = () => {
-    const t = toks[toks.length - 1];
-    if (!t) return true;
-    if (t.k === 'id') return REGEX_AFTER.has(t.v);
-    if (t.k === 'p') return !(t.v === ')' || t.v === ']' || t.v === '}');
-    return false;
+  /** @returns {'re'|'div'|'fork'} what a `/` here starts */
+  const slashKind = () => {
+    const t = tok(1);
+    if (!t) return 're';
+    if (t.k === 'id') {
+      if (dotted(1)) return 'div';
+      if (REGEX_AFTER.has(t.v)) return 're';
+      return SLASH_CONTEXTUAL.has(t.v) ? 'fork' : 'div';
+    }
+    if (t.k === 'tpl') return t.open ? 're' : 'div';
+    if (t.k !== 'p') return 'div';
+    if (t.v === ')') return t.stmt ? 're' : 'div';
+    if (t.v === ']' || t.v === '++' || t.v === '--') return 'div';
+    return t.v === '}' ? 'fork' : 're';
   };
-  /** Scan template text from `i` to the closing backtick or the next `${`. */
-  const tplChunk = () => {
+  /** End of a regex literal starting at `s`, or -1 when none can. @param {number} s */
+  const regexEnd = (s) => {
+    let j = s + 1;
+    let cls = false;
+    for (;;) {
+      if (j >= n || src[j] === '\n' || src[j] === '\r') return -1;
+      const ch = src[j];
+      if (ch === '\\') {
+        if (j + 1 >= n || src[j + 1] === '\n' || src[j + 1] === '\r') return -1;
+        j += 2; continue;
+      }
+      if (cls) { if (ch === ']') cls = false; } else if (ch === '[') cls = true;
+      else if (ch === '/') break;
+      j++;
+    }
+    const f = ++j;
+    while (j < n && ID_PART.test(src[j])) j++;
+    return REGEX_FLAGS.test(src.slice(f, j)) ? j : -1;
+  };
+  /** Scan template text from `i` to the closing backtick or the next `${`. @param {string} lead */
+  const template = (lead) => {
     const s = i;
+    let closed = false;
+    let opened = false;
     while (i < n) {
       const c = src[i];
       if (c === '\\') { i += 2; continue; }
-      if (c === '`') { i++; return { text: src.slice(s, i), open: false }; }
-      if (c === '$' && src[i + 1] === '{') { i += 2; return { text: src.slice(s, i), open: true }; }
+      if (c === '`') { i++; closed = true; break; }
+      if (c === '$' && src[i + 1] === '{') { i += 2; opened = true; break; }
       i++;
     }
-    return { text: src.slice(s), open: false };
+    if (!closed && !opened) invalid(s, 'unterminated template literal');
+    const text = src.slice(s, i);
+    code += lead + text;
+    toks.push({ k: 'tpl', v: text, open: opened });
+    if (opened) open.push({ t: '${' });
   };
-  /** @param {string} lead */
-  const template = (lead) => {
-    const r = tplChunk();
-    code += lead + r.text;
-    toks.push({ k: 'tpl', v: r.text });
-    if (r.open) tpl.push(depth);
-  };
+  const lineEnd = () => { const e = src.indexOf('\n', i); return e < 0 ? n : e; };
 
   while (i < n) {
     const c = src[i];
     const d = src[i + 1];
-    if (c === '/' && d === '/') {
-      const e = src.indexOf('\n', i); i = e < 0 ? n : e; code += ' '; continue;
-    }
+    if (c === '/' && d === '/') { i = lineEnd(); code += ' '; continue; }
     if (c === '/' && d === '*') {
-      const e = src.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; code += ' '; continue;
+      const e = src.indexOf('*/', i + 2);
+      if (e < 0) invalid(i, 'unterminated block comment');
+      const end = e < 0 ? n : e + 2;
+      // Keep its line breaks: a `-->` after a multi-line comment leads a line.
+      code += ` ${src.slice(i, end).replace(/[^\n]/g, '')}`;
+      i = end; continue;
+    }
+    // HTML-like comments (ECMA-262 Annex B): a line comment in a CommonJS script,
+    // but `<!--` is `< ! --` and `-->` is `-- >` in an ES module. FORKED.
+    if ((c === '<' && src.startsWith('<!--', i))
+      || (c === '-' && src.startsWith('-->', i) && code.slice(code.lastIndexOf('\n') + 1).trim() === '')) {
+      if (fork(i)) { i = lineEnd(); code += ' '; continue; }
     }
     if (/\s/.test(c)) { code += c; i++; continue; }
     if (c === '"' || c === "'") {
       const s = i++;
       while (i < n && src[i] !== c && src[i] !== '\n') i += src[i] === '\\' ? 2 : 1;
       const closed = src[i] === c;
-      if (closed) i++;
+      if (closed) i++; else invalid(s, 'unterminated string');
       const lit = src.slice(s, i);
       code += lit;
       toks.push({ k: 'str', v: lit.slice(1, closed ? -1 : undefined) });
       continue;
     }
     if (c === '`') { i++; template('`'); continue; }
-    if (c === '}' && tpl.length && tpl[tpl.length - 1] === depth) {
-      tpl.pop(); i++; template('}'); continue;
+    if (c === '}' && open.length && open[open.length - 1].t === '${') {
+      open.pop(); i++; template('}'); continue;
     }
-    if (c === '/' && regexAllowed()) {
-      const s = i++;
-      let cls = false;
-      while (i < n && src[i] !== '\n') {
-        const ch = src[i];
-        if (ch === '\\') { i += 2; continue; }
-        if (cls) { if (ch === ']') cls = false; } else if (ch === '[') cls = true;
-        else if (ch === '/') { i++; break; }
-        i++;
+    if (c === '/') {
+      let kind = slashKind();
+      // A fork only where a regex could actually end on this line.
+      if (kind === 'fork') kind = regexEnd(i) < 0 ? 'div' : fork(i) ? 're' : 'div';
+      if (kind === 're') {
+        let e = regexEnd(i);
+        if (e < 0) { invalid(i, 'unterminated regex literal'); e = lineEnd(); }
+        code += src.slice(i, e);
+        toks.push({ k: 're', v: src.slice(i, e) });
+        i = e; continue;
       }
-      while (i < n && /[A-Za-z]/.test(src[i])) i++;
-      code += src.slice(s, i);
-      toks.push({ k: 're', v: src.slice(s, i) });
-      continue;
     }
-    if (/[A-Za-z_$#\u0080-￿]/.test(c)) {
-      const s = i++;
-      while (i < n && /[\w$\u0080-￿]/.test(src[i])) i++;
+    if (ID_START.test(c) || (c === '\\' && d === 'u')) {
+      const s = i;
+      let v = '';
+      while (i < n) {
+        if (src[i] === '\\') {
+          const m = src[i + 1] === 'u' ? ID_ESCAPE.exec(src.slice(i, i + 10)) : null;
+          const cp = m ? parseInt(m[1] || m[2], 16) : -1;
+          if (!m || cp > 0x10ffff) { invalid(i, 'bad escape in an identifier'); i += 2; continue; }
+          v += String.fromCodePoint(cp); i += m[0].length; continue;
+        }
+        if (!(i === s ? ID_START : ID_PART).test(src[i])) break;
+        v += src[i]; i++;
+      }
       code += src.slice(s, i);
-      toks.push({ k: 'id', v: src.slice(s, i) });
+      toks.push({ k: 'id', v });
       continue;
     }
     if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(d || ''))) {
@@ -643,41 +780,163 @@ function lexJs(src) {
       continue;
     }
     // `...` is ONE token: read as three dots, `...require('x')` looks like `.require`.
-    const p = c === '=' && d === '>' ? '=>' : src.startsWith('...', i) ? '...' : c;
-    if (p === '{') depth++;
-    if (p === '}') depth--;
+    // `++`/`--` are one token too: a `/` after either is a division.
+    const p = c === '=' && d === '>' ? '=>' : src.startsWith('...', i) ? '...'
+      : (c === '+' || c === '-') && d === c ? c + c : c;
+    /** @type {Tok} */
+    const t = { k: 'p', v: p };
+    if (p === '(') {
+      const h = tok(1);
+      const h2 = tok(2);
+      const stmt = !!h && h.k === 'id' && !dotted(1) && (STMT_PAREN.has(h.v)
+        || (h.v === 'await' && !!h2 && h2.k === 'id' && h2.v === 'for' && !dotted(2)));
+      open.push({ t: '(', stmt });
+    } else if (p === '[' || p === '{') {
+      open.push({ t: p });
+    } else if (p === ')' || p === ']' || p === '}') {
+      const want = p === ')' ? '(' : p === ']' ? '[' : '{';
+      const top = open[open.length - 1];
+      if (top && top.t === want) { open.pop(); if (p === ')') t.stmt = !!top.stmt; }
+      else invalid(i, `unbalanced '${p}'`);
+    }
     i += p.length;
     code += p;
-    toks.push({ k: 'p', v: p });
+    toks.push(t);
   }
-  return { toks, code };
+  if (open.length) invalid(n, `unclosed '${open[open.length - 1].t}'`);
+  return { toks, code, forks, bad };
+}
+
+/** At most this many readings of one file; beyond it the file is AMBIGUOUS. */
+const MAX_READINGS = 32;
+
+/**
+ * Every reading of `src`: one per combination of choices at its fork points,
+ * depth-first, at most MAX_READINGS. ⇒ Cost is one lex per reading, and a fork
+ * exists only where a `/` after `}` (or a contextual keyword) could close as a
+ * regex on the same line, or at an HTML-like comment — rare in real code.
+ *
+ * A reading that goes invalid is KEPT (its hash still counts), but is not
+ * branched past its invalid point: every reading below it shares the defect.
+ *
+ * @param {string} src @returns {{readings: Reading[], capped: boolean}}
+ */
+function readJs(src) {
+  /** @type {Reading[]} */
+  const readings = [];
+  /** @type {boolean[][]} choice prefixes still to lex */
+  const todo = [[]];
+  while (todo.length) {
+    if (readings.length >= MAX_READINGS) return { readings, capped: true };
+    const pre = /** @type {boolean[]} */ (todo.pop());
+    const r = lexJs(src, pre);
+    readings.push(r);
+    const lim = r.bad ? r.bad.forks : r.forks.length;
+    for (let m = lim - 1; m >= pre.length; m--) {
+      todo.push([...pre, ...new Array(m - pre.length).fill(false), true]);
+    }
+  }
+  return { readings, capped: false };
+}
+
+/** @param {Reading} r */
+function readingHash(r) {
+  return createHash('sha256').update(r.code.replace(/\s+/g, ' ').trim()).digest('hex');
+}
+
+/**
+ * What no-revendor knows about one file, across EVERY reading of it.
+ *
+ * * `hashes` — the normalised-content hash of every reading (valid or not). Both
+ *   sides of the content comparison go through this, so a copy and its original
+ *   produce the same set, and a match on ANY reading is a copy.
+ * * `facts` — specifiers + defines (moduleFacts), but ONLY when every valid
+ *   reading agrees on them and on the hash; otherwise null and `ambiguous` says
+ *   where and why. ⇒ An ambiguous file gets no exception: fails CLOSED.
+ *
+ * ⚠ Remaining limits, with the direction each one fails:
+ * * Beyond MAX_READINGS the file is ambiguous (closed for every exception) — but
+ *   the content arm then compares only the readings explored, so a copy whose
+ *   matching reading was not explored is missed (OPEN; needs > ~5 `}`-forks).
+ * * A reading is dropped only for being invalid JS. A file that is invalid in
+ *   EVERY reading is ambiguous (closed). If the true reading of a valid file were
+ *   dropped, that would be a lexer bug, not a stated limit.
+ * * A locally SHADOWED `require` (`function require() {}`) is still taken as
+ *   require, so a copy that defines its own fake `require` and "calls" its base
+ *   module through it is excused as a shim (OPEN; it has to be written that way
+ *   on purpose — no copy taken from base looks like that).
+ * * `defines` sees syntax (`function`, `class`, `=>`, `(…) {`) and the named
+ *   string-to-code entry points (`eval`, `Function`, `constructor`, `vm.*`,
+ *   `data:` imports, non-literal `import()`). Code reached by another route — a
+ *   name built at runtime, a string timer, a worker — is not seen (OPEN, but
+ *   again only for a file written to evade).
+ *
+ * @param {string} src
+ * @returns {{hashes: string[], facts: null | {specifiers: string[], defines: boolean},
+ *   ambiguous: null | {lines: number[], why: string}}}
+ */
+function analyse(src) {
+  const { readings, capped } = readJs(src);
+  const hashes = [...new Set(readings.map(readingHash))];
+  /** @param {number} at */
+  const lineAt = (at) => src.slice(0, at).split('\n').length;
+  const forkLines = [...new Set(readings.flatMap((r) => r.forks.map(lineAt)))].sort((a, b) => a - b);
+  if (capped) {
+    return { hashes, facts: null, ambiguous: { lines: forkLines, why: `it has more than ${MAX_READINGS} readings` } };
+  }
+  const valid = readings.filter((r) => !r.bad);
+  if (valid.length === 0) {
+    const b = /** @type {NonNullable<Reading['bad']>} */ (readings[0].bad);
+    return { hashes, facts: null, ambiguous: { lines: [lineAt(b.at)], why: `this lexer cannot read it (${b.why})` } };
+  }
+  const all = valid.map((r) => ({ ...moduleFacts(r.toks), hash: readingHash(r) }));
+  /** @param {(typeof all)[number]} f */
+  const key = (f) => JSON.stringify([[...new Set(f.specifiers)].sort(), f.defines, f.hash]);
+  if (new Set(all.map(key)).size > 1) {
+    return {
+      hashes, facts: null,
+      ambiguous: { lines: forkLines, why: 'it reads two ways, and the readings disagree on what it imports, defines or contains' },
+    };
+  }
+  return { hashes, facts: { specifiers: all[0].specifiers, defines: all[0].defines }, ambiguous: null };
 }
 
 /** Keywords that take `( … ) {` without that being a method definition. */
 const PAREN_BLOCK = new Set(['if', 'for', 'while', 'switch', 'catch', 'with', 'await']);
+/** Names that turn a STRING into code. A file reaching one does not "define nothing". */
+const EVALS = new Set(['eval', 'Function', 'constructor', 'runInThisContext', 'runInNewContext',
+  'runInContext', 'compileFunction']);
 
 /**
- * The two facts no-revendor needs about a module, read from TOKENS:
+ * The two facts no-revendor needs about a module, read from ONE reading's TOKENS:
  *
  * * `specifiers` — string literals in a module-syntax position ONLY:
  *   `… from '<s>'` inside an `import`/`export {…}|*` clause, `import '<s>'`,
  *   `import('<s>')` and `require('<s>')` (not `x.require`, and only when the
  *   argument is that one literal). ⇒ Text inside a comment, inside another
  *   string, or inside a template is never a specifier.
- * * `defines` — the file contains a `function`, `class`, `=>`, or a method
- *   shorthand `name(…) {`. A false positive here fails CLOSED (the file is not
- *   excused), which is the safe direction.
+ * * `defines` — the file contains `function`, `class` or `=>`; ANY `( … )`
+ *   followed by `{` that is not an if/for/while/switch/catch/with head — so
+ *   method shorthand under every key form (`f() {`, `['f']() {`, `'f'() {`,
+ *   `get ['x']() {`); or a string-to-code entry point (EVALS, as a name or a
+ *   string, a `data:` specifier, an `import()` whose argument is not one
+ *   literal). A false positive here fails CLOSED (the file is not excused).
  *
- * ⚠ Limits: a lexer, not a parser. A regex literal after `)` or `}` is read as
- * division; a shadowed `require` is still taken as require.
- *
- * @param {string} src @returns {{specifiers: string[], defines: boolean}}
+ * @param {Tok[]} toks @returns {{specifiers: string[], defines: boolean}}
  */
-function moduleFacts(src) {
-  const { toks } = lexJs(src);
+function moduleFacts(toks) {
   /** @param {number} j @param {string} v */
   const is = (j, v) => j >= 0 && j < toks.length && toks[j].k !== 'str' && toks[j].k !== 'tpl'
     && toks[j].v === v;
+  /** @type {Map<number, number>} index of each `(` -> index of its `)` */
+  const closeOf = new Map();
+  /** @type {number[]} */
+  const parens = [];
+  toks.forEach((t, j) => {
+    if (t.k !== 'p') return;
+    if (t.v === '(') parens.push(j);
+    else if (t.v === ')' && parens.length) closeOf.set(/** @type {number} */ (parens.pop()), j);
+  });
   /** @type {string[]} */
   const specifiers = [];
   let defines = false;
@@ -686,6 +945,10 @@ function moduleFacts(src) {
   for (let j = 0; j < toks.length; j++) {
     const t = toks[j];
     const dotted = is(j - 1, '.');
+    if (t.k === 'id' && !dotted && t.v === 'import' && is(j + 1, '(')
+      && !(toks[j + 2] && toks[j + 2].k === 'str' && (is(j + 3, ')') || is(j + 3, ',')))) {
+      defines = true; // import(<expression>) may load a module built from a string
+    }
     if (t.k === 'id' && !dotted && t.v === 'import' && !is(j + 1, '(') && !is(j + 1, '.')) {
       clause = true;
       if (toks[j + 1] && toks[j + 1].k === 'str') specifiers.push(toks[j + 1].v);
@@ -704,18 +967,16 @@ function moduleFacts(src) {
       specifiers.push(t.v);
     }
     if (t.k === 'id' && !dotted && (t.v === 'function' || t.v === 'class')) defines = true;
-    if (t.k === 'p' && t.v === '=>') defines = true;
-    if (t.k === 'p' && t.v === '(' && j > 0 && toks[j - 1].k === 'id' && !dotted
-      && !is(j - 2, '.') && !PAREN_BLOCK.has(toks[j - 1].v)) {
-      let lvl = 0;
-      let k = j;
-      for (; k < toks.length; k++) {
-        if (is(k, '(')) lvl++;
-        else if (is(k, ')') && --lvl === 0) break;
-      }
-      if (is(k + 1, '{')) defines = true;
+    if ((t.k === 'id' || t.k === 'str') && EVALS.has(t.v)) defines = true;
+    if (is(j, '=>')) defines = true;
+    if (is(j, '(')) {
+      const h = toks[j - 1];
+      const head = !!h && h.k === 'id' && PAREN_BLOCK.has(h.v) && !is(j - 2, '.');
+      const k = closeOf.get(j);
+      if (!head && k !== undefined && is(k + 1, '{')) defines = true;
     }
   }
+  if (specifiers.some((s) => s.startsWith('data:'))) defines = true;
   return { specifiers, defines };
 }
 
@@ -744,22 +1005,6 @@ function walkJs(dir) {
   }
   return out;
 }
-
-/**
- * Hash of the NORMALISED code: comments stripped, whitespace collapsed. ⇒ A copy
- * is still recognised after reformatting or re-commenting, which is what a
- * re-vendor looks like once someone has "adapted" it.
- *
- * ⭐ Comments are stripped by the SAME lexer the specifier test uses, so a
- * TRAILING comment added to a copy is stripped too (the old line filter kept
- * it, and the copy hashed differently). Both sides go through this function, so
- * the hash stays symmetric.
- * @param {string} src
- */
-function normHash(src) {
-  return createHash('sha256').update(lexJs(src).code.replace(/\s+/g, ' ').trim()).digest('hex');
-}
-
 
 // ── entry ─────────────────────────────────────────────────────────────────────
 const [, , cmd, ...args] = process.argv;

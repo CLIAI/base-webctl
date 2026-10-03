@@ -173,8 +173,8 @@ by another door. No surveyed shim needs it.
   argument and not `x.require`. `normHash` uses the same lexer's comment-free text,
   so a TRAILING comment added to a copy no longer changes its hash (symmetric: both
   sides go through it).
-* ⚠ Lexer limits, stated rather than hidden: a regex literal right after `)` or `}`
-  is read as division; a locally shadowed `require` is still taken as require.
+* ⛔ ~~Lexer limits: a regex literal right after `)` or `}` is read as division~~ —
+  **that limit was stated as harmless and it FAILED OPEN.** See the re-review below.
 * ⭐ **Base's own house rule conflicted with generation 5.** AGENTS.md tells
   consumers to import only `lib/index.js`, and gen 5 failed a same-named pure
   re-export through it; it also failed a consumer's own local barrel `lib/index.js`
@@ -194,6 +194,65 @@ by another door. No surveyed shim needs it.
   `defines` constant, single-valued `byName`, rename advice removed, regex / template
   / spread lexing off, method shorthand ignored, `from` outside a clause, `x.require`
   counted); each turned at least one test red.
+
+### Re-review of generation 5: the lexer failed OPEN (same generation)
+
+⛔ **The stated limit was the wrong way round.** The note above said a regex right
+after `)` or `}` "is read as division", and the code comment called that a false
+FAIL. Measured in re-review (25 probe repos, all exit 0 where they should have been
+1): when that regex holds a quote or a backtick, division-reading opens a **phantom
+string or template**, and then
+
+* comment text after it is lexed as CODE — `if (x) /'/.test(a) // ' ; require('…/cdp-client.js')`
+  made an edited copy a "shim" (also with a backtick, after `{ }`, and inside `${…}`);
+* real code is HIDDEN inside it, with no prose at all — a `cdp-client.js` requiring
+  base's `lib/index.js` with `if (name) /[\`]/.test(name) && …` "defined nothing", so
+  the barrel exception passed it (the same file without that line FAILed);
+* the content hash kept a comment, so a re-commented copy under a new name escaped.
+
+⇒ **Fixed in two layers, both failing closed:**
+
+1. **Precision** — a bracket stack. A `)` closing `if`/`while`/`for`/`with` is followed
+   by a regex, any other `)` by division; `${` by a regex; `]`, `++`, `--` by division.
+   These are decidable from tokens, so they are decided.
+2. **What is left is read BOTH ways.** A `/` after `}` (block → regex; object or
+   function expression → division) or after a contextual keyword (`of`, `yield`,
+   `await`), and an **HTML-like comment** — `<!--`, or `-->` leading a line, which is a
+   comment in a CommonJS script (Node runs `.js` CJS that way; measured) and code in an
+   ES module — are **fork points**. `readJs` lexes every combination (≤ 32), drops a
+   reading only if it is not lexically valid JS (unterminated string/regex/template,
+   bad flags, unbalanced brackets), and `analyse` uses the facts (specifiers, defines,
+   hash) only when every remaining reading agrees. **A disagreeing file is AMBIGUOUS:
+   it gets no shim, barrel or local-barrel exception**, and the FAIL names the line and
+   says how to make it read one way. The content arm compares **every** reading's
+   hash, on both sides. A fork exists only where a regex could close on the same line,
+   so real code almost never forks: the fleet's ~950 JS files (`--lib .` in every
+   local consumer) produced **zero** ambiguous files.
+
+Also from the re-review: "defines nothing" now counts **any** `( … ) {` that is not an
+`if/for/while/switch/catch/with` head (computed `['f']() {`, string `'f'() {`, computed
+getter `get ['x']() {` all were "nothing"), and string-to-code routes — `eval`,
+`Function`, `constructor`, `vm.*` as a name **or a string key**, a `data:` specifier,
+an `import()` whose argument is not one literal. Identifier escapes are decoded
+(`Function` is `Function`; `require` is `require`).
+
+⚠ **What remains, and which way each fails:**
+
+| limit | direction |
+|---|---|
+| more than 32 readings → ambiguous | CLOSED for every exception |
+| …and its content arm compares only the readings explored | OPEN — needs a base module with > ~5 `}`-forks AND a renamed copy |
+| a file invalid in EVERY reading → ambiguous | CLOSED |
+| a locally SHADOWED `require` (`function require(){}`) is still require | OPEN — only for a file written to look like a shim; no copy taken from base does |
+| code reached by a name built at runtime, a string timer, a worker | OPEN — same: an evasion, not a re-vendor |
+| an edited copy under a different name | OPEN — whole-file hashing, as stated since gen 2 |
+| a same-named file that imports its base module is a wrapper, however much it defines | OPEN — by design (the fleet's real wrappers add code) |
+
+Sabotaged, each against the new tests (13 mutations, every one red): no dual lexing;
+no paren stack (`)` → division); `)` → fork instead of decided; `${` → division; `++`
+as two tokens; invalid readings kept; disagreeing readings trusted; `( … ) {` only after
+an identifier; EVALS ignored; escapes not decoded; HTML-like comments not forked;
+`data:`/computed `import()` not counted; content arm on the first reading only.
 
 ## ⛔ A generation number renders TWO STATES IDENTICALLY
 

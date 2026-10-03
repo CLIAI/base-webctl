@@ -129,6 +129,17 @@ PASS). **The rule now:**
   position counts (`… from '<s>'` in an import/export clause, `import '<s>'`,
   `import('<s>')`, `require('<s>')`). Text in a line, trailing or block comment, or
   inside another string or template, never counts.
+* "Defines nothing" means no `function`, `class`, `=>`, no `( … ) {` other than an
+  `if/for/while/switch/catch/with` head (so method shorthand under any key form), and
+  no string-to-code route (`eval`, `Function`, `constructor`, `vm.*`, a `data:` or
+  computed `import()`).
+* ⛔ **An AMBIGUOUS file gets no exception.** Where tokens cannot decide how a `/` reads
+  (after a `}`, or after `of`/`yield`/`await`) or whether `<!--` / a line-leading `-->`
+  is a comment (it is in CommonJS, not in an ES module), the file is lexed **both
+  ways**. If the readings disagree on what it imports, defines or contains, a
+  same-named file FAILs, naming the line — make it read one way (e.g. assign the regex
+  to a variable first). Any reading's hash matching base is a copy. A file not named
+  like a base module still PASSes, and the reason names it.
 * Bare specifiers (package names, import maps) are not resolved, so they do not
   excuse a file: fails **closed**, naming it.
 * A same-named file that is an **unrelated** module (base has generic names:
@@ -142,7 +153,10 @@ import their own base module and stay green; the only reds are two local
 ⛔ **What it still does NOT catch:** a copy that was **edited** and **renamed**
 (whole-file hashing cannot see it), and a same-named file that imports its base
 module is treated as a wrapper however much else it defines. The PASS reason says
-both explicitly rather than leaving an impression of coverage.
+both explicitly rather than leaving an impression of coverage. Also OPEN, but only for
+a file written to evade: a locally shadowed `require`, and code built from a string by
+a route the lexer does not name. The full table, with the direction each limit fails,
+is in DEV_NOTES ("the lexer failed OPEN").
 
 
 Asserts no local file shadows a base module. **Asserts code, never prose** — a
