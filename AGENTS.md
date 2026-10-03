@@ -103,7 +103,9 @@ live on:
     location flag), `arch-remote-bring-up-over-ssh-rb7s` (the driver's work happens ON
     the target — phases 2–3 superseded by rx9q), `arch-runtime-layer-xq-boundary-rx9q`
     (xq runs the app up to a declared control port; base speaks CDP/BiDi above it;
-    capability-pinned, never version-pinned).
+    capability-pinned, never version-pinned), `arch-gui-exposure-standard-gx7e` (GUI
+    exposure over the tailnet: base's verb family, xq's enforcement; allow by node
+    identity, never by device name).
   * **test** — `test-cross-repo-consumer-loop-xrl4` (the `test-against-base.sh`
     contract + `consumers.jsonc` + the release gate),
     `test-checks-that-cannot-fail-k3wn` (verification discipline, led by base's

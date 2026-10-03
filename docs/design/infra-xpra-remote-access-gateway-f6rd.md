@@ -4,7 +4,7 @@ title: "xpra-html5 Tailnet Remote-Access Gateway"
 category: infra
 created: "2026-06-24"
 updated: "2026-08-31"
-status: review
+status: deprecated
 tags: [execution-mode, docker-xpra, reverse-proxy, websocket, tailnet, access-control, ttl-grants, remote-view, zero-dep]
 tech:
   - name: "Node.js"
@@ -27,6 +27,12 @@ similar_to: []
 > auth-gateway. Service-agnostic; the controlled site/platform is never named.
 > **Status: review** — the source brief's 5 "open decisions for Greg" are
 > resolved here to the manager's recommended defaults (§10); Greg may override.
+
+> ⚠ **DEPRECATED (2026-10-03) — superseded by `arch-gui-exposure-standard-gx7e`.** Exposure
+> is xq's side of the runtime boundary (`rx9q`); this gateway is used by no lane, and its
+> defaults (whole-tailnet allowlist, enabled by default, loopback trusted, empty allowlist
+> accepted) must not be inherited. Defaults become fail-closed in the next release; the
+> module is removed after xq's X19 ships.
 
 ## 1. Principle
 
