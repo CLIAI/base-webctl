@@ -119,6 +119,7 @@ function world(o = {}) {
     /** @param {Record<string,string>} [extra] */
     env(extra = {}) {
       const e = { ...process.env, WEBCTL_CONSUMERS_FILE: reg, WEBCTL_CONSUMERS_DIR: dir, TMPDIR: tmp,
+        WEBCTL_GATE_SCRATCH_DIR: tmp,
         WEBCTL_GATE_LOG_DIR: path.join(dir, 'gate-logs'), ...extra };
       delete e.NODE_TEST_CONTEXT;
       delete e.WEBCTL_HOST_NETNS;
@@ -397,7 +398,7 @@ test('scratch: every scratch dir is removed — on PASS, on FAIL, and on a signa
       const r = w.gate(['--against-head', '--scratch']);
       assert.equal(r.status, code, r.out);
       const pwd = reported(r.out, 'PWD') || '';
-      assert.ok(pwd.startsWith(w.tmp), 'positive control: the scratch dir existed under TMPDIR');
+      assert.ok(pwd.startsWith(w.tmp), 'positive control: the scratch dir existed under WEBCTL_GATE_SCRATCH_DIR');
       assert.ok(!fs.existsSync(pwd));
       assert.deepEqual(fs.readdirSync(w.tmp), [], `left behind (exit ${code})`);
     } finally { w.cleanup(); }
@@ -466,14 +467,30 @@ test('scratch: the live tree\'s installed node_modules is COPIED into the clone 
   } finally { c.cleanup(); }
 });
 
-test('scratch: the throwaway HOME stays WRITABLE even when TMPDIR is under the read-only home', { skip: NEEDS_NS }, () => {
-  // Final review, measured: \`isolated\` keeps a $HOME only under /tmp, so with TMPDIR
-  // under the user's home the gate's throwaway HOME was read-only and a contract
-  // writing $HOME (npm) went false red. A throwaway dir under the real home, removed.
+test('⛔ scratch: clones go OUTSIDE /tmp by default — lanes mask /tmp in their own sandboxes', { skip: NEEDS_NS }, () => {
+  // Second real scratch run: three lanes that mask /tmp themselves could not see a clone
+  // under /tmp ("Cannot find module …/repo/…"), and one asserts its repo is outside /tmp.
+  const w = world();
+  try {
+    const cache = path.join(w.dir, 'xdg-cache');
+    const r = w.gate(['--against-head', '--scratch'], { WEBCTL_GATE_SCRATCH_DIR: '', XDG_CACHE_HOME: cache });
+    assert.equal(r.status, 0, r.out);
+    const pwd = reported(r.out, 'PWD') || '';
+    assert.ok(pwd.startsWith(path.join(cache, 'webctl-base', 'gate-scratch', 'webctl-gate-scratch-')), `ran in ${pwd}`);
+    assert.ok(!pwd.startsWith(w.tmp), 'not under TMPDIR');
+    assert.deepEqual(fs.readdirSync(path.join(cache, 'webctl-base', 'gate-scratch')), [], 'and it is removed after');
+  } finally { w.cleanup(); }
+});
+
+test('scratch: the throwaway HOME stays WRITABLE when the scratch dir is under the read-only home (the default)', { skip: NEEDS_NS }, () => {
+  // Final review, measured: \`isolated\` keeps a $HOME only under /tmp, so with the
+  // scratch dir under the user's home (now the DEFAULT) the gate's throwaway HOME was
+  // read-only and a contract writing $HOME (npm) went false red. A throwaway dir under
+  // the real home, removed.
   const underHome = fs.mkdtempSync(path.join(os.homedir(), '.webctl-gate-test-'));
   const w = world();
   try {
-    const r = w.gate(['--against-head', '--scratch'], { FAKE_WRITE_HOME: '1', TMPDIR: underHome });
+    const r = w.gate(['--against-head', '--scratch'], { FAKE_WRITE_HOME: '1', WEBCTL_GATE_SCRATCH_DIR: underHome });
     assert.equal(r.status, 0, r.out);
     assert.match(r.out, /HOME=WRITABLE/);
   } finally { w.cleanup(); fs.rmSync(underHome, { recursive: true, force: true }); }
