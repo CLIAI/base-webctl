@@ -657,8 +657,11 @@ function usageRefusal(why, command) {
  * masking — each is FAIL, and the command is not started. Refusals carry COUNTS,
  * never socket paths: they get pasted into a public repo's logs.
  *
- * ⛔ The command runs with NO CAPABILITIES (privilegeDrop: setpriv, checked) — otherwise
- * namespace root could simply unmount every mask above (measured).
+ * ⛔ The command runs with NO CAPABILITIES — otherwise namespace root could simply unmount
+ * every mask above (measured). It runs in a CHILD user namespace as the REAL uid/gid
+ * (privilegeDrop: `setpriv --no-new-privs -- unshare -U --map-user …`, read back), so it can
+ * still make namespaces of its own — `unshare -rn`, Chromium's sandbox — which the earlier
+ * setpriv capability drop broke (measured).
  *
  * The command's env drops DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK,
  * DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST and XDG_RUNTIME_DIR and gets TMPDIR=/tmp —
@@ -691,8 +694,9 @@ function runIsolated(a) {
     }
     const nestedPlan = planKeeps(keeps, [], { home: '', roots: recordedRoRoots() || [], sensitive: [] });
     if (nestedPlan.usage) return Promise.resolve(usageRefusal(nestedPlan.usage, command));
-    // ⛔ and still capless: a nested call must not be the way back to capabilities
-    const priv = privilegeDrop();
+    // ⛔ and still capless: a nested call must not be the way back to capabilities — its
+    // command, too, enters a uid-mapped child user namespace (read back as on the fresh path)
+    const priv = privilegeDrop(recordedHostIds());
     if (priv.why) {
       return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${priv.why}. The command was NOT started.`, { command }));
     }
@@ -738,8 +742,10 @@ function runIsolated(a) {
       + 'their masking cannot be PROVEN. The command was NOT started.', { command }));
   }
   for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
+  // ⇩ the REAL uid/gid, read HERE: inside, getuid() is 0. The command runs as them (privilegeDrop).
+  const ids = { uid: process.getuid?.() ?? -1, gid: process.getgid?.() ?? -1 };
   const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots,
-    exempt: plan.exempt, sockets });
+    exempt: plan.exempt, sockets, ids });
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
     let child;
@@ -752,7 +758,7 @@ function runIsolated(a) {
           process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'],
           env: { ...process.env, [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt, [HOST_PIDNS_ENV]: hostPid,
-            [RO_ROOTS_ENV]: JSON.stringify(prot.roots) } });
+            [RO_ROOTS_ENV]: JSON.stringify(prot.roots), [HOST_IDS_ENV]: JSON.stringify(ids) } });
     } catch (e) {
       resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
       return;
@@ -856,7 +862,7 @@ async function runIsolatedInner(a) {
 
   // ⇩ only now, provably off the host network, read the plan. (On the host the
   // proofs above refuse first, so an unrelated fd 4 is never read.)
-  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], exempt: string[], sockets: string[]}} */
+  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], exempt: string[], sockets: string[], ids: unknown}} */
   let plan;
   try {
     // node's stdio 'pipe' is a socketpair, not a FIFO; anything else is not ours
@@ -868,7 +874,7 @@ async function runIsolatedInner(a) {
     const binds = (/** @type {unknown} */ x) => Array.isArray(x)
       && x.every((b) => b && typeof b.p === 'string' && typeof b.rw === 'boolean');
     if (typeof plan.hostMnt !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
-      || !strs(plan.roots) || !strs(plan.exempt) || !strs(plan.sockets)) throw new Error('malformed');
+      || !strs(plan.roots) || !strs(plan.exempt) || !strs(plan.sockets) || !hostIdsOf(plan.ids)) throw new Error('malformed');
   } catch (e) {
     return refuse(`internal: no masking plan on fd 4 (${errMsg(e)}) — run via \`isolated\``);
   }
@@ -915,8 +921,9 @@ async function runIsolatedInner(a) {
     return refuse(`cannot re-enter the working directory after masking (${errMsg(e).split(plan.cwd).join('<cwd>')})`);
   }
 
-  // ⛔ LAST, after every mount: the command gets NO capabilities, so it cannot undo them.
-  const priv = privilegeDrop();
+  // ⛔ LAST, after every mount: the command runs as the real uid in a child user namespace —
+  // NO capabilities, so it cannot undo them, yet free to make namespaces of its own.
+  const priv = privilegeDrop(hostIdsOf(plan.ids));
   if (priv.why) return refuse(priv.why);
 
   if (!tell('started')) return refuse('internal: the status channel (fd 3) is missing — run via `isolated`');
@@ -1350,8 +1357,12 @@ async function closeResidualSockets(sockets, exempt) {
     covered: open.length, coverFailed, still: again.filter((o) => !SOCKET_UNREACHABLE.has(o)).length };
 }
 
-/** The capability fields /proc/<pid>/status must show as ZERO for the command. */
-const CAP_FIELDS = Object.freeze(['CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb']);
+/**
+ * The capability fields /proc/<pid>/status must show as ZERO for the command. ⚠ Not
+ * CapBnd: a new user namespace starts with a FULL bounding set, and that is harmless here
+ * — a non-root uid under no_new_privs can never raise anything from it.
+ */
+const CAP_FIELDS = Object.freeze(['CapInh', 'CapPrm', 'CapEff', 'CapAmb']);
 
 /** @param {string} status /proc/<pid>/status text @returns {Record<string, string>} */
 function statusFields(status) {
@@ -1360,49 +1371,111 @@ function statusFields(status) {
 }
 
 /**
+ * The REAL (host-namespace) uid/gid, as `isolated` recorded them at entry: in the plan on
+ * the fresh path, in WEBCTL_HOST_IDS on the nested one. Inside the outer namespace
+ * getuid() is 0, so they cannot be re-derived there. null when absent/malformed.
+ * @param {unknown} v @returns {{uid: number, gid: number} | null}
+ */
+function hostIdsOf(v) {
+  const o = /** @type {{uid?: unknown, gid?: unknown} | null} */ (v);
+  const ok = (/** @type {unknown} */ n) => Number.isInteger(n) && /** @type {number} */ (n) >= 0;
+  return o && typeof o === 'object' && ok(o.uid) && ok(o.gid)
+    ? { uid: /** @type {number} */ (o.uid), gid: /** @type {number} */ (o.gid) } : null;
+}
+
+/** The host ids recorded in WEBCTL_HOST_IDS (nested path), or null. */
+function recordedHostIds() {
+  try { return hostIdsOf(JSON.parse(process.env[HOST_IDS_ENV] ?? 'null')); } catch { return null; }
+}
+
+/**
+ * Is `map` (a /proc/<pid>/{uid,gid}_map text) EXACTLY one line mapping `inside` to
+ * `outside`, count 1? @param {string} map @param {number} inside @param {number} outside
+ */
+function singleMapping(map, inside, outside) {
+  const lines = String(map).trim().split('\n').map((l) => l.trim().split(/\s+/).join(' ')).filter(Boolean);
+  return lines.length === 1 && lines[0] === `${inside} ${outside} 1`;
+}
+
+/**
  * The argv prefix that runs the command with NO capabilities — and the PROOF that it does.
  *
- * ⛔ WITHOUT THIS THE ARM IS NAMESPACE ROOT WITH EVERY CAPABILITY (measured by the final
+ * ⛔ WITHOUT IT THE ARM IS NAMESPACE ROOT WITH EVERY CAPABILITY (measured by the final
  * review: CapEff 000001ffffffffff). It could `umount` a /dev/null cover, `umount -l /tmp`
- * (both probe sockets went ENOENT/ECONNREFUSED → CONNECTED), `mount -o remount,rw` the
+ * (both probe sockets went ENOENT/ECONNREFUSED → CONNECTED), `mount -o remount,bind,rw` the
  * read-only home — every mask undone by one call. And CAP_DAC_OVERRIDE made a chmod-000
  * file READABLE inside: a consumer test asserting EACCES went false-red only under the gate.
  *
- * ⇒ `setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all`. uid
- * stays 0 (the files it owns are the caller's); every capability set is emptied.
- * ⚠ `--bounding-set=-all` needs CAP_SETPCAP, which a nested call (already capless) lacks —
- * measured: "apply bounding set: Operation not permitted" — so it is passed only while the
- * bounding set is non-empty.
+ * ⇒ `setpriv --no-new-privs -- unshare -U --map-user <real uid> --map-group <real gid> --`:
+ * the command runs in a CHILD user namespace as the REAL uid/gid number (mapped onto the
+ * outer namespace's root, i.e. back onto the caller). A non-root uid loses every capability
+ * on execve; no mount namespace is created, so the masks it lives under belong to the
+ * OUTER user namespace, where it holds nothing. ⚠ It stays able to make its OWN nested
+ * namespaces (`unshare -rn`, a pid ns, Chromium's sandbox) — and inherited mounts are
+ * LOCKED in those, so they cannot be the way back (measured).
  *
- * ⭐ ASSERTS THE PROPERTY, not setpriv's exit: the same prefix runs node once to print its
- * own /proc/self/status, and every CapXxx must be 0 and NoNewPrivs 1. A missing setpriv,
- * or one that ignores its flags, is refused — the command never runs with capabilities.
+ * ⛔ WHY NOT `setpriv --bounding-set=-all …` (a28b280): it measured as BREAKING NESTED
+ * NAMESPACES. A capless namespace-ROOT process cannot write a nested user namespace's
+ * uid_map — mapping its uid 0 needs CAP_SETFCAP since Linux 5.12 — so under the release
+ * gate a lane that self-isolates with `unshare -rn` FAILED, a lane probing for a netns went
+ * INCONCLUSIVE, and a real Chromium never brought CDP up (its sandbox needs a user
+ * namespace; as uid 0 it refuses to start at all). Here the uid is NOT 0, so a nested
+ * `unshare -r` maps the real uid, which needs no capability.
+ *
+ * `--no-new-privs` is KEPT: measured not to hinder nested `unshare -rn` (+ `ip link set lo
+ * up`), a nested pid ns or Chromium; it stops a setuid or file-capability binary from
+ * handing the command capabilities in its child namespace.
+ *
+ * ⭐ ASSERTS THE PROPERTY, not the tools' exit: the same prefix runs node once to report its
+ * own /proc/self/status, uid_map and gid_map. CapInh/CapPrm/CapEff/CapAmb must be 0,
+ * NoNewPrivs 1, getuid() the real uid, and uid_map/gid_map EXACTLY one line mapping the real
+ * id onto our own euid/egid. A missing setpriv, a missing or too-old unshare (no
+ * --map-user: util-linux < 2.38), one that ignores its flags, a real uid of 0 — refused.
+ * ⚠ Refusals never print the ids: they get pasted into a public repo's logs.
+ * @param {{uid: number, gid: number} | null} ids the REAL uid/gid (host namespace)
  * @returns {{prefix: string[], why: string}}
  */
-function privilegeDrop() {
-  let bnd = '';
-  try { bnd = statusFields(fs.readFileSync('/proc/self/status', 'utf8')).CapBnd || ''; } catch { /* below */ }
-  if (!bnd) return { prefix: [], why: 'cannot read this process\'s capability bounding set (/proc/self/status)' };
-  const prefix = ['setpriv', '--no-new-privs', ...(/^0+$/.test(bnd) ? [] : ['--bounding-set=-all']),
-    '--inh-caps=-all', '--ambient-caps=-all', '--'];
+function privilegeDrop(ids) {
+  if (!ids) return { prefix: [], why: 'internal: the real uid/gid were not recorded at entry — run via `isolated`' };
+  if (ids.uid === 0) {
+    return { prefix: [], why: 'the real uid is 0 (root): a child user namespace mapped onto it would keep every '
+      + 'capability — run `isolated` as an ordinary user' };
+  }
+  const prefix = ['setpriv', '--no-new-privs', '--', 'unshare', '-U', '--map-user', String(ids.uid),
+    '--map-group', String(ids.gid), '--'];
   const r = spawnSync(prefix[0], [...prefix.slice(1), process.execPath, '-e',
-    'process.stdout.write(require("fs").readFileSync("/proc/self/status", "utf8"))'],
+    'const f = require("fs"); process.stdout.write(JSON.stringify({ status: f.readFileSync("/proc/self/status", "utf8"),'
+      + ' uidMap: f.readFileSync("/proc/self/uid_map", "utf8"), gidMap: f.readFileSync("/proc/self/gid_map", "utf8"),'
+      + ' uid: process.getuid(), gid: process.getgid() }))'],
   { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  // ⚠ strip the ids from anything quoted back (a getopt error may echo an argument)
+  const redact = (/** @type {string} */ s) => s.replace(new RegExp(`\\b(${ids.uid}|${ids.gid})\\b`, 'g'), '<id>');
+  const tail = () => redact(String(r.stderr || '').trim().split('\n').pop() || '');
+  const ns = 'the uid-mapped child user namespace';
   if (r.error) {
     const err = /** @type {NodeJS.ErrnoException} */ (r.error);
-    return { prefix, why: `cannot drop capabilities: ${err.code === 'ENOENT' ? "'setpriv' not found — install util-linux"
+    return { prefix, why: `cannot enter ${ns}: ${err.code === 'ENOENT' ? "'setpriv' not found — install util-linux"
       : errMsg(err)}; the command would run as namespace root with every capability (it could unmount the masks)` };
   }
   if (r.status !== 0) {
-    return { prefix, why: `cannot drop capabilities: setpriv exited ${r.status ?? r.signal} `
-      + `(${String(r.stderr || '').trim().split('\n').pop()})` };
+    return { prefix, why: `cannot enter ${ns}: \`setpriv --no-new-privs -- unshare -U --map-user …\` exited `
+      + `${r.status ?? r.signal} (${tail()}) — util-linux ≥ 2.38 (unshare --map-user) is required` };
   }
-  const f = statusFields(r.stdout);
+  /** @type {{status?: string, uidMap?: string, gidMap?: string, uid?: number, gid?: number}} */
+  let got = {};
+  try { got = JSON.parse(r.stdout); } catch { /* every check below fails */ }
+  const f = statusFields(String(got.status || ''));
   const held = CAP_FIELDS.filter((k) => !/^0+$/.test(f[k] || 'x'));
-  if (held.length || f.NoNewPrivs !== '1') {
-    return { prefix, why: `after setpriv the command would still hold ${held.length ? held.join(', ') : 'no caps'}`
-      + `${f.NoNewPrivs !== '1' ? ' and NoNewPrivs is not set' : ''} — it is not dropping privileges` };
+  /** @type {string[]} */
+  const bad = [];
+  if (held.length) bad.push(`it would still hold ${held.join(', ')}`);
+  if (f.NoNewPrivs !== '1') bad.push('NoNewPrivs is not set');
+  if (got.uid !== ids.uid || got.gid !== ids.gid) bad.push('its uid/gid are not the real ones');
+  if (!singleMapping(String(got.uidMap || ''), ids.uid, process.geteuid?.() ?? -1)
+    || !singleMapping(String(got.gidMap || ''), ids.gid, process.getegid?.() ?? -1)) {
+    bad.push('its uid_map/gid_map are not exactly the one expected mapping');
   }
+  if (bad.length) return { prefix, why: `after entering ${ns}, ${bad.join('; ')} — it is not dropping privileges` };
   return { prefix, why: '' };
 }
 
@@ -1475,6 +1548,8 @@ const HOST_NETNS_ENV = 'WEBCTL_HOST_NETNS';
 const HOST_MNTNS_ENV = 'WEBCTL_HOST_MNTNS';
 const HOST_PIDNS_ENV = 'WEBCTL_HOST_PIDNS';
 const RO_ROOTS_ENV = 'WEBCTL_RO_ROOTS';
+/** The REAL uid/gid ({uid, gid} JSON), recorded at entry for the nested path's privilegeDrop. */
+const HOST_IDS_ENV = 'WEBCTL_HOST_IDS';
 
 /** The protected roots `isolated` recorded at entry, or null when absent/malformed. */
 function recordedRoRoots() {
