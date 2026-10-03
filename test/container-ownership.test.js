@@ -24,6 +24,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -145,7 +146,8 @@ function daemon(initial, o = {}) {
 
 /**
  * @param {any} docker
- * @param {{uid?: number|null, lock?: any, userDataDir?: string, logs?: string[]}} [o]
+ * @param {{uid?: number|null, lock?: any, userDataDir?: string, logs?: string[], cdpPort?: number}} [o]
+ *   `cdpPort`: drive CDP at this port (a test server) instead of portless.
  */
 function driver(docker, o = {}) {
   const C = fakeC();
@@ -155,9 +157,10 @@ function driver(docker, o = {}) {
     mounts: hermeticMounts(C), docker, profileLock: o.lock || freeLock(), chromiumPrefs: noPrefs,
     ...(o.uid === null ? {} : { uid: o.uid ?? UID }),
   }).createDriver({
-    port: 45998, host: '127.0.0.1', slug: 'test', force: true,
+    port: o.cdpPort || 45998, host: '127.0.0.1', slug: 'test', force: true,
     userDataDir: o.userDataDir || OUR_PROFILE,
-    containerEnv: { LWC_CDP_PORT: null }, // portless: no CDP poll against a real port
+    // portless unless a test CDP endpoint is supplied: no poll against a real port
+    ...(o.cdpPort ? {} : { containerEnv: { LWC_CDP_PORT: null } }),
     logger: {
       info: (/** @type {string} */ m) => logs.push(`info:${m}`),
       warn: (/** @type {string} */ m) => logs.push(`warn:${m}`),
@@ -169,7 +172,7 @@ function driver(docker, o = {}) {
 /**
  * Bring up against a daemon in the given state.
  * @param {Record<string, Ctr | 'fail' | 'garbage'>} initial
- * @param {{rmIsNoop?: boolean, lock?: any, userDataDir?: string}} [o]
+ * @param {{rmIsNoop?: boolean, lock?: any, userDataDir?: string, cdpPort?: number}} [o]
  */
 async function up(initial, o = {}) {
   const d = daemon(initial, o);
@@ -288,7 +291,16 @@ test('⛔ a FOREIGN xpra is refused even when chromium is ours — no partial re
 test('⛔ an xpra ALONE (no chromium to vouch for it) is refused', async () => {
   const r = await up({ [XPRA]: xpraOf() });
   assertRefused(r, XPRA);
-  assert.match(String(r.error.message), /chromium partner \(demo-webctl-u4242-chromium-test\) is not proven ours/);
+  // the one-time orphan: the refusal names the exact one-time remedy
+  assert.match(String(r.error.message), /chromium partner \(demo-webctl-u4242-chromium-test\) does not exist/);
+  assert.match(String(r.error.message), /ONE-TIME orphan/);
+  assert.match(String(r.error.message), /remove it once:  docker rm -f demo-webctl-u4242-xpra-test/);
+});
+
+test('⛔ an xpra whose chromium EXISTS but is not ours is refused — and is not called an orphan', async () => {
+  const r = await up({ [CHROMIUM]: { binds: [FOREIGN_PROFILE], running: false }, [XPRA]: xpraOf() });
+  assertRefused(r, CHROMIUM);
+  assert.doesNotMatch(String(r.error.message), /orphan/);
 });
 
 test('⛔ a FAILED inspect is refused, never read as "absent"', async () => {
@@ -479,4 +491,64 @@ test('MIGRATION: shutdown() leaves a pre-owner browser NOT provably ours alone',
   assertHermetic(d.violations);
   assert.ok(!d.verbs.some((v) => v === `stop:${L_CHROMIUM}` || v === `stop:${L_XPRA}`), d.verbs.join(', '));
   assert.ok(d.ctrs.get(L_CHROMIUM).running, 'their browser still runs');
+});
+
+// ── the REUSE path: a healthy running pair is driven only if proven ours ────
+
+/** A local endpoint that answers CDP's /json/version — so "CDP answers" is real. */
+async function cdpEndpoint() {
+  const srv = http.createServer((req, res) => {
+    if (req.url === '/json/version') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ Browser: 'FakeChrome/1.0' }));
+    } else { res.writeHead(404); res.end(); }
+  });
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const port = /** @type {any} */ (srv.address()).port;
+  return { port, close: () => new Promise((resolve) => srv.close(() => resolve(undefined))) };
+}
+
+test('CONTROL: a running, CDP-answering pair PROVEN ours is reused — nothing removed or started', async () => {
+  const cdp = await cdpEndpoint();
+  try {
+    const r = await up({ [CHROMIUM]: ours({ running: true }), [XPRA]: xpraOf({ running: true }) }, { cdpPort: cdp.port });
+    assert.equal(r.error, undefined, r.error && r.error.message);
+    assert.equal(r.result.ok, true);
+    assert.equal(r.result.cdpHttpUrl, `http://127.0.0.1:${cdp.port}`);
+    assert.deepEqual(r.removed, []);
+    assert.deepEqual(r.started, []);
+  } finally { await cdp.close(); }
+});
+
+test('⛔ a running, CDP-answering pair NOT provably ours is never DRIVEN — and never removed', async () => {
+  // Same uid, same names, our label — but its chromium runs a DIFFERENT profile
+  // (e.g. the slug's userDataDir was changed). Handing back its CDP URL would
+  // have the caller drive a session that is not this profile's.
+  const cdp = await cdpEndpoint();
+  try {
+    const r = await up({
+      [CHROMIUM]: { labels: { [OWNER]: String(UID) }, binds: [FOREIGN_PROFILE], running: true },
+      [XPRA]: xpraOf({ running: true }),
+    }, { cdpPort: cdp.port });
+    assert.equal(r.result, undefined, 'no CDP URL may be handed back');
+    assert.ok(r.error, 'must refuse');
+    assert.equal(r.error.exitCode, 4);
+    assert.match(String(r.error.message), /REFUSING to reuse container demo-webctl-u4242-chromium-test/);
+    assert.ok(!String(r.error.message).includes(FOREIGN_PROFILE));
+    assert.deepEqual(r.removed, []);
+    assert.deepEqual(r.stopped, []);
+    assert.deepEqual(r.started, []);
+    assert.ok(r.ctrs.get(CHROMIUM).running, 'it still runs');
+  } finally { await cdp.close(); }
+});
+
+test('⛔ portless too: a running pair NOT provably ours is not reused', async () => {
+  const r = await up({
+    [CHROMIUM]: { labels: { [OWNER]: '1001' }, binds: [FOREIGN_PROFILE], running: true },
+    [XPRA]: { labels: { [OWNER]: '1001' }, running: true },
+  });
+  assert.equal(r.result, undefined);
+  assert.match(String(r.error && r.error.message), /REFUSING to reuse container .*another account/s);
+  assert.deepEqual(r.removed, []);
+  assert.deepEqual(r.started, []);
 });
