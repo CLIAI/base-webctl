@@ -272,7 +272,7 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
 
 * **`contract-harness.mjs isolated -- <cmd…>`**: runs `<cmd>` in a private user + network +
   mount namespace. The only interface is its own `lo`, which is brought up. There is a fresh
-  tmpfs over `/run` and `/tmp`, and kept paths are bound back. Host path sockets still
+  tmpfs over `/run` and `/tmp`, and kept paths (the cwd, base's repo, `--keep <dir>`) are bound back. Host path sockets still
   reachable are masked. DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK, DBUS_SESSION_BUS_ADDRESS,
   DOCKER_HOST and XDG_RUNTIME_DIR are unset, and TMPDIR=/tmp. **Fails closed**: no fallback to
   the host, ever. "Already inside" is proven from the kernel (namespace ids, uid_map,
