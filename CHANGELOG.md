@@ -313,7 +313,10 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
   regex literals including after `break`/`continue`/`debugger`, Unicode identifiers).
   Contracts that `require-generation 4` keep working; `require-generation 5` gets the fix.
 * **Gate `--against-head --scratch`** — the recommended pre-release arm. Each wired consumer
-  is cloned at its committed HEAD, and base's candidate is placed in the clone's submodule.
+  is cloned at its committed HEAD, OUTSIDE /tmp (`WEBCTL_GATE_SCRATCH_DIR`, default
+  `${XDG_CACHE_HOME:-~/.cache}/webctl-base/gate-scratch`, because lanes mask /tmp in their
+  own sandboxes), with the live tree's installed `node_modules` copied in, and base's
+  candidate is placed in the clone's submodule.
   The contract runs there under `isolated`, with a throwaway HOME. **A change to the live
   tree BLOCKS:** its git-visible state (HEAD, submodule HEAD, `git status`) is fingerprinted
   before and after. Gitignored files (`.env`, profile or state dirs) are NOT covered. A live
