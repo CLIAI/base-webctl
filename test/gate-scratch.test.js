@@ -62,6 +62,7 @@ if [ -n "\${FAKE_PAUSE:-}" ]; then
   for _ in $(seq 300); do [ -f ./.fake-go ] && break; sleep 0.1; done
 fi
 if [ -n "\${FAKE_STARTED:-}" ]; then : > ./.fake-started; sleep 30; fi
+if [ -n "\${FAKE_WIPE_TMP:-}" ]; then c="$(cat code.txt)"; cat out.txt; rm -rf /tmp/* 2>/dev/null; exit "$c"; fi
 cat out.txt
 exit "$(cat code.txt)"
 `;
@@ -413,6 +414,29 @@ test('scratch: every scratch dir is removed — on PASS, on FAIL, and on a signa
     await done;
     assert.deepEqual(w.scratchDirs(), []);
   } finally { w.cleanup(); }
+});
+
+test('⛔ scratch: a contract that wipes /tmp still counts as RUN — the start proof is a log line, not a file', { skip: NEEDS_NS }, () => {
+  // Final review: the start marker was a file in the scratch dir, so a contract running
+  // `rm -rf /tmp/*` (inside, its fresh /tmp holds the kept scratch tree) deleted it, and a
+  // contract that really ran was reported as a GATE-ENVIRONMENT fault.
+  const w = world();
+  try {
+    const r = w.gate(['--against-head', '--scratch'], { FAKE_WIPE_TMP: '1' });
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /PASS {2}fake-webctl/);
+    assert.doesNotMatch(r.out, /GATE-ENVIRONMENT/);
+    // the proof line never leaks into the reason the gate quotes
+    assert.doesNotMatch(r.stdout, /WEBCTL-GATE-CONTRACT-STARTED/);
+  } finally { w.cleanup(); }
+  // control: a contract that FAILS after the wipe is still a lane FAIL, not a gate fault
+  const f = world({ code: 1, output: 'boom\n' });
+  try {
+    const r = f.gate(['--against-head', '--scratch'], { FAKE_WIPE_TMP: '1' });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /FAIL {2}fake-webctl \(exit 1\):.* boom/);
+    assert.doesNotMatch(r.out, /GATE-ENVIRONMENT/);
+  } finally { f.cleanup(); }
 });
 
 test('scratch: a hidden failure (exit 0 + TAP `not ok`) is a FAIL, reported exactly as in-place', { skip: NEEDS_NS }, () => {
