@@ -337,6 +337,39 @@ levels down; red. Base root writable → its arm red; no recursion into submount
 logic units red; cwd-contains-home unrefused → red; keeps not realpath'd → the symlink arm
 red; no note → red; no nested home fact → the previous-`isolated` nesting arm red.
 
+### ⛔ The command held EVERY capability — and could undo every mask (2026-10-03)
+
+*Measured by the final review:* inside `isolated`, `id -u` 0 and CapEff `000001ffffffffff`.
+`umount <cwd>/m2.sock` (the /dev/null cover) and `umount -l /tmp` took both probe sockets
+from ENOENT/ECONNREFUSED to CONNECTED; the same root could `remount,bind,rw` the ro home.
+CAP_DAC_OVERRIDE also read a chmod-000 file — a consumer's `EACCES` test went false-red
+only under the gate.
+
+⇒ `privilegeDrop()`: `setpriv --no-new-privs --bounding-set=-all --inh-caps=-all
+--ambient-caps=-all --` before the command, on the fresh AND the nested path. Measured:
+
+```
+inside, after setpriv          CapInh/Prm/Eff/Bnd/Amb 0, NoNewPrivs 1
+umount -l /tmp                 "must be superuser to unmount"
+mount -o remount,bind,rw <H>   "permission denied", rc 32
+chmod-000 file                 EACCES (raw `unshare -r`: readable)
+setpriv --bounding-set=-all    "Operation not permitted" when ALREADY capless (needs
+                               CAP_SETPCAP) ⇒ passed only while CapBnd is non-zero
+nested `unshare -rm` (capless) "write failed /proc/self/uid_map: Operation not permitted"
+nested `unshare -Um`           CapEff 0; `umount -l /tmp` EINVAL
+nested `unshare -rm` WITH caps `umount -l /tmp` → "not mounted": inherited mounts LOCKED
+```
+
+* **The drop is asserted, not trusted.** The prefix runs node once to print its own
+  `/proc/self/status`; every CapXxx must be 0 and NoNewPrivs 1. A missing setpriv and a fake
+  one that execs its argv are both tested refusals.
+* **Last, after every mount**, just before `started`: the inner half itself needs the caps.
+* **Sabotage:** drop removed → CapEff arm, `umount -l /tmp` arm, chmod-000 arm, both
+  fail-closed arms red. ⚠ The remount arm first **SURVIVED**: it used `remount,rw`, a
+  SUPERBLOCK remount that needs init-ns CAP_SYS_ADMIN and fails even with every namespace
+  cap. The attack is `remount,bind,rw` (the per-mount flag); fixed, red. The nested-unshare
+  arm survives the mutation **by design** — it tests mount locking, which holds with caps.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
@@ -357,9 +390,9 @@ deliberately not re-indented, to keep the guard a two-line diff against concurre
   other five facts still require being inside a real masked namespace, so it does not let
   the host pass as "inside".
 
-* **Mapped root.** The command runs as uid 0 inside the namespace. A tool that refuses
-  root (Chromium without `--no-sandbox`) refuses here. A nested `unshare --map-user` back
-  to the caller's uid would lift this; not built — no arm needs it yet.
+* **Mapped root, no capabilities.** The command runs as uid 0 inside the namespace, with
+  every capability set empty (below). A tool that refuses root (Chromium without
+  `--no-sandbox`) refuses here; a port below 1024 cannot be bound.
 * **`ip` or `ifconfig` is required** to bring `lo` up; node has no ioctl. Absent → FAIL.
   So is **`mount`** (util-linux, the package `unshare` comes from).
 * **Sockets the list misses.** One created on the host AFTER start-up (still masked if it

@@ -221,7 +221,7 @@ contract's output when it is used.
 | `guard-live-port <port> [--pin-verified]` | defence in depth where `isolated` is not used: **REFUSES** when `127.0.0.1:<port>` listens **or** answers CDP (`GET /json/version` 200), naming both facts, unless `--pin-verified` | 0 pass · 1 refused · 3 usage |
 
 * ⛔ **`isolated` fails CLOSED.** No `unshare`, unprivileged user namespaces disabled, no
-  `ip`/`ifconfig`, no `mount`, a loopback that will not come up, a mask that fails, a home
+  `ip`/`ifconfig`, no `mount`, no `setpriv` (or one that leaves a capability), a loopback that will not come up, a mask that fails, a home
   (or any submount of it) that cannot be made read-only, a host
   socket that still answers after masking → FAIL, reason printed (counts, never socket
   paths), command not run. **There is no path on which it runs the command on the host.**
@@ -265,9 +265,17 @@ contract's output when it is used.
   `unshare -rn` passes all three network facts and is refused by the tmpfs fact; the
   previous `isolated` — full mask, writable home — is refused by the home fact. All are
   tested.)*
-* ⚠ **The command runs as mapped root** (uid 0 inside the namespace — `unshare -r`). Files
-  it creates are owned by you on disk; a tool that refuses to run as root (Chromium without
-  `--no-sandbox`) refuses here. A mutation arm should not be launching a real browser anyway.
+* ⚠ **The command runs as mapped root WITH NO CAPABILITIES** (uid 0 inside the namespace —
+  `unshare -r` — then `setpriv --no-new-privs --bounding-set=-all --inh-caps=-all
+  --ambient-caps=-all`). ⛔ Without the drop it held **every** capability (CapEff
+  `000001ffffffffff`, measured by the final review) and could `umount -l /tmp`, unmount a
+  `/dev/null` cover or `remount,bind,rw` the home — every mask undone by one call. The drop is
+  **checked**, not trusted: the same prefix prints its own `/proc/self/status` first, and any
+  non-zero CapXxx (or no NoNewPrivs) — or no `setpriv` at all — is a FAIL, nothing run.
+  Consequences for your arm: files it creates are owned by you on disk; a **chmod-000 file is
+  NOT readable** (no CAP_DAC_OVERRIDE — before the drop it was, so an `EACCES` assertion went
+  false-red only under the gate); no port below 1024; a tool that refuses root (Chromium
+  without `--no-sandbox`) refuses here. A mutation arm should not launch a real browser anyway.
 * ⚠ **A harness older than these verbs exits 3 on `isolated`** — which, since your
   contract must treat it as FAIL, fails closed too. Do NOT write `isolated … || <run it
   anyway>`: that is the host fallback this verb exists to remove.

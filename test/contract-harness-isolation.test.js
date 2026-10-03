@@ -987,6 +987,147 @@ test('⛔ nesting: every OLD fact satisfied (netns, mntns, our tmpfs on /run+/tm
   assert.equal(r.ran, false, 'a namespace with a writable home was accepted as `isolated`');
 });
 
+// ── the command runs with NO capabilities (it cannot undo the masks) ────────
+//
+// ⛔ Measured by the final review: inside `isolated` the command was namespace root with
+// CapEff 000001ffffffffff — `umount -l /tmp` and `umount <covered socket>` re-exposed host
+// sockets, and CAP_DAC_OVERRIDE read a chmod-000 file. ⇒ setpriv drops every set.
+// Each CONTROL runs the same act in a raw `unshare` WITH capabilities, to show it works
+// there — so the arm's refusal is the privilege drop, not some other accident.
+
+/** `unshare -rnm` + a fresh /tmp, NOT via the harness: namespace root with every cap. */
+const RAW_NS = ['unshare', '-rnm', '--propagation=private', 'sh', '-c'];
+const PRINT_CAPS = 'grep -E "^(CapEff|CapBnd|NoNewPrivs):" /proc/self/status | tr "\\t" " "';
+
+test('⭐ ARM: inside `isolated` CapEff, CapBnd are 0 and NoNewPrivs is 1', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'sh', '-c', PRINT_CAPS]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^CapEff: 0{16}$/m, `the command holds capabilities:\n${r.stdout}`);
+  assert.match(r.stdout, /^CapBnd: 0{16}$/m);
+  assert.match(r.stdout, /^NoNewPrivs: 1$/m);
+});
+
+test('⭐ CONTROL: a raw `unshare -rnm` gives the command EVERY capability (what the arm removes)', needsIsolation, async () => {
+  const r = await runRaw([...RAW_NS, PRINT_CAPS]);
+  assert.doesNotMatch(r.stdout, /^CapEff: 0{16}$/m, r.stdout + r.stderr);
+});
+
+test('⭐ ARM: `umount -l /tmp` FAILS inside, and a host socket under an unkept /tmp dir stays ENOENT', needsIsolation, async () => {
+  const dir = tmpdir();
+  const sock = path.join(dir, 's.sock');
+  const srv = await unixServer(sock);
+  try {
+    const r = await run(['isolated', '--', 'sh', '-c',
+      'umount -l /tmp; echo "UMOUNT $?"; "$0" -e "$1" "$2"', process.execPath, UNIX_CONNECT, sock]);
+    await settle();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.doesNotMatch(r.stdout, /^UMOUNT 0$/m, 'the command could unmount the /tmp mask');
+    assert.equal(outcomeOf(r.stdout), 'ENOENT');
+    assert.equal(srv.count(), 0, 'the host socket was reached from inside');
+  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ CONTROL: WITH capabilities, `umount -l /tmp` re-exposes that socket → CONNECTED (why the drop matters)', needsIsolation, async () => {
+  const dir = tmpdir();
+  const sock = path.join(dir, 's.sock');
+  const srv = await unixServer(sock);
+  try {
+    const r = await runRaw([...RAW_NS,
+      'mount -t tmpfs t /tmp && "$0" -e "$1" "$2" && umount -l /tmp && "$0" -e "$1" "$2"', process.execPath, UNIX_CONNECT, sock]);
+    await settle();
+    const outs = [...r.stdout.matchAll(/OUTCOME (\S+)/g)].map((m) => m[1]);
+    assert.deepEqual(outs, ['ENOENT', 'CONNECTED'], r.stdout + r.stderr);
+  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ ARM: `mount -o remount,bind,rw <home>` FAILS inside, and the home stays EROFS', needsIsolation, async () => {
+  // ⚠ `remount,BIND,rw` — the per-mount flag the ro step set. A plain `remount,rw` is a
+  // SUPERBLOCK remount, which needs init-namespace CAP_SYS_ADMIN and fails even WITH every
+  // namespace capability: an arm using it SURVIVED the no-setpriv mutation (measured).
+  const target = path.join(PW_HOME, probeName());
+  try {
+    const r = await run(['isolated', '--', 'sh', '-c',
+      'mount -o remount,bind,rw "$3"; echo "REMOUNT $?"; "$0" -e "$1" "$2"', process.execPath, TRY_CREATE, target, PW_HOME]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^REMOUNT [1-9]\d*$/m, 'the command could remount the home read-write');
+    assert.equal(writeOf(r.stdout), 'EROFS');
+    assert.equal(fs.existsSync(target), false);
+  } finally { fs.rmSync(target, { force: true }); }
+});
+
+test('⭐ CONTROL: WITH capabilities, a ro bind of the home CAN be remounted rw (nothing is written)', needsIsolation, async () => {
+  const r = await runRaw([...RAW_NS,
+    'mount --rbind "$0" "$0" && mount -o remount,bind,ro "$0" && mount -o remount,bind,rw "$0"; echo "REMOUNT $?"', PW_HOME]);
+  assert.match(r.stdout, /^REMOUNT 0$/m, r.stdout + r.stderr);
+});
+
+test('⛔ a NESTED `unshare -rm` + `umount -l /tmp` inside still cannot reach the host socket (measured, not assumed)', needsIsolation, async () => {
+  // Inherited mounts are LOCKED in a child user namespace — and, measured here, a capless
+  // process cannot even write the child's uid_map. Either way: no route back to the host.
+  const dir = tmpdir();
+  const sock = path.join(dir, 's.sock');
+  const srv = await unixServer(sock);
+  try {
+    const r = await run(['isolated', '--', 'sh', '-c',
+      'unshare -rm sh -c \'umount -l /tmp; "$0" -e "$1" "$2"\' "$0" "$1" "$2"; echo "NESTED $?"; '
+      + 'unshare -Um sh -c \'umount -l /tmp; "$0" -e "$1" "$2"\' "$0" "$1" "$2"; echo "NESTED-U $?"',
+      process.execPath, UNIX_CONNECT, sock]);
+    await settle();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.doesNotMatch(r.stdout, /OUTCOME CONNECTED/, `a nested namespace re-exposed the host socket:\n${r.stdout}${r.stderr}`);
+    assert.equal(srv.count(), 0);
+  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ ARM: a chmod-000 file is NOT readable inside (no CAP_DAC_OVERRIDE: no false greens) — CONTROL: raw unshare reads it', needsIsolation, async () => {
+  const dir = tmpdir();
+  const f = path.join(dir, 'locked');
+  fs.writeFileSync(f, 'secret');
+  fs.chmodSync(f, 0o000);
+  const READ = `try { require('fs').readFileSync(process.argv[1]); console.log('READ ok'); } catch (e) { console.log('READ ' + e.code); }`;
+  try {
+    const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e', READ, f]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^READ EACCES$/m, 'a chmod-000 file was readable inside: a test asserting EACCES goes false-red only here');
+    const c = await runRaw(['unshare', '-r', process.execPath, '-e', READ, f]);
+    assert.match(c.stdout, /^READ ok$/m, `CONTROL: namespace root WITH caps should read it:\n${c.stdout}${c.stderr}`);
+  } finally { fs.chmodSync(f, 0o600); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: no `setpriv` → FAIL naming it, command NOT run (never with capabilities)', needsIsolation, async () => {
+  // ⚠ the PATH dir lives in a throwaway HOME dir: one under /tmp vanishes while /tmp is
+  // masked, and `mount` itself would go missing first (measured)
+  const dir = tmpdir();
+  const marker = path.join(dir, 'RAN');
+  const binHome = homeTmpdir();
+  const bin = path.join(binHome, 'bin');
+  fs.mkdirSync(bin);
+  const which = (/** @type {string} */ b) => spawnSync('sh', ['-c', `command -v ${b}`], { encoding: 'utf8' }).stdout.trim();
+  for (const b of ['unshare', 'mount', which('ip') ? 'ip' : 'ifconfig']) fs.symlinkSync(which(b), path.join(bin, b));
+  try {
+    const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e',
+      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: bin });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot drop capabilities: 'setpriv' not found/);
+    assert.equal(fs.existsSync(marker), false, 'the command ran with capabilities');
+  } finally { for (const d of [dir, binHome]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: a `setpriv` that does NOT drop (runs its argv as-is) → FAIL, command NOT run (the property is checked)', needsIsolation, async () => {
+  const dir = tmpdir();
+  const marker = path.join(dir, 'RAN');
+  const bin = path.join(dir, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'setpriv'), '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done; shift\nexec "$@"\n', { mode: 0o755 });
+  try {
+    const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e',
+      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: `${bin}:${process.env.PATH}` });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /after setpriv the command would still hold CapPrm, CapEff, CapBnd/);
+    assert.equal(fs.existsSync(marker), false, 'the command ran with capabilities');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ── import guard ─────────────────────────────────────────────────────────────
 
 test('⛔ importing the harness runs NO verb, even when the importer\'s argv names one', async () => {

@@ -601,6 +601,9 @@ const ISOLATED_USAGE = 'usage: contract-harness.mjs isolated [--keep <path>]… 
  * masking — each is FAIL, and the command is not started. Refusals carry COUNTS,
  * never socket paths: they get pasted into a public repo's logs.
  *
+ * ⛔ The command runs with NO CAPABILITIES (privilegeDrop: setpriv, checked) — otherwise
+ * namespace root could simply unmount every mask above (measured).
+ *
  * The command's env drops DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK,
  * DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST and XDG_RUNTIME_DIR and gets TMPDIR=/tmp —
  * on the nested path too. argv goes through as an ARRAY: no shell sees the command.
@@ -638,7 +641,12 @@ function runIsolated(a) {
       process.stderr.write(`isolated: ${nestedPlan.usage}\n${ISOLATED_USAGE}`);
       return Promise.resolve(EXIT.usage);
     }
-    return runCommand(command); // provably inside already: do not unshare again
+    // ⛔ and still capless: a nested call must not be the way back to capabilities
+    const priv = privilegeDrop();
+    if (priv.why) {
+      return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${priv.why}. The command was NOT started.`, { command }));
+    }
+    return runCommand(command, priv.prefix); // provably inside already: do not unshare again
   }
   let hostNs = '';
   let hostMnt = '';
@@ -847,10 +855,14 @@ async function runIsolatedInner(a) {
     return refuse(`cannot re-enter the working directory after masking (${errMsg(e).split(plan.cwd).join('<cwd>')})`);
   }
 
+  // ⛔ LAST, after every mount: the command gets NO capabilities, so it cannot undo them.
+  const priv = privilegeDrop();
+  if (priv.why) return refuse(priv.why);
+
   if (!tell('started')) return refuse('internal: the status channel (fd 3) is missing — run via `isolated`');
   try { fs.closeSync(3); } catch { /* the command must not inherit it */ }
 
-  return runCommand(command);
+  return runCommand(command, priv.prefix);
 }
 
 /**
@@ -1277,21 +1289,79 @@ async function closeResidualSockets(sockets, exempt) {
     covered: open.length, coverFailed, still: again.filter((o) => !SOCKET_UNREACHABLE.has(o)).length };
 }
 
+/** The capability fields /proc/<pid>/status must show as ZERO for the command. */
+const CAP_FIELDS = Object.freeze(['CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb']);
+
+/** @param {string} status /proc/<pid>/status text @returns {Record<string, string>} */
+function statusFields(status) {
+  return Object.fromEntries(status.split('\n').map((l) => l.split(':\t')).filter((f) => f.length === 2)
+    .map(([k, v]) => [k, v.trim()]));
+}
+
+/**
+ * The argv prefix that runs the command with NO capabilities — and the PROOF that it does.
+ *
+ * ⛔ WITHOUT THIS THE ARM IS NAMESPACE ROOT WITH EVERY CAPABILITY (measured by the final
+ * review: CapEff 000001ffffffffff). It could `umount` a /dev/null cover, `umount -l /tmp`
+ * (both probe sockets went ENOENT/ECONNREFUSED → CONNECTED), `mount -o remount,rw` the
+ * read-only home — every mask undone by one call. And CAP_DAC_OVERRIDE made a chmod-000
+ * file READABLE inside: a consumer test asserting EACCES went false-red only under the gate.
+ *
+ * ⇒ `setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all`. uid
+ * stays 0 (the files it owns are the caller's); every capability set is emptied.
+ * ⚠ `--bounding-set=-all` needs CAP_SETPCAP, which a nested call (already capless) lacks —
+ * measured: "apply bounding set: Operation not permitted" — so it is passed only while the
+ * bounding set is non-empty.
+ *
+ * ⭐ ASSERTS THE PROPERTY, not setpriv's exit: the same prefix runs node once to print its
+ * own /proc/self/status, and every CapXxx must be 0 and NoNewPrivs 1. A missing setpriv,
+ * or one that ignores its flags, is refused — the command never runs with capabilities.
+ * @returns {{prefix: string[], why: string}}
+ */
+function privilegeDrop() {
+  let bnd = '';
+  try { bnd = statusFields(fs.readFileSync('/proc/self/status', 'utf8')).CapBnd || ''; } catch { /* below */ }
+  if (!bnd) return { prefix: [], why: 'cannot read this process\'s capability bounding set (/proc/self/status)' };
+  const prefix = ['setpriv', '--no-new-privs', ...(/^0+$/.test(bnd) ? [] : ['--bounding-set=-all']),
+    '--inh-caps=-all', '--ambient-caps=-all', '--'];
+  const r = spawnSync(prefix[0], [...prefix.slice(1), process.execPath, '-e',
+    'process.stdout.write(require("fs").readFileSync("/proc/self/status", "utf8"))'],
+  { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (r.error) {
+    const err = /** @type {NodeJS.ErrnoException} */ (r.error);
+    return { prefix, why: `cannot drop capabilities: ${err.code === 'ENOENT' ? "'setpriv' not found — install util-linux"
+      : errMsg(err)}; the command would run as namespace root with every capability (it could unmount the masks)` };
+  }
+  if (r.status !== 0) {
+    return { prefix, why: `cannot drop capabilities: setpriv exited ${r.status ?? r.signal} `
+      + `(${String(r.stderr || '').trim().split('\n').pop()})` };
+  }
+  const f = statusFields(r.stdout);
+  const held = CAP_FIELDS.filter((k) => !/^0+$/.test(f[k] || 'x'));
+  if (held.length || f.NoNewPrivs !== '1') {
+    return { prefix, why: `after setpriv the command would still hold ${held.length ? held.join(', ') : 'no caps'}`
+      + `${f.NoNewPrivs !== '1' ? ' and NoNewPrivs is not set' : ''} — it is not dropping privileges` };
+  }
+  return { prefix, why: '' };
+}
+
 /**
  * Run the user command with the caller's cwd/stdio and a SCRUBBED env; resolve with
- * its exit code (128+signal when killed, 127 when it cannot be started).
+ * its exit code (128+signal when killed, 127 when it cannot be started). `prefix` is the
+ * privilege drop (privilegeDrop).
  *
  * ⛔ The scrub applies on BOTH paths (fresh and nested): the vars it drops NAME host
  * sockets and displays, and TMPDIR is reset because an inherited one may name a
  * directory the /tmp mask just hid.
- * @param {string[]} command @returns {Promise<number>}
+ * @param {string[]} command @param {string[]} [prefix] @returns {Promise<number>}
  */
-function runCommand(command) {
+function runCommand(command, prefix = []) {
   /** @type {NodeJS.ProcessEnv} */
   const env = { ...process.env, TMPDIR: '/tmp' };
   for (const k of SCRUBBED_ENV) delete env[k];
+  const argv = [...prefix, ...command];
   return new Promise((resolve) => {
-    const child = spawn(command[0], command.slice(1), { stdio: 'inherit', env });
+    const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', env });
     forwardSignals(child);
     child.on('error', (e) => {
       process.stderr.write(`isolated: cannot run '${command[0]}': ${errMsg(e)}\n`);

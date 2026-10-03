@@ -464,6 +464,14 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
   `/dev/null` bound over it and is tested again; any that still answers ⇒ refused. Refusals
   carry **counts, never paths**. *Measured on a workstation:* 307 listed, 220 answer on the
   host, **0** inside.
+* **No capabilities.** *Measured by the final review:* the command was namespace root with
+  **every** capability, so `umount -l /tmp` or unmounting a `/dev/null` cover re-exposed host
+  sockets (ENOENT/ECONNREFUSED → CONNECTED). ⇒ It runs under `setpriv --no-new-privs
+  --bounding-set=-all --inh-caps=-all --ambient-caps=-all`, on the nested path too, and the
+  drop is **checked** by reading the prefix's own `/proc/self/status` (all CapXxx 0,
+  NoNewPrivs 1); no `setpriv` ⇒ refused. A nested `unshare -rm` from inside cannot write its
+  uid_map, and even with capabilities the inherited mounts are **locked** (`umount -l /tmp`
+  → "not mounted") — measured, both.
 * **Env scrub** on the fresh and the nested path: `DISPLAY`, `WAYLAND_DISPLAY`,
   `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `XDG_RUNTIME_DIR` unset;
   `TMPDIR=/tmp`, so an inherited value cannot name a directory the mask hid.
