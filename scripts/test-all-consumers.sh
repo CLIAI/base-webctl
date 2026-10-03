@@ -31,7 +31,8 @@
 # --against-head --scratch   ⭐ THE RECOMMENDED PRE-RELEASE ARM. Each wired
 #                  consumer is CLONED at its committed HEAD into a throwaway dir,
 #                  base's candidate is cloned into the submodule path THERE, and
-#                  the contract runs in the clone, NETWORK-ISOLATED (harness
+#                  the contract runs in the clone, with NO host network and NO host
+#                  unix sockets (harness
 #                  `isolated`), with a throwaway HOME. The live tree is NEVER
 #                  written, and the gate re-checks it after each run. Uncommitted
 #                  TRACKED changes -> SKIP (the commit is not what runs). Isolation
@@ -646,6 +647,13 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     # before it evals testCmd; no marker ⇒ the contract never started ⇒ a
     # GATE-ENVIRONMENT fault, never a lane FAIL. There is no host-network
     # fallback: refused isolation means the consumer is not run, full stop.
+    #
+    # ⛔ `isolated` gives the arm a FRESH /tmp (no host unix sockets), so the
+    # marker, which lives in $SCRATCH_TMP and outside the cwd, would be written to
+    # the namespace's private /tmp and never seen here. Every consumer would then
+    # read as a GATE-ENVIRONMENT fault (measured). ⇒ --keep binds the scratch
+    # tree back. It is the gate's own throwaway tree, so exempting it from the
+    # host-socket check exposes nothing of the host.
     started_file="$SCRATCH_TMP/contract-started"
     rm -f "$started_file"
     # shellcheck disable=SC2016  # $1/$2 belong to the inner bash
@@ -654,7 +662,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
         && WEBCTL_BASE_DIR="$run_base_dir" \
            WEBCTL_DECLARED_PIN="${declared_pin:-}" \
            WEBCTL_GATE_SWAPPED="${swapped_now:-0}" \
-           node "$BASE_ROOT/scripts/contract-harness.mjs" isolated -- \
+           node "$BASE_ROOT/scripts/contract-harness.mjs" isolated --keep "$SCRATCH_TMP" -- \
              bash -c 'm="$2"; c="$1"; set --; : > "$m" || exit 97; eval "$c"' \
              webctl-gate-contract "$testCmd" "$started_file" ) 2>&1 | tee "$run_log" >&2
     rc=${PIPESTATUS[0]}
