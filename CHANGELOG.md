@@ -273,12 +273,17 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
 * **`contract-harness.mjs isolated [--keep <dir>]… -- <cmd…>`** runs `<cmd>` in private
   user, network, mount and PID namespaces:
   * The only network interface is its own `lo`, which is brought up.
-  * There is a fresh tmpfs over `/run` and `/tmp`. Kept paths (the cwd, base's repo, a
-    `$HOME` under /tmp, `--keep <dir>`) are bound back.
+  * There is a fresh tmpfs over `/run` and `/tmp`. The cwd, a `$HOME` under /tmp and
+    `--keep <dir>` are bound back WRITABLE. Base's repo, node and the command are visible
+    READ-ONLY, so a mutant cannot change the base that the next consumer is judged against.
   * Host path sockets that are still reachable are masked.
   * The user's home directory is READ-ONLY, except the kept paths.
-  * The command runs with NO capabilities (`setpriv`, no-new-privs), so it cannot unmount or
-    remount what masks the host.
+  * The command runs with NO capabilities (`setpriv`, no-new-privs; the drop is READ BACK from
+    `/proc/self/status`, never trusted), so it cannot unmount or remount what masks the host.
+    It runs as pid 1's child in its own PID namespace, so host processes cannot be signalled,
+    and anything it leaves running dies with it.
+  * A tool that writes under the home (e.g. npm's `~/.npm/_logs`) gets EROFS. npm itself
+    carries on with one warning line; point `npm_config_cache` under `/tmp` to keep its logs.
   * DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK, DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST and
     XDG_RUNTIME_DIR are unset, and TMPDIR=/tmp.
 
