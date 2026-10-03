@@ -31,7 +31,8 @@
 # --against-head --scratch   ⭐ THE RECOMMENDED PRE-RELEASE ARM. Each wired
 #                  consumer is CLONED at its committed HEAD into a throwaway dir,
 #                  base's candidate is cloned into the submodule path THERE, and
-#                  the contract runs in the clone, NETWORK-ISOLATED (harness
+#                  the contract runs in the clone, with NO host network and NO host
+#                  unix sockets (harness
 #                  `isolated`), with a throwaway HOME. The live tree is NEVER
 #                  written, and the gate re-checks it after each run. Uncommitted
 #                  TRACKED changes -> SKIP (the commit is not what runs). Isolation
@@ -56,7 +57,7 @@ for arg in "$@"; do
   case "$arg" in
     --against-head) AGAINST_HEAD=1 ;;
     --scratch) SCRATCH=1 ;;
-    -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -265,6 +266,22 @@ envelope() {
       "$(ts)" "$1" "$2" "$3"
   fi
 }
+
+# ⭐ EVERY RUN KEEPS ITS LOGS, IN ITS OWN DIRECTORY, NEVER OVERWRITTEN. A failure line
+# without the lines above it says nothing about which file or which subtest. One run
+# removed its per-consumer log as soon as it was judged, and a later question about a
+# line in it had to be settled by timestamps. ⇒ mktemp -d under a timestamped name: a
+# second run cannot reuse the directory, so it cannot clobber the first run's evidence.
+# Mode 700: consumer output is local evidence, not something to publish.
+#   WEBCTL_GATE_LOG_DIR   where run directories go
+#                         (default ${XDG_STATE_HOME:-~/.local/state}/webctl-base/gate-logs)
+GATE_LOG_ROOT="${WEBCTL_GATE_LOG_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/webctl-base/gate-logs}"
+mkdir -p "$GATE_LOG_ROOT"
+RUN_LOG_DIR="$(mktemp -d "$GATE_LOG_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-${BASE_HEAD:0:12}-XXXXXX")"
+chmod 700 "$RUN_LOG_DIR"
+# The whole run as well: stdout (the JSONL) and stderr (the human report) each copied.
+exec > >(tee -a "$RUN_LOG_DIR/gate.jsonl") 2> >(tee -a "$RUN_LOG_DIR/gate.err" >&2)
+echo "gate logs: $RUN_LOG_DIR" >&2
 
 pass=0 fail=0 skip=0 stale=0
 probe_ok=0 probe_bad=0 probe_none=0
@@ -585,7 +602,8 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # side effect: gate chatter already lives on stderr, and this leaves stdout as
   # pure JSONL for the lszd machine interface, which consumer stdout used to
   # interleave with.
-  run_log="$(mktemp "${TMPDIR:-/tmp}/webctl-gate-XXXXXX")"
+  # kept: one file per consumer in this run's log directory (see RUN_LOG_DIR)
+  run_log="$(mktemp "$RUN_LOG_DIR/$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_').XXXX.log")"
   set +e
   # ⭐ WEBCTL_DECLARED_PIN — what the consumer DECLARES, from its committed
   # gitlink, handed over because the swap makes it unknowable from inside.
@@ -629,6 +647,13 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     # before it evals testCmd; no marker ⇒ the contract never started ⇒ a
     # GATE-ENVIRONMENT fault, never a lane FAIL. There is no host-network
     # fallback: refused isolation means the consumer is not run, full stop.
+    #
+    # ⛔ `isolated` gives the arm a FRESH /tmp (no host unix sockets), so the
+    # marker, which lives in $SCRATCH_TMP and outside the cwd, would be written to
+    # the namespace's private /tmp and never seen here. Every consumer would then
+    # read as a GATE-ENVIRONMENT fault (measured). ⇒ --keep binds the scratch
+    # tree back. It is the gate's own throwaway tree, so exempting it from the
+    # host-socket check exposes nothing of the host.
     started_file="$SCRATCH_TMP/contract-started"
     rm -f "$started_file"
     # shellcheck disable=SC2016  # $1/$2 belong to the inner bash
@@ -637,7 +662,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
         && WEBCTL_BASE_DIR="$run_base_dir" \
            WEBCTL_DECLARED_PIN="${declared_pin:-}" \
            WEBCTL_GATE_SWAPPED="${swapped_now:-0}" \
-           node "$BASE_ROOT/scripts/contract-harness.mjs" isolated -- \
+           node "$BASE_ROOT/scripts/contract-harness.mjs" isolated --keep "$SCRATCH_TMP" -- \
              bash -c 'm="$2"; c="$1"; set --; : > "$m" || exit 97; eval "$c"' \
              webctl-gate-contract "$testCmd" "$started_file" ) 2>&1 | tee "$run_log" >&2
     rc=${PIPESTATUS[0]}
@@ -702,7 +727,6 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
       reason="exit 0, but the run REPORTED FAILURES (${n} TAP 'not ok'${spec_fail:+; spec: $spec_fail}${strict_bad:+; strict reporter}): ${first:-see log}. A describe() that throws while registering vanishes from the counts — use base's scripts/run-tests-strict.mjs"
     fi
   fi
-  rm -f "$run_log"
 
   if [ "$SCRATCH" = "1" ]; then
     scratch_end
@@ -782,6 +806,7 @@ if [ "$AGAINST_HEAD" = "1" ]; then
   fi
 fi
 echo "----- validated against: $VALIDATED_AGAINST -----" >&2
+echo "----- logs kept: $RUN_LOG_DIR -----" >&2
 if [ "$AGAINST_HEAD" != "1" ]; then
   echo "NOTE: this run says NOTHING about releasing base HEAD. Use --against-head before tagging." >&2
 fi

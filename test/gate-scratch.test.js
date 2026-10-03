@@ -55,9 +55,13 @@ echo "ran" > gate-was-here.txt
 if [ -n "\${FAKE_HOST_PORT:-}" ]; then
   node -e 'const s=require("net").connect(+process.env.FAKE_HOST_PORT,"127.0.0.1");s.on("connect",()=>{console.log("NET=REACHED");s.destroy()});s.on("error",e=>console.log("NET=BLOCKED "+e.code))'
 fi
-if [ -n "\${FAKE_LIVE_WRITE:-}" ]; then echo x > "$FAKE_LIVE_WRITE"; fi
-if [ -n "\${FAKE_LIVE_SUB:-}" ]; then git -C "$FAKE_LIVE_SUB" -c user.email=t@t -c user.name=t commit -q --allow-empty -m moved; fi
-if [ -n "\${FAKE_STARTED:-}" ]; then : > "$FAKE_STARTED"; sleep 30; fi
+# Markers go in the CWD (the scratch clone): \`isolated\` gives the contract a fresh
+# /tmp, so a host /tmp path written from in here would never be seen outside.
+if [ -n "\${FAKE_PAUSE:-}" ]; then
+  : > ./.fake-started
+  for _ in $(seq 300); do [ -f ./.fake-go ] && break; sleep 0.1; done
+fi
+if [ -n "\${FAKE_STARTED:-}" ]; then : > ./.fake-started; sleep 30; fi
 cat out.txt
 exit "$(cat code.txt)"
 `;
@@ -111,7 +115,8 @@ function world(o = {}) {
     consumerHead: git(['rev-parse', 'HEAD'], repo),
     /** @param {Record<string,string>} [extra] */
     env(extra = {}) {
-      const e = { ...process.env, WEBCTL_CONSUMERS_FILE: reg, WEBCTL_CONSUMERS_DIR: dir, TMPDIR: tmp, ...extra };
+      const e = { ...process.env, WEBCTL_CONSUMERS_FILE: reg, WEBCTL_CONSUMERS_DIR: dir, TMPDIR: tmp,
+        WEBCTL_GATE_LOG_DIR: path.join(dir, 'gate-logs'), ...extra };
       delete e.NODE_TEST_CONTEXT;
       delete e.WEBCTL_HOST_NETNS;
       return e;
@@ -232,17 +237,26 @@ test('⛔ scratch: the live tree — HEAD, submodule HEAD, porcelain, index, eve
   } finally { w.cleanup(); }
 });
 
-test('⛔ the gate FAILS LOUDLY when a live tree changes during its scratch run (untracked file; submodule HEAD)', { skip: NEEDS_NS }, () => {
-  // The contract reaches the live tree by ABSOLUTE path — what a breach, or a
-  // concurrent writer, looks like from the gate's side. Network isolation does not
-  // stop a filesystem write; the fingerprint is what catches it.
-  for (const [what, extra] of /** @type {[string, (w: ReturnType<typeof world>) => Record<string,string>][]} */ ([
-    ['STATUS', (w) => ({ FAKE_LIVE_WRITE: path.join(w.repo, 'stray.txt') })],
-    ['SUBHEAD', (w) => ({ FAKE_LIVE_SUB: w.sub })],
+test('⛔ the gate FAILS LOUDLY when a live tree changes during its scratch run (untracked file; submodule HEAD)', { skip: NEEDS_NS }, async () => {
+  // A CONCURRENT WRITER on the host changes the live tree while the contract runs.
+  // (A contract inside \`isolated\` can no longer reach a live tree under /tmp, but
+  // real live trees live outside /tmp and /run and stay writable from inside, so the
+  // fingerprint is still what catches a breach.) The contract pauses until we write.
+  for (const [what, move] of /** @type {[string, (w: ReturnType<typeof world>) => void][]} */ ([
+    ['STATUS', (w) => fs.writeFileSync(path.join(w.repo, 'stray.txt'), 'x\n')],
+    ['SUBHEAD', (w) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q',
+      '--allow-empty', '-m', 'moved'], { cwd: w.sub, stdio: 'ignore' })],
   ])) {
     const w = world();
     try {
-      const r = w.gate(['--against-head', '--scratch'], extra(w));
+      const run = w.gateAsync(['--against-head', '--scratch'], { FAKE_PAUSE: '1' });
+      const marker = () => w.scratchDirs().map((d) => path.join(w.tmp, d, 'repo', '.fake-started')).find((f) => fs.existsSync(f));
+      for (let i = 0; i < 400 && !marker(); i++) await new Promise((r) => setTimeout(r, 50));
+      const m = marker();
+      assert.ok(m, 'positive control: the contract started inside the scratch clone');
+      move(w);
+      fs.writeFileSync(path.join(path.dirname(m), '.fake-go'), '');
+      const r = await run;
       assert.equal(r.status, 1, r.out);
       assert.match(r.out, /⛔ LIVE TREE CHANGED {2}fake-webctl/);
       assert.match(r.out, new RegExp(`> ${what} `), `names the moved fact (${what})`);
@@ -388,12 +402,12 @@ test('scratch: every scratch dir is removed — on PASS, on FAIL, and on a signa
   // SIGTERM to the gate's process group mid-contract: the trap still cleans up
   const w = world();
   try {
-    const started = path.join(w.dir, 'started');
     const child = spawn('bash', [path.join(w.base, 'scripts', 'test-all-consumers.sh'), '--against-head', '--scratch'],
-      { env: w.env({ FAKE_STARTED: started }), detached: true, stdio: 'ignore' });
+      { env: w.env({ FAKE_STARTED: '1' }), detached: true, stdio: 'ignore' });
     const done = new Promise((resolve) => child.on('exit', resolve));
-    for (let i = 0; i < 200 && !fs.existsSync(started); i++) await new Promise((r) => setTimeout(r, 50));
-    assert.ok(fs.existsSync(started), 'the contract never started');
+    const started = () => w.scratchDirs().some((d) => fs.existsSync(path.join(w.tmp, d, 'repo', '.fake-started')));
+    for (let i = 0; i < 200 && !started(); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(started(), 'the contract never started');
     assert.equal(w.scratchDirs().length, 1, 'positive control: one scratch dir exists mid-run');
     process.kill(-(/** @type {number} */ (child.pid)), 'SIGTERM');
     await done;

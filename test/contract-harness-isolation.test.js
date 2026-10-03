@@ -1,4 +1,5 @@
-// contract-harness-isolation.test.js — mutation arms run with NO HOST NETWORK.
+// contract-harness-isolation.test.js — mutation arms run with NO HOST NETWORK and
+// NO HOST UNIX SOCKETS (see the "no host UNIX SOCKETS" section below).
 //
 // ⛔ INCIDENT (2026-10-02, a consumer lane's mutation control): a mutant re-derived
 // the default port, the arm attached to the REAL signed-in browser on the host's
@@ -36,10 +37,12 @@ function cleanEnv(/** @type {Record<string,string>} */ extra = {}) {
  * Measured, not assumed. @returns {string} '' when yes, else the named reason to skip
  */
 function isolationUnavailable() {
-  const r = spawnSync('unshare', ['-rn', 'sh', '-c', 'ip link set lo up 2>/dev/null || ifconfig lo up'],
-    { encoding: 'utf8' });
+  // ⇩ the SAME namespaces `isolated` makes, plus one tmpfs mount — measured, not assumed.
+  const r = spawnSync('unshare', ['-rnm', '--propagation=private', 'sh', '-c',
+    '(ip link set lo up 2>/dev/null || ifconfig lo up) && mount -t tmpfs probe /tmp'],
+  { encoding: 'utf8' });
   if (r.error) return `unshare not runnable here (${r.error.message})`;
-  if (r.status !== 0) return `unprivileged user+net namespaces unavailable here: ${(r.stderr || '').trim()}`;
+  if (r.status !== 0) return `unprivileged user+net+mount namespaces or tmpfs mounts unavailable here: ${(r.stderr || '').trim()}`;
   return '';
 }
 const NO_ISOLATION = isolationUnavailable();
@@ -50,11 +53,12 @@ const needsIsolation = NO_ISOLATION ? { skip: `SKIP (isolation): ${NO_ISOLATION}
  * Run the harness ASYNC — a fake listener in this process must be able to
  * accept while the child runs. Never throws.
  * @param {string[]} args @param {Record<string,string>} [env] @param {string} [execPath]
+ * @param {string} [cwd]
  * @returns {Promise<{status:number, stdout:string, stderr:string}>}
  */
-function run(args, env = {}, execPath = process.execPath) {
+function run(args, env = {}, execPath = process.execPath, cwd = ROOT) {
   return new Promise((resolve) => {
-    const c = spawn(execPath, [TOOL, ...args], { cwd: ROOT, env: cleanEnv(env) });
+    const c = spawn(execPath, [TOOL, ...args], { cwd, env: cleanEnv(env) });
     let stdout = ''; let stderr = '';
     c.stdout.on('data', (d) => { stdout += d; });
     c.stderr.on('data', (d) => { stderr += d; });
@@ -119,7 +123,8 @@ test('⭐ QA: a mutant under `isolated` cannot reach a host listener — the fak
   const dir = tmpdir();
   const fake = await fakeListener();
   try {
-    const r = await run(['isolated', '--', process.execPath, writeMutant(dir), String(fake.port)]);
+    // --keep: the mutant lives under /tmp, which `isolated` masks.
+    const r = await run(['isolated', '--keep', dir, '--', process.execPath, writeMutant(dir), String(fake.port)]);
     await settle();
     assert.equal(fake.count(), 0, `the host fake was reached from inside isolation:\n${r.stdout}${r.stderr}`);
     assert.equal(r.status, 1, `the mutant's connect must FAIL inside:\n${r.stdout}${r.stderr}`);
@@ -158,7 +163,7 @@ srv.listen(0, '127.0.0.1', () => {
 });
 `);
   try {
-    const r = await run(['isolated', '--', process.execPath, script]);
+    const r = await run(['isolated', '--keep', dir, '--', process.execPath, script]);
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /LOCAL pong/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -197,7 +202,8 @@ test('⛔ fail closed: an `unshare` that does NOT isolate → FAIL, command NOT 
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin);
   // A fake `unshare`: drops its flags and execs the rest ON THE HOST.
-  fs.writeFileSync(path.join(bin, 'unshare'), '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, 'unshare'),
+    '#!/bin/sh\nwhile [ "${1#-}" != "$1" ]; do shift; done\nexec "$@"\n', { mode: 0o755 });
   try {
     const r = await run(['isolated', '--', process.execPath, '-e',
       `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: `${bin}:/usr/bin:/bin` });
@@ -220,6 +226,23 @@ test('⛔ fail closed: neither `ip` nor `ifconfig` → FAIL naming it, command N
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /cannot bring the namespace loopback up \(ip: not found; ifconfig: not found\)/);
     assert.equal(fs.existsSync(marker), false, 'the command ran without a working loopback');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: no `mount` → FAIL naming it, command NOT run (no socket masking, no run)', needsIsolation, async () => {
+  const dir = tmpdir();
+  const marker = path.join(dir, 'RAN');
+  const bin = path.join(dir, 'bin');
+  fs.mkdirSync(bin);
+  const which = (/** @type {string} */ b) => spawnSync('sh', ['-c', `command -v ${b}`], { encoding: 'utf8' }).stdout.trim();
+  fs.symlinkSync(which('unshare'), path.join(bin, 'unshare'));
+  fs.symlinkSync(which('ip') || which('ifconfig'), path.join(bin, which('ip') ? 'ip' : 'ifconfig'));
+  try {
+    const r = await run(['isolated', '--', process.execPath, '-e',
+      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: bin });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /NOT RUN: cannot cover \/run with a fresh tmpfs: 'mount' not found/);
+    assert.equal(fs.existsSync(marker), false, 'the command ran with the host\'s unix sockets unmasked');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -371,25 +394,29 @@ test('isolation-check: usage without ports or with a bad port → exit 3', async
 
 // ── nesting: "already inside" is proven from the KERNEL, never from env ─────
 
+const HOST_MNT = fs.readlinkSync('/proc/self/ns/mnt');
+
 /**
- * Run `isolated -- <write marker>` with WEBCTL_HOST_NETNS set, optionally under a
- * prefix (e.g. `unshare -r`). @param {string} recorded @param {string[]} [prefix]
+ * Run `isolated -- <print a marker>` with WEBCTL_HOST_NETNS (and optionally
+ * WEBCTL_HOST_MNTNS) set, optionally under a prefix (e.g. `unshare -r`).
+ *
+ * ⚠ The marker goes to STDOUT, not to a file: a prefix that masks /tmp would hide a
+ * marker FILE from this test, and "no marker" would then pass whether or not it ran.
+ * @param {string} recorded @param {string[]} [prefix] @param {string} [recordedMnt]
  */
-async function nestedAttempt(recorded, prefix = []) {
-  const dir = tmpdir();
-  const marker = path.join(dir, 'RAN');
+async function nestedAttempt(recorded, prefix = [], recordedMnt) {
   const argv = [...prefix, process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
-    `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`];
-  const r = await new Promise((resolve) => {
-    const c = spawn(argv[0], argv.slice(1), { env: cleanEnv({ WEBCTL_HOST_NETNS: recorded }) });
+    'console.log("RAN-" + "MARKER")'];
+  const env = cleanEnv({ WEBCTL_HOST_NETNS: recorded, ...(recordedMnt ? { WEBCTL_HOST_MNTNS: recordedMnt } : {}) });
+  if (!recordedMnt) delete env.WEBCTL_HOST_MNTNS;
+  const r = /** @type {{status:number, stdout:string, stderr:string}} */ (await new Promise((resolve) => {
+    const c = spawn(argv[0], argv.slice(1), { env });
     let stdout = ''; let stderr = '';
     c.stdout.on('data', (d) => { stdout += d; });
     c.stderr.on('data', (d) => { stderr += d; });
     c.on('close', (code) => resolve({ status: code, stdout, stderr }));
-  });
-  const ran = fs.existsSync(marker);
-  fs.rmSync(dir, { recursive: true, force: true });
-  return { .../** @type {{status:number, stdout:string, stderr:string}} */ (r), ran };
+  }));
+  return { ...r, ran: r.stdout.includes('RAN-MARKER') };
 }
 
 test('⛔ nesting: the marker set on the HOST (= the real host id) → refused rc 2, nothing run', async () => {
@@ -419,17 +446,311 @@ test('⛔ nesting: `unshare -r` + a fabricated id that DIFFERS beats netns+uid_m
   const r = await nestedAttempt('net:[1]', ['unshare', '-r']);
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(r.stderr, /interface\(s\) besides 'lo' are visible/);
-  assert.doesNotMatch(r.stderr, /EQUALS|uid_map is/, 'only the interface fact should have refused this');
+  assert.doesNotMatch(r.stderr, /EQUALS|uid_map is/, 'the first two NETWORK facts should have passed');
   assert.equal(r.ran, false);
+});
+
+// ── nesting: the old NET-ONLY namespace is no longer "inside" ────────────────
+
+test('⛔ nesting: the OLD `unshare -rn` (no -m) + fabricated ids → refused rc 2 by the MOUNT fact alone, nothing run', needsIsolation, async () => {
+  // Every NETWORK fact passes here: netns ≠ the fabricated id, uid_map mapped, only
+  // 'lo' visible. This is exactly what generation-4 `isolated` made — and it leaves
+  // every host path socket reachable. Only the tmpfs fact stands in the way.
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rn'], 'mnt:[1]');
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /no 'webctl-isolated' tmpfs on top of \/run, .*\/tmp/);
+  assert.doesNotMatch(r.stderr, /EQUALS|uid_map is|interface\(s\) besides/, 'only the mount fact should have refused this');
+  assert.equal(r.ran, false, 'a net-only namespace was accepted as no-host-sockets');
+});
+
+test('⛔ nesting: `unshare -rn` with the REAL host mount-ns id recorded → refused naming it EQUAL', needsIsolation, async () => {
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rn'], HOST_MNT);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /the current mount namespace .* EQUALS the recorded host one/);
+  assert.equal(r.ran, false);
+});
+
+test('⛔ nesting: `unshare -rnm` (a mount ns, NOTHING masked) + fabricated ids → refused by the tmpfs fact', needsIsolation, async () => {
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private'], 'mnt:[1]');
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /no 'webctl-isolated' tmpfs on top of/);
+  assert.doesNotMatch(r.stderr, /EQUALS/);
+  assert.equal(r.ran, false, 'a fresh mount ns with the host /run and /tmp was accepted');
 });
 
 test('nesting CONTROL: a real nested `isolated` inside `isolated` proceeds WITHOUT unsharing again', needsIsolation, async () => {
   const r = await run(['isolated', '--', 'sh', '-c',
-    'readlink /proc/self/ns/net; "$0" "$1" isolated -- readlink /proc/self/ns/net', process.execPath, TOOL]);
+    'readlink /proc/self/ns/net /proc/self/ns/mnt; "$0" "$1" isolated -- readlink /proc/self/ns/net /proc/self/ns/mnt',
+    process.execPath, TOOL]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  const [outer, inner] = r.stdout.trim().split('\n');
-  assert.notEqual(outer, HOST_NS, 'the outer level is not isolated');
-  assert.equal(inner, outer, 'the nested call unshared AGAIN (or ran elsewhere)');
+  const [outerNet, outerMnt, innerNet, innerMnt] = r.stdout.trim().split('\n');
+  assert.notEqual(outerNet, HOST_NS, 'the outer level is not network-isolated');
+  assert.notEqual(outerMnt, HOST_MNT, 'the outer level has no mount namespace');
+  assert.equal(innerNet, outerNet, 'the nested call unshared AGAIN (or ran elsewhere)');
+  assert.equal(innerMnt, outerMnt, 'the nested call made another mount namespace');
+});
+
+// ── no host UNIX SOCKETS ─────────────────────────────────────────────────────
+//
+// ⛔ `unshare -rn` hides TCP listeners but not PATH unix sockets — they are files.
+// Measured by the coordinator: inside it, docker.sock answered. ⇒ The guard LOGIC is
+// tested with sockets THIS FILE creates; the host's real sockets are separate
+// precondition arms that skip, by name, where absent. (A consumer's first version of
+// such a test tripped on the host's own socket — a guard's test must not depend on
+// the host it guards.)
+
+/** Prints `OUTCOME <CONNECTED|errno>` for a connect to the unix socket in argv[1]. */
+const UNIX_CONNECT = `
+const s = require('node:net').connect({ path: process.argv[1] });
+s.on('connect', () => { console.log('OUTCOME CONNECTED'); s.destroy(); });
+s.on('error', (e) => console.log('OUTCOME ' + e.code));
+`;
+/** @param {string} out */
+const outcomeOf = (out) => (out.match(/OUTCOME (\S+)/) || [])[1] || `none in: ${out}`;
+
+/** A unix-socket server THIS test owns, counting connections. @param {string} p */
+async function unixServer(p) {
+  let connections = 0;
+  const srv = net.createServer((s) => { connections++; s.destroy(); });
+  await new Promise((resolve, reject) => { srv.on('error', reject); srv.listen(p, () => resolve(undefined)); });
+  return { count: () => connections, close: () => new Promise((r) => srv.close(() => r(undefined))) };
+}
+
+/** Run argv directly (no harness). @param {string[]} argv @param {{cwd?: string}} [o] */
+function runRaw(argv, o = {}) {
+  return /** @type {Promise<{status:number, stdout:string, stderr:string}>} */ (new Promise((resolve) => {
+    const c = spawn(argv[0], argv.slice(1), { env: cleanEnv(), cwd: o.cwd });
+    let stdout = ''; let stderr = '';
+    c.stdout.on('data', (d) => { stdout += d; });
+    c.stderr.on('data', (d) => { stderr += d; });
+    c.on('close', (code) => resolve({ status: code ?? -1, stdout, stderr }));
+  }));
+}
+
+test('⭐ QA: a self-made socket under an UNKEPT /tmp dir → ENOENT inside (the fresh /tmp has no such path); server sees ZERO', needsIsolation, async () => {
+  const dir = tmpdir();
+  const sock = path.join(dir, 's.sock');
+  const srv = await unixServer(sock);
+  try {
+    const r = await run(['isolated', '--', process.execPath, '-e', UNIX_CONNECT, sock]);
+    await settle();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    // ENOENT, not ECONNREFUSED: the path itself is gone — /tmp is a fresh tmpfs.
+    assert.equal(outcomeOf(r.stdout), 'ENOENT');
+    assert.equal(srv.count(), 0, 'the host socket was reached from inside');
+  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ CONTROL: the same connect on the host → CONNECTED (the QA arm can fail)', async () => {
+  const dir = tmpdir();
+  const sock = path.join(dir, 's.sock');
+  const srv = await unixServer(sock);
+  try {
+    const r = await runRaw([process.execPath, '-e', UNIX_CONNECT, sock]);
+    await settle();
+    assert.equal(outcomeOf(r.stdout), 'CONNECTED');
+    assert.equal(srv.count(), 1);
+  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ MUTANT: the OLD `unshare -rn` form still reaches that socket → CONNECTED (why -n alone was not enough)', needsIsolation, async () => {
+  const dir = tmpdir();
+  const sock = path.join(dir, 's.sock');
+  const srv = await unixServer(sock);
+  try {
+    const r = await runRaw(['unshare', '-rn', process.execPath, '-e', UNIX_CONNECT, sock]);
+    await settle();
+    assert.equal(outcomeOf(r.stdout), 'CONNECTED', 'the net-only namespace did not reach it — this arm no longer discriminates');
+    assert.equal(srv.count(), 1);
+  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ a self-made socket in the KEPT cwd still answers before masking → covered with /dev/null → ECONNREFUSED; a file beside it reads', needsIsolation, async () => {
+  // The cwd is re-exposed (it must be — the arm lives there) but it is NOT exempt:
+  // a socket in it is connect-tested inside, and covered because it answers.
+  const dir = tmpdir();
+  const sock = path.join(dir, 's.sock');
+  fs.writeFileSync(path.join(dir, 'data.txt'), 'kept');
+  const srv = await unixServer(sock);
+  try {
+    const r = await run(['isolated', '--', process.execPath, '-e',
+      `${UNIX_CONNECT}; console.log('READ ' + require('fs').readFileSync('data.txt', 'utf8'))`, sock],
+    {}, process.execPath, dir);
+    await settle();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    // ECONNREFUSED: the path exists, but it is /dev/null now, not a socket.
+    assert.equal(outcomeOf(r.stdout), 'ECONNREFUSED');
+    assert.match(r.stdout, /READ kept/);
+    assert.equal(srv.count(), 1, 'exactly ONE connect: the harness\'s own probe that found it open; the command\'s never landed');
+  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('`--keep` EXEMPTS its sockets: a self-made socket under an explicit keep → CONNECTED inside', needsIsolation, async () => {
+  const dir = tmpdir();
+  const sock = path.join(dir, 's.sock');
+  const srv = await unixServer(sock);
+  try {
+    const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e', UNIX_CONNECT, sock]);
+    await settle();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(outcomeOf(r.stdout), 'CONNECTED');
+    assert.equal(srv.count(), 1, 'the harness probed an exempt socket, or the command did not reach it');
+  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('CONTROL: a socket created INSIDE (server and client both inside, in the fresh /tmp) works', needsIsolation, async () => {
+  const r = await run(['isolated', '--', process.execPath, '-e', `
+const net = require('node:net'); const p = require('node:path').join(require('node:os').tmpdir(), 'in.sock');
+const srv = net.createServer((s) => s.end('pong')).listen(p, () => {
+  const c = net.connect({ path: p }); let got = '';
+  c.on('data', (d) => { got += d; });
+  c.on('end', () => { console.log('INSIDE ' + got + ' ' + p); srv.close(); });
+  c.on('error', (e) => { console.log('INSIDE FAIL ' + e.code); srv.close(); });
+});`]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /INSIDE pong \/tmp\/in\.sock/);
+  assert.equal(fs.existsSync('/tmp/in.sock'), false, 'the inside /tmp leaked onto the host');
+});
+
+/**
+ * A HOST socket precondition arm: skip (named) unless the host has it AND it answers
+ * here; then assert the exact errno inside — ENOENT when it lives under a masked
+ * directory (the path is gone), ECONNREFUSED otherwise (covered with /dev/null).
+ * @param {string} name @param {() => string} find
+ */
+function hostSocketArm(name, find) {
+  test(`host precondition: ${name} → unreachable inside, exact errno`, needsIsolation, async (t) => {
+    const p = find();
+    if (!p) { t.skip(`SKIP (host): no ${name} on this host`); return; }
+    const host = outcomeOf((await runRaw([process.execPath, '-e', UNIX_CONNECT, p])).stdout);
+    if (host !== 'CONNECTED') { t.skip(`SKIP (host): ${name} exists but does not answer here (${host})`); return; }
+    const real = fs.realpathSync(p);
+    const masked = ['/run', '/tmp'].map((d) => fs.realpathSync(d)).some((d) => real.startsWith(`${d}/`));
+    const want = masked ? 'ENOENT' : 'ECONNREFUSED';
+    const r = await run(['isolated', '--', process.execPath, '-e', UNIX_CONNECT, p]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(outcomeOf(r.stdout), want, `${name}: on the host CONNECTED, inside must be ${want}`);
+  });
+}
+hostSocketArm('the docker socket (/var/run/docker.sock)',
+  () => (fs.existsSync('/var/run/docker.sock') ? '/var/run/docker.sock' : ''));
+hostSocketArm('an X11 display socket (/tmp/.X11-unix/X*)', () => {
+  try { const x = fs.readdirSync('/tmp/.X11-unix').find((f) => /^X\d+$/.test(f)); return x ? `/tmp/.X11-unix/${x}` : ''; } catch { return ''; }
+});
+hostSocketArm('the ssh-agent ($SSH_AUTH_SOCK)', () => process.env.SSH_AUTH_SOCK || '');
+
+// ── env scrub ────────────────────────────────────────────────────────────────
+
+const SCRUBBED = ['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK', 'DBUS_SESSION_BUS_ADDRESS', 'DOCKER_HOST', 'XDG_RUNTIME_DIR'];
+const PRINT_ENV = `console.log('ENV ' + JSON.stringify(Object.fromEntries(${JSON.stringify([...SCRUBBED, 'TMPDIR'])}.map((k) => [k, process.env[k] ?? null]))))`;
+const HOSTILE_ENV = { DISPLAY: ':99', WAYLAND_DISPLAY: 'wayland-9', SSH_AUTH_SOCK: '/nonexistent/agent',
+  DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent/bus', DOCKER_HOST: 'unix:///nonexistent/docker.sock',
+  XDG_RUNTIME_DIR: '/nonexistent/xdg', TMPDIR: '/nonexistent/tmp' };
+
+/** @param {string} out @returns {Record<string, string|null>[]} every ENV line */
+const envLines = (out) => [...out.matchAll(/^ENV (.*)$/gm)].map((m) => JSON.parse(m[1]));
+
+test('⛔ env scrub: socket/display vars are ABSENT inside and TMPDIR=/tmp — fresh AND nested paths', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'sh', '-c',
+    `"$0" -e "$2"; DISPLAY=:98 SSH_AUTH_SOCK=/nonexistent/again TMPDIR=/nonexistent "$0" "$1" isolated -- "$0" -e "$2"`,
+    process.execPath, TOOL, PRINT_ENV], HOSTILE_ENV);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const lines = envLines(r.stdout);
+  assert.equal(lines.length, 2, r.stdout);
+  for (const [i, e] of lines.entries()) {
+    for (const k of SCRUBBED) assert.equal(e[k], null, `${['fresh', 'nested'][i]} path: ${k} reached the command`);
+    assert.equal(e.TMPDIR, '/tmp', `${['fresh', 'nested'][i]} path: TMPDIR not reset`);
+  }
+});
+
+test('env scrub CONTROL: the same vars DO reach a command run without `isolated`', async () => {
+  const c = await new Promise((resolve) => {
+    const ch = spawn(process.execPath, ['-e', PRINT_ENV], { env: cleanEnv(HOSTILE_ENV) });
+    let out = ''; ch.stdout.on('data', (d) => { out += d; });
+    ch.on('close', () => resolve(envLines(out)[0]));
+  });
+  assert.equal(/** @type {any} */ (c).DISPLAY, ':99', 'the printer cannot see env at all — the scrub arm proves nothing');
+  assert.equal(/** @type {any} */ (c).TMPDIR, '/nonexistent/tmp');
+});
+
+// ── keep-binds: /tmp is masked, the arm's own paths are not ──────────────────
+
+test('⭐ keep-binds: cwd under /tmp + an absolute /tmp path work inside; an UNKEPT sibling under /tmp is invisible', needsIsolation, async () => {
+  // ⚠ The cwd is TWO levels below /tmp, with the unkept sibling beside it. From a
+  // direct child of /tmp, `..` lands on a dentry the new tmpfs is mounted on, and the
+  // walk crosses INTO the new /tmp — which hid a missing re-chdir (measured: the
+  // mutation survived). One level deeper, `..` is an ordinary directory of the OLD /tmp.
+  const parent = tmpdir();
+  const cwd = path.join(parent, 'cwd');
+  const sibling = path.join(parent, 'sibling');
+  fs.mkdirSync(cwd);
+  fs.mkdirSync(sibling);
+  const kept = tmpdir();
+  fs.writeFileSync(path.join(cwd, 'rel.txt'), 'cwd-file');
+  fs.writeFileSync(path.join(kept, 'abs.txt'), 'kept-file');
+  fs.writeFileSync(path.join(sibling, 'hidden.txt'), 'must-not-see');
+  const show = `const fs = require('fs'); const t = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch (e) { return e.code; } };
+console.log('CWD ' + process.cwd()); console.log('REL ' + t('rel.txt')); console.log('ABS ' + t(process.argv[1]));
+console.log('SIB ' + t(process.argv[2])); console.log('UP ' + t(process.argv[3]));`;
+  try {
+    const r = await run(['isolated', '--keep', kept, '--', process.execPath, '-e', show,
+      path.join(kept, 'abs.txt'), path.join(sibling, 'hidden.txt'),
+      path.join('..', path.basename(sibling), 'hidden.txt')], {}, process.execPath, cwd);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, new RegExp(`^CWD ${fs.realpathSync(cwd)}$`, 'm'), 'the cwd moved');
+    assert.match(r.stdout, /^REL cwd-file$/m);
+    assert.match(r.stdout, /^ABS kept-file$/m);
+    assert.match(r.stdout, /^SIB ENOENT$/m, 'an unkept /tmp directory was visible inside');
+    // ⛔ `..` from the cwd: an INHERITED cwd still points into the OLD /tmp, so this is
+    // how a missing re-chdir would show — relative paths walking out under the mask.
+    assert.match(r.stdout, /^UP ENOENT$/m, 'the old /tmp is reachable through the cwd');
+    // CONTROL: on the host the sibling IS readable — so ENOENT above is the mask.
+    assert.equal(fs.readFileSync(path.join(sibling, 'hidden.txt'), 'utf8'), 'must-not-see');
+    // and the writes a command makes through a keep land on the host (it is a bind, not a copy)
+    const w = await run(['isolated', '--', process.execPath, '-e', 'require("fs").writeFileSync("out.txt", "w")'],
+      {}, process.execPath, cwd);
+    assert.equal(w.status, 0, w.stderr);
+    assert.equal(fs.readFileSync(path.join(cwd, 'out.txt'), 'utf8'), 'w');
+  } finally {
+    for (const d of [parent, kept]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('⛔ keep refusals: /tmp, /run, an ancestor of them, a path under /run, $HOME, a missing path → usage 3, nothing run', async () => {
+  const dir = tmpdir();
+  try {
+    for (const k of ['/tmp', '/run', '/', os.userInfo().homedir, path.join(dir, 'missing')]) {
+      const r = await run(['isolated', '--keep', k, '--', process.execPath, '-e', 'console.log("RAN-" + "MARKER")']);
+      assert.equal(r.status, 3, `--keep <${k === os.userInfo().homedir ? 'HOME' : k}>: ${r.stderr}`);
+      assert.doesNotMatch(r.stdout, /RAN-MARKER/);
+    }
+    if (fs.existsSync('/run/user') && fs.statSync('/run/user').isDirectory()) {
+      const r = await run(['isolated', '--keep', '/run/user', '--', 'true']);
+      assert.equal(r.status, 3, r.stderr);
+      assert.match(r.stderr, /beneath \/run, where host sockets live/);
+    }
+    assert.equal((await run(['isolated', '--keep', '--', 'true'])).status, 3, '--keep without a value');
+    assert.equal((await run(['isolated', '--bogus', '--', 'true'])).status, 3, 'an unknown option');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('keep-binds: a throwaway HOME under /tmp stays visible inside without --keep (the gate\'s layout)', needsIsolation, async () => {
+  const home = tmpdir();
+  fs.writeFileSync(path.join(home, '.rc'), 'home-file');
+  try {
+    const r = await run(['isolated', '--', process.execPath, '-e',
+      'console.log("HOME " + require("fs").readFileSync(require("path").join(process.env.HOME, ".rc"), "utf8"))'],
+    { HOME: home });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^HOME home-file$/m);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('⛔ a cwd that IS /tmp → FAIL, not run (re-exposing it would undo the mask)', async () => {
+  const r = await run(['isolated', '--', process.execPath, '-e', 'console.log("RAN-" + "MARKER")'], {}, process.execPath, '/tmp');
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /NOT RUN: the working directory is \/tmp itself, which is masked/);
+  assert.doesNotMatch(r.stdout, /RAN-MARKER/);
 });
 
 // ── import guard ─────────────────────────────────────────────────────────────
