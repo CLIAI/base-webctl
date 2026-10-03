@@ -325,6 +325,14 @@ inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
 * ⛔ **If minting fails, REFUSE.** Never fall back to an existing tab. The error names the
   opt-in: `{targetId, owner: 'adopted'}`. A fallback to `existing[0]` would rebuild the
   incident on exactly the builds where minting is broken.
+* ⛔ **Mint in the DEFAULT browser context.** The `createTarget` request carries no
+  `browserContextId`. A fresh context lacks the human's sign-in, so every page would come
+  back walled. A caller then "recovers nothing", silently *(`substack`'s review)*.
+* ⛔ **Never close the LAST page target.** If ours is the only page left, closing it exits
+  Chromium. That is how the linkedin browser was lost. `close()` instead navigates it to
+  `about:blank` and leaves it open, and says so in its return value (`{closed: false,
+  reason: 'last-page'}`). "Last" is read from the browser endpoint at close time, never
+  remembered.
 * ⛔ **No "is this tab blank, so reusable?" heuristic, ever.** Blankness is not ownership.
   Opera's new-tab page is `chrome://startpage`, not `chrome://newtab`, so a human's start
   page would read as free. A URL describes what a tab shows, not whose it is.
@@ -339,6 +347,10 @@ inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
 **BREAKING.** A caller that relied on the default reusing the first tab now gets a new tab.
 Where reuse was meant, it must say whose tab it is. Lanes adopt this deliberately: it
 changes what a signed-in browser shows.
+
+**Migration.** A caller that uses `openPage()` only to get a session for BROWSER-level
+calls (e.g. `Storage.getCookies`) must switch to `connectBrowser()`. Under mint-by-default,
+every such call would otherwise open, and possibly leave, a blank tab.
 
 **QA, each with its control:**
 
@@ -355,7 +367,11 @@ changes what a signed-in browser shows.
    connects to the local forward. *Control:* the raw authority is never dialled; the fake
    records every connection.
 5. `keep: true` → the minted tab survives `close()`. *Control:* without it, it is closed.
-6. `{targetId}` naming an absent id, or a non-page target: refused, naming it.
+6. The mint request carries no `browserContextId`. *Control:* a fake that records the
+   request sees exactly `{url, background: true, newWindow: false}`.
+7. ⛔ One page target, ours: `close()` leaves the browser with that page, at `about:blank`,
+   and returns `reason: 'last-page'`. *Control:* with a second page present, ours is closed.
+8. `{targetId}` naming an absent id, or a non-page target: refused, naming it.
    `openPage(base, {reuse: true})`: refused as an unknown option.
 
 ## Security Considerations
