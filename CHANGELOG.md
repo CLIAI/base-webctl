@@ -280,10 +280,22 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
     normal permissions, and base's repo is writable when it is the cwd.
   * Host path sockets that are still reachable are masked.
   * The user's home directory is READ-ONLY, except the kept paths.
-  * The command runs with NO capabilities (`setpriv`, no-new-privs; the drop is READ BACK from
-    `/proc/self/status`, never trusted), so it cannot unmount or remount what masks the host.
-    It runs as pid 1's child in its own PID namespace, so host processes cannot be signalled,
-    and anything it leaves running dies with it.
+  * The command runs as the REAL (non-root) uid and gid, in a child user namespace that has
+    no mount namespace of its own. So it holds NO capabilities over the masks and cannot
+    unmount or remount them. Inherited mounts are locked even in a namespace it nests
+    itself. The no-new-privs bit is set, which blocks setuid binaries. A probe run in the
+    same child before the command starts must read back zero capabilities, the real ids and
+    exact single-line uid/gid maps, or the run is refused.
+    ⇒ **Nested namespaces still work**: a lane that self-isolates with its own `unshare -rn`
+    can bring its own `lo` up, and Chromium's sandbox starts. An earlier design that dropped
+    every capability from a namespace root broke both (measured on the first real gate run:
+    since Linux 5.12, mapping the parent's uid 0 needs CAP_SETFCAP).
+  * It has its own PID namespace, so host processes cannot be signalled, and anything it
+    leaves running dies with it. A signal forwarded to it is re-raised, so the caller sees
+    the command die BY that signal (a Ctrl-C is never an ordinary exit 130).
+  * Called inside a lane's own `unshare -r`, it resolves the REAL uid and home from the
+    kernel's uid/gid maps and the passwd database, accepting a home only if the kernel shows
+    it owned by us. If it cannot resolve them, or there is no passwd entry, it refuses.
   * A tool that writes under the home (e.g. npm's `~/.npm/_logs`) gets EROFS. npm itself
     carries on with one warning line; point `npm_config_cache` under `/tmp` to keep its logs.
   * DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK, DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST and
@@ -293,8 +305,7 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
   the kernel (namespace ids, uid_map, interfaces, mounts); an env marker alone is refused.
   Why: twice on 2026-10-03 a consumer's mutation control reached a live signed-in browser.
   Separately, `unshare -rn` alone was measured still reaching the docker socket. And the
-  final review measured that a command left with namespace-root capabilities could unmount
-  every mask.
+  final review measured that a command left as namespace root could unmount every mask.
   Companions: `isolation-check <port>…` (a precondition run inside: the real port must give
   exactly ECONNREFUSED, and a self-made fake must answer); `sandbox-port`; `guard-live-port`.
 * **Harness generation 5**: the `no-revendor` check counts a same-named file as a shim only if
@@ -363,12 +374,13 @@ while the live pair has the old ones) — `inspect().legacy` comes in the next r
   Paths under `/run` and `/tmp` are covered whatever their kind, because those trees are
   replaced, not checked. ⚠ Outside the home dir, `/run` and `/tmp`, the rest of the
   filesystem keeps its normal permissions (e.g. `/var/tmp`, `/dev/shm`).
-* The read-only "home" is the passwd home of the caller's uid. Under an outer `unshare -r`
-  that is root's home, so the real one stays writable (measured), and with no passwd entry
-  nothing is made read-only. Browser profiles kept outside the home dir are not covered,
+* The read-only "home" is the passwd home of the real uid. Two or more stacked
+  `unshare -r` levels cannot be resolved from inside, so that case is refused, as is an
+  account with no passwd entry (a CI container running an arbitrary uid must add one).
+  Browser profiles kept outside the home dir are not covered,
   unless reached through a dot-dir (`~/.cache`, `~/.config`, …) that is ITSELF a symlink out
   of it. A deeper symlink (`~/.cache/<tool>` pointing elsewhere) is not covered.
-* Without capabilities, a command under `isolated` cannot bind ports below 1024.
+* A command under `isolated` cannot bind ports below 1024.
 * The gate's default and plain `--against-head` modes are NOT isolated and still swap in
   place; only `--scratch` gives both guarantees.
 * **openPage() currently drives the first existing tab; v0.32.0 changes the default to a new
