@@ -248,7 +248,9 @@ before minting", was right for an unattended browser and is superseded.
   `{closed: false, reason}` with reason `'keep' | 'owned-reuse' | 'adopted' | 'last-page' |
   'close-failed'`. ⛔ **The LAST page target is never closed** — closing it exits Chromium;
   it is navigated to `about:blank` instead (`reason: 'last-page'`). "Last" is read from the
-  browser endpoint at close time.
+  browser endpoint at close time. Closes of our own tabs are serialised per browser
+  authority within a process. ⚠ A person or another process closing a tab in the same
+  instant is a residual race: the read and the close cannot be made atomic.
 * `navigate(base, url, opts)` passes `targetId` / `owner` / `ownedTargets` / `keep` /
   `close` / `onMinted` (and now `defaultTimeout`) through, returns `openPage()`'s result,
   and closes a minted tab if the navigation itself fails.

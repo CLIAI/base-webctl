@@ -260,6 +260,37 @@ test('QA7: an owned reuse with close: true is also bound by the last-page rule',
   });
 });
 
+test('⛔ QA7: two of OUR tabs closed CONCURRENTLY — one closes, the other is the last page and stays; the browser stays up', async () => {
+  // Measured by the review: each close read "2 pages", both closed, 0 pages
+  // left -> Chromium exits. Closes are serialised per browser authority.
+  await withFake({ targets: [] }, async (fake) => {
+    const a = await openPage(fake.base);
+    const b = await openPage(fake.base);
+    fake.configure({ getTargetsDelayMs: 50 }); // both reads in flight together, every run
+    const r = await Promise.all([a.close(), b.close()]);
+    assert.deepEqual(r.map((x) => x.closed).sort(), [false, true], JSON.stringify(r));
+    assert.ok(r.some((x) => !x.closed && x.reason === 'last-page'), JSON.stringify(r));
+    assert.equal(fake.targets.size, 1);
+    assert.equal(fake.urlOf([...fake.targets.keys()][0]), 'about:blank');
+    assert.equal(fake.state.browserExited, false);
+  });
+  // Control: sequential closes give the same outcome.
+  await withFake({ targets: [] }, async (fake) => {
+    const a = await openPage(fake.base);
+    const b = await openPage(fake.base);
+    assert.deepEqual([await a.close(), await b.close()], [{ closed: true }, { closed: false, reason: 'last-page' }]);
+    assert.equal(fake.state.browserExited, false);
+  });
+  // Control: with a human tab present, concurrent closes close BOTH of ours.
+  await withFake({ targets: [HUMAN] }, async (fake) => {
+    const a = await openPage(fake.base);
+    const b = await openPage(fake.base);
+    fake.configure({ getTargetsDelayMs: 50 });
+    assert.deepEqual(await Promise.all([a.close(), b.close()]), [{ closed: true }, { closed: true }]);
+    assert.deepEqual([...fake.targets.keys()], ['HUMAN-1']);
+  });
+});
+
 test('QA7 control: with a second page present, ours IS closed', async () => {
   await withFake({ targets: [HUMAN] }, async (fake) => {
     const n = await navigate(fake.base, WORK_URL, NAV);

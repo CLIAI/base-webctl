@@ -332,7 +332,11 @@ inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
   Chromium. That is how the linkedin browser was lost. `close()` instead navigates it to
   `about:blank` and leaves it open, and says so in its return value (`{closed: false,
   reason: 'last-page'}`). "Last" is read from the browser endpoint at close time, never
-  remembered.
+  remembered. Within one process, closes of base's own tabs are SERIALISED per browser
+  authority: two concurrent closes each read "2 pages" and both closed, so Chromium exited
+  *(measured by the review)*. ⚠ **Residual, which base cannot close:** a PERSON, or another
+  process, closing a tab in the same instant. Reading the count and closing are two calls,
+  and no CDP primitive makes them atomic.
 * ⛔ **No "is this tab blank, so reusable?" heuristic, ever.** Blankness is not ownership.
   Opera's new-tab page is `chrome://startpage`, not `chrome://newtab`, so a human's start
   page would read as free. A URL describes what a tab shows, not whose it is.

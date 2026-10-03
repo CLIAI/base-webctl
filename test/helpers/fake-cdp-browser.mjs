@@ -107,6 +107,8 @@ export async function startTrap() {
  *   createTarget?: boolean,      // Target.createTarget succeeds (default true)
  *   jsonNew?: string[],          // verbs /json/new accepts (default ['PUT'])
  *   advertise?: string,          // authority printed in ws URLs (default: own)
+ *   getTargetsDelayMs?: number,  // hold every Target.getTargets reply this long, so
+ *                                // concurrent readers are DETERMINISTICALLY in flight together
  * }} [opts]
  */
 export async function startFakeBrowser(opts = {}) {
@@ -118,6 +120,7 @@ export async function startFakeBrowser(opts = {}) {
   const cfg = {
     createTarget: opts.createTarget !== false,
     jsonNew: opts.jsonNew || ['PUT'],
+    getTargetsDelayMs: opts.getTargetsDelayMs || 0,
   };
   /** @type {LogEntry[]} */
   const log = [];
@@ -234,6 +237,10 @@ export async function startFakeBrowser(opts = {}) {
         return remove(String(p.targetId)) ? ok({ success: true }) : err(-32602, `No target with given id ${p.targetId}`);
       }
       if (msg.method === 'Target.getTargets') {
+        // The snapshot is taken NOW, at receipt; only the reply is delayed. That is
+        // the check-then-act window of a real browser, widened.
+        const infos = [...targets.values()].map((t) => ({ targetId: t.id, type: t.type, url: t.url, title: t.title, attached: false }));
+        if (cfg.getTargetsDelayMs) { setTimeout(() => ok({ targetInfos: infos }), cfg.getTargetsDelayMs); return; }
         return ok({ targetInfos: [...targets.values()].map((t) => ({ targetId: t.id, type: t.type, url: t.url, title: t.title, attached: false })) });
       }
       return err(-32601, `'${msg.method}' wasn't found`);
