@@ -100,7 +100,9 @@ live on:
     read-only inventory where unreachable is UNKNOWN, never omitted),
     `arch-target-resolution-no-implicit-location-nl0c` (never assume where the browser
     runs: flag > env > config, else refused before any contact; `--target` is the
-    location flag).
+    location flag), `arch-remote-bring-up-over-ssh-rb7s` (the driver's work happens ON
+    the target: docker over `DOCKER_HOST=ssh://`, an argv ssh transport, target facts,
+    an owned tunnel).
   * **test** — `test-cross-repo-consumer-loop-xrl4` (the `test-against-base.sh`
     contract + `consumers.jsonc` + the release gate),
     `test-checks-that-cannot-fail-k3wn` (verification discipline, led by base's
