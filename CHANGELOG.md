@@ -359,6 +359,11 @@ while the live pair has the old ones) — `inspect().legacy` comes in the next r
   Paths under `/run` and `/tmp` are covered whatever their kind, because those trees are
   replaced, not checked. ⚠ Outside the home dir, `/run` and `/tmp`, the rest of the
   filesystem keeps its normal permissions (e.g. `/var/tmp`, `/dev/shm`).
+* The read-only "home" is the passwd home of the caller's uid. Under an outer `unshare -r`
+  that is root's home, so the real one stays writable (measured), and with no passwd entry
+  nothing is made read-only. Browser profiles kept outside the home dir are not covered,
+  unless reached through a dot-dir (`~/.cache`, `~/.config`, …) that symlinks out of it.
+* Without capabilities, a command under `isolated` cannot bind ports below 1024.
 * The gate's default and plain `--against-head` modes are NOT isolated and still swap in
   place; only `--scratch` gives both guarantees.
 * **openPage() currently drives the first existing tab; v0.32.0 changes the default to a new
