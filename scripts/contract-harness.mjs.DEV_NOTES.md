@@ -233,10 +233,49 @@ requires `ECONNREFUSED` for each named port, a reachable control, and the kernel
 | env marker (`…_IN_NETNS=1`) | setting it on the host | a lane's whole suite ran on the host network |
 | recorded host netns id ≠ current | fabricating the id | fleet manager |
 | + uid_map not identity | `unshare -r` WITHOUT `-n` + a fabricated id that differs | while building this: both facts pass, on the host network |
-| + only `lo` in /proc/self/net/dev | — | the fact is about the NETWORK, which is what is claimed |
+| + only `lo` in /proc/self/net/dev | the OLD `unshare -rn` itself: all three pass, every host PATH socket answers | 2026-10-03, below |
+| + mntns ≠ recorded `WEBCTL_HOST_MNTNS` | `unshare -rnm` + a fabricated id | while building this |
+| + our `webctl-isolated` tmpfs on TOP of /run, /tmp in mountinfo | — | the fact is about the SOCKETS; "a tmpfs at /run" is a proxy (the host's is one) |
 
 A marker whose proof fails is refused with exit 2 before anything runs. The refusal
 names every failed fact (counts, never interface names).
+
+### ⛔ No host UNIX SOCKETS either (2026-10-03)
+
+The `webctl:base` coordinator measured that `-n` does not cover PATH unix sockets: inside
+`unshare -rn`, `curl --unix-socket /var/run/docker.sock` was answered. ⇒ `-rnm`, a
+`webctl-isolated` tmpfs over /run, /tmp (and a real /var/run), keep-binds, a residual
+connect test, an env scrub. Measured while building it, on one workstation:
+
+```
+host path sockets in /proc/net/unix   307
+  answering on the host               220 CONNECTED
+  answering inside `isolated`           0   (241 ENOENT, 60 ECONNREFUSED, 6 EACCES)
+/proc/<host-pid>/root/… from inside   EACCES (ptrace-mode check across the userns)
+```
+
+* **Staging order.** /run first; each kept path is `--rbind`-ed to `/run/.webctl-keep/<i>`
+  while the old /tmp is visible; then /tmp; then the skeleton is recreated and each staged
+  mount `--move`-d back. rbind, not bind: a subtree with LOCKED child mounts (inherited
+  from the parent userns) refuses a plain bind.
+* **⛔ The cwd leak.** The inner node inherits its cwd as a reference to the OLD directory,
+  and so does the command: `ls ../<sibling>` from a cwd two levels below /tmp listed the
+  unmasked /tmp. ⇒ `process.chdir(cwd)` by PATH after masking. ⚠ The first test of this
+  used a cwd ONE level below /tmp and the no-chdir mutation SURVIVED: there `..` is the
+  dentry the new tmpfs is mounted on, so the walk crossed INTO the new /tmp. Test fixed.
+* **The residual test** connects to every listed host socket not under a `--keep` —
+  stream sockets to a DGRAM/SEQPACKET socket give `EPROTOTYPE`, which is NOT treated as
+  unreachable, so those are covered too. A connect to /dev/null bound over a socket is
+  `ECONNREFUSED`. Only `--keep` exempts: an implicit keep (cwd) is not test-owned enough —
+  `cwd = $HOME` would otherwise exempt the ssh ControlMaster.
+* **The $HOME guard reads passwd, not `$HOME`.** `os.homedir()` honours `$HOME`, so the
+  `--scratch` gate's throwaway HOME inside its scratch dir made `--keep <scratch>` look
+  like "contains the home directory". Measured with the gate's layout; fixed.
+* **Sabotage, each run against the test file:** no /dev/null cover → the kept-cwd socket
+  test fails (CONNECTED); no env scrub → env test fails; no tmpfs fact → the old
+  `unshare -rn` nesting test RAN; no re-chdir → keep-binds `UP` fails; no /tmp mask →
+  unkept-/tmp test fails; no keep-binds → keep-binds fails; exemption ignored → `--keep`
+  test fails. Restored → all green.
 
 ### The import guard
 
@@ -253,6 +292,10 @@ deliberately not re-indented, to keep the guard a two-line diff against concurre
   root (Chromium without `--no-sandbox`) refuses here. A nested `unshare --map-user` back
   to the caller's uid would lift this; not built — no arm needs it yet.
 * **`ip` or `ifconfig` is required** to bring `lo` up; node has no ioctl. Absent → FAIL.
+  So is **`mount`** (util-linux, the package `unshare` comes from).
+* **Sockets the list misses.** One created on the host AFTER start-up (still masked if it
+  is under /run or /tmp); ones bound in another network namespace (not in this netns's
+  /proc/net/unix). A keep under /run is refused rather than supported.
 * **Linux only.** No unprivileged netns elsewhere ⇒ FAIL, never a host run. The tests
   SKIP with a named reason where userns is unavailable.
 * **Generation unchanged (4).** These verbs are additive: no existing verdict changes

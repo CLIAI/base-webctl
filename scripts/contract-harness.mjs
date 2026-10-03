@@ -38,7 +38,7 @@
 //   node <base>/scripts/contract-harness.mjs require-generation 4    # the floor; ANY non-zero = FAIL
 //   node <base>/scripts/contract-harness.mjs pin         --repo . --sub vendor/base-webctl
 //   node <base>/scripts/contract-harness.mjs no-revendor --repo . --sub vendor/base-webctl
-//   node <base>/scripts/contract-harness.mjs isolated -- <cmd> [args…]   # every mutation arm (xrl4)
+//   node <base>/scripts/contract-harness.mjs isolated [--keep <path>]… -- <cmd> [args…]   # every mutation arm (xrl4)
 //   node <base>/scripts/contract-harness.mjs isolated -- node <base>/scripts/contract-harness.mjs isolation-check <port>…
 //   node <base>/scripts/contract-harness.mjs sandbox-port [--bare]
 //   node <base>/scripts/contract-harness.mjs guard-live-port <port> [--pin-verified]
@@ -56,7 +56,7 @@ import { createHash } from 'node:crypto';
 import net from 'node:net';
 import os from 'node:os';
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -494,7 +494,7 @@ function normHash(src) {
 }
 
 
-// ── network isolation for mutation arms (xrl4 "NO HOST NETWORK") ──────────────
+// ── isolation for mutation arms (xrl4: no host network AND no host unix sockets) ──
 //
 // ⛔ INCIDENT (2026-10-02, a consumer lane's mutation control): the mutant planted
 // "the default port is a location", the arm ATTACHED to the real signed-in browser
@@ -502,12 +502,33 @@ function normHash(src) {
 // Correct code refuses; A MUTANT DOES NOT REFUSE — that is what makes it a mutant.
 // The family's sandboxes isolated HOME, CWD, env and PATH. Not the network.
 //
-// ⇒ `isolated` puts the arm in a private user+network namespace (`unshare -rn`)
-// whose only interface is its OWN loopback, so the host's listeners do not exist.
+// ⇒ `isolated` puts the arm in private user + network + MOUNT namespaces
+// (`unshare -rnm --propagation=private`):
+//
+//   * NETWORK: the only interface is its OWN loopback, so the host's listeners do
+//     not exist. Abstract-namespace unix sockets ('@…') are per-netns too, so -n
+//     hides those as well.
+//   * ⛔ PATH UNIX SOCKETS ARE NOT NETWORK. They are filesystem objects, and `-n`
+//     leaves them reachable — measured: inside `unshare -rn`,
+//     `curl --unix-socket /var/run/docker.sock` was ANSWERED by the daemon, i.e. a
+//     mutant could `docker stop` the human's browser container; the X display
+//     (/tmp/.X11-unix — key injection), the ssh-agent and the session bus
+//     ($XDG_RUNTIME_DIR under /run) were equally open. ⇒ a fresh tmpfs over /run and
+//     /tmp (and /var/run when it is a real directory), the paths the arm needs bound
+//     back, every host path socket still listed connect-tested and covered with
+//     /dev/null if it answers, and the env vars that NAME host sockets scrubbed.
+//
 // It FAILS CLOSED: there is no path on which the command runs on the host.
 
 const SELF = fileURLToPath(import.meta.url);
+/** base's repo root (SELF is <root>/scripts/…) — kept visible under the /tmp mask. */
+const SELF_ROOT = path.resolve(path.dirname(SELF), '..');
 const ISOLATED_INNER = '__isolated-inner';
+/** The tmpfs source tag `isolated` mounts with; the nesting proof looks for it. */
+const MASK_SOURCE = 'webctl-isolated';
+/** Env vars the command never inherits: each one NAMES a host socket or display. */
+const SCRUBBED_ENV = Object.freeze(['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK',
+  'DBUS_SESSION_BUS_ADDRESS', 'DOCKER_HOST', 'XDG_RUNTIME_DIR']);
 
 /**
  * Forward termination signals to a child, so killing the harness kills the arm
@@ -526,29 +547,59 @@ function exitCodeOf(code, signal) {
   return 128 + (n || 1);
 }
 
+const ISOLATED_USAGE = 'usage: contract-harness.mjs isolated [--keep <path>]… -- <cmd> [args…]\n';
+
 /**
- * `isolated -- <cmd> [args…]` — run <cmd> in a private network namespace.
+ * `isolated [--keep <path>]… -- <cmd> [args…]` — run <cmd> with NO host network and
+ * NO host unix sockets.
  *
- * The outer half spawns `unshare -rn <node> <this file> __isolated-inner <netns> -- <cmd…>`
- * with an extra pipe on fd 3. The inner half proves the isolation (below), then
- * writes `started` on fd 3 and runs the command; any refusal is written as
+ * The outer half spawns
+ * `unshare -rnm --propagation=private <node> <this file> __isolated-inner <netns> -- <cmd…>`
+ * with two extra pipes: fd 3 is the STATUS channel, fd 4 carries the masking PLAN
+ * (host mount-ns id, cwd, paths to re-expose, the host's path sockets — a list that
+ * can be long, so never argv). The inner half proves the isolation and masks (below),
+ * then writes `started` on fd 3 and runs the command; any refusal is written as
  * `fail <reason>` instead. ⇒ The outer half can tell "isolation was refused" from
  * "the command exited 1", and reports the former ONCE, as FAIL, with the reason.
  *
- * ⛔ NEVER FALLS BACK TO THE HOST. No unshare, userns disabled, no `ip`/`ifconfig`,
- * a loopback that will not come up, a namespace that still sees a non-loopback
- * interface or a listener — each is FAIL, and the command is not started.
+ * ⛔ /tmp IS MASKED, AND THE ARM USUALLY LIVES THERE. Worktrees, the `--scratch` gate's
+ * consumer clones and test fixtures are all commonly under /tmp. So these stay
+ * visible at their SAME absolute paths: the cwd, base's own repo root, the command
+ * if given by absolute path, node itself, a $HOME that lives under /tmp (a sandbox's
+ * throwaway one), and every `--keep <path>`. Anything else the arm shares with its
+ * caller under /tmp — a marker file, a fixture — needs a `--keep`. A keep may not
+ * be /tmp or /run itself, an ancestor of either, a path under /run, or contain the
+ * (passwd) home directory. ⚠ Only `--keep` paths are EXEMPT from the socket check below — a
+ * socket in the cwd is still covered if it answers, so `cwd = $HOME` cannot re-open
+ * the ssh ControlMaster.
  *
- * argv goes through as an ARRAY: no shell sees the user command.
+ * ⛔ NEVER FALLS BACK TO THE HOST. No unshare, userns disabled, no `ip`/`ifconfig`, no
+ * `mount`, a loopback that will not come up, a namespace that still sees a non-loopback
+ * interface or a listener, a mount that fails, a host socket that still answers after
+ * masking — each is FAIL, and the command is not started. Refusals carry COUNTS,
+ * never socket paths: they get pasted into a public repo's logs.
+ *
+ * The command's env drops DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK,
+ * DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST and XDG_RUNTIME_DIR and gets TMPDIR=/tmp —
+ * on the nested path too. argv goes through as an ARRAY: no shell sees the command.
  * @param {string[]} a
  * @returns {Promise<number>}
  */
 function runIsolated(a) {
-  if (a[0] !== '--' || a.length < 2) {
-    process.stderr.write('usage: contract-harness.mjs isolated -- <cmd> [args…]\n');
+  const sep = a.indexOf('--');
+  const opts = sep < 0 ? a : a.slice(0, sep);
+  const command = sep < 0 ? [] : a.slice(sep + 1);
+  /** @type {string[]} */
+  const keeps = [];
+  let bad = sep < 0 || command.length === 0;
+  for (let i = 0; i < opts.length && !bad; i++) {
+    if (opts[i] === '--keep' && opts[i + 1]) keeps.push(opts[++i]);
+    else bad = true;
+  }
+  if (bad) {
+    process.stderr.write(ISOLATED_USAGE);
     return Promise.resolve(EXIT.usage);
   }
-  const command = a.slice(1);
   // ⛔ NESTED CALL: "already inside" is proven from the KERNEL. The marker alone is
   // trusted input — set on the host it would skip isolation entirely — so a marker
   // whose proof fails is REFUSED (no verdict, exit 2) before anything runs.
@@ -560,25 +611,62 @@ function runIsolated(a) {
           + `namespace, but the kernel says otherwise — ${proof.why}. Unset it on the host; only `
           + '`isolated` sets it.', { command, namespace: proof.facts }));
     }
+    const nestedPlan = planKeeps(keeps, []);
+    if (nestedPlan.usage) {
+      process.stderr.write(`isolated: ${nestedPlan.usage}\n${ISOLATED_USAGE}`);
+      return Promise.resolve(EXIT.usage);
+    }
     return runCommand(command); // provably inside already: do not unshare again
   }
   let hostNs = '';
-  try { hostNs = fs.readlinkSync('/proc/self/ns/net'); } catch (e) {
+  let hostMnt = '';
+  try {
+    hostNs = fs.readlinkSync('/proc/self/ns/net');
+    hostMnt = fs.readlinkSync('/proc/self/ns/mnt');
+  } catch (e) {
     return Promise.resolve(report('isolated', EXIT.fail,
-      `cannot read this process's network namespace (/proc/self/ns/net: ${errMsg(e)}), so `
-      + 'isolation cannot be PROVEN; refusing to run the command on the host'));
+      `cannot read this process's namespaces (${errMsg(e)}), so isolation cannot be PROVEN; `
+      + 'refusing to run the command on the host'));
   }
+  const plan = planKeeps(keeps, [
+    { p: process.cwd(), label: 'the working directory' },
+    { p: SELF_ROOT, label: "base's repo root" },
+    ...(path.isAbsolute(command[0]) ? [{ p: command[0], label: 'the command' }] : []),
+    { p: process.execPath, label: 'node' },
+    // a throwaway HOME under /tmp is the arm's own (the family's sandboxes isolate HOME)
+    ...(throwawayHome() ? [{ p: throwawayHome(), label: 'HOME' }] : []),
+  ]);
+  if (plan.usage) {
+    process.stderr.write(`isolated: ${plan.usage}\n${ISOLATED_USAGE}`);
+    return Promise.resolve(EXIT.usage);
+  }
+  if (plan.refuse) {
+    return Promise.resolve(report('isolated', EXIT.fail,
+      `NOT RUN: ${plan.refuse}. The command was NOT started.`, { command }));
+  }
+  const sockets = hostPathSockets();
+  if (!sockets) {
+    return Promise.resolve(report('isolated', EXIT.fail,
+      'NOT RUN: /proc/self/net/unix is unreadable, so the host\'s unix sockets cannot be listed and '
+      + 'their masking cannot be PROVEN. The command was NOT started.', { command }));
+  }
+  const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, exempt: plan.exempt, sockets });
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
     let child;
     try {
-      child = spawn('unshare', ['-rn', process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
-        { stdio: ['inherit', 'inherit', 'inherit', 'pipe'], env: { ...process.env, [HOST_NETNS_ENV]: hostNs } });
+      child = spawn('unshare',
+        ['-rnm', '--propagation=private', process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
+        { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'],
+          env: { ...process.env, [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt } });
     } catch (e) {
       resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
       return;
     }
     forwardSignals(child);
+    const planPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[4]);
+    planPipe?.on('error', () => { /* the inner side refused or never started */ });
+    planPipe?.end(payload);
     let status = '';
     child.stdio[3]?.on('data', (d) => { status += String(d); });
     child.stdio[3]?.on('error', () => { /* inner closed it */ });
@@ -604,15 +692,21 @@ function runIsolated(a) {
 function errMsg(e) { return e instanceof Error ? e.message : String(e); }
 
 /**
- * The half that runs INSIDE the namespace. Proves the PROPERTY — no host network —
- * not its proxy ("unshare exited 0"):
+ * The half that runs INSIDE the namespaces. Proves the PROPERTY — no host network,
+ * no host unix sockets — not its proxy ("unshare exited 0"):
  *
  *   1. the network namespace differs from the caller's;
  *   2. the namespace's ONLY interface is `lo` (/proc/self/net/dev is per-netns);
  *   3. nothing LISTENS on TCP here (/proc/self/net/tcp{,6} — the host's browser
  *      would appear here if this were the host's namespace);
- *   4. `lo` is brought up (`ip`, else `ifconfig`) and a self-connect on
- *      127.0.0.1 works, so local fakes and stubs still run.
+ *   4. the mount namespace differs from the caller's;
+ *   5. `lo` is brought up (`ip`, else `ifconfig`) and a self-connect on
+ *      127.0.0.1 works, so local fakes and stubs still run;
+ *   6. /run, /tmp (and a real /var/run) are covered with a fresh tmpfs, the kept
+ *      paths bound back — and /proc/self/mountinfo then SHOWS our tmpfs on top;
+ *   7. every host path socket the outer half listed (except under a `--keep`) is
+ *      connect-tested; one that still answers gets /dev/null bound over it and is
+ *      tested again. Any that still answers → refuse.
  *
  * ⇒ (2) and (3) also make this verb useless as a bypass: called directly on the
  * host it refuses, whatever namespace id it is handed.
@@ -657,10 +751,53 @@ async function runIsolatedInner(a) {
     return refuse(`${listeners} TCP listener(s) are visible inside — this is not a fresh namespace`);
   }
 
+  // ⇩ only now, provably off the host network, read the plan. (On the host the
+  // proofs above refuse first, so an unrelated fd 4 is never read.)
+  /** @type {{hostMnt: string, cwd: string, binds: string[], exempt: string[], sockets: string[]}} */
+  let plan;
+  try {
+    // node's stdio 'pipe' is a socketpair, not a FIFO; anything else is not ours
+    const st = fs.fstatSync(4);
+    if (!st.isSocket() && !st.isFIFO()) throw new Error('fd 4 is not a pipe');
+    plan = JSON.parse(fs.readFileSync(4, 'utf8'));
+    try { fs.closeSync(4); } catch { /* the command must not inherit it */ }
+    const strs = (/** @type {unknown} */ x) => Array.isArray(x) && x.every((s) => typeof s === 'string');
+    if (typeof plan.hostMnt !== 'string' || typeof plan.cwd !== 'string' || !strs(plan.binds)
+      || !strs(plan.exempt) || !strs(plan.sockets)) throw new Error('malformed');
+  } catch (e) {
+    return refuse(`internal: no masking plan on fd 4 (${errMsg(e)}) — run via \`isolated\``);
+  }
+  let mnt = '';
+  try { mnt = fs.readlinkSync('/proc/self/ns/mnt'); } catch (e) {
+    return refuse(`cannot read the mount namespace id inside (${errMsg(e)})`);
+  }
+  if (mnt === plan.hostMnt) {
+    return refuse(`still in the CALLER'S mount namespace (${mnt}) — whatever ran as 'unshare' did not `
+      + 'create one, so the host\'s unix sockets cannot be masked');
+  }
+
   const up = bringLoUp();
   if (up) return refuse(up);
   try { await loopbackSelfTest(); } catch (e) {
     return refuse(`the namespace loopback does not work after bringing it up (${errMsg(e)})`);
+  }
+
+  const masked = maskSocketDirs(plan.binds);
+  if (masked) return refuse(masked);
+  const unmasked = unmaskedDirs();
+  if (unmasked.length) {
+    return refuse(`after masking, ${unmasked.join(', ')} still lack(s) the '${MASK_SOURCE}' tmpfs on top`);
+  }
+  const res = await closeResidualSockets(plan.sockets, plan.exempt);
+  if (res.still > 0) {
+    return refuse(`${res.still} of ${res.checked} host path socket(s) still ANSWER after masking `
+      + `(${res.listed} listed, ${res.exempt} exempt under --keep, ${res.covered} covered with /dev/null, `
+      + `${res.coverFailed} of those covers failed)`);
+  }
+  // ⛔ The cwd we inherited is a reference to the OLD directory — through it the
+  // command would still see the unmasked /tmp. Re-enter it BY PATH.
+  try { process.chdir(plan.cwd); } catch (e) {
+    return refuse(`cannot re-enter the working directory after masking (${errMsg(e).split(plan.cwd).join('<cwd>')})`);
   }
 
   if (!tell('started')) return refuse('internal: the status channel (fd 3) is missing — run via `isolated`');
@@ -670,13 +807,249 @@ async function runIsolatedInner(a) {
 }
 
 /**
- * Run the user command with the caller's env/cwd/stdio; resolve with its exit code
- * (128+signal when killed, 127 when it cannot be started).
+ * The directories that get a fresh tmpfs: where host sockets live. Real paths;
+ * /run first (the keeps are staged in the NEW /run), /tmp last. /var/run only when it
+ * is a REAL directory — usually it is a symlink into /run, which /run already covers.
+ * @returns {{run: string, tmp: string, all: string[]}}
+ */
+function maskedDirs() {
+  const real = (/** @type {string} */ p) => { try { return fs.realpathSync(p); } catch { return p; } };
+  const run = real('/run');
+  const tmp = real('/tmp');
+  const all = [run];
+  try { if (fs.lstatSync('/var/run').isDirectory()) all.push('/var/run'); } catch { /* absent */ }
+  all.push(tmp);
+  return { run, tmp, all };
+}
+
+/** $HOME when it is strictly beneath /tmp (a sandbox's throwaway home), else ''. */
+function throwawayHome() {
+  const h = process.env.HOME;
+  if (!h) return '';
+  try {
+    const real = fs.realpathSync(h);
+    const { tmp } = maskedDirs();
+    return real !== tmp && isWithin(real, tmp) ? real : '';
+  } catch { return ''; }
+}
+
+/** Is `p` equal to `dir` or beneath it? @param {string} p @param {string} dir */
+function isWithin(p, dir) { return p === dir || p.startsWith(dir === '/' ? '/' : `${dir}/`); }
+
+/**
+ * Decide what must stay visible once /tmp is masked. ⚠ Messages name the keep by
+ * its LABEL and the masked directory, never by its path.
+ * @param {string[]} explicit `--keep` paths
+ * @param {{p: string, label: string}[]} implicit
+ * @returns {{binds: string[], exempt: string[], usage?: string, refuse?: string}}
+ */
+function planKeeps(explicit, implicit) {
+  const { tmp, all } = maskedDirs();
+  // ⚠ The PASSWD home, not $HOME: os.homedir() honours $HOME, and an arm's throwaway
+  // HOME under a kept scratch dir is exactly what a keep is for (measured: the
+  // `--scratch` gate's layout was refused by the $HOME reading).
+  let home = '';
+  try { home = fs.realpathSync(os.userInfo().homedir); } catch { /* no home: nothing to protect */ }
+  /** @type {string[]} */ const binds = [];
+  /** @type {string[]} */ const exempt = [];
+  const items = [...explicit.map((p, i) => ({ p, label: `--keep #${i + 1}`, explicit: true })),
+    ...implicit.map((k) => ({ ...k, explicit: false }))];
+  for (const k of items) {
+    let real = '';
+    try { real = fs.realpathSync(path.resolve(k.p)); } catch {
+      if (k.explicit) return { binds, exempt, usage: `${k.label} does not exist` };
+      continue; // an absent command fails on its own (127), visibly
+    }
+    for (const m of all) {
+      if (isWithin(m, real)) { // real IS a masked dir, or an ancestor of one
+        if (k.explicit) {
+          return { binds, exempt, usage: `${k.label} is ${real === m ? m : `an ancestor of ${m}`} — `
+            + 'keeping it would undo the masking; keep a test-owned directory beneath it' };
+        }
+        if (real === m) {
+          return { binds, exempt, refuse: `${k.label} is ${m} itself, which is masked — run from a `
+            + 'test-owned directory beneath it' };
+        }
+        // e.g. cwd '/': nothing beneath it needs re-exposing
+      } else if (m !== tmp && isWithin(real, m)) {
+        const why = `${k.label} is beneath ${m}, where host sockets live, and cannot be re-exposed `
+          + 'without re-exposing them';
+        return k.explicit ? { binds, exempt, usage: why } : { binds, exempt, refuse: why };
+      }
+    }
+    if (k.explicit && home && isWithin(home, real)) {
+      return { binds, exempt, usage: `${k.label} contains the home directory — a keep exempts the `
+        + 'sockets beneath it, and home holds the ssh ones; keep a test-owned directory' };
+    }
+    if (isWithin(real, tmp) && real !== tmp) binds.push(real);
+    if (k.explicit) exempt.push(real);
+  }
+  // A path beneath another kept path is already re-exposed by it.
+  const sorted = [...new Set(binds)].sort((x, y) => x.length - y.length);
+  /** @type {string[]} */ const outer = [];
+  for (const b of sorted) if (!outer.some((o) => isWithin(b, o))) outer.push(b);
+  return { binds: outer, exempt };
+}
+
+/**
+ * PATH unix sockets in THIS network namespace (/proc/self/net/unix is per-netns):
+ * the 8th column onward, absolute, unique. Abstract ones ('@…') are skipped — they
+ * are per-netns, so a new network namespace already cannot reach them.
+ * @returns {string[]|null} null when unreadable
+ */
+function hostPathSockets() {
+  let txt = '';
+  try { txt = fs.readFileSync('/proc/self/net/unix', 'utf8'); } catch { return null; }
+  const out = new Set();
+  for (const line of txt.split('\n').slice(1)) {
+    const f = line.trim().split(/\s+/);
+    if (f.length < 8) continue;
+    const p = f.slice(7).join(' ');
+    if (p.startsWith('/')) out.add(p);
+  }
+  return [...out];
+}
+
+/**
+ * Run `mount` (util-linux) with an argv ARRAY. @param {string[]} argv
+ * @param {string} what for the reason @param {string[]} [redact] paths never to print
+ * @returns {string} '' on success, else the reason
+ */
+function mountOrWhy(argv, what, redact = []) {
+  const r = spawnSync('mount', argv, { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
+  if (r.error) {
+    const err = /** @type {NodeJS.ErrnoException} */ (r.error);
+    return `cannot ${what}: ${err.code === 'ENOENT' ? "'mount' not found — install util-linux" : errMsg(err)}`;
+  }
+  if (r.status === 0) return '';
+  let msg = String(r.stderr || '').trim().split('\n').pop() || `exit ${r.status ?? r.signal}`;
+  for (const p of redact) msg = msg.split(p).join('<path>');
+  return `cannot ${what}: ${msg}`;
+}
+
+/**
+ * Cover /run, /tmp (and a real /var/run) with a fresh tmpfs, re-exposing `binds`
+ * (absolute real paths beneath /tmp) at the SAME paths.
+ *
+ * ⛔ /tmp hides the arm itself, so: mount the new /run FIRST, rbind each kept path to
+ * a staging point INSIDE it while the old /tmp is still visible, mount the new /tmp,
+ * recreate the skeleton, and MOVE each staged mount back to its original path.
+ * @param {string[]} binds @returns {string} '' on success, else the reason
+ */
+function maskSocketDirs(binds) {
+  const { run, tmp, all } = maskedDirs();
+  const opts = (/** @type {string} */ d) => (d === tmp ? 'mode=1777' : 'mode=0755') + ',nosuid,nodev';
+  const cover = (/** @type {string} */ d) => mountOrWhy(['-t', 'tmpfs', '-o', opts(d), MASK_SOURCE, d],
+    `cover ${d} with a fresh tmpfs`);
+  const stage = path.join(run, '.webctl-keep');
+  try {
+    for (const d of all.filter((x) => x !== tmp)) { const e = cover(d); if (e) return e; }
+    fs.mkdirSync(stage);
+    const isDir = binds.map((b) => fs.statSync(b).isDirectory());
+    for (const [i, b] of binds.entries()) {
+      const s = path.join(stage, String(i));
+      if (isDir[i]) fs.mkdirSync(s); else fs.writeFileSync(s, '');
+      const e = mountOrWhy(['--rbind', b, s], `stage kept path ${i + 1} of ${binds.length}`, [b]);
+      if (e) return e;
+    }
+    const e = cover(tmp);
+    if (e) return e;
+    for (const [i, b] of binds.entries()) {
+      const s = path.join(stage, String(i));
+      if (isDir[i]) fs.mkdirSync(b, { recursive: true });
+      else { fs.mkdirSync(path.dirname(b), { recursive: true }); fs.writeFileSync(b, ''); }
+      const m = mountOrWhy(['--move', s, b], `re-expose kept path ${i + 1} of ${binds.length}`, [b]);
+      if (m) return m;
+      try { if (isDir[i]) fs.rmdirSync(s); else fs.unlinkSync(s); } catch { /* left empty: harmless */ }
+    }
+    try { fs.rmdirSync(stage); } catch { /* left empty: harmless */ }
+  } catch (e) {
+    let msg = errMsg(e);
+    for (const b of binds) msg = msg.split(b).join('<path>');
+    return `masking failed (${msg})`;
+  }
+  return '';
+}
+
+/**
+ * Masked directories whose TOPMOST mount is NOT our tmpfs. ⚠ "a tmpfs at /run" alone
+ * is a proxy: on a systemd host /run and /tmp are ALREADY tmpfs (measured), so the
+ * test is the source tag `isolated` mounts with.
+ * @returns {string[]}
+ */
+function unmaskedDirs() {
+  let txt = '';
+  try { txt = fs.readFileSync('/proc/self/mountinfo', 'utf8'); } catch { return ['/proc/self/mountinfo (unreadable)']; }
+  const mounts = txt.split('\n').filter(Boolean).map((l) => {
+    const [pre, post = ''] = l.split(' - ');
+    const f = pre.split(' ');
+    const g = post.split(' ');
+    return { id: f[0], parent: f[1], at: f[4], fstype: g[0], source: g[1] };
+  });
+  return maskedDirs().all.filter((d) => {
+    const here = mounts.filter((m) => m.at === d);
+    const top = here.find((m) => !here.some((o) => o.parent === m.id));
+    return !(top && top.fstype === 'tmpfs' && top.source === MASK_SOURCE);
+  });
+}
+
+/** Outcomes that mean "a mutant cannot talk to it either". */
+const SOCKET_UNREACHABLE = new Set(['ENOENT', 'ENOTDIR', 'ECONNREFUSED', 'EACCES', 'EPERM']);
+
+/**
+ * Connect to a unix socket path: 'CONNECTED', the errno, or 'TIMEOUT'.
+ * @param {string} p @param {number} [ms] @returns {Promise<string>}
+ */
+function unixConnectOutcome(p, ms = 800) {
+  return new Promise((resolve) => {
+    const s = net.connect({ path: p });
+    const t = setTimeout(() => { s.destroy(); resolve('TIMEOUT'); }, ms);
+    s.on('connect', () => { clearTimeout(t); s.destroy(); resolve('CONNECTED'); });
+    s.on('error', (e) => { clearTimeout(t); resolve(/** @type {NodeJS.ErrnoException} */ (e).code || errMsg(e)); });
+  });
+}
+
+/** @param {string[]} ps @returns {Promise<string[]>} outcomes, 32 at a time */
+async function connectAll(ps) {
+  /** @type {string[]} */ const out = [];
+  for (let i = 0; i < ps.length; i += 32) out.push(...await Promise.all(ps.slice(i, i + 32).map((p) => unixConnectOutcome(p))));
+  return out;
+}
+
+/**
+ * ⭐ ASSERT THE PROPERTY: after masking, try every host path socket (except under a
+ * `--keep`). Anything not provably unreachable gets /dev/null bound over it — a
+ * connect to a non-socket is ECONNREFUSED — and is tried again. Counts only.
+ * @param {string[]} sockets @param {string[]} exempt
+ */
+async function closeResidualSockets(sockets, exempt) {
+  const todo = sockets.filter((p) => !exempt.some((k) => isWithin(p, k)));
+  const first = await connectAll(todo);
+  const open = todo.filter((_, i) => !SOCKET_UNREACHABLE.has(first[i]));
+  let coverFailed = 0;
+  for (const p of open) {
+    if (mountOrWhy(['--bind', '/dev/null', p], 'cover a socket', [p])) coverFailed++;
+  }
+  const again = await connectAll(open);
+  return { listed: sockets.length, exempt: sockets.length - todo.length, checked: todo.length,
+    covered: open.length, coverFailed, still: again.filter((o) => !SOCKET_UNREACHABLE.has(o)).length };
+}
+
+/**
+ * Run the user command with the caller's cwd/stdio and a SCRUBBED env; resolve with
+ * its exit code (128+signal when killed, 127 when it cannot be started).
+ *
+ * ⛔ The scrub applies on BOTH paths (fresh and nested): the vars it drops NAME host
+ * sockets and displays, and TMPDIR is reset because an inherited one may name a
+ * directory the /tmp mask just hid.
  * @param {string[]} command @returns {Promise<number>}
  */
 function runCommand(command) {
+  /** @type {NodeJS.ProcessEnv} */
+  const env = { ...process.env, TMPDIR: '/tmp' };
+  for (const k of SCRUBBED_ENV) delete env[k];
   return new Promise((resolve) => {
-    const child = spawn(command[0], command.slice(1), { stdio: 'inherit' });
+    const child = spawn(command[0], command.slice(1), { stdio: 'inherit', env });
     forwardSignals(child);
     child.on('error', (e) => {
       process.stderr.write(`isolated: cannot run '${command[0]}': ${errMsg(e)}\n`);
@@ -701,8 +1074,20 @@ function runCommand(command) {
 // (1)+(2) together are still beaten by `unshare -r` plus a fabricated id that merely
 // differs from the current one — measured while building this. (3) is what closes it:
 // it is a fact about the NETWORK, which is the thing being claimed.
+//
+// ⛔ AND THE NETWORK IS NO LONGER THE WHOLE CLAIM. The old `unshare -rn` namespace
+// passes (1)–(3) yet leaves every host PATH socket reachable. So two MOUNT facts too:
+//
+//   4. /proc/self/ns/mnt DIFFERS from WEBCTL_HOST_MNTNS (recorded at entry);
+//   5. /proc/self/mountinfo shows OUR tmpfs (source 'webctl-isolated') on top of
+//      /run and /tmp (and a real /var/run)                                — env-free.
+//
+// (5) is the fact about the SOCKETS; (4) alone is beaten by `unshare -rnm` plus a
+// fabricated id. ⚠ "a tmpfs at /run" would be a proxy: the host's /run and /tmp are
+// usually tmpfs already.
 
 const HOST_NETNS_ENV = 'WEBCTL_HOST_NETNS';
+const HOST_MNTNS_ENV = 'WEBCTL_HOST_MNTNS';
 
 /** @returns {'identity'|'mapped'|'unreadable'} */
 function uidMapKind() {
@@ -726,16 +1111,20 @@ function extraInterfaces() {
 }
 
 /**
- * Is this process provably inside a private network namespace that `isolated` made?
- * All three facts must hold; every one that fails is named.
+ * Is this process provably inside the namespaces `isolated` made — no host network,
+ * no host unix sockets? All five facts must hold; every one that fails is named.
  * @returns {{inside: boolean, why: string, facts: Record<string, any>}}
  */
 function kernelInsideProof() {
   const recorded = process.env[HOST_NETNS_ENV];
+  const recordedMnt = process.env[HOST_MNTNS_ENV];
   let netns = '';
   try { netns = fs.readlinkSync('/proc/self/ns/net'); } catch { /* named below */ }
+  let mntns = '';
+  try { mntns = fs.readlinkSync('/proc/self/ns/mnt'); } catch { /* named below */ }
   const uidMap = uidMapKind();
   const extra = extraInterfaces();
+  const unmasked = unmaskedDirs();
   /** @type {string[]} */
   const fails = [];
   if (!netns) fails.push('/proc/self/ns/net is unreadable');
@@ -746,8 +1135,15 @@ function kernelInsideProof() {
     fails.push(extra < 0 ? '/proc/self/net/dev is unreadable'
       : `${extra} interface(s) besides 'lo' are visible (the host's network)`);
   }
+  if (!mntns) fails.push('/proc/self/ns/mnt is unreadable');
+  if (!recordedMnt) fails.push(`${HOST_MNTNS_ENV} is not set, so there is no recorded host mount namespace to differ from`);
+  else if (mntns === recordedMnt) fails.push(`the current mount namespace ${mntns} EQUALS the recorded host one`);
+  if (unmasked.length) {
+    fails.push(`no '${MASK_SOURCE}' tmpfs on top of ${unmasked.join(', ')} (the host's unix sockets there are reachable)`);
+  }
   return { inside: fails.length === 0, why: fails.join('; '),
-    facts: { netns, recorded: recorded ?? null, uidMap, extraInterfaces: extra } };
+    facts: { netns, recorded: recorded ?? null, uidMap, extraInterfaces: extra,
+      mntns, recordedMnt: recordedMnt ?? null, unmasked } };
 }
 
 /**
@@ -1003,7 +1399,7 @@ switch (cmd) {
   default:
     process.stderr.write(
       'usage: contract-harness.mjs <generation|require-generation N|pin|no-revendor|gate-probe> [--repo D] [--sub P] [--lib D]\n'
-      + '       contract-harness.mjs isolated -- <cmd> [args…] | isolation-check <port>… | sandbox-port [--bare] | guard-live-port <port> [--pin-verified]\n'
+      + '       contract-harness.mjs isolated [--keep <path>]… -- <cmd> [args…] | isolation-check <port>… | sandbox-port [--bare] | guard-live-port <port> [--pin-verified]\n'
       + '⇒ exit 0 pass · 1 fail · 2 no verdict (reason on the last line) · 3 usage\n');
     code = EXIT.usage;
 }
