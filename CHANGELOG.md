@@ -236,6 +236,9 @@ before minting", was right for an unattended browser and is superseded.
   (`{targetId, owner: 'adopted'}`). It never falls back to an existing tab.
 * **`ownedTargets`** (any object with `has(id)`; a `Set` works) defaults to the ids THIS
   process minted. A lane with a durable ledger passes its own. Adopting never adds to it.
+  ⛔ Only a literal `true` from `has()` vouches; a `has()` that returns a Promise (an async,
+  db- or file-backed ledger) is REFUSED — a Promise is truthy and would vouch for any id.
+  Resolve the ledger first (e.g. into a `Set`).
 * A reused target must exist and be a `page` (checked on `Target.getTargets`); otherwise
   refused, naming the id.
 * **`onMinted(id)`** is awaited after the mint and BEFORE the first attach. If it throws,

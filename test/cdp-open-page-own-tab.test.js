@@ -113,6 +113,33 @@ test('QA2 control: the id THIS process minted is driven as owner:\'minted\'; so 
   });
 });
 
+test('⛔ QA2: an ASYNC ownedTargets.has() (a db-backed ledger) is refused — a Promise is truthy and would vouch for ANY id', async () => {
+  // Measured by the review: has: async id => id === 'LEDGER-1' returned a truthy
+  // Promise for the HUMAN tab, and navigate drove it.
+  await withFake({ targets: [HUMAN, { id: 'LEDGER-1', type: 'page', url: 'about:blank' }] }, async (fake) => {
+    const asyncLedger = { has: async (/** @type {string} */ id) => id === 'LEDGER-1' };
+    await assert.rejects(() => navigate(fake.base, WORK_URL,
+      { ...NAV, targetId: 'HUMAN-1', owner: 'minted', ownedTargets: asyncLedger }),
+    (e) => /has\(\) must return a boolean/.test(e.message) && /resolve your ledger first/.test(e.message));
+    // Even for an id the ledger DOES hold: a Promise is never an answer.
+    await assert.rejects(() => openPage(fake.base,
+      { targetId: 'LEDGER-1', owner: 'minted', ownedTargets: asyncLedger }), /must return a boolean/);
+    // A truthy NON-boolean is not true either.
+    await assert.rejects(() => openPage(fake.base,
+      { targetId: 'HUMAN-1', owner: 'minted', ownedTargets: { has: () => /** @type {any} */ ('yes') } }), /HUMAN-1/);
+    assert.equal(fake.urlOf('HUMAN-1'), HUMAN_URL, 'the human tab\'s URL is unchanged');
+    assert.equal(fake.log.length, 0, 'refused before any contact');
+    // Control: the same ledger, synchronous, drives the ledger tab and refuses the human one.
+    const syncLedger = { has: (/** @type {string} */ id) => id === 'LEDGER-1' };
+    const ok = await openPage(fake.base, { targetId: 'LEDGER-1', owner: 'minted', ownedTargets: syncLedger });
+    assert.equal(ok.targetId, 'LEDGER-1');
+    await ok.close();
+    await assert.rejects(() => openPage(fake.base,
+      { targetId: 'HUMAN-1', owner: 'minted', ownedTargets: syncLedger }), /HUMAN-1/);
+    assert.equal(fake.urlOf('HUMAN-1'), HUMAN_URL);
+  });
+});
+
 // ── 3 ──────────────────────────────────────────────────────────────────────────
 test('⛔ QA3: minting unavailable on BOTH paths -> refused with the opt-in hint, never a fallback to an existing tab', async () => {
   await withFake({ targets: [HUMAN], createTarget: false, jsonNew: [] }, async (fake) => {
