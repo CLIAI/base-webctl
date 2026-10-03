@@ -3,7 +3,7 @@ id: v59v
 title: "Storage Path Resolution: Unified cacheRoot, XDG, and Dotenv Standard"
 category: infra
 created: "2026-06-24"
-updated: "2026-09-02"
+updated: "2026-10-03"
 status: stable
 tags: [filesystem, xdg, paths, cacheroot, state, dotenv, constants-seam, scaffold, consolidation]
 tech:
@@ -92,6 +92,14 @@ All under the `CLIAI/<CACHE_DIRNAME>/` segment. This **supersedes** `f868`'s
 "Not used: `$XDG_DATA_HOME`, `$XDG_STATE_HOME`" — **state IS used** now (the
 gateway grant store is exactly XDG "state": persists, not config, not
 regenerable cache).
+
+⛔ **A test that overrides `HOME` must ALSO strip `XDG_{CACHE,CONFIG,STATE,DATA}_HOME`.**
+The XDG variable wins over `$HOME` by this very table, so a temp `HOME` with an inherited
+`XDG_CACHE_HOME` resolves to the REAL dirs, silently, on any host that exports one (found
+by `perplexity`; a sibling lane's suite wrote and then deleted the human's real tab ledger
+and captcha lock through the same class of mistake). Pass a constructed `env` to
+`createStoragePaths(C, {env})`, or spawn with those four removed. The harness's `isolated`
+verb unsets them for everything it runs (`xrl4`).
 
 ### 4.1 Locks: runtime-dir-preferred, cache-fallback
 

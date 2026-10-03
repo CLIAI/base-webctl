@@ -658,11 +658,15 @@ hostSocketArm('the ssh-agent ($SSH_AUTH_SOCK)', () => process.env.SSH_AUTH_SOCK 
 
 // ── env scrub ────────────────────────────────────────────────────────────────
 
-const SCRUBBED = ['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK', 'DBUS_SESSION_BUS_ADDRESS', 'DOCKER_HOST', 'XDG_RUNTIME_DIR'];
+const SCRUBBED = ['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK', 'DBUS_SESSION_BUS_ADDRESS', 'DOCKER_HOST', 'XDG_RUNTIME_DIR',
+  // state roots: base's storage paths prefer these over $HOME (a temp HOME was silently bypassed)
+  'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_DATA_HOME'];
 const PRINT_ENV = `console.log('ENV ' + JSON.stringify(Object.fromEntries(${JSON.stringify([...SCRUBBED, 'TMPDIR'])}.map((k) => [k, process.env[k] ?? null]))))`;
 const HOSTILE_ENV = { DISPLAY: ':99', WAYLAND_DISPLAY: 'wayland-9', SSH_AUTH_SOCK: '/nonexistent/agent',
   DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent/bus', DOCKER_HOST: 'unix:///nonexistent/docker.sock',
-  XDG_RUNTIME_DIR: '/nonexistent/xdg', TMPDIR: '/nonexistent/tmp' };
+  XDG_RUNTIME_DIR: '/nonexistent/xdg', TMPDIR: '/nonexistent/tmp',
+  XDG_CACHE_HOME: '/nonexistent/real-cache', XDG_CONFIG_HOME: '/nonexistent/real-config',
+  XDG_STATE_HOME: '/nonexistent/real-state', XDG_DATA_HOME: '/nonexistent/real-data' };
 
 /** @param {string} out @returns {Record<string, string|null>[]} every ENV line */
 const envLines = (out) => [...out.matchAll(/^ENV (.*)$/gm)].map((m) => JSON.parse(m[1]));
@@ -688,6 +692,28 @@ test('env scrub CONTROL: the same vars DO reach a command run without `isolated`
   });
   assert.equal(/** @type {any} */ (c).DISPLAY, ':99', 'the printer cannot see env at all — the scrub arm proves nothing');
   assert.equal(/** @type {any} */ (c).TMPDIR, '/nonexistent/tmp');
+  assert.equal(/** @type {any} */ (c).XDG_CACHE_HOME, '/nonexistent/real-cache', 'CONTROL: an XDG state root is inherited without `isolated`');
+});
+
+test('⛔ a planted XDG_CACHE_HOME cannot redirect base\'s storage paths out of a temp HOME under `isolated`', needsIsolation, async () => {
+  // base's storage paths PREFER XDG_*_HOME over $HOME: a test that set a temp HOME but
+  // inherited an exported XDG_CACHE_HOME resolved to the REAL dirs (`perplexity`).
+  const home = tmpdir();
+  try {
+    const sp = pathToFileURL(path.join(ROOT, 'lib', 'storage-paths.js')).href;
+    const RESOLVE = `import(${JSON.stringify(sp)}).then((m) => { const p = m.createStoragePaths({ CACHE_DIRNAME: 'probe', PROJECT: 'probe' });
+      console.log('ROOTS ' + JSON.stringify([p.cacheRoot, p.configRoot, p.stateRoot])); })`;
+    const planted = { HOME: home, XDG_CACHE_HOME: '/nonexistent/real-cache', XDG_CONFIG_HOME: '/nonexistent/real-config',
+      XDG_STATE_HOME: '/nonexistent/real-state' };
+    const r = await run(['isolated', '--keep', home, '--', process.execPath, '-e', RESOLVE], planted);
+    assert.equal(r.status, 0, r.stderr);
+    const roots = JSON.parse((r.stdout.match(/^ROOTS (.*)$/m) || [])[1] || '[]');
+    assert.equal(roots.length, 3, r.stdout);
+    for (const p of roots) assert.ok(p.startsWith(home + path.sep), `resolved outside the temp HOME: ${p}`);
+    // control: the same resolver WITHOUT `isolated` follows the planted XDG root
+    const c = spawnSync(process.execPath, ['-e', RESOLVE], { encoding: 'utf8', env: cleanEnv(planted) });
+    assert.match(c.stdout, /\/nonexistent\/real-cache/, 'CONTROL: without the scrub the planted root wins');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
 // ── keep-binds: /tmp is masked, the arm's own paths are not ──────────────────

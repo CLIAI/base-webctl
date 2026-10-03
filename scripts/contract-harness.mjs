@@ -1173,9 +1173,17 @@ const SELF_ROOT = path.resolve(path.dirname(SELF), '..');
 const ISOLATED_INNER = '__isolated-inner';
 /** The tmpfs source tag `isolated` mounts with; the nesting proof looks for it. */
 const MASK_SOURCE = 'webctl-isolated';
-/** Env vars the command never inherits: each one NAMES a host socket or display. */
+/**
+ * Env vars the command never inherits. The first six NAME a host socket or display. The
+ * XDG_*_HOME four NAME the user's state roots, and base's storage paths PREFER them over
+ * $HOME: a test that set a temp HOME but inherited an exported XDG_CACHE_HOME was silently
+ * redirected to the REAL dirs (`perplexity`; a sibling lane's suite wrote and deleted the
+ * human's real tab ledger and captcha lock through the same class of mistake). Unset, they
+ * fall back to $HOME — the gate's throwaway one, or the read-only real one.
+ */
 const SCRUBBED_ENV = Object.freeze(['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK',
-  'DBUS_SESSION_BUS_ADDRESS', 'DOCKER_HOST', 'XDG_RUNTIME_DIR']);
+  'DBUS_SESSION_BUS_ADDRESS', 'DOCKER_HOST', 'XDG_RUNTIME_DIR',
+  'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_DATA_HOME']);
 /**
  * Home dot-directories that hold LIVE state: signed-in browser profiles (~/.cache/<tool>),
  * the family's config (~/.config/webctl), keys and ControlMaster sockets (~/.ssh). A keep
@@ -1349,7 +1357,8 @@ function usageRefusal(why, command) {
  * setpriv capability drop broke (measured).
  *
  * The command's env drops DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK,
- * DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST and XDG_RUNTIME_DIR and gets TMPDIR=/tmp —
+ * DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST, XDG_RUNTIME_DIR and XDG_{CACHE,CONFIG,STATE,DATA}_HOME
+ * and gets TMPDIR=/tmp —
  * on the nested path too. argv goes through as an ARRAY: no shell sees the command.
  * @param {string[]} a
  * @returns {Promise<number>}
