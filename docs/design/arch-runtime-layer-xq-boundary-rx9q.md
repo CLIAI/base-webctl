@@ -181,6 +181,17 @@ Judged by xq's lane by reading xq **as it stood at 64e5f9d**, not from memory:
    from `kind = "docker-xpra"` (base's driver) to `kind = "managed-zone"`.
 3. Lanes already on xq zones (grok, gemini, perplexity) adopt the seam.
 4. **Signed-in lanes last**, and only with X5 — never by copying a profile.
+   ⛔ X5 (landed) binds an EXISTING profile dir and refuses one held by ANY running
+   container — so a signed-in lane's profile can move to xq only after base's own driver
+   container releases it, i.e. after a **browser restart**. That is the person's decision,
+   per lane, at a moment they choose; base never performs it automatically.
+
+⛔ **"Restart needed" is never acted on automatically.** xq refuses `up` on a running app
+that lacks the requested `--control` / `--profile-dir` ("stop it and run again"). Base maps
+that to a LIFECYCLE decision through `lifecycleGuard` (`lg1n`: refused in login mode or with
+any viewer attached; otherwise surfaced to the human) — never an automatic stop-and-start
+of a browser a person may be using. Base asks xq to make the case machine-distinguishable
+(a JSON field, not exit 1 + prose).
 
 ## 7. Decisions that are Greg's
 
