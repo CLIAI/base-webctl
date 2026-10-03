@@ -296,7 +296,12 @@ mkdir -p "$GATE_LOG_ROOT"
 RUN_LOG_DIR="$(mktemp -d "$GATE_LOG_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-${BASE_HEAD:0:12}-XXXXXX")"
 chmod 700 "$RUN_LOG_DIR"
 # The whole run as well: stdout (the JSONL) and stderr (the human report) each copied.
-exec > >(tee -a "$RUN_LOG_DIR/gate.jsonl") 2> >(tee -a "$RUN_LOG_DIR/gate.err" >&2)
+# ⚠ The tees IGNORE TERM/HUP/INT: they are the gate's own output, and a signal to the
+# process group killed them first, so the gate's last lines (its own report of the
+# interrupt) were lost and it exited 141 (SIGPIPE) instead of by the signal (final
+# review). They still exit at EOF, when the gate does.
+exec > >(trap '' TERM HUP INT; exec tee -a "$RUN_LOG_DIR/gate.jsonl") \
+     2> >(trap '' TERM HUP INT; exec tee -a "$RUN_LOG_DIR/gate.err" >&2)
 echo "gate logs: $RUN_LOG_DIR" >&2
 
 pass=0 fail=0 skip=0 stale=0
@@ -671,7 +676,13 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     # the arm a fresh /tmp. A contract running `rm -rf /tmp/*` then deleted the
     # marker, and a contract that really ran was reported as a gate fault (final
     # review). Output already written through tee cannot be taken back, and no
-    # keep is needed: the cwd and a $HOME under /tmp are kept by `isolated` itself.
+    # keep is needed for it.
+    #
+    # ⛔ --keep "$run_home": `isolated` keeps a $HOME only when it is under /tmp. With
+    # TMPDIR under the user's home, the throwaway HOME sat inside the READ-ONLY home,
+    # and a contract that writes $HOME (npm) went false RED (measured by the final
+    # review). The throwaway HOME is the gate's own, so keeping it writable exposes
+    # nothing of the host.
     started_nonce="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
     started_line="WEBCTL-GATE-CONTRACT-STARTED $started_nonce"
     # shellcheck disable=SC2016  # $1/$2 belong to the inner bash
@@ -680,7 +691,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
         && WEBCTL_BASE_DIR="$run_base_dir" \
            WEBCTL_DECLARED_PIN="${declared_pin:-}" \
            WEBCTL_GATE_SWAPPED="${swapped_now:-0}" \
-           node "$BASE_ROOT/scripts/contract-harness.mjs" isolated -- \
+           node "$BASE_ROOT/scripts/contract-harness.mjs" isolated --keep "$run_home" -- \
              bash -c 'l="$2"; c="$1"; set --; printf "%s\n" "$l" >&2; eval "$c"' \
              webctl-gate-contract "$testCmd" "$started_line" ) 2>&1 | tee "$run_log" >&2
     rc=${PIPESTATUS[0]}

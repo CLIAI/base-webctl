@@ -63,6 +63,7 @@ if [ -n "\${FAKE_PAUSE:-}" ]; then
 fi
 if [ -n "\${FAKE_STARTED:-}" ]; then : > ./.fake-started; sleep 30; fi
 if [ -n "\${FAKE_DEPS:-}" ]; then if [ -f node_modules/dep/index.js ]; then echo DEPS=PRESENT; else echo DEPS=ABSENT; fi; fi
+if [ -n "\${FAKE_WRITE_HOME:-}" ]; then if : > "$HOME/.gate-home-probe" 2>/dev/null; then echo HOME=WRITABLE; else echo HOME=READONLY; fi; fi
 if [ -n "\${FAKE_WIPE_TMP:-}" ]; then c="$(cat code.txt)"; cat out.txt; rm -rf /tmp/* 2>/dev/null; exit "$c"; fi
 cat out.txt
 exit "$(cat code.txt)"
@@ -463,6 +464,40 @@ test('scratch: the live tree\'s installed node_modules is COPIED into the clone 
     assert.match(r.out, /DEPS=ABSENT/);
     assert.doesNotMatch(r.out, /deps: node_modules/);
   } finally { c.cleanup(); }
+});
+
+test('scratch: the throwaway HOME stays WRITABLE even when TMPDIR is under the read-only home', { skip: NEEDS_NS }, () => {
+  // Final review, measured: \`isolated\` keeps a $HOME only under /tmp, so with TMPDIR
+  // under the user's home the gate's throwaway HOME was read-only and a contract
+  // writing $HOME (npm) went false red. A throwaway dir under the real home, removed.
+  const underHome = fs.mkdtempSync(path.join(os.homedir(), '.webctl-gate-test-'));
+  const w = world();
+  try {
+    const r = w.gate(['--against-head', '--scratch'], { FAKE_WRITE_HOME: '1', TMPDIR: underHome });
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /HOME=WRITABLE/);
+  } finally { w.cleanup(); fs.rmSync(underHome, { recursive: true, force: true }); }
+});
+
+test('scratch: TERM to the gate\'s process group ends it BY the signal, and its log keeps the last lines', { skip: NEEDS_NS }, async () => {
+  // Final review: the log tees died with the group, the gate exited 141 (SIGPIPE) and
+  // gate.err stopped short. The tees now ignore TERM/HUP/INT and end at EOF.
+  const w = world();
+  try {
+    const child = spawn('bash', [path.join(w.base, 'scripts', 'test-all-consumers.sh'), '--against-head', '--scratch'],
+      { env: w.env({ FAKE_STARTED: '1' }), detached: true, stdio: 'ignore' });
+    const done = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+    const started = () => w.scratchDirs().some((d) => fs.existsSync(path.join(w.tmp, d, 'repo', '.fake-started')));
+    for (let i = 0; i < 200 && !started(); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(started(), 'positive control: the contract started');
+    process.kill(-(/** @type {number} */ (child.pid)), 'SIGTERM');
+    const end = /** @type {{code: number|null, signal: string|null}} */ (await done);
+    assert.ok(end.signal === 'SIGTERM' || end.code === 143, `ended by TERM, not ${JSON.stringify(end)}`);
+    const logs = path.join(w.dir, 'gate-logs');
+    const [run] = fs.readdirSync(logs);
+    const err = fs.readFileSync(path.join(logs, run, 'gate.err'), 'utf8');
+    assert.match(err, /RUN {3}fake-webctl/, 'the kept log has the run, up to the signal');
+  } finally { w.cleanup(); }
 });
 
 test('scratch: a hidden failure (exit 0 + TAP `not ok`) is a FAIL, reported exactly as in-place', { skip: NEEDS_NS }, () => {
