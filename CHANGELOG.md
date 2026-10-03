@@ -270,15 +270,24 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
 
 ### Added — the harness and the gate (`xrl4`)
 
-* **`contract-harness.mjs isolated -- <cmd…>`**: runs `<cmd>` in a private user + network +
-  mount namespace. The only interface is its own `lo`, which is brought up. There is a fresh
-  tmpfs over `/run` and `/tmp`, and kept paths (the cwd, base's repo, `--keep <dir>`) are bound back. Host path sockets still
-  reachable are masked. DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK, DBUS_SESSION_BUS_ADDRESS,
-  DOCKER_HOST and XDG_RUNTIME_DIR are unset, and TMPDIR=/tmp. **Fails closed**: no fallback to
-  the host, ever. "Already inside" is proven from the kernel (namespace ids, uid_map,
-  interfaces, mounts); an env marker alone is refused. Why: twice on 2026-10-03 a consumer's
-  mutation control reached a live signed-in browser. Separately, `unshare -rn` alone was
-  measured still reaching the docker socket.
+* **`contract-harness.mjs isolated [--keep <dir>]… -- <cmd…>`** runs `<cmd>` in private
+  user, network, mount and PID namespaces:
+  * The only network interface is its own `lo`, which is brought up.
+  * There is a fresh tmpfs over `/run` and `/tmp`. Kept paths (the cwd, base's repo, a
+    `$HOME` under /tmp, `--keep <dir>`) are bound back.
+  * Host path sockets that are still reachable are masked.
+  * The user's home directory is READ-ONLY, except the kept paths.
+  * The command runs with NO capabilities (`setpriv`, no-new-privs), so it cannot unmount or
+    remount what masks the host.
+  * DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK, DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST and
+    XDG_RUNTIME_DIR are unset, and TMPDIR=/tmp.
+
+  **Fails closed**: there is never a fallback to the host. "Already inside" is proven from
+  the kernel (namespace ids, uid_map, interfaces, mounts); an env marker alone is refused.
+  Why: twice on 2026-10-03 a consumer's mutation control reached a live signed-in browser.
+  Separately, `unshare -rn` alone was measured still reaching the docker socket. And the
+  final review measured that a command left with namespace-root capabilities could unmount
+  every mask.
   Companions: `isolation-check <port>…` (a precondition run inside: the real port must give
   exactly ECONNREFUSED, and a self-made fake must answer); `sandbox-port`; `guard-live-port`.
 * **Harness generation 5**: the `no-revendor` check counts a same-named file as a shim only if
@@ -287,8 +296,9 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
   Contracts that `require-generation 4` keep working; `require-generation 5` gets the fix.
 * **Gate `--against-head --scratch`** — the recommended pre-release arm. Each wired consumer
   is cloned at its committed HEAD, and base's candidate is placed in the clone's submodule.
-  The contract runs there under `isolated`, with a throwaway HOME. **The live tree is never
-  written**: it is fingerprinted before and after, and any change BLOCKS. A live tree with
+  The contract runs there under `isolated`, with a throwaway HOME. **A change to the live
+  tree BLOCKS:** its git-visible state (HEAD, submodule HEAD, `git status`) is fingerprinted
+  before and after. Ignored files are not covered, but they sit under the read-only home. A live tree with
   uncommitted tracked changes → SKIP, because the commit is not what runs. Isolation
   unavailable → a GATE-ENVIRONMENT fault, never a lane FAIL. Why: some live trees are what
   unattended timers run from, so the in-place swap could run an untested candidate.
@@ -330,11 +340,18 @@ while the live pair has the old ones) — `inspect().legacy` comes in the next r
 * Firefox is still `ENGINES_PENDING`: the BiDi client is specified (`bd1x`), not built.
 * cdp-client still ignores unknown options (the rule is written; the code is next).
 * `isolated` covers what a lane RUNS UNDER IT. A lane's arm that is not wrapped is not
-  isolated; adopting it is each lane's change. It masks host unix sockets present when the
-  arm starts, not ones created on the host afterwards. It needs unprivileged user namespaces
-  (refused, never bypassed, where they are off). ⚠ It is NOT a filesystem sandbox: outside
-  /run and /tmp, the user's files (home dir, live repos) stay readable and writable from
-  inside. The `--scratch` gate catches a live-tree write by fingerprint; it does not prevent it.
+  isolated; adopting it is each lane's change. It needs unprivileged user namespaces, and
+  where they are off it refuses rather than bypassing. **Host unix sockets it does NOT
+  mask:**
+  * sockets created on the host after the arm starts;
+  * sockets bound in another network namespace (e.g. a rootless container's volume), which
+    are absent from the host's `/proc/net/unix`;
+  * sockets bound by a RELATIVE path, whose location cannot be known;
+  * a masked socket the host unlinks and re-creates while the arm runs.
+
+  Paths under `/run` and `/tmp` are covered whatever their kind, because those trees are
+  replaced, not checked. ⚠ Outside the home dir, `/run` and `/tmp`, the rest of the
+  filesystem keeps its normal permissions (e.g. `/var/tmp`, `/dev/shm`).
 * The gate's default and plain `--against-head` modes are NOT isolated and still swap in
   place; only `--scratch` gives both guarantees.
 * **openPage() currently drives the first existing tab; v0.32.0 changes the default to a new
