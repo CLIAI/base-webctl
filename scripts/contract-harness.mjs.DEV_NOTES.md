@@ -277,6 +277,66 @@ host path sockets in /proc/net/unix   307
   unkept-/tmp test fails; no keep-binds → keep-binds fails; exemption ignored → `--keep`
   test fails. Restored → all green.
 
+### ⛔ The home directory is READ-ONLY (2026-10-03)
+
+The coordinator `webctl:mgr` measured that, with the network and the sockets gone, the real
+home was still writable from inside — profiles under `~/.cache/<tool>`, `~/.config/webctl`,
+`~/.ssh`. A mutant restoring a literal path needs no network. Measured while building it:
+
+```
+inside unshare -rnm: rbind H H; remount,bind,ro H          create in H      EROFS
+  + bind <dir under H> onto itself; remount,bind,rw         create there     ok
+locked nosuid,nodev mount (inherited): remount,bind,ro      OK (util-linux 2.42 keeps the flags)
+top-only ro remount of an rbind with a tmpfs submount       touch in submount SUCCEEDED
+  + remount the submount too                                EROFS
+mount --move onto a directory of a ro tree                  OK
+```
+
+* **Order** (`maskSocketDirs`): cover /run → **stage the keeps** (copies of the untouched
+  tree, host modes and submounts intact) → **rbind each root onto itself, remount it and
+  every reachable submount ro** → cover /tmp → move the keeps back on top, outer first,
+  remounting a read-only keep (base's root under /tmp) ro right after its move — before an
+  inner writable keep lands on it.
+* **Reachable** (`reachableMountsUnder`, exported for the unit test): start at the bottom
+  mount AT the root, follow each same-path stack to its top, recurse into children, skip a
+  child that a sibling mounted later on an ancestor path shadows. The ORIGINAL submounts
+  (beneath the new rbind) descend from a different parent and are never selected. Octal
+  escapes (`\040`) in mountinfo are decoded.
+* **Roots are computed on the HOST side.** Inside the user namespace we are uid 0, and
+  `os.userInfo()` answers root's home — the inner half gets the roots in the fd-4 plan, the
+  nested proof gets them from `WEBCTL_RO_ROOTS`. Measured: the submount probe's outer
+  `unshare -r` made the harness protect `/root`, hence its second userns mapping back to the
+  caller's uid.
+* **Protected roots**: the passwd home, plus the real path of `.ssh`, `.gnupg`, `.config`,
+  `.cache`, `.local`, `.mozilla`, `.pki` when one symlinks OUT of home. A root containing
+  /run or /tmp (home = `/`) is refused; a root under them is dropped (the mask hides it).
+* **Writable vs read-only keeps.** cwd, `$HOME` under /tmp and `--keep` are writable;
+  base's root, node and an absolute command are read-only — **under /tmp too**. Decided for
+  base's root because the release gate runs every consumer against ONE base checkout (and it
+  is the harness's own code); base's own suite has cwd = its root and is unaffected. Dedup:
+  a keep inside a writable keep is covered; a writable keep inside a read-only one gets its
+  own mount on top.
+* **Refusals.** A cwd containing the home: **was not refused before** (only `--keep` was) —
+  now FAIL, cwd `/` included. `throwawayHome()` never returns something containing the
+  passwd home.
+* **Not covered by `ro`: unix sockets.** `connect(2)` checks write permission on the inode,
+  not the mount's ro flag, so the residual socket check still matters under home.
+* **Nesting fact** uses `access(W_OK)` = `EROFS` on each recorded root rather than a
+  mountinfo walk: it asks the exact question through path resolution; the full submount
+  sweep needs the writable keeps, which only the inner half knows.
+* **npm** (12.0.2): `npm test` / `npm install` under the ro home: rc 0, rc 1 propagated;
+  the debug logfile is skipped (EROFS), a one-line notice on error. No change needed.
+
+**Sabotage, each run against the test file, each red, restored → green:** ro step off +
+read-back off → the home arm created the file (and its `finally` removed it); ro step off
+alone → refused by the read-back; top-only remount + read-back off → submount arm `ok`;
+top-only alone → refused by the read-back; no re-chdir → the `..` arm — **which first
+SURVIVED**: from a cwd one level below home, `..` is the home dentry, now a mount point, so
+the walk crossed into the ro mount (the /tmp keep-bind test's trap, again). Moved two
+levels down; red. Base root writable → its arm red; no recursion into submounts → both
+logic units red; cwd-contains-home unrefused → red; keeps not realpath'd → the symlink arm
+red; no note → red; no nested home fact → the previous-`isolated` nesting arm red.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
@@ -287,6 +347,15 @@ keeps a symlinked path while `import.meta.url` is resolved. The dispatch body is
 deliberately not re-indented, to keep the guard a two-line diff against concurrent edits.
 
 ### Known limits
+
+* **The home is whatever passwd says for the CALLER's uid.** Run from inside another user
+  namespace that maps the caller to 0 (a bare `unshare -r`), that is root's home, and the
+  real one stays writable — measured with the submount probe's first draft. No passwd entry
+  at all ⇒ nothing is protected. A profile directory configured OUTSIDE home (and not via a
+  symlinked dot-dir) is not covered either.
+* **`WEBCTL_RO_ROOTS` is recorded input.** `[]` would satisfy the nested home fact; the
+  other five facts still require being inside a real masked namespace, so it does not let
+  the host pass as "inside".
 
 * **Mapped root.** The command runs as uid 0 inside the namespace. A tool that refuses
   root (Chromium without `--no-sandbox`) refuses here. A nested `unshare --map-user` back
