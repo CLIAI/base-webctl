@@ -57,7 +57,7 @@ for arg in "$@"; do
   case "$arg" in
     --against-head) AGAINST_HEAD=1 ;;
     --scratch) SCRATCH=1 ;;
-    -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
