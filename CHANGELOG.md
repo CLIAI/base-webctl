@@ -207,7 +207,7 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
-## v0.32.0 — (unreleased)
+## v0.32.0 — 2026-10-03
 
 **Headline: base drives only a tab base opened — `openPage()` / `navigate()` MINT a
 background tab by default and never drive the human's tab unless told whose it is**
@@ -311,6 +311,19 @@ on an adopted tab, `onMinted` or `owner` without a mint/`targetId` respectively.
   `getTargets`, a lost `createTarget` reply, refused attaches, `subtype` targets).
 * `test/cdp-client-lifecycle.test.js`: arm 1 ("an existing page is REUSED") and the
   reuse half of arm 3 asserted the old default; both now assert the new one.
+
+### Harness and gate (since v0.31.0)
+
+* **`isolated` also unsets `XDG_{CACHE,CONFIG,STATE,DATA}_HOME`.** base's storage paths prefer
+  them over `$HOME`, so a test that set a temp HOME but inherited one resolved to the REAL
+  dirs (`perplexity`; a sibling lane's suite wrote and deleted the human's real tab ledger and
+  captcha lock through the same class of mistake). `v59v` §4 now states the rule for tests.
+* **xq inside `isolated`:** with xq ≥ f9a7bad and `UV_NO_CACHE=1`, `xq machine ls --json` runs
+  inside, so a no-host-literals check need not weaken under the gate (harness README).
+* **Gate:** an unwritable scratch root is a named setup FAIL (it used to attempt a clone at the
+  filesystem root); orphaned clones (their gate is gone, by pid + start time) are pruned at
+  start, a live gate's clone never; the gate's own tests wait by a deadline, not a 10 s count,
+  so they hold under a heavily loaded host.
 
 ### Docs — a correction to the v0.31.0 entry
 
