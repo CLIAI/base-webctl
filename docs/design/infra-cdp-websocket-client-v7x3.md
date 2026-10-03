@@ -412,6 +412,33 @@ every such call would otherwise open, and possibly leave, a blank tab.
 9. `{targetId}` naming an absent id, or a non-page target: refused, naming it.
    `openPage(base, {reuse: true})`: refused as an unknown option.
 
+**QA added after review, each with its control** (`test/cdp-open-page-own-tab.test.js`; the
+file holds 29 tests: these, arms 1–9, their controls, and extra variants of 7 and 8 —
+"last" read at close time, an owned reuse with `close: true`, an async `onMinted`):
+
+10. An ASYNC `ownedTargets.has()` (a Promise) is refused, also for an id it holds, and so is
+    a truthy non-boolean; the human tab's URL is unchanged. *Control:* the same ledger,
+    synchronous, drives its own tab and still refuses the human's.
+11. A LOST `createTarget` reply (no reply; dropped socket) is refused, naming that a tab may
+    exist; EXACTLY one tab was minted, and no `/json/new`. *Control:* an explicit CDP error
+    reply, and an unreachable browser endpoint, still fall back to `/json/new`.
+12. Two of our tabs closed CONCURRENTLY: one closed, one `'last-page'`, browser up.
+    *Controls:* sequential closes give the same; with a human tab, both of ours close.
+13. The same, through two spellings of one loopback authority (`127.0.0.1`, `localhost`):
+    still one `'last-page'`.
+14. A prerender (`page` + `subtype`) does not count as a second page: ours is `'last-page'`.
+    *Control:* plus a human tab, ours is closed.
+15. A prerender id is refused for reuse, naming the subtype. *Control:* the plain page
+    beside it is accepted.
+16. Our target, present but now carrying a `subtype`: `close()` returns `'not-a-tab'` and
+    sends nothing. *Control:* absent at close time → `{closed: true}`, nothing sent.
+17. The first ATTACH to a mint fails: the error names the id and its fate — closed (and no
+    longer in `ownedTargets`), kept open (`keep: true`, still reusable), or NOT closed
+    (`close-failed`, last page).
+18. `new CdpSession(url, {readOnly: true})`: a `TypeError` naming `readOnly`. *Control:*
+    `defaultTimeout`, `WebSocketImpl` and no options construct.
+19. Options that cannot be honoured together are refused before any contact.
+
 ## Security Considerations
 
 * **Local-only binding** -- The browser's debugging port should bind to

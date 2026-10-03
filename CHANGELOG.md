@@ -302,9 +302,13 @@ on an adopted tab, `onMinted` or `owner` without a mint/`targetId` respectively.
 
 ### Tests
 
-* `test/cdp-open-page-own-tab.test.js`: the nine `v7x3` QA arms, each with its control,
-  against a recording fake CDP browser (`test/helpers/fake-cdp-browser.mjs`, ephemeral
-  ports, a trap that records any dial of the raw authority).
+* `test/cdp-open-page-own-tab.test.js` (29 tests): the nine `v7x3` QA arms and the ten
+  added after review (`v7x3` QA 10–19: async `has()`, a lost `createTarget` reply,
+  concurrent closes and two loopback spellings, prerender ×2, present-but-not-a-tab, the
+  attach-failure fate, the `CdpSession` constructor, refused combinations), each with its
+  control, against a recording fake CDP browser (`test/helpers/fake-cdp-browser.mjs`:
+  ephemeral ports, a trap that records any dial of the raw authority, a delayed
+  `getTargets`, a lost `createTarget` reply, refused attaches, `subtype` targets).
 * `test/cdp-client-lifecycle.test.js`: arm 1 ("an existing page is REUSED") and the
   reuse half of arm 3 asserted the old default; both now assert the new one.
 
@@ -322,6 +326,10 @@ on an adopted tab, `onMinted` or `owner` without a mint/`targetId` respectively.
   last-page rule. Use the `close()` that `openPage()` / `navigate()` return.
 * Unknown-key refusal covers the four factories above, not `getVersion`, `listTargets`,
   `listPageTargets` or `listTargetsViaBrowser`.
+* ⚠ **An HTTP-only forward leaks a tab per mint.** Without the browser websocket each mint
+  goes through `/json/new`, but `close()` cannot read the page count and returns
+  `'close-failed'`, leaving the tab open — safe (it never closes a last page), but a long run
+  piles up tabs. Use a forward that exposes the browser websocket (`/devtools/browser/…`).
 * Nothing here was run against a real browser; the arms use a fake that implements only
   the CDP surface listed in its header.
 
