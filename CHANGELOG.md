@@ -255,7 +255,8 @@ before minting", was right for an unattended browser and is superseded.
   names the id and its fate: kept open (`keep: true`), closed, or NOT closed with the reason.
 * **`close()` is now on `openPage()`'s result too**, and returns `{closed: true}` or
   `{closed: false, reason}` with reason `'keep' | 'owned-reuse' | 'adopted' | 'last-page' |
-  'close-failed'`. ⛔ **The LAST page target is never closed** — closing it exits Chromium;
+  'not-a-tab' | 'close-failed'` (`'not-a-tab'`: our target is still there but now carries a
+  `subtype`, so it is left, never reported closed). ⛔ **The LAST page target is never closed** — closing it exits Chromium;
   it is navigated to `about:blank` instead (`reason: 'last-page'`). "Last" is read from the
   browser endpoint at close time. Closes of our own tabs are serialised per browser
   authority within a process (the loopback spellings `localhost`, `127.0.0.1` and `[::1]`

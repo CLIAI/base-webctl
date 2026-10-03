@@ -353,6 +353,25 @@ test('⛔ QA7: concurrent closes through two SPELLINGS of one browser (127.0.0.1
   });
 });
 
+test('close(): our target PRESENT but no longer a tab is never reported {closed: true}; an ABSENT one is', async () => {
+  // Re-review N4: the "already gone" check ran over TABS only, so a target of
+  // ours that is present but carries a subtype read as closed.
+  await withFake({ targets: [HUMAN] }, async (fake) => {
+    const n = await openPage(fake.base);
+    /** @type {any} */ (fake.targets.get(n.targetId)).subtype = 'prerender';
+    assert.deepEqual(await n.close(), { closed: false, reason: 'not-a-tab' });
+    assert.ok(fake.targets.has(n.targetId), 'left as it is: base closes only a tab it can count');
+    assert.equal(fake.calls('Target.closeTarget').length, 0);
+  });
+  // Control: absent at close time (the person closed it) -> {closed: true}, nothing sent.
+  await withFake({ targets: [HUMAN] }, async (fake) => {
+    const n = await openPage(fake.base);
+    fake.targets.delete(n.targetId);
+    assert.deepEqual(await n.close(), { closed: true });
+    assert.equal(fake.calls('Target.closeTarget').length, 0);
+  });
+});
+
 test('⛔ QA7: a PRERENDER (type page + subtype) is not a tab — it does not count as a second page', async () => {
   const PRERENDER = { id: 'PRE-1', type: 'page', subtype: 'prerender', url: 'https://work.example.test/next' };
   await withFake({ targets: [PRERENDER] }, async (fake) => {
