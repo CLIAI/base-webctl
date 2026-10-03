@@ -604,10 +604,38 @@ test('⛔ MIGRATION: an owner-named container ALREADY beside our pre-owner pair 
   const r = await up({ ...legacyPair(OUR_PROFILE), [CHROMIUM]: ours(), [XPRA]: xpraOf() });
   assert.ok(r.error, 'must refuse');
   assert.equal(r.error.exitCode, 4);
-  assert.match(String(r.error.message), /owner-named container \(demo-webctl-u4242-chromium-test/);
+  assert.match(String(r.error.message), /owner-named container demo-webctl-u4242-chromium-test \(stopped\)/);
   assert.match(String(r.error.message), /nothing was changed/);
+  // ⚠ the advice names the pair that is NOT running — never the live browser (final review, L1)
+  assert.match(String(r.error.message), /docker rm -f demo-webctl-u4242-chromium-test demo-webctl-u4242-xpra-test/);
+  assert.doesNotMatch(String(r.error.message), /docker rm -f demo-webctl-chromium-test/);
   assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), []);
   assert.ok(r.ctrs.get(L_CHROMIUM).running);
+});
+
+test('⚠ L1: when the OWNER-named pair is the running one, the advice removes the stopped PRE-OWNER pair', async () => {
+  const r = await up({ ...legacyPair(OUR_PROFILE, false), [CHROMIUM]: ours({ running: true }), [XPRA]: xpraOf({ running: true }) });
+  assert.ok(r.error, 'must refuse');
+  assert.match(String(r.error.message), /docker rm -f demo-webctl-chromium-test demo-webctl-xpra-test/);
+  assert.doesNotMatch(String(r.error.message), /docker rm -f demo-webctl-u4242-chromium-test/, 'never advise killing the live browser');
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), []);
+});
+
+test('⛔ M1: a pair migrated EARLIER whose xpra later died is NOT repaired by restarting its running browser', async () => {
+  // Owner-named chromium RUNS and still mounts the PRE-OWNER x11 volume (it was renamed in place
+  // by an earlier command); its xpra is stopped. Repairing the pair would RESTART the browser.
+  const r = await up({ [CHROMIUM]: ours({ running: true, volumes: [L_VOLUME] }), [XPRA]: xpraOf({ running: false, volumes: [L_VOLUME] }) });
+  assert.ok(r.error, 'must refuse');
+  assert.equal(r.error.exitCode, 4);
+  assert.match(String(r.error.message), /renamed in place from its pre-owner name, is RUNNING/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), [], 'nothing stopped, removed or started');
+  assert.ok(r.ctrs.get(CHROMIUM).running, 'the browser still runs');
+});
+
+test('M1 CONTROL: a NON-migrated partial pair (owner-named volume) is still recreated, as before', async () => {
+  const r = await up({ [CHROMIUM]: ours({ running: true, volumes: [VOLUME] }), [XPRA]: xpraOf({ running: false, volumes: [VOLUME] }) });
+  assert.equal(r.error, undefined, r.error && r.error.message);
+  assert.ok(r.removed.length > 0, 'pre-existing behaviour for a non-migrated pair: torn down and recreated');
 });
 
 test('⭐ MIGRATION: a pre-owner pair NOT provably ours is ABSENT to us — untouched, not blocking', async () => {
