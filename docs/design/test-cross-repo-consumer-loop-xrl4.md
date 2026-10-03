@@ -492,6 +492,10 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
   root: the review measured a write landing in the REAL home. ⇒ The ids come from the
   outside of `/proc/self/{uid,gid}_map`, the home from passwd for that uid, accepted only if
   the kernel shows it owned by us. A stack of `unshare -r`, no passwd entry ⇒ refused.
+  ⛔ `getent` runs by ABSOLUTE path and is cross-checked against `/etc/passwd`: a PATH-
+  shadowed `getent` answering a self-owned dir under /tmp made the REAL home writable
+  (measured by the review; the decoy "home" was dropped as masked, so nothing was
+  protected). A home under /run or /tmp, or two sources that disagree ⇒ refused.
 * **Ctrl-C stops the caller.** A forwarded signal that ended the command is re-raised, so
   `isolated` dies BY it and bash's cooperative-exit rule stops a trap-less parent (before:
   it carried on with `$? = 130`).

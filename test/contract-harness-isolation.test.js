@@ -1271,6 +1271,51 @@ test('⭐ ARM: `isolated` inside `unshare -r` → a write into the REAL home is 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('⛔ a PATH-shadowed `getent` cannot redirect the read-only home (under an outer `unshare -r`) — the real home stays EROFS', needsIsolation, async () => {
+  // Final review, measured: a fake \`getent\` first on PATH answered a self-owned dir under
+  // /tmp; that "home" was then dropped as hidden by the mask, nothing was protected, and a
+  // file APPEARED in the real home. getent is now run by absolute path, and a home under a
+  // mask is refused. Either way, nothing may land in the real home.
+  const dir = homeTmpdir(); // a throwaway dir under the real home — removed in finally
+  const fake = tmpdir();
+  const decoy = tmpdir();
+  const target = path.join(dir, 'arm');
+  try {
+    fs.writeFileSync(path.join(fake, 'getent'),
+      `#!/bin/sh\necho "x:x:${process.getuid?.()}:${process.getgid?.()}::${decoy}:/bin/sh"\n`, { mode: 0o755 });
+    const r = await runRaw(['unshare', '-r', 'env', `PATH=${fake}:${process.env.PATH}`, process.execPath, TOOL,
+      'isolated', '--', process.execPath, '-e', TRY_CREATE, target], { cwd: ROOT });
+    assert.equal(fs.existsSync(target), false, `the file appeared in the real home:\n${r.stdout}${r.stderr}`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(writeOf(r.stdout), 'EROFS', 'the fake getent was ignored, so the real home is the protected one');
+    // control: the fake really answers when called by name, so the arm is not vacuous
+    const c = spawnSync('sh', ['-c', 'getent passwd 0'], { encoding: 'utf8', env: { ...process.env, PATH: `${fake}:${process.env.PATH}` } });
+    assert.match(c.stdout, new RegExp(`::${decoy}:`), 'CONTROL: the fake getent shadows the real one by PATH');
+  } finally {
+    for (const d of [dir, fake, decoy]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('⛔ fail closed: a passwd home under /tmp (it would protect NOTHING) → FAIL, nothing run', needsIsolation, async (t) => {
+  // A fake /etc/passwd bound in a throwaway \`unshare -rm\` gives the real uid a self-owned
+  // home under /tmp: the mask would hide it and the real files would stay writable.
+  const dir = tmpdir();
+  const fakeHome = tmpdir();
+  const pw = path.join(dir, 'passwd');
+  fs.writeFileSync(pw, `x:x:${process.getuid?.()}:${process.getgid?.()}::${fakeHome}:/bin/sh\n`);
+  const marker = path.join(dir, 'RAN');
+  try {
+    const r = await runRaw(['unshare', '-rm', '--propagation=private', 'sh', '-c',
+      'mount --bind "$0" /etc/passwd || exit 9; shift; exec "$@"',
+      pw, 'x', process.execPath, TOOL, 'isolated', '--keep', dir, '--',
+      process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { cwd: ROOT });
+    if (r.status === 9) { t.skip('SKIP (host): cannot bind over /etc/passwd here'); return; }
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: .*(lies under \/run or \/tmp|DISAGREE)/);
+    assert.equal(fs.existsSync(marker), false);
+  } finally { for (const d of [dir, fakeHome]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
 test('⛔ fail closed: inside a STACK of `unshare -r` (the real uid is two levels up) → FAIL, nothing run', needsIsolation, async () => {
   const dir = tmpdir();
   const marker = path.join(dir, 'RAN');
