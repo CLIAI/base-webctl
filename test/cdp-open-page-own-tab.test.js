@@ -181,7 +181,9 @@ test('â›” QA3: a LOST createTarget reply (timeout / dropped socket) is refused â
         { defaultTimeout: 300, keep: true, onMinted: (/** @type {string} */ id) => { recorded.push(id); } }),
       (e) => /may have created a tab/i.test(e.message) && /reply was lost/.test(e.message), createReply);
       const minted = [...fake.targets.keys()].filter((k) => k.startsWith('MINTED-'));
-      assert.ok(minted.length <= 1, `at most ONE tab, got ${minted} (${createReply})`);
+      // EXACTLY one: the browser did mint (so the error's "may have created a tab" is
+      // true), and nothing minted a second. `<= 1` would pass with no mint at all.
+      assert.equal(minted.length, 1, `exactly ONE tab, got ${minted} (${createReply})`);
       assert.deepEqual(fake.log.filter((e) => e.t === 'http' && e.path === '/json/new'), [],
         `no /json/new after a lost reply (${createReply})`);
       assert.equal(fake.pageAttaches().length, 0);
