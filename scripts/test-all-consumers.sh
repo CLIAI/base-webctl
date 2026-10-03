@@ -151,6 +151,45 @@ restore_submodule() {
 # repo (fetching from it is a read, and stays allowed).
 SCRATCH_TMP=""
 SCRATCH_ERR=""
+# Where scratch clones live. WEBCTL_GATE_SCRATCH_DIR overrides.
+scratch_root_dir() {
+  printf '%s\n' "${WEBCTL_GATE_SCRATCH_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/webctl-base/gate-scratch}"
+}
+# $1 pid → its start time in clock ticks (field 22 of /proc/<pid>/stat), or "" if gone.
+proc_starttime() {
+  local st
+  st="$(cat "/proc/$1/stat" 2>/dev/null)" || { printf ''; return 0; }
+  # the comm field may contain spaces and parens: fields after the LAST ')' are fixed
+  st="${st##*) }"
+  # shellcheck disable=SC2086  # word-splitting the fixed fields is the point
+  set -- $st
+  printf '%s' "${20:-}"
+}
+# ⛔ ORPHANED CLONES. Scratch clones moved from /tmp (cleared at boot) to ~/.cache, so a
+# gate killed with SIGKILL — no trap runs — left its clone, node_modules copy included,
+# for good (final review). ⇒ At start, remove clones whose owning gate is gone: the
+# recorded pid is not running, or is running with a DIFFERENT start time (recycled).
+# A clone with no owner record (an older gate) is removed only when older than a day.
+# A clone of a LIVE gate is never touched: two gates may run at once.
+prune_orphan_scratch() {
+  local root d pid start now
+  root="$(scratch_root_dir)"
+  [ -d "$root" ] || return 0
+  for d in "$root"/webctl-gate-scratch-*; do
+    [ -d "$d" ] || continue
+    if [ -f "$d/.gate-owner" ]; then
+      read -r pid start < "$d/.gate-owner" || continue
+      now="$(proc_starttime "$pid")"
+      if [ -n "$now" ] && [ "$now" = "$start" ]; then continue; fi
+    elif [ -z "$(find "$d" -maxdepth 0 -mmin +1440 2>/dev/null)" ]; then
+      continue
+    fi
+    chmod -R u+w "${d:?}" 2>/dev/null || true
+    rm -rf "${d:?}"
+    echo "pruned an orphaned scratch clone (its gate is gone): $(basename "$d")" >&2
+  done
+  return 0
+}
 scratch_end() {
   trap - EXIT INT TERM HUP
   if [ -n "$SCRATCH_TMP" ]; then
@@ -176,9 +215,23 @@ scratch_begin() {
   # outside /tmp, so the clone goes where they are. Inside `isolated` it is the cwd, so
   # it stays writable even under the read-only home.
   #   WEBCTL_GATE_SCRATCH_DIR  where clones go (default ${XDG_CACHE_HOME:-~/.cache}/webctl-base/gate-scratch)
-  local scratch_root="${WEBCTL_GATE_SCRATCH_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/webctl-base/gate-scratch}"
-  mkdir -p "$scratch_root"
-  SCRATCH_TMP="$(mktemp -d "$scratch_root/webctl-gate-scratch-XXXXXX")"
+  local scratch_root
+  scratch_root="$(scratch_root_dir)"
+  # ⛔ CHECKED. An unchecked mktemp left SCRATCH_TMP="" when the root was unwritable, and
+  # the gate went on to `mkdir -p /repo-home` and `git clone … /repo` at the FILESYSTEM
+  # ROOT, reporting a misleading "git clone failed" (as root it would have created /repo,
+  # which scratch_end then skipped). Measured by the final review.
+  SCRATCH_TMP=""
+  if ! mkdir -p "$scratch_root" 2>/dev/null \
+     || ! SCRATCH_TMP="$(mktemp -d "$scratch_root/webctl-gate-scratch-XXXXXX" 2>/dev/null)" \
+     || [ -z "$SCRATCH_TMP" ] || [ ! -d "$SCRATCH_TMP" ]; then
+    SCRATCH_TMP=""
+    SCRATCH_ERR="cannot create a scratch dir under $scratch_root (set WEBCTL_GATE_SCRATCH_DIR to a writable dir)"
+    return 1
+  fi
+  # whose clone this is: pid + its start time (a recycled pid has a different one), so
+  # a later gate can tell an orphan from a clone another live gate is using
+  printf '%s %s\n' "$$" "$(proc_starttime "$$")" > "$SCRATCH_TMP/.gate-owner"
   # Registered BEFORE anything is written into it, for the same reason the swap's
   # restore is: an EXIT trap alone does not run when the shell dies by a signal.
   trap 'scratch_end' EXIT
@@ -292,6 +345,8 @@ envelope() {
       "$(ts)" "$1" "$2" "$3"
   fi
 }
+
+if [ "$SCRATCH" = "1" ]; then prune_orphan_scratch; fi
 
 # ⭐ EVERY RUN KEEPS ITS LOGS, IN ITS OWN DIRECTORY, NEVER OVERWRITTEN. A failure line
 # without the lines above it says nothing about which file or which subtest. One run

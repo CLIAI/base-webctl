@@ -544,6 +544,49 @@ test('⛔ scratch: Ctrl-C (INT to the process group) ends the gate by the signal
   } finally { w.cleanup(); }
 });
 
+test('⛔ scratch: an UNWRITABLE scratch root is a named setup FAIL — never a clone at the filesystem root', () => {
+  // Final review: an unchecked mktemp left SCRATCH_TMP="", and the gate tried
+  // \`mkdir -p /repo-home\` and \`git clone … /repo\`, reporting "git clone failed".
+  const w = world();
+  try {
+    const ro = path.join(w.dir, 'ro-root');
+    fs.mkdirSync(ro);
+    fs.chmodSync(ro, 0o500);
+    const r = w.gate(['--against-head', '--scratch'], { WEBCTL_GATE_SCRATCH_DIR: path.join(ro, 'sub') });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /SCRATCH SETUP FAILED: cannot create a scratch dir under .*ro-root\/sub/);
+    assert.doesNotMatch(r.out, /git clone of the live repo failed/);
+    fs.chmodSync(ro, 0o700);
+  } finally { w.cleanup(); }
+});
+
+test('scratch: ORPHANED clones (their gate is gone) are pruned at start; a LIVE gate\'s clone and a fresh legacy one are kept', () => {
+  // Final review: clones now live in ~/.cache, not /tmp, so a SIGKILLed gate's clone
+  // (node_modules copy included) would stay forever.
+  const w = world();
+  try {
+    const mk = (/** @type {string} */ name, /** @type {string|null} */ owner) => {
+      const d = path.join(w.tmp, `webctl-gate-scratch-${name}`);
+      fs.mkdirSync(path.join(d, 'repo'), { recursive: true });
+      if (owner !== null) fs.writeFileSync(path.join(d, '.gate-owner'), owner);
+      return d;
+    };
+    const stat = fs.readFileSync(`/proc/${process.pid}/stat`, 'utf8');
+    const myStart = stat.slice(stat.lastIndexOf(') ') + 2).split(' ')[19];
+    const dead = mk('DEAD01', '2147483646 1\n');               // no such pid
+    const recycled = mk('RECY01', `${process.pid} 1\n`);        // a live pid, a different start time
+    const live = mk('LIVE01', `${process.pid} ${myStart}\n`);   // this test process: alive
+    const legacy = mk('LEGC01', null);                          // no owner record, fresh
+    const r = w.gate(['--against-head', '--scratch']);
+    assert.equal(r.status, 0, r.out);
+    assert.equal(fs.existsSync(dead), false, 'a dead gate\'s clone is pruned');
+    assert.equal(fs.existsSync(recycled), false, 'a recycled pid does not keep a clone alive');
+    assert.equal(fs.existsSync(live), true, 'CONTROL: a live gate\'s clone is never touched');
+    assert.equal(fs.existsSync(legacy), true, 'CONTROL: a fresh clone with no owner record is kept');
+    assert.match(r.out, /pruned an orphaned scratch clone \(its gate is gone\): webctl-gate-scratch-DEAD01/);
+  } finally { w.cleanup(); }
+});
+
 test('scratch: a hidden failure (exit 0 + TAP `not ok`) is a FAIL, reported exactly as in-place', { skip: NEEDS_NS }, () => {
   const output = 'not ok 1 - needs a fixture\nok 2 - survivor\n# tests 1\n# pass 1\n# fail 0\n';
   const s = world({ output, code: 0 });
