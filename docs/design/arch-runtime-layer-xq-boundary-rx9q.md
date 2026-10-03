@@ -136,6 +136,13 @@ design doc, before any lane writes firefox code.
 | X13 | `app restart --control none\|cdp`, keeping the profile | the login-mode cycle (with X8) |
 | X14 | **raw X primitives** as verbs: input injection, pixel/region capture, viewer-presence count | the X half of hover-proof click, displayed-tab-by-pixels and human presence — base composes them with CDP and owns the X-input LEASE identity (`ow9k`) |
 | X15 | `rm --purge` stops first and reports the removed path | lifecycle hygiene |
+| X16 | an explicit **`--config-dir <path relative to the TARGET's home>`**, carried by xq's own remote delegation — never the caller's environment forwarded implicitly | lanes keep PRIVATE images through a per-tool xq config on the browser host (`~/.config/<tool>/xq`); three lanes each hand-roll `ssh host 'XQ_CONFIG_DIR=… xq …'`, which ssh delegation cannot carry. A local env var naming a path on another machine is "assumed, not stated" (`nl0c`). Base's seam passes it from the target record; the lane wrappers retire |
+
+*Status (xq's lane, 2026-10-03): X1–X3 landed; X4 partly — `zone create --exist-ok` + `up
+--no-attach` = ensureApp, and `capabilities --machine` = the skew guard. The full remote
+proof is blocked on the browser host's own state (an outdated xq; no xq config, so the
+SHARED image — built before control labels existed — refuses `--control cdp`). Fixing the
+host is Greg's call (§7).*
 
 *X10–X15 were reconciled by `webctl:mgr` from every lane's shared-core list, against this
 table, so xq is asked once.* The rule each was placed by is §1's: what touches the running
@@ -181,6 +188,8 @@ Judged by xq's lane by reading xq **as it stood at 64e5f9d**, not from memory:
   via the capability check above.
 * **Public base depending on a private xq** — either xq becomes public, or base keeps xq
   behind the seam (recommended) so public base stays usable without it.
+* **The browser host's xq state**: update its xq checkout; give it a default xq config
+  (private chromium/opera images) or rebuild the shared image with control labels.
 * **Login mode without Chromium's own sandbox** (X8): accept "the container is the sandbox"
   for a human sign-in, or grant the container the privileges Chromium's sandbox needs.
 
