@@ -210,9 +210,10 @@ is the strongest form: it names the ownership in the function that reads it.
 ## v0.31.0 — 2026-10-03
 
 **Headline: the docker driver never touches, reuses or restarts a container that is not
-proven ours — and upgrading base never restarts a running signed-in browser.** Plus the
-engine vocabulary, base's reader of xq's capabilities, and the design that makes **xq the
-runtime layer** (`rx9q`).
+proven ours — and upgrading base never restarts a running signed-in browser.** Plus **the
+harness no longer lets a consumer's tests reach the host** (mutation arms and the release
+gate run with no host network and no host unix sockets), the engine vocabulary, base's
+reader of xq's capabilities, and the design that makes **xq the runtime layer** (`rx9q`).
 
 ### ⛔ BREAKING — container names carry the owner
 
@@ -267,6 +268,34 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
   remote bring-up would run half-local (measured by `webctl:mgr`). Remote browsers run
   through xq (`rx9q`).
 
+### Added — the harness and the gate (`xrl4`)
+
+* **`contract-harness.mjs isolated -- <cmd…>`**: runs `<cmd>` in a private user + network +
+  mount namespace. The only interface is its own `lo`, which is brought up. There is a fresh
+  tmpfs over `/run` and `/tmp`, and kept paths are bound back. Host path sockets still
+  reachable are masked. DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK, DBUS_SESSION_BUS_ADDRESS,
+  DOCKER_HOST and XDG_RUNTIME_DIR are unset, and TMPDIR=/tmp. **Fails closed**: no fallback to
+  the host, ever. "Already inside" is proven from the kernel (namespace ids, uid_map,
+  interfaces, mounts); an env marker alone is refused. Why: twice on 2026-10-03 a consumer's
+  mutation control reached a live signed-in browser. Separately, `unshare -rn` alone was
+  measured still reaching the docker socket.
+  Companions: `isolation-check <port>…` (a precondition run inside: the real port must give
+  exactly ECONNREFUSED, and a self-made fake must answer); `sandbox-port`; `guard-live-port`.
+* **Harness generation 5**: the `no-revendor` check counts a same-named file as a shim only if
+  it actually imports THAT base module (a lexer, not a regex: comments, strings, templates,
+  regex literals including after `break`/`continue`/`debugger`, Unicode identifiers).
+  Contracts that `require-generation 4` keep working; `require-generation 5` gets the fix.
+* **Gate `--against-head --scratch`** — the recommended pre-release arm. Each wired consumer
+  is cloned at its committed HEAD, and base's candidate is placed in the clone's submodule.
+  The contract runs there under `isolated`, with a throwaway HOME. **The live tree is never
+  written**: it is fingerprinted before and after, and any change BLOCKS. A live tree with
+  uncommitted tracked changes → SKIP, because the commit is not what runs. Isolation
+  unavailable → a GATE-ENVIRONMENT fault, never a lane FAIL. Why: some live trees are what
+  unattended timers run from, so the in-place swap could run an untested candidate.
+* **The gate keeps every run's logs** in its own never-reused directory
+  (`WEBCTL_GATE_LOG_DIR`, default `${XDG_STATE_HOME:-~/.local/state}/webctl-base/gate-logs`,
+  mode 700): one log per consumer plus the whole run.
+
 ### Docs
 
 * `rx9q` — **the runtime layer is xq**: xq runs the app up to a declared control port; base
@@ -300,11 +329,15 @@ while the live pair has the old ones) — `inspect().legacy` comes in the next r
   uid are not distinguished (remote containers move to xq per `rx9q`).
 * Firefox is still `ENGINES_PENDING`: the BiDi client is specified (`bd1x`), not built.
 * cdp-client still ignores unknown options (the rule is written; the code is next).
-* **Harness generation stays 4.** The `no-revendor` same-name fix (generation 5) is held for
-  the next release: its final review found the lexer still fails open after `break` /
-  `continue` / `debugger`. The generation-4 gap it closes is not new.
-* Network isolation of consumers' mutation arms (two incidents today: mutation controls
-  reached live signed-in browsers) ships in the next release (`xrl4`).
+* `isolated` covers what a lane RUNS UNDER IT. A lane's arm that is not wrapped is not
+  isolated; adopting it is each lane's change. It masks host unix sockets present when the
+  arm starts, not ones created on the host afterwards. It needs unprivileged user namespaces
+  (refused, never bypassed, where they are off).
+* The gate's default and plain `--against-head` modes are NOT isolated and still swap in
+  place; only `--scratch` gives both guarantees.
+* **openPage() currently drives the first existing tab; v0.32.0 changes the default to a new
+  target.** Callers that rely on reuse will have to ask for it by target id. Grep your
+  `openPage` callers now.
 
 ## v0.30.0 — 2026-10-03
 
