@@ -26,7 +26,8 @@ than by any lane reading its own.
 ## The checks
 
 `require-generation`, `pin`, `no-revendor` and `generation` are for your contract;
-`gate-probe` is for the release gate (see below).
+`gate-probe` is for the release gate (see below); `isolated`, `sandbox-port` and
+`guard-live-port` are for your **mutation arms** (see *NO HOST NETWORK* below).
 
 ## ⛔ LOAD-BEARING: the checker lives INSIDE the thing it checks
 
@@ -170,6 +171,49 @@ is no swap window, so there is nothing to assert.
 deliberately not from comparing the declared pin against the worktree — which is
 the comparison it is testing. A guard and a claim that read the same input cannot
 disagree.
+
+## ⛔ Mutation arms run with NO HOST NETWORK — `isolated`, `sandbox-port`, `guard-live-port`
+
+*Incident, 2026-10-02 (a consumer lane's mutation control):* the mutant planted "the
+default port is a location", the arm **attached to the real signed-in browser on the
+host's loopback**, closed its last tab, and Chromium exited. Correct code refuses; **a
+mutant does not refuse — that is what makes it a mutant.** The sandboxes isolated HOME,
+CWD, env and PATH. Not the network. Spec: xrl4, *"Mutation arms run with NO HOST NETWORK"*.
+
+⇒ **Every runner-spawning mutation arm runs under `isolated`.** The lines a contract adds:
+
+```bash
+H="$BASE_DIR/scripts/contract-harness.mjs"
+
+# a port with nothing behind it; every port DERIVED from it is dead too
+export MYLANE_PORT="$(node "$H" sandbox-port --bare)" || exit 1
+
+# each mutation arm: the runner sees its OWN loopback only — the host's browser does not exist
+node "$H" isolated -- node test/my-mutation-arm.js
+```
+
+| verb | does | exit |
+|---|---|---|
+| `isolated -- <cmd> [args…]` | runs `<cmd>` in a private user+network namespace (`unshare -rn`) whose ONLY interface is its own `lo`, brought up first so local fakes/stubs work. Caller's env, cwd and stdio; argv as an array (no shell). | the command's exit code; **1** (FAIL, with a JSONL `"check":"isolated"` record) when isolation could not be established — **the command is then not started** |
+| `sandbox-port [--bare]` | binds `127.0.0.1:0`, reads the port, closes it, **asserts a connect is refused**, prints it (JSONL + human line; `--bare` = the number only, for `$(…)`) | 0 |
+| `guard-live-port <port> [--pin-verified]` | defence in depth where `isolated` is not used: **REFUSES** when `127.0.0.1:<port>` listens **or** answers CDP (`GET /json/version` 200), naming both facts, unless `--pin-verified` | 0 pass · 1 refused · 3 usage |
+
+* ⛔ **`isolated` fails CLOSED.** No `unshare`, unprivileged user namespaces disabled, no
+  `ip`/`ifconfig`, a loopback that will not come up → FAIL, reason printed, command not
+  run. **There is no path on which it runs the command on the host.**
+* ⭐ **It checks the PROPERTY, not the exit of `unshare`.** Inside, before the command
+  starts, it asserts: the network namespace differs from the caller's; the only interface
+  is `lo`; **no TCP listener is visible**; `lo` is up and a self-connect works. A fake
+  `unshare` that just runs its arguments is caught (tested).
+* ⚠ **The command runs as mapped root** (uid 0 inside the namespace — `unshare -r`). Files
+  it creates are owned by you on disk; a tool that refuses to run as root (Chromium without
+  `--no-sandbox`) refuses here. A mutation arm should not be launching a real browser anyway.
+* ⚠ **A harness older than these verbs exits 3 on `isolated`** — which, since your
+  contract must treat it as FAIL, fails closed too. Do NOT write `isolated … || <run it
+  anyway>`: that is the host fallback this verb exists to remove.
+* *(A listener with a dead browser behind it — docker-proxy — still counts for
+  `guard-live-port`: the browser may come back mid-run. A connect that times out is not
+  proof of absence, so it refuses too.)*
 
 ## ⛔ Contract checklist: a green exit is not a green run
 

@@ -158,6 +158,68 @@ established, not only that it was — e.g. `{generation: 2, established: "verifi
 tag: changing what a contract records is a change to what every lane writes, and it
 should land with the ownership work rather than alone.
 
+## ⛔ `isolated` — a mutant does not refuse
+
+*Incident, 2026-10-02 18:43 UTC (verified with `docker inspect` by `webctl:mgr`):* a
+consumer lane's mutation control planted "the default port is a location". The arms
+ATTACHED to the real signed-in browser listening on the host's loopback, closed its last
+tab, and Chromium exited. Correct code refuses, so the green runs were safe all along. **A
+mutant does not refuse — that is what makes it a mutant** — so every mutation control that
+perturbs target resolution can reach a live browser on the same host. The family's
+sandboxes isolated HOME, CWD, env and PATH. Not the network.
+
+### The measurement it rests on
+
+Measured on the operator machine by the `webctl:base` lead, and again while building this:
+
+```
+unshare -rn sh -c '…'                works unprivileged
+inside: connect 127.0.0.1:<host port> "Network is unreachable" (lo is DOWN in a fresh netns)
+inside: ip link set lo up            works as mapped root
+inside: /proc/self/net/dev           lists ONLY lo
+inside: /proc/self/net/tcp           no LISTEN rows (host has dozens)
+```
+
+⇒ Bringing `lo` up turns *unreachable* into *refused* — local fakes and stubs work again,
+and the host's listeners are still absent, because they live in a different namespace.
+
+### ⭐ It asserts the property, not `unshare`'s exit code
+
+The inner half runs **inside** the namespace and refuses to start the command unless:
+the netns id differs from the caller's; the only interface is `lo`; no TCP listener is
+visible; `lo` comes up and a self-connect works. ⇒ A fake `unshare` that just runs its
+arguments is caught (a test plants one), and calling the inner verb directly on the host
+refuses (the interface check fails), so it is not a bypass.
+
+⚠ The refusal reports a COUNT of extra interfaces, never their names: interface names
+describe the host, and refusal lines get pasted into issues.
+
+### Status channel on fd 3
+
+The outer half cannot tell "isolation refused" from "the command exited 1" by exit code
+alone. So the inner half writes `started` — or `fail <reason>` — on an extra pipe (fd 3),
+and closes it before spawning the command so the command does not inherit it. No
+`started` ⇒ FAIL, reported once, by the outer half; the command never ran.
+
+### Sabotage (2026-10-03)
+
+`isolated` changed to run the command directly (`sh -c 'echo started >&3; exec "$@"'`, no
+unshare) → the QA arm failed with *"the host fake was reached from inside isolation"*
+(1 connection), and both fail-closed arms that depend on the namespace failed too.
+Restored → 15/15.
+
+### Known limits
+
+* **Mapped root.** The command runs as uid 0 inside the namespace. A tool that refuses
+  root (Chromium without `--no-sandbox`) refuses here. A nested `unshare --map-user` back
+  to the caller's uid would lift this; not built — no arm needs it yet.
+* **`ip` or `ifconfig` is required** to bring `lo` up; node has no ioctl. Absent → FAIL.
+* **Linux only.** No unprivileged netns elsewhere ⇒ FAIL, never a host run. The tests
+  SKIP with a named reason where userns is unavailable.
+* **Generation unchanged (4).** These verbs are additive: no existing verdict changes
+  meaning, so a bump would send every lane looking for rot that is not there (the
+  `gate-probe` precedent).
+
 ## Deliberately not here yet
 
 * **Exercisable under the gate.** The pin check's swap arm is the one path that
