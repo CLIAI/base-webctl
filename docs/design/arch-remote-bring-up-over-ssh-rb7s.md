@@ -72,6 +72,10 @@ moved (`k3wn`: fixing an eager side effect at one call site says nothing about t
   * ⛔ **ssh joins its arguments into ONE remote shell string** (`r7x2` §1b) — an argv
     array does not survive the hop. Every element is therefore POSIX single-quoted before
     it is sent. A NUL byte is refused.
+  * ⚠ **The quoting assumes the target user's LOGIN shell is POSIX** (sh, bash, dash, zsh,
+    ksh): ssh hands the joined string to that shell. A csh/tcsh login shell rejects a
+    newline inside single quotes. *(Raised by the implementing subagent.)* Not detected
+    today; a target with a csh login shell is out of scope until someone needs one.
   * `ssh` comes from `PATH` and is **injectable**, so the `nl0c` §5.1 recording-stub
     control is base's, written once.
 
