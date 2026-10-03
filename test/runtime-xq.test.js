@@ -11,6 +11,7 @@ import child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   CAPABILITIES_SCHEMA, parseCapabilities, hasVerb, controlFor, readCapabilities,
+  hasFlag,
 } from '../lib/runtime-xq.js';
 import * as index from '../lib/index.js';
 
@@ -340,4 +341,35 @@ test('⛔ an additive field in a newer xq (per-verb "schemas") is tolerated — 
   const ff = controlFor(caps, 'firefox', { distro: 'ubuntu' });
   assert.equal(ff.state, 'declared');
   assert.deepEqual(ff.controls.map((c) => c.adapter), ['bidi']);
+});
+
+// ── flags: never send a flag this xq does not list (an older xq passes it to the APP) ──
+const fixture = (/** @type {string} */ n) => fs.readFileSync(new URL(`./fixtures/${n}`, import.meta.url), 'utf8');
+
+test('⛔ hasFlag: a flag the verb lists is OK — one it does not list is refused, naming it', () => {
+  const caps = /** @type {any} */ (parseCapabilities(fixture('xq-capabilities.schema1.flags.measured.json')));
+  assert.equal(caps.verdict, 'ok', caps.reason);
+  assert.deepEqual(hasFlag(caps, 'up', ['--profile-dir', '--no-attach']), { ok: true });
+  const r = /** @type {any} */ (hasFlag(caps, 'up', ['--profile-dir', '--teleport']));
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.missing, ['--teleport']);
+  assert.match(r.reason, /never send it/);
+  assert.equal(/** @type {any} */ (hasFlag(caps, 'no such verb', ['--x'])).ok, false);
+});
+
+test('⛔ hasFlag: an xq whose capabilities carry NO "flags" is TOO OLD to vouch — fail closed', () => {
+  // the earlier measured fixture predates the field (a real older xq)
+  const text = fixture('xq-capabilities.schema1.measured.json');
+  assert.ok(!/"flags"/.test(text), 'premise: this fixture really has no flags field');
+  const caps = /** @type {any} */ (parseCapabilities(text));
+  assert.equal(caps.verdict, 'ok', 'an older xq still PARSES — it just cannot vouch for flags');
+  const r = /** @type {any} */ (hasFlag(caps, 'up', ['--profile-dir']));
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /too old to vouch/);
+});
+
+test('a malformed "flags" makes the whole document UNKNOWN (never half-trusted)', () => {
+  const j = JSON.parse(fixture('xq-capabilities.schema1.flags.measured.json'));
+  j.verbs[0].flags = 'oops';
+  assert.equal(/** @type {any} */ (parseCapabilities(JSON.stringify(j))).verdict, 'unknown');
 });
