@@ -90,6 +90,19 @@ export function assertHermetic(violations) {
 }
 
 /**
+ * What `docker inspect` reports for a container started with these
+ * `runDetached` opts: its labels, and its BIND mounts (an absolute source; a
+ * named volume is not a bind) — the evidence the driver proves ownership by.
+ * @param {any} runOpts
+ */
+export function inspectFromRun(runOpts) {
+  const binds = (runOpts.mounts || [])
+    .map((/** @type {any} */ m) => (Array.isArray(m) ? m[0] : m && m.src))
+    .filter((/** @type {any} */ s) => typeof s === 'string' && s.startsWith('/'));
+  return inspectPresent(runOpts.name, { labels: runOpts.labels || {}, binds });
+}
+
+/**
  * A `run` for fakes in which no container exists: inspect → absent, anything
  * else → `other`.
  * @param {{code: number, stdout: string, stderr: string}} [other]

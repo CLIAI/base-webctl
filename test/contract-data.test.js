@@ -150,7 +150,12 @@ test('⛔ TEARDOWN_CONTRACT matches what shutdown() ACTUALLY calls', async () =>
     networkRm: async (/** @type {string} */ n) => { verbs.push(`networkRm:${n}`); return { code: 0 }; },
   }, { run: {
     // shutdown() proves the pair ours before stopping it: both carry our label.
-    inspect: (a) => inspectPresent(a[a.length - 1], { labels: { 'demo-webctl.owner.uid': '4242' } }),
+    // Proof is the profile bind mount (the label alone is not proof). Only the
+    // owner-named pair exists; the pre-owner names are absent.
+    inspect: (a) => (/-u4242-/.test(a[a.length - 1])
+      ? inspectPresent(a[a.length - 1], {
+        labels: { 'demo-webctl.owner.uid': '4242' }, binds: ['/tmp/no-mkdir/test'] })
+      : INSPECT_ABSENT),
   } });
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(), docker, uid: 4242 })
     .createDriver({ port: 4427, host: '127.0.0.1', slug: 'test', force: true });
