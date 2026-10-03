@@ -333,7 +333,7 @@ test('unknown keys on app / image / control objects are tolerated (additive), kn
   const withControl = j.apps.flatMap((a) => a.images).find((im) => Array.isArray(im.control) && im.control.length);
   if (withControl) withControl.control[0].future = 'y';
   assert.equal(/** @type {any} */ (parseCapabilities(JSON.stringify(j))).verdict, 'ok');
-  // control: a malformed KNOWN field on the same objects is refused
+  // control: a malformed KNOWN field (here the verb-level `schemas`) is still refused
   j.verbs[0].schemas = 'x';
   assert.equal(/** @type {any} */ (parseCapabilities(JSON.stringify(j))).verdict, 'unknown');
 });
