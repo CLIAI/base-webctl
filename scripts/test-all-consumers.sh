@@ -202,6 +202,22 @@ scratch_begin() {
     fi
   fi
   rm -f "$log"
+  # ⛔ DEPENDENCIES. A clone has no node_modules (it is gitignored), and the contract
+  # runs with NO network, so it cannot install one. A lane with npm dependencies
+  # then failed every test with "Cannot find package" (measured on the first real
+  # scratch run). ⇒ COPY the live tree's installed node_modules. Not a symlink: a link
+  # would put the live tree within the arm's reach, and one under /tmp would dangle
+  # inside `isolated`'s fresh /tmp. What runs is the live tree's INSTALLED copy, which
+  # is what the lane runs too; it is named in the output so nobody reads it as a
+  # fresh `npm ci`.
+  SCRATCH_DEPS=""
+  if [ -z "$SCRATCH_ERR" ] && [ -d "$live/node_modules" ] && [ ! -e "$dst/node_modules" ]; then
+    if cp -a -- "$live/node_modules" "$dst/node_modules" 2>/dev/null; then
+      SCRATCH_DEPS="node_modules copied from the live tree (its installed copy, not a fresh npm ci)"
+    else
+      SCRATCH_ERR="could not copy the live tree's node_modules into the clone"
+    fi
+  fi
   if [ -z "$SCRATCH_ERR" ]; then
     # ⛔ Assert the VALUES, not that the commands exited 0.
     got="$(git -C "$dst" rev-parse HEAD 2>/dev/null || echo none)"
@@ -497,6 +513,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     run_home="$SCRATCH_TMP/repo-home"
     echo "SCRATCH $name: clone of $repo_dir at ${live_head:0:7}; $submodulePath = base ${BASE_HEAD:0:7}; live tree untouched" >&2
     echo "        $tested_note" >&2
+    if [ -n "$SCRATCH_DEPS" ]; then echo "        deps: $SCRATCH_DEPS" >&2; fi
   fi
   contract_script="${testCmd%% *}"
   if [ ! -x "$run_dir/$contract_script" ]; then

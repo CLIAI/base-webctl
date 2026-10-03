@@ -62,6 +62,7 @@ if [ -n "\${FAKE_PAUSE:-}" ]; then
   for _ in $(seq 300); do [ -f ./.fake-go ] && break; sleep 0.1; done
 fi
 if [ -n "\${FAKE_STARTED:-}" ]; then : > ./.fake-started; sleep 30; fi
+if [ -n "\${FAKE_DEPS:-}" ]; then if [ -f node_modules/dep/index.js ]; then echo DEPS=PRESENT; else echo DEPS=ABSENT; fi; fi
 if [ -n "\${FAKE_WIPE_TMP:-}" ]; then c="$(cat code.txt)"; cat out.txt; rm -rf /tmp/* 2>/dev/null; exit "$c"; fi
 cat out.txt
 exit "$(cat code.txt)"
@@ -94,7 +95,7 @@ function world(o = {}) {
   fs.writeFileSync(path.join(repo, 'test-against-base.sh'), contract('committed'), { mode: 0o755 });
   fs.writeFileSync(path.join(repo, 'out.txt'), o.output ?? 'ok 1 - a\n# tests 1\n# pass 1\n# fail 0\n');
   fs.writeFileSync(path.join(repo, 'code.txt'), `${o.code ?? 0}\n`);
-  fs.writeFileSync(path.join(repo, '.gitignore'), 'gate-was-here.txt\n');
+  fs.writeFileSync(path.join(repo, '.gitignore'), 'gate-was-here.txt\nnode_modules/\n');
   git(['init', '-q'], repo); git(['add', '.'], repo);
   git([...GIT_ID, 'commit', '-qm', 'fake consumer'], repo);
   // initialised, as a real consumer's is — else `submodule status` prints `-` and
@@ -437,6 +438,31 @@ test('⛔ scratch: a contract that wipes /tmp still counts as RUN — the start 
     assert.match(r.out, /FAIL {2}fake-webctl \(exit 1\):.* boom/);
     assert.doesNotMatch(r.out, /GATE-ENVIRONMENT/);
   } finally { f.cleanup(); }
+});
+
+test('scratch: the live tree\'s installed node_modules is COPIED into the clone (no network to install)', { skip: NEEDS_NS }, () => {
+  // First real scratch run: a lane with npm dependencies failed every test with
+  // "Cannot find package". The clone has no node_modules and the arm has no network.
+  const w = world();
+  try {
+    const dep = path.join(w.repo, 'node_modules', 'dep');
+    fs.mkdirSync(dep, { recursive: true });
+    fs.writeFileSync(path.join(dep, 'index.js'), 'module.exports = 1;\n');
+    const r = w.gate(['--against-head', '--scratch'], { FAKE_DEPS: '1' });
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /DEPS=PRESENT/);
+    assert.match(r.out, /deps: node_modules copied from the live tree/);
+    // a COPY: the live dir is untouched and is not what the arm saw through a link
+    assert.equal(fs.readFileSync(path.join(dep, 'index.js'), 'utf8'), 'module.exports = 1;\n');
+  } finally { w.cleanup(); }
+  // control: no node_modules in the live tree → none in the clone, and no deps line
+  const c = world();
+  try {
+    const r = c.gate(['--against-head', '--scratch'], { FAKE_DEPS: '1' });
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /DEPS=ABSENT/);
+    assert.doesNotMatch(r.out, /deps: node_modules/);
+  } finally { c.cleanup(); }
 });
 
 test('scratch: a hidden failure (exit 0 + TAP `not ok`) is a FAIL, reported exactly as in-place', { skip: NEEDS_NS }, () => {
