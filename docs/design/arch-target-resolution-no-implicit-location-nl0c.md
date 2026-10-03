@@ -105,6 +105,28 @@ driver. ⇒ **Composition:**
 * Moving a signed-in lane to another machine is a **re-login there**, which is the
   person's decision; changing the shared default never does it implicitly.
 
+## 1c. ✅ RULED: the ENGINE vocabulary is base's — one resolver, one code set
+
+Greg, 2026-10-03: the new lanes develop for chromium, opera and firefox, each in docker.
+Two lanes built engine-aware layers the same day and **diverged** at once — different env
+names, different refusal codes for the same rule, ~40 identical lines of glue each
+(`webctl:mgr`). ⇒ Base defines it:
+
+* **`firefox` is a valid `app`.** Validity is about the record; whether an engine can be
+  DRIVEN is separate: **`ENGINES_PENDING`** (base-owned, `['firefox']` until base's WebDriver
+  BiDi backend ships — Firefox removed CDP in v141, `rx9q` §2). A firefox record loads; a
+  run that would drive it is refused `engine-pending`. No lane decides this alone.
+* **`targetEnvKey(tool, 'engine')`** → `CLIAI_<TOOL>_BROWSER_ENGINE`.
+* **`resolveEngine({flag, env, record})`** — a record that names an `app` describes what
+  RUNS there: a flag or env asking for a different engine on that target is
+  **`engine-conflict`**, refused, never overridden. A record without `app` lets flag > env
+  decide. Fixed code set: **`no-engine` · `invalid-engine` · `engine-conflict` ·
+  `engine-pending`**; a resolved engine reports its source like `resolveTarget` does.
+* **`resolveSharedTarget({flag, env, laneConfig, hints})`** — the glue both lanes wrote:
+  load the shared config, rank flag > env > laneConfig > shared, resolve, and return the
+  record for the resolved NAME (whole, `§1b`) — or `record: null` with the reason when the
+  name has no shared record.
+
 ## 2. ✅ RULED: `--target` is THE location flag; `--client` never chooses a location
 
 `btg4` left the noun collision open. Settled here, once:
