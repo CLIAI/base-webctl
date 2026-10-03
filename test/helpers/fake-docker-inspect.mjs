@@ -101,12 +101,3 @@ export function inspectFromRun(runOpts) {
     .filter((/** @type {any} */ s) => typeof s === 'string' && s.startsWith('/'));
   return inspectPresent(runOpts.name, { labels: runOpts.labels || {}, binds });
 }
-
-/**
- * A `run` for fakes in which no container exists: inspect → absent, anything
- * else → `other`.
- * @param {{code: number, stdout: string, stderr: string}} [other]
- */
-export function runAbsent(other = { code: 0, stdout: '', stderr: '' }) {
-  return async (/** @type {string[]} */ args) => (args[0] === 'inspect' ? INSPECT_ABSENT : other);
-}

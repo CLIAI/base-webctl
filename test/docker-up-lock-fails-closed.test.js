@@ -13,8 +13,7 @@ import assert from 'node:assert/strict';
 
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
-import * as realDocker from '../lib/browser-location/docker-ctl.js';
-import { INSPECT_ABSENT, inspectFromRun } from './helpers/fake-docker-inspect.mjs';
+import { guardedDocker, assertHermetic, INSPECT_ABSENT, inspectFromRun } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC() {
   return {
@@ -67,8 +66,7 @@ async function bringUp(/** @type {any} */ lock) {
   // mounts the driver's own profile.
   /** @type {Map<string, any>} */
   const live = new Map();
-  const docker = {
-    ...realDocker,
+  const { docker, violations } = guardedDocker({
     dockerAvailable: async () => true,
     containerExists: async () => false,
     containerRunning: async (/** @type {string} */ n) => started > 0 && n.includes('chromium'),
@@ -79,15 +77,15 @@ async function bringUp(/** @type {any} */ lock) {
     volumeRm: async () => ({ code: 0 }),
     volumeCreate: async () => ({ code: 0 }),
     exec: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
-    run: async (/** @type {string[]} */ a) => {
-      if (a[0] !== 'inspect') return { code: 0, stdout: '', stderr: '' };
-      const n = a[a.length - 1];
-      return live.has(n) ? inspectFromRun(live.get(n)) : INSPECT_ABSENT;
-    },
     runDetached: async (/** @type {any} */ o) => {
       started++; live.set(o.name, o); return { code: 0, stderr: '' };
     },
-  };
+  }, { run: {
+    inspect: (a) => {
+      const n = a[a.length - 1];
+      return live.has(n) ? inspectFromRun(live.get(n)) : INSPECT_ABSENT;
+    },
+  } });
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C), docker, profileLock: lock, uid: 4242 })
     // Portless: no CDP poll. force: skip the port pre-flight (a different `force`).
     .createDriver({ port: 45999, host: '127.0.0.1', slug: 'test', force: true,
@@ -95,6 +93,7 @@ async function bringUp(/** @type {any} */ lock) {
   /** @type {any} */
   let result, error;
   try { result = await drv.ensureRunning(); } catch (e) { error = e; }
+  assertHermetic(violations);
   // only removals AFTER containers were started count as teardown
   return { result, error, removed, removedAfterStart, started };
 }

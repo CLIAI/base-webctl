@@ -16,8 +16,7 @@ import assert from 'node:assert/strict';
 
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
-import * as realDocker from '../lib/browser-location/docker-ctl.js';
-import { runAbsent } from './helpers/fake-docker-inspect.mjs';
+import { guardedDocker, assertHermetic, INSPECT_ABSENT } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC() {
   return {
@@ -87,8 +86,7 @@ async function bringUp(cfg, o = {}) {
   const C = fakeC();
   /** @type {any[]} */
   const calls = [];
-  const docker = {
-    ...realDocker,
+  const { docker, violations } = guardedDocker({
     dockerAvailable: async () => true,
     containerExists: async () => false,
     containerRunning: async (/** @type {string} */ n) =>
@@ -98,14 +96,16 @@ async function bringUp(cfg, o = {}) {
     volumeRm: async () => ({ code: 0 }),
     volumeCreate: async () => ({ code: 0 }),
     exec: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
-    // inspect → absent (the ownership check); anything else → logs.
-    run: runAbsent({ code: 0, stdout: 'container logs', stderr: '' }),
     runDetached: async (/** @type {any} */ a) => { calls.push(a); return { code: 0, stderr: '' }; },
-  };
+  }, { run: {
+    inspect: () => INSPECT_ABSENT, // the ownership check: no container exists
+    logs: () => ({ code: 0, stdout: 'container logs', stderr: '' }),
+  } });
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C), docker })
     .createDriver({ port: TEST_CDP_PORT, host: '127.0.0.1', slug: 'test', force: true, ...cfg });
   let result, error;
   try { result = await drv.ensureRunning(); } catch (e) { error = e; }
+  assertHermetic(violations);
   return { calls, result, error, drv };
 }
 
