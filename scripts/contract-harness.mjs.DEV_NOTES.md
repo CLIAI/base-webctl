@@ -370,6 +370,31 @@ nested `unshare -rm` WITH caps `umount -l /tmp` → "not mounted": inherited mou
   cap. The attack is `remount,bind,rw` (the per-mount flag); fixed, red. The nested-unshare
   arm survives the mutation **by design** — it tests mount locking, which holds with caps.
 
+### ⛔ No PID namespace — host processes were signalable (2026-10-03)
+
+*Measured by the final review:* `kill -0 <host pid>` from inside succeeded (same kuid, no
+pid ns) and `/proc` showed every host process. ⇒ `unshare -rnm --pid --fork --mount-proc
+--kill-child`. The inner half is now **pid 1** of the new namespace; when it exits, the
+kernel SIGKILLs everything left in it — an arm's stray background processes included.
+
+* ⛔ **`unshare --fork` BLOCKS SIGTERM in its own process until its child exits** (and
+  ignores INT/QUIT: `SigIgn 0x6`). Measured: TERM to unshare never reached the child, which
+  ran to completion. The old `forwardSignals(unshare)` would have silently stopped
+  delivering — no test covered it (the brief assumed one did). ⇒
+  `forwardSignalsPastUnshare`: signal unshare's CHILD (from
+  `/proc/<pid>/task/<pid>/children`, else a `/proc` scan); none yet ⇒ SIGKILL unshare, and
+  `--kill-child` takes the namespace down — nothing had started.
+* **pid 1 ignores a signal it has no handler for.** So the inner half installs exit-on-signal
+  handlers from its first line and swaps them for runCommand's forwarders only when the
+  command starts. ⚠ That pre-command window has no test: it needs a signal inside a ~100 ms
+  masking window, which is a race, not an arm.
+* **Nesting fact 7:** `/proc/self/ns/pid` ≠ `WEBCTL_HOST_PIDNS`. Recorded, so fabricable —
+  like the netns/mntns ids; the env-free facts carry the rest.
+* **Sabotage:** no `--pid --fork --mount-proc` → the ESRCH arm red (the SIGTERM arm stays
+  green: without `--fork` unshare execs, and the old path works); signals to unshare instead
+  of its child → the SIGTERM arm red (`TIMEOUT` after 10 s — the trapper is bounded so a lost
+  signal cannot leave an orphan); nested pid fact off → its nesting arm red.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

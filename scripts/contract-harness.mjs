@@ -552,6 +552,45 @@ function forwardSignals(child) {
   }
 }
 
+/**
+ * Host pids of `pid`'s children: /proc/<pid>/task/<pid>/children, else a /proc scan.
+ * @param {number} pid @returns {number[]}
+ */
+function childrenOf(pid) {
+  try {
+    return fs.readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number);
+  } catch { /* CONFIG_PROC_CHILDREN off: scan */ }
+  /** @type {number[]} */ const out = [];
+  for (const d of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(d)) continue;
+    try {
+      const st = fs.readFileSync(`/proc/${d}/stat`, 'utf8');
+      if (Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[1]) === pid) out.push(Number(d));
+    } catch { /* gone */ }
+  }
+  return out;
+}
+
+/**
+ * Forward termination signals THROUGH `unshare --fork` to the inner half.
+ *
+ * ⛔ `unshare --fork` BLOCKS SIGTERM (and ignores SIGINT/SIGQUIT) in its own process until
+ * its child exits — measured: a SIGTERM to it never reached the child, which ran to the
+ * end. So the signal goes to unshare's CHILD, the inner half (pid 1 of the new namespace;
+ * it installs handlers, which a namespace init needs to receive anything). No child yet ⇒
+ * SIGKILL unshare, and `--kill-child` takes the namespace with it — nothing has started.
+ * @param {import('node:child_process').ChildProcess} unshare
+ */
+function forwardSignalsPastUnshare(unshare) {
+  for (const s of /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM', 'SIGHUP'])) {
+    process.on(s, () => {
+      const kids = unshare.pid ? childrenOf(unshare.pid) : [];
+      if (kids.length === 0) { try { unshare.kill('SIGKILL'); } catch { /* gone */ } return; }
+      for (const k of kids) { try { process.kill(k, s); } catch { /* gone */ } }
+    });
+  }
+}
+
 /** @param {number|null} code @param {NodeJS.Signals|null} signal */
 function exitCodeOf(code, signal) {
   if (code != null) return code;
@@ -566,7 +605,7 @@ const ISOLATED_USAGE = 'usage: contract-harness.mjs isolated [--keep <path>]… 
  * NO host unix sockets.
  *
  * The outer half spawns
- * `unshare -rnm --propagation=private <node> <this file> __isolated-inner <netns> -- <cmd…>`
+ * `unshare -rnm --pid --fork --mount-proc --kill-child --propagation=private <node> <this file> __isolated-inner <netns> -- <cmd…>`
  * with two extra pipes: fd 3 is the STATUS channel, fd 4 carries the masking PLAN
  * (host mount-ns id, cwd, paths to re-expose, the host's path sockets — a list that
  * can be long, so never argv). The inner half proves the isolation and masks (below),
@@ -650,9 +689,11 @@ function runIsolated(a) {
   }
   let hostNs = '';
   let hostMnt = '';
+  let hostPid = '';
   try {
     hostNs = fs.readlinkSync('/proc/self/ns/net');
     hostMnt = fs.readlinkSync('/proc/self/ns/mnt');
+    hostPid = fs.readlinkSync('/proc/self/ns/pid');
   } catch (e) {
     return Promise.resolve(report('isolated', EXIT.fail,
       `cannot read this process's namespaces (${errMsg(e)}), so isolation cannot be PROVEN; `
@@ -696,15 +737,19 @@ function runIsolated(a) {
     let child;
     try {
       child = spawn('unshare',
-        ['-rnm', '--propagation=private', process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
+        // --pid --fork --mount-proc: a private PID namespace with its own /proc, so no host
+        // process can be signalled or even seen. --kill-child: if unshare dies, so does
+        // everything inside (the inner half is the namespace's pid 1).
+        ['-rnm', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
+          process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'],
-          env: { ...process.env, [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt,
+          env: { ...process.env, [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt, [HOST_PIDNS_ENV]: hostPid,
             [RO_ROOTS_ENV]: JSON.stringify(prot.roots) } });
     } catch (e) {
       resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
       return;
     }
-    forwardSignals(child);
+    forwardSignalsPastUnshare(child);
     const planPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[4]);
     planPipe?.on('error', () => { /* the inner side refused or never started */ });
     planPipe?.end(payload);
@@ -765,6 +810,12 @@ async function runIsolatedInner(a) {
   };
   const [hostNs, sep, ...command] = a;
   if (!hostNs || sep !== '--' || command.length === 0) return refuse('internal: malformed inner invocation');
+  // ⚠ We are pid 1 of the new PID namespace: a signal with no handler is IGNORED. Until the
+  // command runs (runCommand forwards from then on), a termination signal ends us — and the
+  // namespace with us — rather than letting the command start after the caller gave up.
+  const SIGS = /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM', 'SIGHUP']);
+  const early = (/** @type {NodeJS.Signals} */ s) => process.exit(128 + (os.constants.signals[s] || 1));
+  for (const s of SIGS) process.on(s, early);
 
   let ns = '';
   try { ns = fs.readlinkSync('/proc/self/ns/net'); } catch (e) {
@@ -862,6 +913,7 @@ async function runIsolatedInner(a) {
   if (!tell('started')) return refuse('internal: the status channel (fd 3) is missing — run via `isolated`');
   try { fs.closeSync(3); } catch { /* the command must not inherit it */ }
 
+  for (const s of SIGS) process.off(s, early);
   return runCommand(command, priv.prefix);
 }
 
@@ -1402,7 +1454,8 @@ function runCommand(command, prefix = []) {
 // WRITABLE — signed-in profiles, ~/.config, ~/.ssh. So a sixth:
 //
 //   6. each root in WEBCTL_RO_ROOTS (recorded at entry) answers access(W_OK) with EROFS
-//      (or is absent — masked).
+//      (or is absent — masked);
+//   7. /proc/self/ns/pid DIFFERS from WEBCTL_HOST_PIDNS — no host process is signalable.
 //
 // ⚠ The roots are RECORDED, not re-derived: inside the user namespace we are uid 0 and
 // the passwd lookup answers root's home. access(2) rather than mountinfo because it asks
@@ -1412,6 +1465,7 @@ function runCommand(command, prefix = []) {
 
 const HOST_NETNS_ENV = 'WEBCTL_HOST_NETNS';
 const HOST_MNTNS_ENV = 'WEBCTL_HOST_MNTNS';
+const HOST_PIDNS_ENV = 'WEBCTL_HOST_PIDNS';
 const RO_ROOTS_ENV = 'WEBCTL_RO_ROOTS';
 
 /** The protected roots `isolated` recorded at entry, or null when absent/malformed. */
@@ -1456,7 +1510,7 @@ function extraInterfaces() {
 
 /**
  * Is this process provably inside the namespaces `isolated` made — no host network,
- * no host unix sockets, a read-only home? All six facts must hold; every one that fails
+ * no host unix sockets, a read-only home, no host processes? All seven facts must hold; every one that fails
  * is named.
  * @returns {{inside: boolean, why: string, facts: Record<string, any>}}
  */
@@ -1467,6 +1521,9 @@ function kernelInsideProof() {
   try { netns = fs.readlinkSync('/proc/self/ns/net'); } catch { /* named below */ }
   let mntns = '';
   try { mntns = fs.readlinkSync('/proc/self/ns/mnt'); } catch { /* named below */ }
+  const recordedPid = process.env[HOST_PIDNS_ENV];
+  let pidns = '';
+  try { pidns = fs.readlinkSync('/proc/self/ns/pid'); } catch { /* named below */ }
   const uidMap = uidMapKind();
   const extra = extraInterfaces();
   const unmasked = unmaskedDirs();
@@ -1488,12 +1545,15 @@ function kernelInsideProof() {
   if (unmasked.length) {
     fails.push(`no '${MASK_SOURCE}' tmpfs on top of ${unmasked.join(', ')} (the host's unix sockets there are reachable)`);
   }
+  if (!pidns) fails.push('/proc/self/ns/pid is unreadable');
+  if (!recordedPid) fails.push(`${HOST_PIDNS_ENV} is not set, so there is no recorded host PID namespace to differ from`);
+  else if (pidns === recordedPid) fails.push(`the current PID namespace ${pidns} EQUALS the recorded host one (host processes can be signalled)`);
   if (!roRoots) fails.push(`${RO_ROOTS_ENV} is not set (or malformed), so there is no recorded home directory to find read-only`);
   else if (writable) fails.push(`${writable} of ${roRoots.length} protected root(s) — the home directory — are WRITABLE here`);
   // ⚠ counts, never the roots: they are home paths, and refusals get pasted
   return { inside: fails.length === 0, why: fails.join('; '),
     facts: { netns, recorded: recorded ?? null, uidMap, extraInterfaces: extra,
-      mntns, recordedMnt: recordedMnt ?? null, unmasked,
+      mntns, recordedMnt: recordedMnt ?? null, pidns, recordedPid: recordedPid ?? null, unmasked,
       roRoots: roRoots ? roRoots.length : null, writableRoRoots: writable } };
 }
 

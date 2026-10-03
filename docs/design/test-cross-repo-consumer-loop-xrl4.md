@@ -464,6 +464,13 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
   `/dev/null` bound over it and is tested again; any that still answers ⇒ refused. Refusals
   carry **counts, never paths**. *Measured on a workstation:* 307 listed, 220 answer on the
   host, **0** inside.
+* **No host processes.** *Measured by the final review:* `kill -0 <host pid>` succeeded from
+  inside and `/proc` listed every host process — a mutant of an ownership check (`ow9k`)
+  that kills by pid kills the human's live browser, without any network. ⇒
+  `unshare --pid --fork --mount-proc --kill-child`: inside, a host pid is `ESRCH` and absent
+  from `/proc`; the arm's own leftovers die with the namespace's pid 1. ⚠ `unshare --fork`
+  **blocks SIGTERM** in its own process until the child exits (measured), so the harness
+  forwards termination signals to unshare's CHILD — the inner half — not to unshare.
 * **No capabilities.** *Measured by the final review:* the command was namespace root with
   **every** capability, so `umount -l /tmp` or unmounting a `/dev/null` cover re-exposed host
   sockets (ENOENT/ECONNREFUSED → CONNECTED). ⇒ It runs under `setpriv --no-new-privs

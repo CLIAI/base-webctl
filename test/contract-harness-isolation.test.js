@@ -980,10 +980,10 @@ test('⛔ nesting: every OLD fact satisfied (netns, mntns, our tmpfs on /run+/tm
     + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
     + ' && mount -t tmpfs webctl-isolated /tmp && mkdir -p "$0" && mount --move /run/k "$0" && exec "$@"';
   const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage, ROOT],
-    'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]) });
+    'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]' });
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(r.stderr, /1 of 1 protected root\(s\) — the home directory — are WRITABLE here/);
-  assert.doesNotMatch(r.stderr, /EQUALS|uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs/, 'only the home fact should refuse');
+  assert.doesNotMatch(r.stderr, /EQUALS|uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|PID namespace/, 'only the home fact should refuse');
   assert.equal(r.ran, false, 'a namespace with a writable home was accepted as `isolated`');
 });
 
@@ -1126,6 +1126,84 @@ test('⛔ fail closed: a `setpriv` that does NOT drop (runs its argv as-is) → 
     assert.match(r.stderr, /after setpriv the command would still hold CapPrm, CapEff, CapBnd/);
     assert.equal(fs.existsSync(marker), false, 'the command ran with capabilities');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── signals and exit codes reach through the namespaces ─────────────────────
+
+/**
+ * Wait for READY, SIGTERM the process, resolve with its exit code + stdout. The command
+ * gives up by itself after ~10 s, so a LOST signal ends as `TIMEOUT` rc 9 — never as an
+ * orphan looping forever. @param {string[]} argv
+ */
+function termAfterReady(argv) {
+  return /** @type {Promise<{status: number|null, signal: string|null, stdout: string}>} */ (new Promise((resolve) => {
+    const c = spawn(argv[0], argv.slice(1), { env: cleanEnv() });
+    let stdout = ''; let sent = false;
+    c.stdout.on('data', (d) => {
+      stdout += d;
+      if (!sent && /READY/.test(stdout)) { sent = true; c.kill('SIGTERM'); }
+    });
+    c.on('close', (status, signal) => resolve({ status, signal, stdout }));
+  }));
+}
+const TRAPPER = 'trap "echo GOT-TERM; exit 7" TERM; echo READY; i=0; '
+  + 'while [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; echo TIMEOUT; exit 9';
+
+test('⭐ SIGTERM to the harness reaches the command inside (its trap runs, its exit code comes back)', needsIsolation, async () => {
+  const r = await termAfterReady([process.execPath, TOOL, 'isolated', '--', 'sh', '-c', TRAPPER]);
+  assert.match(r.stdout, /GOT-TERM/, `the command never saw the SIGTERM:\n${r.stdout}`);
+  assert.equal(r.status, 7, r.stdout);
+});
+
+test('⭐ CONTROL: the same trapper WITHOUT `isolated` → GOT-TERM, rc 7', async () => {
+  const r = await termAfterReady(['sh', '-c', TRAPPER]);
+  assert.match(r.stdout, /GOT-TERM/);
+  assert.equal(r.status, 7);
+});
+
+test('isolated: a command killed by a signal → 128+signal (143 for SIGTERM)', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'sh', '-c', 'kill -TERM $$']);
+  assert.equal(r.status, 143, r.stdout + r.stderr);
+});
+
+// ── no host PROCESSES: a private PID namespace ───────────────────────────────
+//
+// ⛔ Measured by the final review: `kill -0 <host pid>` SUCCEEDED from inside (same kuid,
+// no PID namespace) and /proc listed every host process. A mutant of an ownership check
+// ("is this browser mine?", ow9k) that kills by pid would kill the human's live browser.
+// These arms only ever signal 0 at a `sleep` THIS test started.
+
+/** Prints `KILL0 <ok|errno>` for kill(argv[1], 0), and `PROC <yes|no>` for /proc/<pid>. */
+const KILL0 = `const p = Number(process.argv[1]);
+try { process.kill(p, 0); console.log('KILL0 ok'); } catch (e) { console.log('KILL0 ' + e.code); }
+console.log('PROC ' + (require('fs').existsSync('/proc/' + p) ? 'yes' : 'no'));`;
+
+test('⭐ ARM: a host process this test started → kill(pid, 0) is ESRCH inside, and /proc does not list it', needsIsolation, async () => {
+  const victim = spawn('sleep', ['30'], { stdio: 'ignore' });
+  try {
+    const r = await run(['isolated', '--', process.execPath, '-e', KILL0, String(victim.pid)]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^KILL0 ESRCH$/m, `a host process can be signalled from inside:\n${r.stdout}`);
+    assert.match(r.stdout, /^PROC no$/m, 'host processes are visible in /proc inside');
+    // CONTROL: on the host the same pid is alive and signalable — ESRCH above is the namespace
+    const c = await runRaw([process.execPath, '-e', KILL0, String(victim.pid)]);
+    assert.match(c.stdout, /^KILL0 ok$/m);
+    assert.match(c.stdout, /^PROC yes$/m);
+  } finally { victim.kill('SIGKILL'); }
+});
+
+test('⛔ nesting: every other fact satisfied (full mask, ro home) but the HOST PID namespace → refused by the pid fact alone', needsIsolation, async () => {
+  const stage = 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
+    + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
+    + ' && mount -t tmpfs webctl-isolated /tmp && mkdir -p "$0" && mount --move /run/k "$0"'
+    + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift && exec "$@"';
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage, ROOT, PW_HOME],
+    'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: fs.readlinkSync('/proc/self/ns/pid') });
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /the current PID namespace .* EQUALS the recorded host one/);
+  assert.doesNotMatch(r.stderr, /uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|WRITABLE here|mount namespace .* EQUALS/,
+    'only the pid fact should refuse');
+  assert.equal(r.ran, false, 'a namespace sharing the host PIDs was accepted as `isolated`');
 });
 
 // ── import guard ─────────────────────────────────────────────────────────────

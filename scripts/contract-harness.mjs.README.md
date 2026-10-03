@@ -215,7 +215,7 @@ contract's output when it is used.
 
 | verb | does | exit |
 |---|---|---|
-| `isolated [--keep <path>]… -- <cmd> [args…]` | runs `<cmd>` in private user+network+mount namespaces (`unshare -rnm`): the ONLY interface is its own `lo`, brought up first so local fakes/stubs work; `/run` and `/tmp` (and a real `/var/run`) are a fresh tmpfs, so the host's unix sockets — docker, X11, ssh-agent, session bus — are gone. The **passwd home is READ-ONLY**, every submount included. The cwd, base's repo root, an absolute `<cmd>`, node, a `$HOME` under `/tmp` and each `--keep` stay at their paths; **writable**: the cwd, a `$HOME` under `/tmp`, each `--keep` — **read-only**: base's repo root, node, the command. Caller's cwd and stdio; env minus `DISPLAY`/`WAYLAND_DISPLAY`/`SSH_AUTH_SOCK`/`DBUS_SESSION_BUS_ADDRESS`/`DOCKER_HOST`/`XDG_RUNTIME_DIR`, `TMPDIR=/tmp`; argv as an array (no shell). | the command's exit code; **1** (FAIL, with a JSONL `"check":"isolated"` record) when isolation could not be established — **the command is then not started** |
+| `isolated [--keep <path>]… -- <cmd> [args…]` | runs `<cmd>` in private user+network+mount+**PID** namespaces (`unshare -rnm --pid --fork --mount-proc`) — no host process can be seen or signalled, and everything the arm started dies with it: the ONLY interface is its own `lo`, brought up first so local fakes/stubs work; `/run` and `/tmp` (and a real `/var/run`) are a fresh tmpfs, so the host's unix sockets — docker, X11, ssh-agent, session bus — are gone. The **passwd home is READ-ONLY**, every submount included. The cwd, base's repo root, an absolute `<cmd>`, node, a `$HOME` under `/tmp` and each `--keep` stay at their paths; **writable**: the cwd, a `$HOME` under `/tmp`, each `--keep` — **read-only**: base's repo root, node, the command. Caller's cwd and stdio; env minus `DISPLAY`/`WAYLAND_DISPLAY`/`SSH_AUTH_SOCK`/`DBUS_SESSION_BUS_ADDRESS`/`DOCKER_HOST`/`XDG_RUNTIME_DIR`, `TMPDIR=/tmp`; argv as an array (no shell). | the command's exit code; **1** (FAIL, with a JSONL `"check":"isolated"` record) when isolation could not be established — **the command is then not started** |
 | `isolation-check <port>…` | run INSIDE `isolated`. Each named port: a connect to `127.0.0.1:<port>` must fail with **exactly `ECONNREFUSED`** (lo up, nothing listening) — `ENETUNREACH` means the loopback is DOWN and is a FAIL. A control listener it opens on the namespace loopback must be reachable. The kernel proof below must hold. | 0 pass · 1 fail, naming every condition that failed · 3 usage |
 | `sandbox-port [--bare]` | binds `127.0.0.1:0`, reads the port, closes it, **asserts a connect is refused**, prints it (JSONL + human line; `--bare` = the number only, for `$(…)`) | 0 |
 | `guard-live-port <port> [--pin-verified]` | defence in depth where `isolated` is not used: **REFUSES** when `127.0.0.1:<port>` listens **or** answers CDP (`GET /json/version` 200), naming both facts, unless `--pin-verified` | 0 pass · 1 refused · 3 usage |
@@ -250,14 +250,14 @@ contract's output when it is used.
   arm sees an empty `/tmp` and writes land in it, not on the host. Only `--keep` paths are
   exempt from the socket test; a socket in the cwd is still covered if it answers.
 * ⛔ **Nested calls are detected from the KERNEL, never from an env marker.** `isolated`
-  exports `WEBCTL_HOST_NETNS`, `WEBCTL_HOST_MNTNS` (the host namespace ids it saw at
-  entry) and `WEBCTL_RO_ROOTS` (the read-only roots). A nested `isolated` proceeds as
-  *already inside* — without unsharing again — only when **all six** hold:
+  exports `WEBCTL_HOST_NETNS`, `WEBCTL_HOST_MNTNS`, `WEBCTL_HOST_PIDNS` (the host namespace
+  ids it saw at entry) and `WEBCTL_RO_ROOTS` (the read-only roots). A nested `isolated`
+  proceeds as *already inside* — without unsharing again — only when **all seven** hold:
   `/proc/self/ns/net` ≠ the netns id; `/proc/self/uid_map` is **not** the identity map;
   `/proc/self/net/dev` lists **only `lo`**; `/proc/self/ns/mnt` ≠ the mntns id;
-  `/proc/self/mountinfo` shows the `webctl-isolated` tmpfs **on top of** `/run` and `/tmp`;
-  and each recorded root answers `access(W_OK)` with `EROFS`. Otherwise: **exit 2, nothing
-  run.** *(A lane's
+  `/proc/self/ns/pid` ≠ the pidns id; `/proc/self/mountinfo` shows the `webctl-isolated`
+  tmpfs **on top of** `/run` and `/tmp`; and each recorded root answers `access(W_OK)` with
+  `EROFS`. Otherwise: **exit 2, nothing run.** *(A lane's
   own `…_IN_NETNS=1` marker, set on the host, skipped isolation for a whole suite. The id
   alone can be fabricated; uid_map alone proves only a USER namespace — `unshare -r`
   without `-n` passes it; and the two together are still beaten by `unshare -r` plus a
