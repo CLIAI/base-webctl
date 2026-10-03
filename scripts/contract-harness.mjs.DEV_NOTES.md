@@ -159,6 +159,42 @@ Also fixed in passing: `byName` was single-valued, and base has **two** `index.j
 module, so a copy could reach its siblings through it and be excused — the same hole
 by another door. No surveyed shim needs it.
 
+### Review of generation 5 (same generation; tightening + two exceptions)
+
+* ⛔ **"Comments stripped" was whole-line `//` only.** Measured in review: a copy
+  ending in `// forked from require('…/cdp-client.js')` → PASS, exit 0; the same text
+  in a string literal → PASS. The regex ran over text that still held prose. ⇒
+  Replaced by a zero-dependency **lexer** (`lexJs`): strings `' " \``, template
+  `${…}` nesting, regex literals (keyword/punctuation heuristic), line/trailing/
+  block comments. `moduleFacts` then takes a string as a specifier **only** in a
+  module-syntax position — `from` inside an `import`/`export {…}|*` clause (so a
+  plain identifier `from` followed by a string after ASI does not count),
+  `import '<s>'`, `import('<s>')`, `require('<s>')` with that single literal as the
+  argument and not `x.require`. `normHash` uses the same lexer's comment-free text,
+  so a TRAILING comment added to a copy no longer changes its hash (symmetric: both
+  sides go through it).
+* ⚠ Lexer limits, stated rather than hidden: a regex literal right after `)` or `}`
+  is read as division; a locally shadowed `require` is still taken as require.
+* ⭐ **Base's own house rule conflicted with generation 5.** AGENTS.md tells
+  consumers to import only `lib/index.js`, and gen 5 failed a same-named pure
+  re-export through it; it also failed a consumer's own local barrel `lib/index.js`
+  (gen 4 passed it). ⇒ Two exceptions, both gated on **defines nothing** (no
+  `function`, `class`, `=>`, or method shorthand `name(…) {`): a re-export through
+  base's top-level `lib/index.js`; and a local `index.js` whose every specifier is a
+  relative path outside the submodule. The rejection above still holds for any file
+  that **defines code**: the barrel reaches every sibling, so a copy can import it.
+  A false "defines" fails closed (not excused), the safe direction.
+* `byName` multi-valued now has a test (two base `util.js`, a shim of each); a
+  single-valued map fails it whatever order the walk takes. `walkJs` order is
+  readdir order, so the test does not rely on it.
+* The FAIL text no longer says "base's index.js does not count" (wrong for a file
+  that is itself `index.js`, misleading under the barrel exception) and now tells an
+  unrelated module that only shares a generic base name to **rename** itself.
+* Every new rule sabotaged once (12 mutations: regex-over-text, each exception off,
+  `defines` constant, single-valued `byName`, rename advice removed, regex / template
+  / spread lexing off, method shorthand ignored, `from` outside a clause, `x.require`
+  counted); each turned at least one test red.
+
 ## ⛔ A generation number renders TWO STATES IDENTICALLY
 
 *(Raised by `linkedin` as a consistency point against this repo's own spec, not as a

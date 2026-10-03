@@ -40,7 +40,7 @@ Recording `CONTRACT_HARNESS_GENERATION` in a comment is not enforcing it. Put th
 first in your contract, and treat **any** non-zero as FAIL:
 
 ```bash
-node "$H" require-generation 4 || { echo "FAIL: base harness below generation 4 (downgraded submodule?)"; exit 1; }
+node "$H" require-generation 5 || { echo "FAIL: base harness below generation 5 (downgraded submodule?)"; exit 1; }
 ```
 
 * ⭐ **Why a VERB, not `generation --min N`.** Measured: every harness before
@@ -116,12 +116,23 @@ PASS). **The rule now:**
 * A local file whose **basename** equals that of any base module — at any depth on
   either side; directory position is ignored, so moving a copy does not hide it — is
   a **FAIL**,
-* **unless** its code (comments stripped) imports, requires or re-exports **that same
-  base module**: a relative or absolute specifier resolving to a base module of the
-  same basename. A sibling module does not count, and neither does base's
-  `index.js` — both are what a copy imports too.
+* **unless** its code imports, requires or re-exports **that same base module**: a
+  relative or absolute specifier resolving to a base module of the same basename. A
+  sibling module does not count — it is what a copy imports too.
+* **or** it **defines nothing** (no `function`, `class`, `=>` or method shorthand)
+  and either re-exports through base's **`lib/index.js`** (base's own rule: consumers
+  import only the barrel — `module.exports = require('…/lib/index.js').cdpClient`),
+  or is a local **`index.js`** whose every specifier is a relative path **outside** the
+  submodule (the consumer's own barrel). Importing the barrel **and** defining code is
+  judged by the main rule: the barrel reaches every sibling.
+* Specifiers are read from **tokens**, not text: only a string in a module-syntax
+  position counts (`… from '<s>'` in an import/export clause, `import '<s>'`,
+  `import('<s>')`, `require('<s>')`). Text in a line, trailing or block comment, or
+  inside another string or template, never counts.
 * Bare specifiers (package names, import maps) are not resolved, so they do not
   excuse a file: fails **closed**, naming it.
+* A same-named file that is an **unrelated** module (base has generic names:
+  `registry.js`, `mounts.js`, …) also FAILs; the message says to **rename it**.
 
 Measured 2026-10-03 across every locally present consumer: all same-named shims
 (bare re-exports, factories bound to local constants, wrappers that add functions)
@@ -134,9 +145,11 @@ module is treated as a wrapper however much else it defines. The PASS reason say
 both explicitly rather than leaving an impression of coverage.
 
 
-Asserts no local file shadows a base module. **Asserts code, never prose** —
-comments are stripped first, because the check this replaces grepped for the
-vendor path and matched the string inside the shim's own comment.
+Asserts no local file shadows a base module. **Asserts code, never prose** — a
+small zero-dependency lexer separates comments, strings and templates from code,
+because the check this replaces grepped for the vendor path and matched the string
+inside the shim's own comment (and the first fix stripped only WHOLE-LINE comments,
+so a trailing comment or a string literal still satisfied it).
 
 ⚠ Examining **zero** files FAILS. "No re-vendoring found" over nothing is the
 shape that let the original grep pass.

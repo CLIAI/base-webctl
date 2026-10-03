@@ -35,7 +35,7 @@
 //
 // Usage:
 //   node <base>/scripts/contract-harness.mjs generation
-//   node <base>/scripts/contract-harness.mjs require-generation 4    # the floor; ANY non-zero = FAIL
+//   node <base>/scripts/contract-harness.mjs require-generation 5    # the floor; ANY non-zero = FAIL
 //   node <base>/scripts/contract-harness.mjs pin         --repo . --sub vendor/base-webctl
 //   node <base>/scripts/contract-harness.mjs no-revendor --repo . --sub vendor/base-webctl
 //
@@ -343,9 +343,9 @@ function checkGateProbe(repo, sub) {
  *
  * ⛔ ASSERTS CODE, NEVER PROSE. The check this replaces grepped for the vendor
  * PATH and matched the string inside the shim's own explanatory comment — so it
- * returned PASS across a genuine re-vendor. ⇒ Comments are stripped before
- * anything is matched, and the assertion is about an import SPECIFIER and about
- * a local definition, both of which are code.
+ * returned PASS across a genuine re-vendor. ⇒ The source is LEXED (lexJs), and
+ * the assertion is about an import SPECIFIER token and about a local definition,
+ * both of which are code — never text in a comment, string or template.
  *
  * ⚠ VACUITY: examining zero shims FAILS. A repo whose lib/ moved, or whose
  * pattern stopped matching, otherwise reports "no re-vendoring found" over
@@ -408,12 +408,18 @@ function checkNoRevendor(repo, sub, libDir) {
       + 'subject, not an absence of re-vendoring.');
   }
 
+  /** realpath of base's top-level barrel, if it has one — see (2b). */
+  let baseIndex = '';
+  try { baseIndex = fs.realpathSync(path.join(baseLib, 'index.js')); } catch { /* no barrel */ }
+  /** @type {string[]} the submodule, lexically and through symlinks */
+  const subRoots = [subAbs];
+  try { subRoots.push(fs.realpathSync(subAbs)); } catch { /* absent: lexical only */ }
+
   /** @type {{local:string, base:string, how:string}[]} */
   const found = [];
   for (const abs of localFiles) {
     const rel = path.relative(repo, abs);
     const raw = fs.readFileSync(abs, 'utf8');
-    const code = stripComments(raw);
 
     // (1) CONTENT — a copy is a copy under any name, in any directory.
     const hit = byHash.get(normHash(raw));
@@ -437,13 +443,37 @@ function checkNoRevendor(repo, sub, libDir) {
     // cdp-client.js does — so the realistic re-vendor was the case the excuse
     // fired on. Measured 2026-10-03 (`substack`): a stale 237-line local
     // lib/cdp-client.js reported PASS, "none is a copy by content or by name".
+    //
+    // ⭐ TWO NARROW EXCEPTIONS, both requiring that the file DEFINES NOTHING (no
+    // function, class, arrow or method — see moduleFacts), because a file with
+    // no code of its own cannot be an edited copy of anything:
+    //   (2a) it imports base's top-level lib/index.js — base's own house rule is
+    //        that consumers import ONLY that barrel, so a pure re-export through
+    //        it (`module.exports = require('…/lib/index.js').cdpClient`) is the
+    //        sanctioned shape, not a bypass;
+    //   (2b) it is a local `index.js` whose every specifier is a RELATIVE path
+    //        resolving OUTSIDE the submodule — the consumer's own barrel, which
+    //        shares base's barrel's name and nothing else.
+    // ⛔ A file that imports base's index.js AND defines code is still judged by
+    // the main rule: the barrel reaches every sibling, so a copy can import it.
     const named = byName.get(path.basename(abs));
-    if (named && !wrapsCounterpart(abs, code, named)) {
-      found.push({
-        local: rel,
-        base: named.map((n) => n.rel).join(' | '),
-        how: `same module name, and it does not import base's own ${named.map((n) => `lib/${n.rel}`).join(' or ')}`,
-      });
+    if (named) {
+      const facts = moduleFacts(raw);
+      const reals = facts.specifiers.map((s) => resolveSpec(abs, s));
+      const want = new Set(named.map((n) => n.real));
+      const wraps = reals.some((r) => r && want.has(r));
+      const barrelShim = !facts.defines && baseIndex !== '' && reals.includes(baseIndex);
+      const localBarrel = path.basename(abs) === 'index.js' && !facts.defines
+        && facts.specifiers.length > 0
+        && facts.specifiers.every((s, k) => s.startsWith('.')
+          && !insideAny(reals[k] || path.resolve(path.dirname(abs), s), subRoots));
+      if (!wraps && !barrelShim && !localBarrel) {
+        found.push({
+          local: rel,
+          base: named.map((n) => n.rel).join(' | '),
+          how: `same module name, and it does not import base's own ${named.map((n) => `lib/${n.rel}`).join(' or ')}`,
+        });
+      }
     }
   }
 
@@ -451,47 +481,242 @@ function checkNoRevendor(repo, sub, libDir) {
     return report('no-revendor', EXIT.fail,
       `${found.length} local file(s) re-vendor base: `
       + found.map((f) => `${f.local} <- lib/${f.base} (${f.how})`).join('; ')
-      + '. The submodule is bypassed. ⇒ Delete the copy and import base, or make the file a '
-      + 'shim that imports its same-named base module (a sibling module, or base\'s index.js, '
-      + 'does not count: it is what a copy imports too).',
+      + '. The submodule is bypassed. ⇒ Delete the copy and import base; or make the file a '
+      + 'shim that imports its same-named base module (importing a DIFFERENT base module does '
+      + 'not count: a copy imports its siblings too), or a pure re-export through base\'s '
+      + 'lib/index.js that defines no function or class of its own; or, if this is an '
+      + 'unrelated module that only shares a name with base\'s, rename it.',
       { found, examined: localFiles.length, baseModules: baseFiles.length });
   }
   return report('no-revendor', EXIT.pass,
     `${localFiles.length} local file(s) examined against ${baseFiles.length} base module(s); `
     + 'none is a normalised-content copy of a base module, and every file NAMED like a base '
-    + 'module imports that same base module. ⚠ NOT covered: an EDITED copy under a DIFFERENT '
-    + 'name is not detected by this check (whole-file hashing cannot see it); and a '
-    + 'same-named file that does import its base module is treated as a wrapper, however '
-    + 'much else it defines.',
+    + 'module imports that same base module, or defines nothing and only re-exports base\'s '
+    + 'lib/index.js or (as a local index.js) local modules. ⚠ NOT covered: an EDITED copy '
+    + 'under a DIFFERENT name is not detected by this check (whole-file hashing cannot see '
+    + 'it); and a same-named file that does import its base module is treated as a wrapper, '
+    + 'however much else it defines.',
     { examined: localFiles.length, baseModules: baseFiles.length });
 }
 
 /**
- * Does the local file at `abs` import / require / re-export one of the base
- * modules in `counterparts` (which all share its basename)?
+ * Resolve a module specifier from local file `abs` to a realpath, or '' when it
+ * is not resolvable here.
  *
  * Only RELATIVE or ABSOLUTE specifiers are resolved — the form every consumer
  * uses. A bare specifier (a package name, an import map) is not resolved, so it
- * does not excuse a file: this fails CLOSED, with a FAIL that names the file.
+ * excuses nothing: the check fails CLOSED, with a FAIL that names the file.
  *
- * @param {string} abs local file, absolute
- * @param {string} code its comment-stripped source (prose cannot satisfy this)
- * @param {{rel:string, real:string}[]} counterparts
+ * @param {string} abs @param {string} s @returns {string}
  */
-function wrapsCounterpart(abs, code, counterparts) {
-  const want = new Set(counterparts.map((c) => c.real));
-  const spec = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"\n]+)\1/g;
-  for (const m of code.matchAll(spec)) {
-    const s = m[2];
-    if (!(s.startsWith('.') || path.isAbsolute(s))) continue;
-    const p = path.resolve(path.dirname(abs), s);
-    for (const cand of [p, `${p}.js`, `${p}.mjs`, `${p}.cjs`, path.join(p, 'index.js')]) {
-      let real;
-      try { real = fs.realpathSync(cand); } catch { continue; }
-      if (want.has(real)) return true;
+function resolveSpec(abs, s) {
+  if (!(s.startsWith('.') || path.isAbsolute(s))) return '';
+  const p = path.resolve(path.dirname(abs), s);
+  for (const cand of [p, `${p}.js`, `${p}.mjs`, `${p}.cjs`, path.join(p, 'index.js')]) {
+    try {
+      if (fs.statSync(cand).isFile()) return fs.realpathSync(cand);
+    } catch { /* next candidate */ }
+  }
+  return '';
+}
+
+/** @param {string} p @param {string[]} roots */
+function insideAny(p, roots) {
+  return roots.some((r) => p === r || p.startsWith(r + path.sep));
+}
+
+// ── a small JS lexer: what is CODE, what is a comment, what is a string ────────
+//
+// ⛔ "COMMENTS STRIPPED" WAS WHOLE-LINE `//` ONLY. A copy ending in
+// `// forked from require('…/cdp-client.js')`, or carrying the same text inside
+// a string literal, PASSED: a regex over the remaining text found the specifier
+// in prose. Measured in review, 2026-10-03, exit 0 on both. ⇒ Specifiers are
+// now read from TOKENS: a string literal counts only in a module-syntax
+// position, and comments / other strings / template text are never searched.
+// Zero dependencies, so this is a lexer, not a parser — its limits are stated
+// at moduleFacts and in DEV_NOTES.
+
+/** @typedef {{k:'id'|'str'|'tpl'|'re'|'num'|'p', v:string}} Tok */
+
+/** Keywords after which `/` starts a regex rather than a division. */
+const REGEX_AFTER = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete',
+  'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+
+/**
+ * Tokenise `src`: strings (' " and templates, with `${…}` nesting), regex
+ * literals, comments (line, trailing and block — all dropped), identifiers,
+ * numbers, punctuation. Also returns the source with every comment replaced by
+ * a space, which is what the content hash reads.
+ *
+ * @param {string} src @returns {{toks: Tok[], code: string}}
+ */
+function lexJs(src) {
+  /** @type {Tok[]} */
+  const toks = [];
+  let code = '';
+  const n = src.length;
+  let i = 0;
+  if (src.startsWith('#!')) { const e = src.indexOf('\n'); i = e < 0 ? n : e; }
+  /** brace depths at which an open `${` will close */
+  /** @type {number[]} */
+  const tpl = [];
+  let depth = 0;
+
+  const regexAllowed = () => {
+    const t = toks[toks.length - 1];
+    if (!t) return true;
+    if (t.k === 'id') return REGEX_AFTER.has(t.v);
+    if (t.k === 'p') return !(t.v === ')' || t.v === ']' || t.v === '}');
+    return false;
+  };
+  /** Scan template text from `i` to the closing backtick or the next `${`. */
+  const tplChunk = () => {
+    const s = i;
+    while (i < n) {
+      const c = src[i];
+      if (c === '\\') { i += 2; continue; }
+      if (c === '`') { i++; return { text: src.slice(s, i), open: false }; }
+      if (c === '$' && src[i + 1] === '{') { i += 2; return { text: src.slice(s, i), open: true }; }
+      i++;
+    }
+    return { text: src.slice(s), open: false };
+  };
+  /** @param {string} lead */
+  const template = (lead) => {
+    const r = tplChunk();
+    code += lead + r.text;
+    toks.push({ k: 'tpl', v: r.text });
+    if (r.open) tpl.push(depth);
+  };
+
+  while (i < n) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === '/' && d === '/') {
+      const e = src.indexOf('\n', i); i = e < 0 ? n : e; code += ' '; continue;
+    }
+    if (c === '/' && d === '*') {
+      const e = src.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; code += ' '; continue;
+    }
+    if (/\s/.test(c)) { code += c; i++; continue; }
+    if (c === '"' || c === "'") {
+      const s = i++;
+      while (i < n && src[i] !== c && src[i] !== '\n') i += src[i] === '\\' ? 2 : 1;
+      const closed = src[i] === c;
+      if (closed) i++;
+      const lit = src.slice(s, i);
+      code += lit;
+      toks.push({ k: 'str', v: lit.slice(1, closed ? -1 : undefined) });
+      continue;
+    }
+    if (c === '`') { i++; template('`'); continue; }
+    if (c === '}' && tpl.length && tpl[tpl.length - 1] === depth) {
+      tpl.pop(); i++; template('}'); continue;
+    }
+    if (c === '/' && regexAllowed()) {
+      const s = i++;
+      let cls = false;
+      while (i < n && src[i] !== '\n') {
+        const ch = src[i];
+        if (ch === '\\') { i += 2; continue; }
+        if (cls) { if (ch === ']') cls = false; } else if (ch === '[') cls = true;
+        else if (ch === '/') { i++; break; }
+        i++;
+      }
+      while (i < n && /[A-Za-z]/.test(src[i])) i++;
+      code += src.slice(s, i);
+      toks.push({ k: 're', v: src.slice(s, i) });
+      continue;
+    }
+    if (/[A-Za-z_$#\u0080-￿]/.test(c)) {
+      const s = i++;
+      while (i < n && /[\w$\u0080-￿]/.test(src[i])) i++;
+      code += src.slice(s, i);
+      toks.push({ k: 'id', v: src.slice(s, i) });
+      continue;
+    }
+    if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(d || ''))) {
+      const s = i++;
+      while (i < n && /[\w.]/.test(src[i])) i++;
+      code += src.slice(s, i);
+      toks.push({ k: 'num', v: src.slice(s, i) });
+      continue;
+    }
+    // `...` is ONE token: read as three dots, `...require('x')` looks like `.require`.
+    const p = c === '=' && d === '>' ? '=>' : src.startsWith('...', i) ? '...' : c;
+    if (p === '{') depth++;
+    if (p === '}') depth--;
+    i += p.length;
+    code += p;
+    toks.push({ k: 'p', v: p });
+  }
+  return { toks, code };
+}
+
+/** Keywords that take `( … ) {` without that being a method definition. */
+const PAREN_BLOCK = new Set(['if', 'for', 'while', 'switch', 'catch', 'with', 'await']);
+
+/**
+ * The two facts no-revendor needs about a module, read from TOKENS:
+ *
+ * * `specifiers` — string literals in a module-syntax position ONLY:
+ *   `… from '<s>'` inside an `import`/`export {…}|*` clause, `import '<s>'`,
+ *   `import('<s>')` and `require('<s>')` (not `x.require`, and only when the
+ *   argument is that one literal). ⇒ Text inside a comment, inside another
+ *   string, or inside a template is never a specifier.
+ * * `defines` — the file contains a `function`, `class`, `=>`, or a method
+ *   shorthand `name(…) {`. A false positive here fails CLOSED (the file is not
+ *   excused), which is the safe direction.
+ *
+ * ⚠ Limits: a lexer, not a parser. A regex literal after `)` or `}` is read as
+ * division; a shadowed `require` is still taken as require.
+ *
+ * @param {string} src @returns {{specifiers: string[], defines: boolean}}
+ */
+function moduleFacts(src) {
+  const { toks } = lexJs(src);
+  /** @param {number} j @param {string} v */
+  const is = (j, v) => j >= 0 && j < toks.length && toks[j].k !== 'str' && toks[j].k !== 'tpl'
+    && toks[j].v === v;
+  /** @type {string[]} */
+  const specifiers = [];
+  let defines = false;
+  /** inside an `import …` / `export {…}|*` clause, where `from '<s>'` is real */
+  let clause = false;
+  for (let j = 0; j < toks.length; j++) {
+    const t = toks[j];
+    const dotted = is(j - 1, '.');
+    if (t.k === 'id' && !dotted && t.v === 'import' && !is(j + 1, '(') && !is(j + 1, '.')) {
+      clause = true;
+      if (toks[j + 1] && toks[j + 1].k === 'str') specifiers.push(toks[j + 1].v);
+      continue;
+    }
+    if (t.k === 'id' && !dotted && t.v === 'export') {
+      clause = is(j + 1, '{') || is(j + 1, '*');
+      continue;
+    }
+    if (t.k === 'str' && clause && is(j - 1, 'from')) { specifiers.push(t.v); clause = false; continue; }
+    if (clause && !(t.k === 'id' || t.k === 'str' || (t.k === 'p' && '{},*'.includes(t.v)))) {
+      clause = false;
+    }
+    if (t.k === 'str' && is(j - 1, '(') && !is(j - 3, '.')
+      && (is(j - 2, 'require') ? is(j + 1, ')') : is(j - 2, 'import') && (is(j + 1, ')') || is(j + 1, ',')))) {
+      specifiers.push(t.v);
+    }
+    if (t.k === 'id' && !dotted && (t.v === 'function' || t.v === 'class')) defines = true;
+    if (t.k === 'p' && t.v === '=>') defines = true;
+    if (t.k === 'p' && t.v === '(' && j > 0 && toks[j - 1].k === 'id' && !dotted
+      && !is(j - 2, '.') && !PAREN_BLOCK.has(toks[j - 1].v)) {
+      let lvl = 0;
+      let k = j;
+      for (; k < toks.length; k++) {
+        if (is(k, '(')) lvl++;
+        else if (is(k, ')') && --lvl === 0) break;
+      }
+      if (is(k + 1, '{')) defines = true;
     }
   }
-  return false;
+  return { specifiers, defines };
 }
 
 /**
@@ -520,20 +745,19 @@ function walkJs(dir) {
   return out;
 }
 
-/** @param {string} src Strip comments, so prose cannot satisfy a code check. */
-function stripComments(src) {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n')
-    .filter((l) => !/^\s*(\/\/|#)/.test(l)).join('\n');
-}
-
 /**
  * Hash of the NORMALISED code: comments stripped, whitespace collapsed. ⇒ A copy
  * is still recognised after reformatting or re-commenting, which is what a
  * re-vendor looks like once someone has "adapted" it.
+ *
+ * ⭐ Comments are stripped by the SAME lexer the specifier test uses, so a
+ * TRAILING comment added to a copy is stripped too (the old line filter kept
+ * it, and the copy hashed differently). Both sides go through this function, so
+ * the hash stays symmetric.
  * @param {string} src
  */
 function normHash(src) {
-  return createHash('sha256').update(stripComments(src).replace(/\s+/g, ' ').trim()).digest('hex');
+  return createHash('sha256').update(lexJs(src).code.replace(/\s+/g, ' ').trim()).digest('hex');
 }
 
 

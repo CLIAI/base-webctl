@@ -554,3 +554,154 @@ test('the reason states what this check does NOT cover', () => {
     assert.match(r.stderr, /EDITED copy under a DIFFERENT name is\s+not detected/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ── no-revendor: specifiers are read from TOKENS, never from prose ───────────
+//
+// ⛔ "COMMENTS STRIPPED" MEANT WHOLE-LINE `//` ONLY. A copy ending in
+// `// forked from require('…/cdp-client.js')`, or carrying that text inside a
+// string literal, PASSED (measured in review, 2026-10-03: exit 0 on both). The
+// regex found the specifier in prose that survived the line filter. ⇒ Every
+// arm below is a COPY whose only mention of its base module is non-code.
+
+const CDP = '../vendor/base-webctl/lib/cdp-client.js';
+const COPY = "class CdpSession { send(m) { return m + '!'; } }\nmodule.exports = { CdpSession };\n";
+
+/**
+ * Write `files` (lib-relative path -> source) into a fresh cdpFixture, run
+ * no-revendor, clean up, and return the result.
+ * @param {Record<string,string>} files @param {(vlib: string) => void} [base]
+ */
+function judge(files, base) {
+  const { dir, vlib } = cdpFixture();
+  try {
+    if (base) base(vlib);
+    for (const [rel, src] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(dir, 'lib', rel)), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'lib', rel), src);
+    }
+    return run(['no-revendor', '--repo', dir]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('⛔ a specifier in a TRAILING comment, a BLOCK comment, a STRING or a TEMPLATE does not make a copy a shim', () => {
+  const fakes = {
+    'trailing comment': `${COPY.trimEnd()} // forked from require('${CDP}')\n`,
+    'string literal': `const note = "forked from '${CDP}'";\n${COPY}`,
+    'inline block comment': `${COPY.trimEnd()} /* require('${CDP}') */\n`,
+    'multi-line block comment': `/*\n * export * from '${CDP}';\n */\n${COPY}`,
+    'template literal': `const t = \`require('${CDP}')\`;\n${COPY}`,
+    'template expression text': `const t = \`\${1} from '${CDP}'\`;\n${COPY}`,
+    'from as a plain identifier (ASI)': `const from = 1;\nfrom\n'${CDP}'\n${COPY}`,
+    'a .require method': `const x = { require() { return 0; } };\nx.require('${CDP}');\n${COPY}`,
+    'a computed require': `require('../vendor/base-webctl/lib/cdp-' + 'client.js');\n${COPY}`,
+  };
+  for (const [what, src] of Object.entries(fakes)) {
+    const r = judge({ 'cdp-client.js': src });
+    assert.equal(r.status, 1, `${what}: a copy must FAIL; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /lib\/cdp-client\.js <- lib\/cdp-client\.js/, what);
+  }
+});
+
+test('⭐ CONTROL: every REAL module-syntax form of the counterpart passes — and the lexer survives regex, template and URL text', () => {
+  const shims = {
+    'require': `module.exports = require('${CDP}');\n`,
+    'import-from, then extends': `import { CdpSession } from '${CDP}';\nexport class Mine extends CdpSession {}\n`,
+    'export-star-from': `export * from '${CDP}';\n`,
+    'export-clause-from, double quotes': `export { CdpSession as default } from "${CDP}";\n`,
+    'side-effect import': `import '${CDP}';\nexport const ready = true;\n`,
+    'dynamic import': `const m = await import('${CDP}');\nexport default m;\n`,
+    // If `/["'\`]/` were read as division, the backtick would open a template
+    // that swallows the rest of the file; if strings were not lexed, `//` in the
+    // URL would comment out the require on the same line.
+    // Discriminating arm for regex lexing: misread as division, this backtick
+    // opens a template running to EOF, and the require below is never seen.
+    'after a regex containing a backtick': `const q = /\`/;\nmodule.exports = require('${CDP}');\n`,
+    'after a regex with quotes, a nested template and a URL':
+      "const q = /[\"'`]/g; const t = `a${ { b: '}' }.b }c`;\n"
+      + `const u = 'http://example.invalid/*'; module.exports = require('${CDP}');\n`,
+  };
+  for (const [what, src] of Object.entries(shims)) {
+    const r = judge({ 'cdp-client.js': src });
+    assert.equal(r.status, 0, `${what}: a real shim must PASS; got ${r.status}\n${r.stderr}`);
+  }
+});
+
+// ── no-revendor: barrels — base's house rule, and a consumer's own index.js ──
+//
+// ⭐ base's AGENTS.md tells consumers to import ONLY lib/index.js, so a pure
+// re-export through that barrel is the sanctioned shape and must not go red.
+// ⛔ But the barrel reaches every sibling, so a file that imports it AND defines
+// code is still a possible copy. "Defines nothing" is what separates the two.
+
+const INDEX = '../vendor/base-webctl/lib/index.js';
+/** @param {string} vlib */
+const withBarrel = (vlib) => fs.writeFileSync(path.join(vlib, 'index.js'),
+  "module.exports = { ...require('./cdp-client.js'), ...require('./client-config.js') };\n");
+
+test('⭐ a same-named PURE re-export through base\'s lib/index.js passes; the same file defining code FAILS', () => {
+  const pure = {
+    'CJS property': `module.exports = require('${INDEX}').CdpSession;\n`,
+    'ESM re-export clause': `export { CdpSession as default } from '${INDEX}';\n`,
+  };
+  for (const [what, src] of Object.entries(pure)) {
+    const r = judge({ 'cdp-client.js': src }, withBarrel);
+    assert.equal(r.status, 0, `${what}: a pure barrel shim must PASS; got ${r.status}\n${r.stderr}`);
+  }
+  const defining = {
+    'a function': `const { CdpSession } = require('${INDEX}');\nfunction send(m) { return m; }\nmodule.exports = { CdpSession, send };\n`,
+    'an arrow': `const { CdpSession } = require('${INDEX}');\nconst send = (m) => m;\nmodule.exports = { CdpSession, send };\n`,
+    'a method shorthand': `module.exports = { ...require('${INDEX}'), send(m) { return m; } };\n`,
+    'a class': `import { CdpSession } from '${INDEX}';\nexport class Mine extends CdpSession {}\n`,
+  };
+  for (const [what, src] of Object.entries(defining)) {
+    const r = judge({ 'cdp-client.js': src }, withBarrel);
+    assert.equal(r.status, 1, `barrel import + ${what}: must FAIL; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /rename it/, what);
+    assert.doesNotMatch(r.stderr, /index\.js, does not count/, 'the old, wrong advice is gone');
+  }
+});
+
+test('⭐ a consumer\'s OWN index.js that only re-exports LOCAL modules is a barrel, not a copy', () => {
+  const own = { 'own.js': 'export const mine = 1;\n', 'cdp/thing.js': 'export const x = 2;\n' };
+  for (const [what, src] of Object.entries({
+    'ESM': "export * from './own.js';\nexport { x } from './cdp/thing.js';\n",
+    'CJS': "module.exports = { ...require('./own.js'), ...require('./cdp/thing') };\n",
+  })) {
+    const r = judge({ ...own, 'index.js': src }, withBarrel);
+    assert.equal(r.status, 0, `${what} local barrel must PASS; got ${r.status}\n${r.stderr}`);
+  }
+  for (const [what, src] of Object.entries({
+    'defines a function': "export * from './own.js';\nexport function extra() { return 1; }\n",
+    're-exports a base SIBLING': `export * from './own.js';\nexport * from '${CDP}';\n`,
+    'a bare specifier (fails closed)': "export * from './own.js';\nexport * from 'some-package';\n",
+  })) {
+    const r = judge({ ...own, 'index.js': src }, withBarrel);
+    assert.equal(r.status, 1, `local index.js that ${what}: must FAIL; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /lib\/index\.js <- lib\/index\.js/, what);
+  }
+});
+
+test('⛔ an UNRELATED module sharing a generic base name FAILS — and the message says to rename it', () => {
+  const r = judge({ 'registry.js': 'export function createRegistry() { return new Map(); }\n' },
+    (vlib) => fs.writeFileSync(path.join(vlib, 'registry.js'),
+      'export function createRegistry(C) { return { C, all: [] }; }\n'));
+  assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /unrelated module that only shares a name with base's, rename it/);
+});
+
+test('⛔ byName is MULTI-VALUED: a shim of EITHER of two same-named base modules passes', () => {
+  // A single-valued map keeps whichever module the walk reached last, so a shim
+  // of the OTHER one goes red. Both arms run, so one of them catches that
+  // whatever order the walk takes.
+  /** @param {string} vlib */
+  const twoUtils = (vlib) => {
+    for (const d of ['a', 'z']) {
+      fs.mkdirSync(path.join(vlib, d), { recursive: true });
+      fs.writeFileSync(path.join(vlib, d, 'util.js'), `export const which = '${d}';\n`);
+    }
+  };
+  for (const d of ['a', 'z']) {
+    const r = judge({ 'util.js': `export * from '../vendor/base-webctl/lib/${d}/util.js';\n` }, twoUtils);
+    assert.equal(r.status, 0, `a shim of lib/${d}/util.js must PASS; got ${r.status}\n${r.stderr}`);
+  }
+});
