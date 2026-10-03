@@ -15,10 +15,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import child_process, { spawnSync } from 'node:child_process';
 
 import {
-  shQuote, SSH_BASE_OPTS, createSshTransport, targetFacts,
+  shQuote, SSH_BASE_OPTS, TIMEOUT_CODE, createSshTransport, targetFacts,
 } from '../lib/target-transport.js';
 import { targetTransport } from '../lib/index.js';
 
@@ -61,6 +61,9 @@ test('shQuote: always single-quoted, quote written as \'\\\'\'', () => {
   assert.equal(shQuote("it's"), "'it'\\''s'");
   assert.equal(shQuote(42), "'42'");
   assert.throws(() => shQuote('a\0b'), /NUL/);
+  for (const bad of [{}, [], undefined, null, true]) {
+    assert.throws(() => shQuote(/** @type {any} */ (bad)), /string or a number/);
+  }
 });
 
 test('§6.1 QUOTING: each hostile value reaches the target as ONE literal argument, nothing runs', async () => {
@@ -93,7 +96,7 @@ test('§6.1 CONTROL: the same values joined WITHOUT quoting do not survive the r
 
 test('§6.2 OPTIONS: recording stub shows the exact argv — no agent, no sharing, never prompts', async () => {
   const rec = path.join(dir, 'argv.rec');
-  const recorder = stub('fake-ssh-record', `printf '%s\\0' "$@" > '${rec}'`);
+  const recorder = stub('fake-ssh-record', `printf '%s\\0' "$@" > ${shQuote(rec)}`);
   const t = createSshTransport({ ssh: ALIAS, sshBin: recorder });
   const r = await t.run(['true']);
   assert.equal(r.code, 0, r.stderr);
@@ -142,19 +145,98 @@ test('TIMEOUT: a hung ssh resolves non-zero, promptly, with the timeout note', a
   const t0 = Date.now();
   const r = await t.run(['true'], { timeoutMs: 300 });
   const ms = Date.now() - t0;
-  assert.notEqual(r.code, 0);
-  assert.match(r.stderr, /timed out after 300 ms/);
+  assert.equal(r.code, TIMEOUT_CODE);
+  assert.equal(r.timedOut, true);
+  assert.match(r.stderr, /timed out after 300 ms; sent SIGTERM\n$/);
   assert.ok(ms < 3000, `resolved in ${ms} ms`);
   // Control: a quick command under the same timeout is NOT reported as timed out.
   const ok = await createSshTransport({ ssh: ALIAS, sshBin: REMOTE }).run(['true'], { timeoutMs: 5000 });
   assert.equal(ok.code, 0);
+  assert.equal(ok.timedOut, false);
   assert.doesNotMatch(ok.stderr, /timed out/);
+});
+
+test('TIMEOUT: a child that IGNORES SIGTERM is SIGKILLed after killGraceMs, and the note says so', async () => {
+  const stubborn = stub('fake-ssh-stubborn', "trap '' TERM\nexec sleep 30");
+  const t = createSshTransport({ ssh: ALIAS, sshBin: stubborn });
+  const t0 = Date.now();
+  const r = await t.run(['true'], { timeoutMs: 200, killGraceMs: 200 });
+  const ms = Date.now() - t0;
+  assert.equal(r.code, TIMEOUT_CODE);
+  assert.equal(r.timedOut, true);
+  assert.match(r.stderr, /sent SIGTERM, then SIGKILL after 200 ms/);
+  assert.ok(ms >= 400 && ms < 400 + 2000, `resolved in ${ms} ms`);
+});
+
+/** @param {string} pidFile */
+function killPidFile(pidFile) {
+  try { process.kill(Number(fs.readFileSync(pidFile, 'utf8').trim()), 'SIGKILL'); } catch {}
+}
+/** @param {string} pidFile */
+function alive(pidFile) {
+  try { process.kill(Number(fs.readFileSync(pidFile, 'utf8').trim()), 0); return true; } catch { return false; }
+}
+
+test('TIMEOUT: a grandchild holding the pipes neither delays the result nor keeps writing into it', async () => {
+  const holderPid = path.join(dir, 'holder.pid');
+  const tickerPid = path.join(dir, 'ticker.pid');
+  // The holder sleeps with our stdout/stderr open; the ticker keeps WRITING to stdout.
+  const leaky = stub('fake-ssh-leaky', [
+    `sleep 30 & echo $! > ${shQuote(holderPid)}`,
+    `( while :; do echo tick || exit 0; sleep 0.1; done ) & echo $! > ${shQuote(tickerPid)}`,
+    'exec sleep 30',
+  ].join('\n'));
+  /** @type {any} */
+  let spawned = null;
+  const realSpawn = child_process.spawn;
+  child_process.spawn = /** @type {any} */ ((/** @type {any[]} */ ...a) => {
+    spawned = /** @type {any} */ (realSpawn)(...a);
+    return spawned;
+  });
+  try {
+    const t = createSshTransport({ ssh: ALIAS, sshBin: leaky });
+    const t0 = Date.now();
+    const r = await t.run(['true'], { timeoutMs: 200 });
+    const ms = Date.now() - t0;
+    assert.equal(r.code, TIMEOUT_CODE);
+    assert.ok(ms < 1500, `resolved in ${ms} ms despite a grandchild holding the pipes`);
+    assert.ok(alive(holderPid), 'control: the holder really is still running with the pipes');
+    for (const s of ['stdout', 'stderr', 'stdin']) {
+      assert.equal(spawned[s].destroyed, true, `child ${s} destroyed`);
+    }
+    // Our end is closed, so the ticker's next write fails and it stops writing.
+    const deadline = Date.now() + 2000;
+    while (alive(tickerPid) && Date.now() < deadline) await new Promise((res) => setTimeout(res, 50));
+    assert.equal(alive(tickerPid), false, 'the writer stopped once our end was destroyed');
+  } finally {
+    child_process.spawn = realSpawn;
+    killPidFile(holderPid);
+    killPidFile(tickerPid);
+  }
+});
+
+test('timeoutMs / killGraceMs must be positive finite numbers', () => {
+  const t = createSshTransport({ ssh: ALIAS, sshBin: REMOTE });
+  for (const bad of [0, -1, NaN, Infinity, '500', null]) {
+    assert.throws(() => t.run(['true'], { timeoutMs: /** @type {any} */ (bad) }), /timeoutMs must be/);
+    assert.throws(() => t.run(['true'], { killGraceMs: /** @type {any} */ (bad) }), /killGraceMs must be/);
+  }
+});
+
+test('ssh killed by an OUTSIDE signal → 128 + signal number, signal named in stderr', async () => {
+  const suicidal = stub('fake-ssh-killed', 'kill -TERM $$\nsleep 5');
+  const r = await createSshTransport({ ssh: ALIAS, sshBin: suicidal }).run(['true']);
+  assert.equal(r.code, 128 + os.constants.signals.SIGTERM);
+  assert.match(r.stderr, /killed by SIGTERM/);
+  assert.equal(r.timedOut, false);
 });
 
 test('spawn error → code 127', async () => {
   const t = createSshTransport({ ssh: ALIAS, sshBin: path.join(dir, 'no-such-ssh') });
   const r = await t.run(['true']);
   assert.equal(r.code, 127);
+  assert.match(r.stderr, /ENOENT/);
+  assert.equal(r.timedOut, false);
 });
 
 /**
@@ -202,10 +284,11 @@ test('§6.4 targetFacts refuses a malformed answer, naming the field — never d
     ['non-zero exit', { code: 255, stdout: '/srv/browser\n1000\n1000\n' }, /code 255/],
   ];
   for (const [label, res, re] of cases) {
-    const got = await targetFacts(fakeTransport(res));
+    const got = await targetFacts(fakeTransport({ ...res, stderr: `why: ${label}` }));
     assert.equal(got.ok, false, label);
     if (got.ok) continue;
     assert.match(got.error, re, label);
+    assert.equal(got.stderr, `why: ${label}`, `${label}: stderr carried on the failure`);
     assert.equal(/** @type {any} */ (got).uid, undefined, `${label}: no defaulted uid`);
   }
 });
