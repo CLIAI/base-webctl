@@ -27,7 +27,7 @@ than by any lane reading its own.
 
 `require-generation`, `pin`, `no-revendor` and `generation` are for your contract;
 `gate-probe` is for the release gate (see below); `isolated`, `isolation-check`,
-`sandbox-port` and `guard-live-port` are for your **mutation arms** (see *NO HOST NETWORK* below).
+`sandbox-port` and `guard-live-port` are for your **mutation arms** (see *no host network and no host unix sockets* below).
 
 ## ⛔ LOAD-BEARING: the checker lives INSIDE the thing it checks
 
@@ -172,13 +172,13 @@ deliberately not from comparing the declared pin against the worktree — which 
 the comparison it is testing. A guard and a claim that read the same input cannot
 disagree.
 
-## ⛔ Mutation arms run with NO HOST NETWORK — `isolated`, `isolation-check`, `sandbox-port`, `guard-live-port`
+## ⛔ Mutation arms run with no host network AND no host unix sockets — `isolated`, `isolation-check`, `sandbox-port`, `guard-live-port`
 
 *Incident, 2026-10-02 (a consumer lane's mutation control):* the mutant planted "the
 default port is a location", the arm **attached to the real signed-in browser on the
 host's loopback**, closed its last tab, and Chromium exited. Correct code refuses; **a
 mutant does not refuse — that is what makes it a mutant.** The sandboxes isolated HOME,
-CWD, env and PATH. Not the network. Spec: xrl4, *"Mutation arms run with NO HOST NETWORK"*.
+CWD, env and PATH. Not the network. Spec: xrl4, *"Mutation arms run with no host network AND no host unix sockets"*.
 
 *A second incident* followed: a lane's mutation control navigated a real signed-in
 browser's only tab. **A port pin cannot stop a mutant that restores a LITERAL port** —
@@ -215,27 +215,38 @@ contract's output when it is used.
 
 | verb | does | exit |
 |---|---|---|
-| `isolated -- <cmd> [args…]` | runs `<cmd>` in a private user+network namespace (`unshare -rn`) whose ONLY interface is its own `lo`, brought up first so local fakes/stubs work. Caller's env, cwd and stdio; argv as an array (no shell). | the command's exit code; **1** (FAIL, with a JSONL `"check":"isolated"` record) when isolation could not be established — **the command is then not started** |
+| `isolated [--keep <path>]… -- <cmd> [args…]` | runs `<cmd>` in private user+network+mount namespaces (`unshare -rnm`): the ONLY interface is its own `lo`, brought up first so local fakes/stubs work; `/run` and `/tmp` (and a real `/var/run`) are a fresh tmpfs, so the host's unix sockets — docker, X11, ssh-agent, session bus — are gone. The cwd, base's repo root, an absolute `<cmd>`, node, a `$HOME` under `/tmp` and each `--keep` stay at their paths. Caller's cwd and stdio; env minus `DISPLAY`/`WAYLAND_DISPLAY`/`SSH_AUTH_SOCK`/`DBUS_SESSION_BUS_ADDRESS`/`DOCKER_HOST`/`XDG_RUNTIME_DIR`, `TMPDIR=/tmp`; argv as an array (no shell). | the command's exit code; **1** (FAIL, with a JSONL `"check":"isolated"` record) when isolation could not be established — **the command is then not started** |
 | `isolation-check <port>…` | run INSIDE `isolated`. Each named port: a connect to `127.0.0.1:<port>` must fail with **exactly `ECONNREFUSED`** (lo up, nothing listening) — `ENETUNREACH` means the loopback is DOWN and is a FAIL. A control listener it opens on the namespace loopback must be reachable. The kernel proof below must hold. | 0 pass · 1 fail, naming every condition that failed · 3 usage |
 | `sandbox-port [--bare]` | binds `127.0.0.1:0`, reads the port, closes it, **asserts a connect is refused**, prints it (JSONL + human line; `--bare` = the number only, for `$(…)`) | 0 |
 | `guard-live-port <port> [--pin-verified]` | defence in depth where `isolated` is not used: **REFUSES** when `127.0.0.1:<port>` listens **or** answers CDP (`GET /json/version` 200), naming both facts, unless `--pin-verified` | 0 pass · 1 refused · 3 usage |
 
 * ⛔ **`isolated` fails CLOSED.** No `unshare`, unprivileged user namespaces disabled, no
-  `ip`/`ifconfig`, a loopback that will not come up → FAIL, reason printed, command not
-  run. **There is no path on which it runs the command on the host.**
+  `ip`/`ifconfig`, no `mount`, a loopback that will not come up, a mask that fails, a host
+  socket that still answers after masking → FAIL, reason printed (counts, never socket
+  paths), command not run. **There is no path on which it runs the command on the host.**
 * ⭐ **It checks the PROPERTY, not the exit of `unshare`.** Inside, before the command
   starts, it asserts: the network namespace differs from the caller's; the only interface
-  is `lo`; **no TCP listener is visible**; `lo` is up and a self-connect works. A fake
-  `unshare` that just runs its arguments is caught (tested).
+  is `lo`; **no TCP listener is visible**; the mount namespace differs; `lo` is up and a
+  self-connect works; our tmpfs is on top of `/run` and `/tmp`; and **every host path socket
+  the outer half listed is connect-tested** — one that still answers (a socket under home)
+  gets `/dev/null` bound over it, and is tested again. A fake `unshare` that just runs its
+  arguments is caught (tested).
+* ⛔ **`/tmp` is masked, and your arm probably lives there.** A fixture, a marker file or
+  anything else you share with the arm under `/tmp` needs `--keep <dir>` — otherwise the
+  arm sees an empty `/tmp` and writes land in it, not on the host. Only `--keep` paths are
+  exempt from the socket test; a socket in the cwd is still covered if it answers.
 * ⛔ **Nested calls are detected from the KERNEL, never from an env marker.** `isolated`
-  exports `WEBCTL_HOST_NETNS` (the host netns id it saw at entry). A nested `isolated`
-  proceeds as *already inside* — without unsharing again — only when **all three** hold:
-  `/proc/self/ns/net` ≠ that id; `/proc/self/uid_map` is **not** the identity map; and
-  `/proc/self/net/dev` lists **only `lo`**. Otherwise: **exit 2, nothing run.** *(A lane's
+  exports `WEBCTL_HOST_NETNS` and `WEBCTL_HOST_MNTNS` (the host namespace ids it saw at
+  entry). A nested `isolated` proceeds as *already inside* — without unsharing again — only
+  when **all five** hold: `/proc/self/ns/net` ≠ the netns id; `/proc/self/uid_map` is
+  **not** the identity map; `/proc/self/net/dev` lists **only `lo`**; `/proc/self/ns/mnt` ≠
+  the mntns id; and `/proc/self/mountinfo` shows the `webctl-isolated` tmpfs **on top of**
+  `/run` and `/tmp`. Otherwise: **exit 2, nothing run.** *(A lane's
   own `…_IN_NETNS=1` marker, set on the host, skipped isolation for a whole suite. The id
   alone can be fabricated; uid_map alone proves only a USER namespace — `unshare -r`
   without `-n` passes it; and the two together are still beaten by `unshare -r` plus a
-  fabricated id that merely differs, which the interface fact refuses. All three are
+  fabricated id that merely differs, which the interface fact refuses. The old net-only
+  `unshare -rn` passes all three network facts and is refused by the tmpfs fact. All are
   tested.)*
 * ⚠ **The command runs as mapped root** (uid 0 inside the namespace — `unshare -r`). Files
   it creates are owned by you on disk; a tool that refuses to run as root (Chromium without
