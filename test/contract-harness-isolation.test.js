@@ -19,7 +19,7 @@ import path from 'node:path';
 import net from 'node:net';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TOOL = path.join(ROOT, 'scripts', 'contract-harness.mjs');
@@ -313,4 +313,140 @@ test('guard-live-port: no listener → PASS; a bad port → usage', async () => 
 test('the new verbs are ADDITIVE: HARNESS_GENERATION is still 4', async () => {
   const r = await run(['generation']);
   assert.equal(JSON.parse(r.stdout.trim()).generation, 4);
+});
+
+// ── isolation-check: the precondition a lane runs INSIDE `isolated` ───────────
+
+const HOST_NS = fs.readlinkSync('/proc/self/ns/net');
+
+test('⭐ isolation-check under `isolated`: a HOST fake\'s port → ECONNREFUSED inside, control reachable → PASS', needsIsolation, async () => {
+  const fake = await fakeListener();
+  try {
+    const r = await run(['isolated', '--', process.execPath, TOOL, 'isolation-check', String(fake.port)]);
+    await settle();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stderr, new RegExp(`PASS {2}isolation-check: 127\\.0\\.0\\.1:${fake.port} → ECONNREFUSED`));
+    const rec = JSON.parse(r.stdout.trim());
+    assert.equal(rec.ports[0].error, 'ECONNREFUSED');
+    assert.equal(rec.control, 'reachable');
+    assert.equal(fake.count(), 0, 'the host fake was reached from inside');
+  } finally { await fake.close(); }
+});
+
+test('⭐ CONTROL: isolation-check of that port WITHOUT `isolated` → FAIL, naming it REACHABLE', async () => {
+  const fake = await fakeListener();
+  try {
+    const r = await run(['isolation-check', String(fake.port)]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, new RegExp(`127\\.0\\.0\\.1:${fake.port} is REACHABLE from here`));
+    assert.match(r.stderr, /not provably inside a private network namespace/);
+  } finally { await fake.close(); }
+});
+
+test('⛔ isolation-check asserts the EXACT errno: a netns with lo DOWN → FAIL naming ENETUNREACH', needsIsolation, async () => {
+  // `unshare -rn` WITHOUT bringing lo up: "unreachable" here is not isolation-and-up.
+  const fake = await fakeListener();
+  try {
+    const r = await new Promise((resolve) => {
+      const c = spawn('unshare', ['-rn', process.execPath, TOOL, 'isolation-check', String(fake.port)],
+        { env: cleanEnv({ WEBCTL_HOST_NETNS: HOST_NS }) });
+      let stdout = ''; let stderr = '';
+      c.stdout.on('data', (d) => { stdout += d; });
+      c.stderr.on('data', (d) => { stderr += d; });
+      c.on('close', (code) => resolve({ status: code, stdout, stderr }));
+    });
+    const res = /** @type {{status:number, stdout:string, stderr:string}} */ (r);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /ENETUNREACH: the loopback is DOWN/);
+    assert.match(res.stderr, /control listener on the namespace loopback is NOT reachable/);
+    assert.equal(fake.count(), 0);
+  } finally { await fake.close(); }
+});
+
+test('isolation-check: usage without ports or with a bad port → exit 3', async () => {
+  assert.equal((await run(['isolation-check'])).status, 3);
+  assert.equal((await run(['isolation-check', '0'])).status, 3);
+  assert.equal((await run(['isolation-check', '80', 'x'])).status, 3);
+});
+
+// ── nesting: "already inside" is proven from the KERNEL, never from env ─────
+
+/**
+ * Run `isolated -- <write marker>` with WEBCTL_HOST_NETNS set, optionally under a
+ * prefix (e.g. `unshare -r`). @param {string} recorded @param {string[]} [prefix]
+ */
+async function nestedAttempt(recorded, prefix = []) {
+  const dir = tmpdir();
+  const marker = path.join(dir, 'RAN');
+  const argv = [...prefix, process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
+    `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`];
+  const r = await new Promise((resolve) => {
+    const c = spawn(argv[0], argv.slice(1), { env: cleanEnv({ WEBCTL_HOST_NETNS: recorded }) });
+    let stdout = ''; let stderr = '';
+    c.stdout.on('data', (d) => { stdout += d; });
+    c.stderr.on('data', (d) => { stderr += d; });
+    c.on('close', (code) => resolve({ status: code, stdout, stderr }));
+  });
+  const ran = fs.existsSync(marker);
+  fs.rmSync(dir, { recursive: true, force: true });
+  return { .../** @type {{status:number, stdout:string, stderr:string}} */ (r), ran };
+}
+
+test('⛔ nesting: the marker set on the HOST (= the real host id) → refused rc 2, nothing run', async () => {
+  const r = await nestedAttempt(HOST_NS);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /REFUSED, nothing run/);
+  assert.equal(r.ran, false, 'a host-set marker skipped isolation and ran the command');
+});
+
+test('⛔ nesting: a FABRICATED host id on the host → refused rc 2 (uid_map is the identity map), nothing run', async () => {
+  const r = await nestedAttempt('net:[1]');
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /uid_map is identity/);
+  assert.equal(r.ran, false);
+});
+
+test('⛔ nesting: inside `unshare -r` (NO -n) with the recorded id = current netns → refused rc 2', needsIsolation, async () => {
+  const r = await nestedAttempt(HOST_NS, ['unshare', '-r']);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /EQUALS the recorded host one/);
+  assert.equal(r.ran, false, 'a user namespace alone was accepted as network isolation');
+});
+
+test('⛔ nesting: `unshare -r` + a fabricated id that DIFFERS beats netns+uid_map — the interface fact refuses it', needsIsolation, async () => {
+  // netns ≠ recorded ✓ (fabricated), uid_map mapped ✓ (user ns) — both of the first
+  // two facts pass. Only "nothing but lo is visible" stands between this and the host.
+  const r = await nestedAttempt('net:[1]', ['unshare', '-r']);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /interface\(s\) besides 'lo' are visible/);
+  assert.doesNotMatch(r.stderr, /EQUALS|uid_map is/, 'only the interface fact should have refused this');
+  assert.equal(r.ran, false);
+});
+
+test('nesting CONTROL: a real nested `isolated` inside `isolated` proceeds WITHOUT unsharing again', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'sh', '-c',
+    'readlink /proc/self/ns/net; "$0" "$1" isolated -- readlink /proc/self/ns/net', process.execPath, TOOL]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const [outer, inner] = r.stdout.trim().split('\n');
+  assert.notEqual(outer, HOST_NS, 'the outer level is not isolated');
+  assert.equal(inner, outer, 'the nested call unshared AGAIN (or ran elsewhere)');
+});
+
+// ── import guard ─────────────────────────────────────────────────────────────
+
+test('⛔ importing the harness runs NO verb, even when the importer\'s argv names one', async () => {
+  const url = pathToFileURL(TOOL).href;
+  const r = await new Promise((resolve) => {
+    const c = spawn(process.execPath, ['--input-type=module', '-e',
+      'const m = await import(process.env.HARNESS_URL); console.log("IMPORTED " + m.HARNESS_GENERATION);',
+      'x', 'generation'], { env: cleanEnv({ HARNESS_URL: url }) });
+    let stdout = ''; let stderr = '';
+    c.stdout.on('data', (d) => { stdout += d; });
+    c.stderr.on('data', (d) => { stderr += d; });
+    c.on('close', (code) => resolve({ status: code, stdout, stderr }));
+  });
+  const res = /** @type {{status:number, stdout:string, stderr:string}} */ (r);
+  assert.equal(res.status, 0, res.stdout + res.stderr);
+  assert.equal(res.stdout.trim(), 'IMPORTED 4', 'a verb ran on import');
+  assert.equal(res.stderr, '');
 });

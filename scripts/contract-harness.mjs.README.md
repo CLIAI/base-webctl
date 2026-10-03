@@ -26,8 +26,8 @@ than by any lane reading its own.
 ## The checks
 
 `require-generation`, `pin`, `no-revendor` and `generation` are for your contract;
-`gate-probe` is for the release gate (see below); `isolated`, `sandbox-port` and
-`guard-live-port` are for your **mutation arms** (see *NO HOST NETWORK* below).
+`gate-probe` is for the release gate (see below); `isolated`, `isolation-check`,
+`sandbox-port` and `guard-live-port` are for your **mutation arms** (see *NO HOST NETWORK* below).
 
 ## ⛔ LOAD-BEARING: the checker lives INSIDE the thing it checks
 
@@ -172,7 +172,7 @@ deliberately not from comparing the declared pin against the worktree — which 
 the comparison it is testing. A guard and a claim that read the same input cannot
 disagree.
 
-## ⛔ Mutation arms run with NO HOST NETWORK — `isolated`, `sandbox-port`, `guard-live-port`
+## ⛔ Mutation arms run with NO HOST NETWORK — `isolated`, `isolation-check`, `sandbox-port`, `guard-live-port`
 
 *Incident, 2026-10-02 (a consumer lane's mutation control):* the mutant planted "the
 default port is a location", the arm **attached to the real signed-in browser on the
@@ -180,10 +180,25 @@ host's loopback**, closed its last tab, and Chromium exited. Correct code refuse
 mutant does not refuse — that is what makes it a mutant.** The sandboxes isolated HOME,
 CWD, env and PATH. Not the network. Spec: xrl4, *"Mutation arms run with NO HOST NETWORK"*.
 
-⇒ **Every runner-spawning mutation arm runs under `isolated`.** The lines a contract adds:
+*A second incident* followed: a lane's mutation control navigated a real signed-in
+browser's only tab. **A port pin cannot stop a mutant that restores a LITERAL port** —
+so the namespace is THE mechanism, and everything else is second.
+
+⇒ **The order, plainly:**
+
+1. **Every runner-spawning mutation arm runs under `isolated`.**
+2. **`isolation-check <your real default port(s)>`, run under `isolated`, is its
+   precondition** — *"my real default port is unreachable from in here; my own fake is
+   reachable."*
+3. **`guard-live-port` is the fallback ONLY where unshare is unavailable** — and it is
+   second because it **cannot stop a literal port**: it guards the port you name, not the
+   one a mutant hardcodes.
 
 ```bash
 H="$BASE_DIR/scripts/contract-harness.mjs"
+
+# precondition: real default port(s) refused INSIDE, own control listener reachable
+node "$H" isolated -- node "$H" isolation-check 4327 4527 || exit 1
 
 # a port with nothing behind it; every port DERIVED from it is dead too
 export MYLANE_PORT="$(node "$H" sandbox-port --bare)" || exit 1
@@ -192,9 +207,16 @@ export MYLANE_PORT="$(node "$H" sandbox-port --bare)" || exit 1
 node "$H" isolated -- node test/my-mutation-arm.js
 ```
 
+⛔ **A lane that falls back to the HOST network when unshare is unavailable is NOT
+COMPLIANT.** `isolated` fails closed; a contract must not wrap it in "warn and run
+anyway" (`isolated … || run-it-anyway`). `guard-live-port` is the **only** sanctioned
+fallback, and it does not make an arm safe against a literal port — say so in the
+contract's output when it is used.
+
 | verb | does | exit |
 |---|---|---|
 | `isolated -- <cmd> [args…]` | runs `<cmd>` in a private user+network namespace (`unshare -rn`) whose ONLY interface is its own `lo`, brought up first so local fakes/stubs work. Caller's env, cwd and stdio; argv as an array (no shell). | the command's exit code; **1** (FAIL, with a JSONL `"check":"isolated"` record) when isolation could not be established — **the command is then not started** |
+| `isolation-check <port>…` | run INSIDE `isolated`. Each named port: a connect to `127.0.0.1:<port>` must fail with **exactly `ECONNREFUSED`** (lo up, nothing listening) — `ENETUNREACH` means the loopback is DOWN and is a FAIL. A control listener it opens on the namespace loopback must be reachable. The kernel proof below must hold. | 0 pass · 1 fail, naming every condition that failed · 3 usage |
 | `sandbox-port [--bare]` | binds `127.0.0.1:0`, reads the port, closes it, **asserts a connect is refused**, prints it (JSONL + human line; `--bare` = the number only, for `$(…)`) | 0 |
 | `guard-live-port <port> [--pin-verified]` | defence in depth where `isolated` is not used: **REFUSES** when `127.0.0.1:<port>` listens **or** answers CDP (`GET /json/version` 200), naming both facts, unless `--pin-verified` | 0 pass · 1 refused · 3 usage |
 
@@ -205,6 +227,16 @@ node "$H" isolated -- node test/my-mutation-arm.js
   starts, it asserts: the network namespace differs from the caller's; the only interface
   is `lo`; **no TCP listener is visible**; `lo` is up and a self-connect works. A fake
   `unshare` that just runs its arguments is caught (tested).
+* ⛔ **Nested calls are detected from the KERNEL, never from an env marker.** `isolated`
+  exports `WEBCTL_HOST_NETNS` (the host netns id it saw at entry). A nested `isolated`
+  proceeds as *already inside* — without unsharing again — only when **all three** hold:
+  `/proc/self/ns/net` ≠ that id; `/proc/self/uid_map` is **not** the identity map; and
+  `/proc/self/net/dev` lists **only `lo`**. Otherwise: **exit 2, nothing run.** *(A lane's
+  own `…_IN_NETNS=1` marker, set on the host, skipped isolation for a whole suite. The id
+  alone can be fabricated; uid_map alone proves only a USER namespace — `unshare -r`
+  without `-n` passes it; and the two together are still beaten by `unshare -r` plus a
+  fabricated id that merely differs, which the interface fact refuses. All three are
+  tested.)*
 * ⚠ **The command runs as mapped root** (uid 0 inside the namespace — `unshare -r`). Files
   it creates are owned by you on disk; a tool that refuses to run as root (Chromium without
   `--no-sandbox`) refuses here. A mutation arm should not be launching a real browser anyway.

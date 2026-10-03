@@ -208,6 +208,45 @@ unshare) → the QA arm failed with *"the host fake was reached from inside isol
 (1 connection), and both fail-closed arms that depend on the namespace failed too.
 Restored → 15/15.
 
+### Second incident — and why the namespace comes FIRST
+
+A lane's mutation control navigated a real signed-in browser's only tab. ⇒ **A port pin
+cannot stop a mutant that restores a LITERAL port**: `sandbox-port` and `guard-live-port`
+act on the port the lane NAMES, and a mutant that hardcodes the default never asks. Only
+the namespace removes the host's listeners regardless of which number is dialled. Hence
+the README's order: `isolated` → `isolation-check` as its precondition → `guard-live-port`
+as the fallback only where unshare is unavailable.
+
+### `isolation-check` asserts the EXACT errno (from `substack`'s isolation work)
+
+"The connect failed" is not the property. In a namespace whose `lo` is DOWN the connect
+fails `ENETUNREACH` — which looks like isolation — and then every in-namespace fake fails
+for the wrong reason. Measured: with lo down a LISTEN on 127.0.0.1 still succeeds, but a
+connect to it fails `ENETUNREACH`, so the control must CONNECT, not merely bind. ⇒ PASS
+requires `ECONNREFUSED` for each named port, a reachable control, and the kernel proof
+(without it, a host on which the browser merely happens to be down right now passes).
+
+### "Already inside" is read from the KERNEL — three facts, each closing a measured hole
+
+| proof used alone | beaten by | measured |
+|---|---|---|
+| env marker (`…_IN_NETNS=1`) | setting it on the host | a lane's whole suite ran on the host network |
+| recorded host netns id ≠ current | fabricating the id | fleet manager |
+| + uid_map not identity | `unshare -r` WITHOUT `-n` + a fabricated id that differs | while building this: both facts pass, on the host network |
+| + only `lo` in /proc/self/net/dev | — | the fact is about the NETWORK, which is what is claimed |
+
+A marker whose proof fails is refused with exit 2 before anything runs. The refusal
+names every failed fact (counts, never interface names).
+
+### The import guard
+
+The dispatch ran at module top level unconditionally, so importing the file would have
+dispatched on the IMPORTER's argv (usage + `process.exit(3)` at best, a real verb at
+worst). Nothing in the repo imported it yet, so this was latent. ⇒ `isEntryScript()`
+compares realpath(argv[1]) with realpath(this file) — realpath on both, because argv[1]
+keeps a symlinked path while `import.meta.url` is resolved. The dispatch body is
+deliberately not re-indented, to keep the guard a two-line diff against concurrent edits.
+
 ### Known limits
 
 * **Mapped root.** The command runs as uid 0 inside the namespace. A tool that refuses
