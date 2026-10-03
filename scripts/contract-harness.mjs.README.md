@@ -154,8 +154,9 @@ import their own base module and stay green; the only reds are two local
 (whole-file hashing cannot see it), and a same-named file that imports its base
 module is treated as a wrapper however much else it defines. The PASS reason says
 both explicitly rather than leaving an impression of coverage. Also OPEN, but only for
-a file written to evade: a locally shadowed `require`, and code built from a string by
-a route the lexer does not name. The full table, with the direction each limit fails,
+a file written to evade: a locally shadowed `require`, an unreachable import
+(`if (false) require('<same module>')` still counts as importing it), and code built
+from a string by a route the lexer does not name. The full table, with the direction each limit fails,
 is in DEV_NOTES ("the lexer failed OPEN").
 
 

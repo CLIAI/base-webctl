@@ -897,3 +897,143 @@ test('⛔ "defines nothing" is not fooled by escapes or string-to-code routes', 
   const r = probe({ 'cdp-client.js': `module.exports = \\u0072equire('../vendor/base-webctl/lib/cdp-client.js');\n` });
   assert.equal(r.status, 0, `an escaped require is a require; got ${r.status}\n${r.stderr}`);
 });
+
+// ── no-revendor: the final review (ASI regexes, line terminators, cost) ──────
+//
+// ⛔ Three more ways the lexer failed OPEN, each measured as a false PASS: a `/`
+// after `break`/`continue`/`debugger` (and every other spot where ASI ends the
+// statement — a label, an uninitialised binding, a module specifier, a prefix
+// `++`) was read as division; a line comment ran to `\n` when node ends it at
+// `\r`, U+2028 or U+2029 too; and a file with thousands of forks cost O(F²).
+
+/**
+ * Is `src` valid JavaScript to node? Every "must FAIL" arm below that claims node
+ * reads it differently from the old lexer is checked here first — an arm node
+ * rejects would prove nothing about a file node would run.
+ * @param {string} src @param {string} [ext]
+ */
+function nodeAccepts(src, ext = '.js') {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'revendor-check-'));
+  try {
+    const f = path.join(dir, `probe${ext}`);
+    fs.writeFileSync(f, src);
+    const r = spawnSync(process.execPath, ['--check', f], { encoding: 'utf8' });
+    return { ok: r.status === 0, err: r.stderr || '' };
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+/** A comment that the old lexer read as `'…'` + a require of the SAME module. */
+const TAIL = "/'/.test('a') // ' ; " + SAME;
+/** The ESM shape: an edited copy importing a SIBLING. */
+const ESM_SIB = "import { rewrite } from '../vendor/base-webctl/lib/cdp-rewrite.js'";
+const ESM_SAME = "export * from '../vendor/base-webctl/lib/cdp-client.js'";
+
+/** [extension for node --check, source of lib/cdp-client.js] — each must FAIL. */
+const ASI_ARMS = {
+  'n9 break⏎/': ['.js', `${HEAD}for (const k of []) { break\n${TAIL}\n}\n`],
+  'n10 continue⏎/': ['.js', `${HEAD}for (const k of []) { continue\n${TAIL}\n}\n`],
+  'n11 debugger⏎/': ['.js', `${HEAD}debugger\n${TAIL}\n`],
+  'extends /': ['.js', `${HEAD}class X extends /'/.constructor {} // ' ; ${SAME}\n`],
+  'break label⏎/': ['.js', `${HEAD}l: for (;;) { break l\n${TAIL}\n}\n`],
+  'let x⏎/': ['.js', `${HEAD}let w\n${TAIL}\n`],
+  'var a = 1, b⏎/ (forked)': ['.js', `${HEAD}var u = 1, w\n${TAIL}\n`],
+  'x⏎++/ (prefix)': ['.js', `${HEAD}let q = 1\n++/'/.lastIndex // ' ; ${SAME}\n`],
+  "from '…'⏎/ (ESM)": ['.mjs', `${ESM_SIB}\n/'/.test('a') // ' ; ${ESM_SAME}\n`
+    + 'export function createCdpClient(){ return rewrite() + 41 }\n'],
+};
+
+test('⛔ n9–n11: a `/` where ASI ends the statement is a REGEX — the require after it is a comment', () => {
+  // Every arm is judged before asserting, so a regression names ALL it broke.
+  /** @type {string[]} */
+  const wrong = [];
+  for (const [id, [ext, src]] of Object.entries(ASI_ARMS)) {
+    const c = nodeAccepts(src, ext);
+    assert.ok(c.ok, `${id}: the arm must be valid JS to node\n${src}\n${c.err}`);
+    const r = probe({ 'cdp-client.js': src });
+    if (r.status !== 1) wrong.push(`${id}: got ${r.status}`);
+  }
+  assert.deepEqual(wrong, [], `each must FAIL:\n${wrong.join('\n')}`);
+});
+
+test('⭐ CONTROL: the ASI rules leave real code alone — division after a label use, a binding, a postfix ++', () => {
+  const wrappers = {
+    'binding WITH an initializer': `const base = ${SAME};\nlet w = 6\n/ 2;\nmodule.exports = { ...base, w };\n`,
+    'postfix ++ then division': `const base = ${SAME};\nlet n = 4;\nconst h = n++ / 2 / 1;\nmodule.exports = { ...base, h };\n`,
+    'a break with no label, then code': `const base = ${SAME};\nfor (const k of []) { break }\nmodule.exports = base;\n`,
+    'a real ESM shim after a specifier': `${ESM_SAME}\nexport const one = 6 / 3 / 2;\n`,
+  };
+  for (const [what, src] of Object.entries(wrappers)) {
+    assert.ok(nodeAccepts(src, what.includes('ESM') ? '.mjs' : '.js').ok, `${what}: must be valid JS`);
+    const r = probe({ 'cdp-client.js': src });
+    assert.equal(r.status, 0, `${what}: a real wrapper must PASS; got ${r.status}\n${src}\n${r.stderr}`);
+  }
+});
+
+/** A barrel re-export, then a definition the old lexer hid in the comment. */
+const BARREL_THEN = (/** @type {string} */ eol) => `module.exports = { ...${IDX} }; // x${eol}`
+  + `function createCdpClient(){ return 42 }${eol}module.exports.createCdpClient = createCdpClient;${eol}`;
+
+test('⛔ n12/n13: a line comment ends at CR, U+2028 and U+2029 — the code after it is CODE', () => {
+  /** @type {string[]} */
+  const wrong = [];
+  for (const [id, eol] of Object.entries({ 'n12 CR-only': '\r', 'n13 U+2028': '\u2028', 'U+2029': '\u2029' })) {
+    const src = BARREL_THEN(eol);
+    assert.ok(nodeAccepts(src).ok, `${id}: must be valid JS`);
+    const r = probe({ 'cdp-client.js': src });
+    if (r.status !== 1) wrong.push(`${id}: got ${r.status}`);
+  }
+  assert.deepEqual(wrong, [], `a barrel that DEFINES a function must FAIL:\n${wrong.join('\n')}`);
+  // A line-leading `-->` after a CR is an HTML-like comment in CommonJS: forked.
+  const html = `${HEAD}x = 1\r--> ${SAME}\n`;
+  assert.ok(nodeAccepts(html).ok, '--> after CR: must be valid JS');
+  const h = probe({ 'cdp-client.js': html });
+  assert.equal(h.status, 1, `--> after CR: must FAIL; got ${h.status}\n${h.stderr}`);
+  assert.match(h.stderr, /AMBIGUOUS at line 5/, 'the line count honours the CR');
+  // A string ends (unterminated) at CR: node rejects the file, so it is no barrel.
+  const str = `module.exports = { ...${IDX} }; const s = 'x\rfunction createCdpClient(){}\r';\r`;
+  assert.ok(!nodeAccepts(str).ok, 'a CR inside a quoted string is a syntax error to node');
+  assert.equal(probe({ 'cdp-client.js': str }).status, 1, 'a string spanning a CR hides nothing');
+});
+
+test('⭐ CONTROL: a CRLF file is read exactly like an LF one', () => {
+  const crlf = (/** @type {string} */ s) => s.replace(/\n/g, '\r\n');
+  for (const [what, src] of Object.entries({
+    'shim': `module.exports = ${SAME}; // shim\n`,
+    'barrel': `module.exports = { ...${IDX} }; // x\nmodule.exports.y = 1;\n`,
+    'string with a CRLF line continuation': `const s = 'a\\\nb'; // it's\nmodule.exports = ${SAME};\n`,
+  })) {
+    assert.ok(nodeAccepts(crlf(src)).ok, `${what}: must be valid JS`);
+    const r = probe({ 'cdp-client.js': crlf(src) });
+    assert.equal(r.status, 0, `${what} (CRLF): must PASS; got ${r.status}\n${r.stderr}`);
+  }
+  const r = probe({ 'cdp-client.js': crlf(`${HEAD}`) });
+  assert.equal(r.status, 1, `an edited copy (CRLF) still FAILS; got ${r.status}`);
+});
+
+test('⛔ COST: 6000 forks on one line finish fast, in bounded memory, and the file is AMBIGUOUS', () => {
+  // The review's file: 132 KB, 6000 forks, 91 s and 4.3 GB. Every `{}/x/g…`
+  // forks (a block then a regex, or an object then a division).
+  const src = `module.exports = ${SAME};\n${'if(a){}/x/g.test(b);'.repeat(6000)}\n`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'revendor-cost-'));
+  try {
+    for (const [root, files] of [[path.join(dir, 'vendor', 'base-webctl', 'lib'), PROBE_BASE],
+      [path.join(dir, 'lib'), { 'cdp-client.js': src }]]) {
+      fs.mkdirSync(root, { recursive: true });
+      for (const [rel, s] of Object.entries(files)) fs.writeFileSync(path.join(root, rel), s);
+    }
+    // The child reports its own CPU time and PEAK resident memory: wall time on a
+    // shared, loaded machine measures the machine, not the lexer.
+    const pre = path.join(dir, 'usage.cjs');
+    fs.writeFileSync(pre, "process.on('exit', () => { const u = process.resourceUsage();"
+      + " process.stderr.write(`\\nUSAGE ${(u.userCPUTime + u.systemCPUTime) / 1000} ${u.maxRSS}\\n`); });\n");
+    const r = spawnSync(process.execPath, ['--require', pre, TOOL, 'no-revendor', '--repo', dir],
+      { cwd: ROOT, encoding: 'utf8' });
+    const m = /USAGE ([\d.]+) (\d+)/.exec(r.stderr || '');
+    assert.ok(m, `no usage line\n${r.stderr}`);
+    const [cpuMs, rssKb] = [Number(m[1]), Number(m[2])];
+    assert.equal(r.status, 1, `must FAIL (ambiguous, no exception); got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /AMBIGUOUS at line 2: it has more than 32 readings/);
+    assert.ok(cpuMs < 3000, `took ${cpuMs} ms of CPU; the bound is 3000`);
+    assert.ok(rssKb < 300 * 1024, `peak RSS ${Math.round(rssKb / 1024)} MB; the bound is 300 MB`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

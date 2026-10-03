@@ -579,8 +579,11 @@ function insideAny(p, roots) {
 //
 // ⇒ Two changes, both in the direction of failing CLOSED:
 //   1. PRECISION. A bracket stack: a `)` closing `if`/`while`/`for`/`with` is
-//      followed by a regex, every other `)` by division; `${` by a regex; `]`,
-//      `++`, `--` by division. Each of these is decidable from the tokens.
+//      followed by a regex, every other `)` by division; `${` by a regex; `]`
+//      and a postfix `++`/`--` by division. So is every spot where ASI ends a
+//      statement (after break/continue/debugger, a label, an uninitialised
+//      binding, a module specifier, a prefix `++`): there `/` is a regex.
+//      Each of these is decidable from the tokens.
 //   2. WHAT IS STILL UNDECIDABLE IS READ BOTH WAYS, NOT GUESSED. A `/` after a
 //      `}` (block → regex, object or function expression → division) or after a
 //      contextual keyword (`of`, `yield`, `await` — also legal variable names),
@@ -594,7 +597,11 @@ function insideAny(p, roots) {
 // Zero dependencies, so this is a lexer, not a parser. Its remaining limits, and
 // which way each one fails, are listed at analyse() and in DEV_NOTES.
 
-/** @typedef {{k:'id'|'str'|'tpl'|'re'|'num'|'p', v:string, open?:boolean, stmt?:boolean}} Tok */
+/**
+ * `nl`: a line terminator precedes it. `pre`: for `++`/`--`, what a `/` after it starts.
+ * @typedef {{k:'id'|'str'|'tpl'|'re'|'num'|'p', v:string, open?:boolean, stmt?:boolean,
+ *   nl?:boolean, pre?:'re'|'div'|'fork'}} Tok
+ */
 /**
  * ONE way of reading a source. `forks` holds the offset of every point at which a
  * second reading was possible; `bad` is set when this reading is not lexically
@@ -604,9 +611,25 @@ function insideAny(p, roots) {
  *   bad: null | {at: number, forks: number, why: string}}} Reading
  */
 
-/** Reserved words after which `/` starts a regex. Reserved, so never a variable. */
+/**
+ * Reserved words after which `/` starts a regex. Reserved, so never a variable.
+ * ⛔ `break`, `continue` and `debugger` were missing: `/` after one on the SAME
+ * line is a syntax error, and after a line break ASI ends the statement, so the
+ * `/` starts a regex. Read as division, `break⏎/'/.test(s) // ' ; require(…)`
+ * opened a phantom string and counted a require that node treats as a COMMENT
+ * (final review, 2026-10-03: a false PASS). `extends` takes an expression.
+ */
 const REGEX_AFTER = new Set(['return', 'typeof', 'instanceof', 'in', 'new', 'delete',
-  'void', 'throw', 'case', 'do', 'else', 'default']);
+  'void', 'throw', 'case', 'do', 'else', 'default', 'break', 'continue', 'debugger', 'extends']);
+/** `break label⏎/…/` — a label on the break's own line; then the same ASI rule. */
+const LABEL_AFTER = new Set(['break', 'continue']);
+/**
+ * `let x⏎/…/` — a binding with no initializer cannot be continued by `/`, so ASI
+ * ends the declaration and the `/` is a regex (on the same line: a syntax error).
+ */
+const DECL = new Set(['var', 'let', 'const']);
+/** ECMAScript line terminators. Node ends a line comment at ANY of them. */
+const LT = new Set(['\n', '\r', '\u2028', '\u2029']);
 /** Contextual keywords: also legal variable names, so a `/` after one is FORKED. */
 const SLASH_CONTEXTUAL = new Set(['of', 'yield', 'await']);
 /** Statement heads: the `)` closing their `( … )` is followed by a statement. */
@@ -644,7 +667,19 @@ function lexJs(src, choices = []) {
 
   const n = src.length;
   let i = 0;
-  if (src.startsWith('#!')) { const e = src.indexOf('\n'); i = e < 0 ? n : e; }
+  /** End of the current line: the next line terminator at or after `from`. @param {number} from */
+  const lineEnd = (from = i) => { let e = from; while (e < n && !LT.has(src[e])) e++; return e; };
+  if (src.startsWith('#!')) i = lineEnd(2);
+  /**
+   * True from a line terminator until the next token: nothing but whitespace and
+   * comments since the line began. ⇒ A `-->` here leads its line, a `++` here is
+   * prefix (ASI), and a token pushed now records `nl` (a break precedes it).
+   */
+  let lineBlank = true;
+  /** Bracket depths at which a var/let/const declaration may still be open. @type {number[]} */
+  const decls = [];
+  /** @param {Tok} t */
+  const push = (t) => { t.nl = lineBlank; lineBlank = false; toks.push(t); };
   /**
    * Open brackets — `(` (stmt: it heads if/while/for/with), `[`, `{`, and a
    * template's `${`, which the next unmatched `}` resumes.
@@ -663,12 +698,29 @@ function lexJs(src, choices = []) {
     if (t.k === 'id') {
       if (dotted(1)) return 'div';
       if (REGEX_AFTER.has(t.v)) return 're';
-      return SLASH_CONTEXTUAL.has(t.v) ? 'fork' : 'div';
+      if (SLASH_CONTEXTUAL.has(t.v)) return 'fork';
+      // The token before this identifier: a `break`/`continue` on the same line
+      // makes it a label, a var/let/const makes it a binding — ASI either way.
+      const h = tok(2);
+      if (h && h.k === 'id' && !dotted(2)) {
+        if (LABEL_AFTER.has(h.v) && !t.nl) return 're';
+        if (DECL.has(h.v)) return 're';
+      }
+      // `var a = 1, b⏎/…/` is a binding too — but whether the declaration is
+      // still open (or ended by ASI lines ago) is a parse question. FORKED.
+      if (h && h.k === 'p' && h.v === ',' && decls.length && decls[decls.length - 1] === open.length) return 'fork';
+      return 'div';
     }
     if (t.k === 'tpl') return t.open ? 're' : 'div';
+    // `import 'x'⏎/…/`, `… from 'x'⏎/…/`: a module specifier ends its declaration.
+    if (t.k === 'str') {
+      const h = tok(2);
+      return h && h.k === 'id' && !dotted(2) && (h.v === 'import' || h.v === 'from') ? 're' : 'div';
+    }
     if (t.k !== 'p') return 'div';
     if (t.v === ')') return t.stmt ? 're' : 'div';
-    if (t.v === ']' || t.v === '++' || t.v === '--') return 'div';
+    if (t.v === '++' || t.v === '--') return t.pre || 'div';
+    if (t.v === ']') return 'div';
     return t.v === '}' ? 'fork' : 're';
   };
   /** End of a regex literal starting at `s`, or -1 when none can. @param {number} s */
@@ -676,10 +728,10 @@ function lexJs(src, choices = []) {
     let j = s + 1;
     let cls = false;
     for (;;) {
-      if (j >= n || src[j] === '\n' || src[j] === '\r') return -1;
+      if (j >= n || LT.has(src[j])) return -1;
       const ch = src[j];
       if (ch === '\\') {
-        if (j + 1 >= n || src[j + 1] === '\n' || src[j + 1] === '\r') return -1;
+        if (j + 1 >= n || LT.has(src[j + 1])) return -1;
         j += 2; continue;
       }
       if (cls) { if (ch === ']') cls = false; } else if (ch === '[') cls = true;
@@ -705,38 +757,44 @@ function lexJs(src, choices = []) {
     if (!closed && !opened) invalid(s, 'unterminated template literal');
     const text = src.slice(s, i);
     code += lead + text;
-    toks.push({ k: 'tpl', v: text, open: opened });
+    push({ k: 'tpl', v: text, open: opened });
     if (opened) open.push({ t: '${' });
   };
-  const lineEnd = () => { const e = src.indexOf('\n', i); return e < 0 ? n : e; };
 
   while (i < n) {
     const c = src[i];
     const d = src[i + 1];
+    // ⛔ A line comment ends at ANY line terminator — `\r`, U+2028, U+2029 too.
+    // Ended at `\n` only, a CR-only file's `// x⏎function f(){}` hid the function
+    // that node defines, so the file "defined nothing" (final review: false PASS).
     if (c === '/' && d === '/') { i = lineEnd(); code += ' '; continue; }
     if (c === '/' && d === '*') {
       const e = src.indexOf('*/', i + 2);
       if (e < 0) invalid(i, 'unterminated block comment');
       const end = e < 0 ? n : e + 2;
       // Keep its line breaks: a `-->` after a multi-line comment leads a line.
-      code += ` ${src.slice(i, end).replace(/[^\n]/g, '')}`;
+      const breaks = src.slice(i, end).replace(/[^\n\r\u2028\u2029]/g, '');
+      if (breaks) lineBlank = true;
+      code += ` ${breaks}`;
       i = end; continue;
     }
     // HTML-like comments (ECMA-262 Annex B): a line comment in a CommonJS script,
     // but `<!--` is `< ! --` and `-->` is `-- >` in an ES module. FORKED.
-    if ((c === '<' && src.startsWith('<!--', i))
-      || (c === '-' && src.startsWith('-->', i) && code.slice(code.lastIndexOf('\n') + 1).trim() === '')) {
+    if ((c === '<' && src.startsWith('<!--', i)) || (c === '-' && lineBlank && src.startsWith('-->', i))) {
       if (fork(i)) { i = lineEnd(); code += ' '; continue; }
     }
-    if (/\s/.test(c)) { code += c; i++; continue; }
+    if (/\s/.test(c)) { if (LT.has(c)) lineBlank = true; code += c; i++; continue; }
     if (c === '"' || c === "'") {
+      // A string may hold U+2028/U+2029 (ES2019) but ends, unterminated, at `\n` or `\r`.
       const s = i++;
-      while (i < n && src[i] !== c && src[i] !== '\n') i += src[i] === '\\' ? 2 : 1;
+      while (i < n && src[i] !== c && src[i] !== '\n' && src[i] !== '\r') {
+        i += src[i] !== '\\' ? 1 : src[i + 1] === '\r' && src[i + 2] === '\n' ? 3 : 2;
+      }
       const closed = src[i] === c;
       if (closed) i++; else invalid(s, 'unterminated string');
       const lit = src.slice(s, i);
       code += lit;
-      toks.push({ k: 'str', v: lit.slice(1, closed ? -1 : undefined) });
+      push({ k: 'str', v: lit.slice(1, closed ? -1 : undefined) });
       continue;
     }
     if (c === '`') { i++; template('`'); continue; }
@@ -751,7 +809,7 @@ function lexJs(src, choices = []) {
         let e = regexEnd(i);
         if (e < 0) { invalid(i, 'unterminated regex literal'); e = lineEnd(); }
         code += src.slice(i, e);
-        toks.push({ k: 're', v: src.slice(i, e) });
+        push({ k: 're', v: src.slice(i, e) });
         i = e; continue;
       }
     }
@@ -769,22 +827,33 @@ function lexJs(src, choices = []) {
         v += src[i]; i++;
       }
       code += src.slice(s, i);
-      toks.push({ k: 'id', v });
+      if (DECL.has(v) && !dotted(0)) decls.push(open.length);
+      push({ k: 'id', v });
       continue;
     }
     if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(d || ''))) {
       const s = i++;
       while (i < n && /[\w.]/.test(src[i])) i++;
       code += src.slice(s, i);
-      toks.push({ k: 'num', v: src.slice(s, i) });
+      push({ k: 'num', v: src.slice(s, i) });
       continue;
     }
     // `...` is ONE token: read as three dots, `...require('x')` looks like `.require`.
-    // `++`/`--` are one token too: a `/` after either is a division.
+    // `++`/`--` are one token too. A `/` after a POSTFIX one is a division; after
+    // a PREFIX one (`a⏎++/'/.lastIndex` — ASI makes it prefix) it is a regex.
+    // Prefix exactly where a `/` would start a regex, or after a line break.
     const p = c === '=' && d === '>' ? '=>' : src.startsWith('...', i) ? '...'
       : (c === '+' || c === '-') && d === c ? c + c : c;
     /** @type {Tok} */
     const t = { k: 'p', v: p };
+    if (p === '++' || p === '--') {
+      const before = tok(1);
+      const k = before ? slashKind() : 're';
+      // after `}`: a block, or a function/object expression, which `++` cannot follow
+      t.pre = lineBlank || k === 're' || (before && before.k === 'p' && before.v === '}') ? 're' : k;
+    } else if (p === ';') {
+      while (decls.length && decls[decls.length - 1] >= open.length) decls.pop();
+    }
     if (p === '(') {
       const h = tok(1);
       const h2 = tok(2);
@@ -798,10 +867,11 @@ function lexJs(src, choices = []) {
       const top = open[open.length - 1];
       if (top && top.t === want) { open.pop(); if (p === ')') t.stmt = !!top.stmt; }
       else invalid(i, `unbalanced '${p}'`);
+      while (decls.length && decls[decls.length - 1] > open.length) decls.pop();
     }
     i += p.length;
     code += p;
-    toks.push(t);
+    push(t);
   }
   if (open.length) invalid(n, `unclosed '${open[open.length - 1].t}'`);
   return { toks, code, forks, bad };
@@ -819,29 +889,55 @@ const MAX_READINGS = 32;
  * A reading that goes invalid is KEPT (its hash still counts), but is not
  * branched past its invalid point: every reading below it shares the defect.
  *
- * @param {string} src @returns {{readings: Reading[], capped: boolean}}
+ * ⛔ THE COST WAS NOT BOUNDED BY THE CAP. Every new fork enqueued its prefix
+ * BEFORE the cap was checked — O(F²) memory for F forks. Measured in the final
+ * review: one generated 132 KB line with 6000 forks took 91 s and 4.3 GB. ⇒ At
+ * most MAX_READINGS − readings − todo prefixes are ever enqueued, and a fork
+ * that finds no room STOPS the walk: the file is `capped` (AMBIGUOUS — fails
+ * closed) at once, with the readings lexed so far. ⇒ Cost ≤ MAX_READINGS lexes
+ * in every case, and one lex when the first reading already overflows. A reading
+ * is reduced to its summary as soon as it is lexed — tokens are not kept, so
+ * memory is one lex, not MAX_READINGS of them.
+ *
+ * @param {string} src @returns {{readings: ReadingSummary[], capped: boolean}}
  */
 function readJs(src) {
-  /** @type {Reading[]} */
+  /** @type {ReadingSummary[]} */
   const readings = [];
   /** @type {boolean[][]} choice prefixes still to lex */
   const todo = [[]];
+  let capped = false;
   while (todo.length) {
-    if (readings.length >= MAX_READINGS) return { readings, capped: true };
     const pre = /** @type {boolean[]} */ (todo.pop());
     const r = lexJs(src, pre);
-    readings.push(r);
     const lim = r.bad ? r.bad.forks : r.forks.length;
-    for (let m = lim - 1; m >= pre.length; m--) {
+    const room = MAX_READINGS - readings.length - 1 - todo.length;
+    if (lim - pre.length > room) capped = true;
+    readings.push({
+      hash: readingHash(r.code),
+      forks: r.forks.slice(0, 5),
+      bad: r.bad,
+      facts: r.bad || capped ? null : moduleFacts(r.toks),
+    });
+    if (capped) break;
+    // The EARLIEST forks first (the last pushed is lexed next): depth-first, as before.
+    for (let m = Math.min(lim, pre.length + room) - 1; m >= pre.length; m--) {
       todo.push([...pre, ...new Array(m - pre.length).fill(false), true]);
     }
   }
-  return { readings, capped: false };
+  return { readings, capped };
 }
 
-/** @param {Reading} r */
-function readingHash(r) {
-  return createHash('sha256').update(r.code.replace(/\s+/g, ' ').trim()).digest('hex');
+/**
+ * A reading, kept: its content hash, its first 5 fork offsets (all a message
+ * shows), its defect, and — when valid and the file is not capped — its facts.
+ * @typedef {{hash: string, forks: number[], bad: Reading['bad'],
+ *   facts: null | {specifiers: string[], defines: boolean}}} ReadingSummary
+ */
+
+/** @param {string} code a reading's comment-free source */
+function readingHash(code) {
+  return createHash('sha256').update(code.replace(/\s+/g, ' ').trim()).digest('hex');
 }
 
 /**
@@ -856,8 +952,10 @@ function readingHash(r) {
  *
  * ⚠ Remaining limits, with the direction each one fails:
  * * Beyond MAX_READINGS the file is ambiguous (closed for every exception) — but
- *   the content arm then compares only the readings explored, so a copy whose
- *   matching reading was not explored is missed (OPEN; needs > ~5 `}`-forks).
+ *   the content arm then compares only the readings explored before the walk
+ *   stopped. Both sides walk in the same order, so a copy identical after
+ *   normalisation still matches; one whose ONLY matching reading lies past the
+ *   cap is missed (OPEN; needs more than log2(MAX_READINGS) = 5 forks).
  * * A reading is dropped only for being invalid JS. A file that is invalid in
  *   EVERY reading is ambiguous (closed). If the true reading of a valid file were
  *   dropped, that would be a lexer bug, not a stated limit.
@@ -877,10 +975,24 @@ function readingHash(r) {
  */
 function analyse(src) {
   const { readings, capped } = readJs(src);
-  const hashes = [...new Set(readings.map(readingHash))];
-  /** @param {number} at */
-  const lineAt = (at) => src.slice(0, at).split('\n').length;
-  const forkLines = [...new Set(readings.flatMap((r) => r.forks.map(lineAt)))].sort((a, b) => a - b);
+  const hashes = [...new Set(readings.map((r) => r.hash))];
+  // ⛔ lineAt was `src.slice(0, at).split('\n')` — O(n) per fork per reading, the
+  // other half of the review's 91 s. ⇒ A line-start index (every terminator, CRLF
+  // as one) and a binary search; and only the first 5 lines, all a message shows.
+  /** @type {number[]} */
+  const starts = [0];
+  for (const m of src.matchAll(/\r\n|[\n\r\u2028\u2029]/g)) starts.push(/** @type {number} */ (m.index) + m[0].length);
+  /** 1-based line of offset `at`. @param {number} at */
+  const lineAt = (at) => {
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= at) lo = mid; else hi = mid - 1; }
+    return lo + 1;
+  };
+  /** @type {Set<number>} */
+  const forkAt = new Set();
+  for (const r of readings) for (const f of r.forks) forkAt.add(f);
+  const forkLines = [...new Set([...forkAt].sort((a, b) => a - b).map(lineAt))].slice(0, 5);
   if (capped) {
     return { hashes, facts: null, ambiguous: { lines: forkLines, why: `it has more than ${MAX_READINGS} readings` } };
   }
@@ -889,7 +1001,7 @@ function analyse(src) {
     const b = /** @type {NonNullable<Reading['bad']>} */ (readings[0].bad);
     return { hashes, facts: null, ambiguous: { lines: [lineAt(b.at)], why: `this lexer cannot read it (${b.why})` } };
   }
-  const all = valid.map((r) => ({ ...moduleFacts(r.toks), hash: readingHash(r) }));
+  const all = valid.map((r) => ({ .../** @type {NonNullable<typeof r.facts>} */ (r.facts), hash: r.hash }));
   /** @param {(typeof all)[number]} f */
   const key = (f) => JSON.stringify([[...new Set(f.specifiers)].sort(), f.defines, f.hash]);
   if (new Set(all.map(key)).size > 1) {

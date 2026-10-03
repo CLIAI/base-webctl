@@ -240,19 +240,59 @@ an `import()` whose argument is not one literal. Identifier escapes are decoded
 
 | limit | direction |
 |---|---|
-| more than 32 readings → ambiguous | CLOSED for every exception |
-| …and its content arm compares only the readings explored | OPEN — needs a base module with > ~5 `}`-forks AND a renamed copy |
+| more than 32 readings → ambiguous (the walk stops at the first fork with no room) | CLOSED for every exception |
+| …and its content arm compares only the readings explored | OPEN — needs a base module with > 5 forks AND a copy matching only past the cap |
 | a file invalid in EVERY reading → ambiguous | CLOSED |
 | a locally SHADOWED `require` (`function require(){}`) is still require | OPEN — only for a file written to look like a shim; no copy taken from base does |
 | code reached by a name built at runtime, a string timer, a worker | OPEN — same: an evasion, not a re-vendor |
 | an edited copy under a different name | OPEN — whole-file hashing, as stated since gen 2 |
 | a same-named file that imports its base module is a wrapper, however much it defines | OPEN — by design (the fleet's real wrappers add code) |
+| an UNREACHABLE import still counts — `if (false) require('<same module>')` makes a copy a wrapper | OPEN — reachability is control flow, not tokens; only for a file written to look like a shim |
 
 Sabotaged, each against the new tests (13 mutations, every one red): no dual lexing;
 no paren stack (`)` → division); `)` → fork instead of decided; `${` → division; `++`
 as two tokens; invalid readings kept; disagreeing readings trusted; `( … ) {` only after
 an identifier; EVALS ignored; escapes not decoded; HTML-like comments not forked;
 `data:`/computed `import()` not counted; content arm on the first reading only.
+
+### Final review of generation 5: three more ways to fail OPEN (same generation)
+
+Each measured by the reviewer as a **false PASS**, each now an arm that must FAIL:
+
+1. **ASI makes a `/` a regex where the lexer said division.** `REGEX_AFTER` lacked
+   `break`, `continue`, `debugger` (and `extends`). After one of them a `/` on the
+   same line is a syntax error, and after a line break ASI ends the statement — so
+   `break⏎/'/.test(s) // ' ; require('<same module>')` is a regex and a COMMENT to node
+   (the require never runs), while the lexer opened a phantom string and counted the
+   require. Same class, found while fixing it, all now decided from tokens: a label on
+   a `break`/`continue` line; a binding with no initializer (`let x⏎/…/`); a module
+   specifier (`import 'x'⏎/…/`, `… from 'x'⏎/…/`); a **prefix** `++`/`--` (after a line
+   break, or wherever a `/` would start a regex — `a⏎++/'/.lastIndex`). `var a = 1, b⏎/`
+   needs to know whether the declaration is still open, a parse question: **forked**.
+   Every arm is checked with `node --check` in the test before it is believed.
+2. **Line terminators.** Line comments, the regex scan and the line-leading `-->` test
+   knew only `\n`; node also ends a line at `\r`, U+2028 and U+2029. In a CR-only file,
+   `require(<index.js>); // x⏎function createCdpClient(){}` — node DEFINES the function,
+   the lexer hid it in the comment, so the file "defined nothing" and the barrel
+   exception passed it. Now every terminator ends a line comment and fails a regex;
+   a quoted string ends (unterminated) at `\r` as at `\n` (U+2028/9 are legal inside
+   one); line numbers in messages count every terminator, CRLF as one. A CRLF file is
+   read exactly like an LF one (control arms).
+3. **Cost was not bounded by the cap.** Each fork enqueued a prefix before the cap was
+   checked (O(F²) memory), and `lineAt` re-split the source per fork per reading. A
+   generated 132 KB line with 6000 forks took 91 s and 4.3 GB. Now at most
+   `MAX_READINGS − readings − todo` prefixes are ever queued; the first fork with no
+   room **stops the walk** and the file is AMBIGUOUS (closed); readings are summarised
+   as they are lexed (no token arrays kept); line numbers come from a line-start index
+   with binary search, and only the first 5 are kept. The test's 6000-fork file (120 KB)
+   measures 0.2–0.4 s CPU and ≈ 78 MB peak RSS (bare `node -e 0`: ≈ 40 MB) in a child that reports its own
+   `process.resourceUsage()` — CPU, not wall time, because the shared machine's load
+   swings wall time tenfold.
+
+Sabotaged, each against the new tests: the four keywords removed → the break,
+continue and debugger arms red; line comments ending at `\n` only → the CR, U+2028,
+U+2029 arms red; the enqueue cap removed → the cost test red (its child exhausts a
+1 GB heap; the pre-fix harness on the same file was at 4.2 GB RSS after 44 s of CPU).
 
 ## ⛔ A generation number renders TWO STATES IDENTICALLY
 
