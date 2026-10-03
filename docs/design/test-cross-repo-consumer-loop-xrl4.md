@@ -3,7 +3,7 @@ id: xrl4
 title: "Cross-Repo Consumer Test Loop & test-against-base Contract"
 category: test
 created: "2026-06-22"
-updated: "2026-08-31"
+updated: "2026-10-03"
 status: draft
 tags: [cross-repo, ci, test-loop, contract, headless, exit-codes, jsonl, drift-canary, semver-gate, gate-validity, vacuous-green, mutation-testing]
 tech:
@@ -612,6 +612,22 @@ For a candidate base commit:
 3. aggregate pass/fail/skip;
 4. **exit non-zero (block the release) if ANY consumer reports a FAIL.** `skip`
    (exit 2, needs-human) never blocks.
+
+⭐ **The pre-release arm is `--against-head --scratch`.** Step 2's "check the
+candidate into the consumer's `submodulePath`" happens in a **throwaway clone of
+the consumer's committed HEAD**, never in its live working tree: some live trees
+are what unattended timers run from, and the in-place arm (`--against-head`
+alone, still supported) let a timer firing inside the gate window run an
+untested candidate. The contract gets the same signals as in place
+(`WEBCTL_BASE_DIR` = the candidate in the clone, `WEBCTL_DECLARED_PIN` = the
+committed gitlink, `WEBCTL_GATE_SWAPPED`) plus a throwaway `HOME`.
+
+⇒ **What a scratch result describes is a COMMIT.** Uncommitted live edits are not
+tested, and the gate says so per consumer (`tested <sha> (live tree has N
+uncommitted change(s) — NOT tested)`). That is the honest subject for a release
+gate anyway — it is what a sibling cloning the consumer gets — and a contract
+that passes only in its live tree (gitignored fixtures) was never green for
+anyone else.
 
 Pairs with `scripts/verify-no-byte-drift.sh`, which asserts no consumer has copied
 a base file back into its own `lib/` (catches regression to byte-duplication).

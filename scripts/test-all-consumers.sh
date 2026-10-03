@@ -28,6 +28,16 @@
 # and reports SKIP naming why. Restore runs from an EXIT trap, so an interrupt
 # still puts the submodule back.
 #
+# --against-head --scratch   ⭐ THE RECOMMENDED PRE-RELEASE ARM. Each wired
+#                  consumer is CLONED at its committed HEAD into a throwaway dir,
+#                  base's candidate is cloned into the submodule path THERE, and
+#                  the contract runs in the clone with a throwaway HOME. The live
+#                  working tree is NEVER written. Uncommitted edits are NOT tested
+#                  — the gate says so per consumer — and a dirty tree no longer
+#                  forces a SKIP. Why: some live trees are what UNATTENDED TIMERS
+#                  run from, so an in-place swap let a timer firing inside the gate
+#                  window run an untested candidate.
+#
 # Exit: 0 if no consumer FAILs (skips allowed); 1 if any consumer FAILs.
 set -euo pipefail
 
@@ -38,13 +48,21 @@ CONSUMERS_DIR="${WEBCTL_CONSUMERS_DIR:-$HOME/github/CLIAI}"
 # for the gate's own tests, which must run against fake consumers, never the fleet.
 
 AGAINST_HEAD=0
+SCRATCH=0
 for arg in "$@"; do
   case "$arg" in
     --against-head) AGAINST_HEAD=1 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    --scratch) SCRATCH=1 ;;
+    -h|--help) sed -n '2,41p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
+if [ "$SCRATCH" = "1" ] && [ "$AGAINST_HEAD" != "1" ]; then
+  # Own-pin mode reads each consumer's mounted vendor/; a scratch clone has none
+  # to read without fetching it from the network. Refuse rather than guess.
+  echo "--scratch requires --against-head (it builds a clone with base's candidate placed in it)." >&2
+  exit 2
+fi
 
 # What this run VALIDATED AGAINST — stated up front, because "PASS" alone was
 # routinely read as "base is releasable" when it meant "the consumer still works
@@ -53,6 +71,7 @@ BASE_HEAD="$(git -C "$BASE_ROOT" rev-parse HEAD)"
 BASE_DESC="$(git -C "$BASE_ROOT" describe --tags --always 2>/dev/null || echo unknown)"
 if [ "$AGAINST_HEAD" = "1" ]; then
   VALIDATED_AGAINST="base HEAD $BASE_DESC ($BASE_HEAD)"
+  [ "$SCRATCH" = "1" ] && VALIDATED_AGAINST="$VALIDATED_AGAINST, in SCRATCH clones of each consumer's committed HEAD"
   if [ -n "$(git -C "$BASE_ROOT" status --porcelain)" ]; then
     echo "REFUSING --against-head: base working tree is dirty." >&2
     echo "  Consumers would be tested against a commit that does not exist," >&2
@@ -106,6 +125,90 @@ restore_submodule() {
   return 0
 }
 
+# ── scratch mode (--scratch) ─────────────────────────────────────────────────
+# ⛔ NEVER SWAP INSIDE A LIVE TREE. Some consumers' live working copies are what
+# UNATTENDED TIMERS run from (a janitor every 30 min), so the in-place swap let a
+# timer firing inside the gate window run an UNTESTED candidate. Scratch mode
+# builds the state the gate needs somewhere nobody else runs from:
+#
+#   <tmp>/repo        git clone of the live repo, checked out at its HEAD COMMIT
+#   <tmp>/repo/<sub>  a clone of BASE_ROOT checked out at BASE_HEAD — a real repo,
+#                     NEVER a symlink (symlinked vendors produced false failures here)
+#   <tmp>/repo-home   the contract's throwaway HOME
+#
+# Reads of the live repo run with GIT_OPTIONAL_LOCKS=0: a plain `git status`
+# opportunistically REWRITES .git/index to refresh stat data, which is a write.
+# The clone uses --no-hardlinks so not even inode link counts change, and both
+# clones get an unusable PUSH url so a contract that pushes cannot reach the live
+# repo (fetching from it is a read, and stays allowed).
+SCRATCH_TMP=""
+SCRATCH_ERR=""
+scratch_end() {
+  trap - EXIT INT TERM HUP
+  if [ -n "$SCRATCH_TMP" ]; then
+    # a contract may leave read-only dirs (module caches); rm -rf cannot enter them
+    chmod -R u+w "${SCRATCH_TMP:?}" 2>/dev/null || true
+    rm -rf "${SCRATCH_TMP:?}"
+  fi
+  SCRATCH_TMP=""
+  return 0
+}
+# $1 live repo dir, $2 the live HEAD commit, $3 submodule path.
+# On success: sets SCRATCH_TMP and returns 0 (scratch_end MUST follow).
+# On failure: sets SCRATCH_ERR to the step and git's own words; returns 1 with
+# nothing left on disk.
+scratch_begin() {
+  local live="$1" head="$2" sub="$3" dst got log
+  SCRATCH_ERR=""
+  SCRATCH_TMP="$(mktemp -d "${TMPDIR:-/tmp}/webctl-gate-scratch-XXXXXX")"
+  # Registered BEFORE anything is written into it, for the same reason the swap's
+  # restore is: an EXIT trap alone does not run when the shell dies by a signal.
+  trap 'scratch_end' EXIT
+  trap 'scratch_end; trap - INT; kill -INT $$' INT
+  trap 'scratch_end; trap - TERM; kill -TERM $$' TERM
+  trap 'scratch_end; trap - HUP; kill -HUP $$' HUP
+  dst="$SCRATCH_TMP/repo"
+  log="$SCRATCH_TMP/setup.log"
+  mkdir -p "$SCRATCH_TMP/repo-home"
+  if ! git clone -q --no-hardlinks --no-checkout -- "$live" "$dst" >"$log" 2>&1; then
+    SCRATCH_ERR="git clone of the live repo failed: $(tail -n 2 "$log" | tr '\n' ' ')"
+  elif ! git -C "$dst" cat-file -e "$head^{commit}" 2>/dev/null \
+       && ! git -C "$dst" fetch -q --no-tags -- "$live" "$head" >"$log" 2>&1; then
+    SCRATCH_ERR="live HEAD ${head:0:7} is not in the clone and could not be fetched: $(tail -n 2 "$log" | tr '\n' ' ')"
+  elif ! git -C "$dst" checkout -q --detach "$head" >"$log" 2>&1; then
+    SCRATCH_ERR="checkout of ${head:0:7} in the clone failed: $(tail -n 2 "$log" | tr '\n' ' ')"
+  else
+    git -C "$dst" remote set-url --push origin "no-push://scratch-clone-of-a-live-tree" 2>/dev/null || true
+    # The gitlink checks out as an empty dir; replace it with base's candidate.
+    rm -rf "${dst:?}/${sub:?}"
+    mkdir -p "$(dirname "$dst/$sub")"
+    if ! git clone -q --no-hardlinks --no-checkout -- "$BASE_ROOT" "$dst/$sub" >"$log" 2>&1; then
+      SCRATCH_ERR="git clone of base into '$sub' failed: $(tail -n 2 "$log" | tr '\n' ' ')"
+    elif ! git -C "$dst/$sub" cat-file -e "$BASE_HEAD^{commit}" 2>/dev/null \
+         && ! git -C "$dst/$sub" fetch -q --no-tags -- "$BASE_ROOT" HEAD >"$log" 2>&1; then
+      SCRATCH_ERR="base HEAD ${BASE_HEAD:0:7} could not be fetched into '$sub': $(tail -n 2 "$log" | tr '\n' ' ')"
+    elif ! git -C "$dst/$sub" checkout -q --detach "$BASE_HEAD" >"$log" 2>&1; then
+      SCRATCH_ERR="checkout of base ${BASE_HEAD:0:7} in '$sub' failed: $(tail -n 2 "$log" | tr '\n' ' ')"
+    else
+      git -C "$dst/$sub" remote set-url --push origin "no-push://scratch-clone-of-base" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$log"
+  if [ -z "$SCRATCH_ERR" ]; then
+    # ⛔ Assert the VALUES, not that the commands exited 0.
+    got="$(git -C "$dst" rev-parse HEAD 2>/dev/null || echo none)"
+    [ "$got" = "$head" ] || SCRATCH_ERR="the clone is at $got, not the live HEAD $head"
+    got="$(git -C "$dst/$sub" rev-parse HEAD 2>/dev/null || echo none)"
+    [ -z "$SCRATCH_ERR" ] && [ "$got" != "$BASE_HEAD" ] \
+      && SCRATCH_ERR="'$sub' in the clone is at $got, not base HEAD $BASE_HEAD"
+  fi
+  if [ -n "$SCRATCH_ERR" ]; then
+    scratch_end
+    return 1
+  fi
+  return 0
+}
+
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # emit a JSONL envelope: type, ts, consumer, suite, result
 # Minimal JSON string escaping for a reason carried into the envelope.
@@ -130,6 +233,8 @@ pass=0 fail=0 skip=0 stale=0
 probe_ok=0 probe_bad=0 probe_none=0
 declare -a probe_fails=()
 fails=()
+scratch_n=0
+declare -a untested_live=()
 
 while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localDir; do
   [ -n "$name" ] || continue
@@ -191,7 +296,58 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     skip=$((skip + 1)); continue
   fi
 
-  if [ ! -d "$repo_dir/$submodulePath" ]; then
+  # ── SCRATCH MODE: judge the COMMITTED state; read the live tree, never write it ──
+  # What survives of the in-place checks when what runs is the HEAD commit:
+  #   * "submodule missing in working copy" -> is a gitlink DECLARED at HEAD?
+  #   * "dirty submodule pointer -> FAIL"   -> the live checkout no longer decides
+  #     what runs (the candidate replaces it), so a mispinned live tree is REPORTED,
+  #     loudly, but it cannot make this result describe an undeclared base. What
+  #     stays meaningful is the committed entry itself: it must be a gitlink. A
+  #     path committed as a plain directory declares no pin at all -> FAIL.
+  #   * "dirty tree -> SKIP"                -> committed state cannot be dirty; the
+  #     uncommitted changes are counted and named as NOT tested instead.
+  live_head="" tested_note="" live_dirty=0
+  if [ "$SCRATCH" = "1" ]; then
+    live_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$repo_dir" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null || true)"
+    if [ -z "$live_head" ]; then
+      envelope "$name" "$tier" "skip" "no HEAD commit at $repo_dir — nothing committed to test"
+      echo "SKIP  $name ($tier) — no HEAD commit at $repo_dir; scratch mode tests committed state only" >&2
+      skip=$((skip + 1)); continue
+    fi
+    gl_entry="$(GIT_OPTIONAL_LOCKS=0 git -C "$repo_dir" ls-tree "$live_head" -- "$submodulePath" 2>/dev/null || true)"
+    gl_mode="$(printf '%s' "$gl_entry" | awk '{print $1}')"
+    gl_type="$(printf '%s' "$gl_entry" | awk '{print $2}')"
+    if [ -z "$gl_entry" ]; then
+      envelope "$name" "$tier" "skip" "submodule '$submodulePath' not declared in committed HEAD ${live_head:0:7} at $repo_dir"
+      echo "SKIP  $name ($tier) — submodule '$submodulePath' not declared in committed HEAD ${live_head:0:7} at $repo_dir" >&2
+      skip=$((skip + 1)); continue
+    fi
+    if [ "$gl_mode" != "160000" ]; then
+      envelope "$name" "$tier" "fail" "UNDECLARED: '$submodulePath' is committed at ${live_head:0:7} as a $gl_type (mode $gl_mode), not a gitlink"
+      {
+        echo "FAIL  $name ($tier) — UNDECLARED: '$submodulePath' is committed at ${live_head:0:7} as a $gl_type (mode $gl_mode), not a gitlink."
+        echo "        A sibling cloning this commit gets no declared pin; the gate has nothing to swap."
+      } >&2
+      fail=$((fail + 1)); fails+=("$name"); continue
+    fi
+    live_dirty="$(GIT_OPTIONAL_LOCKS=0 git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    live_ptr="$(GIT_OPTIONAL_LOCKS=0 git -C "$repo_dir" submodule status 2>/dev/null | grep -E '^[+U]' || true)"
+    if [ "${live_dirty:-0}" -gt 0 ]; then
+      tested_note="tested ${live_head:0:7} (live tree has $live_dirty uncommitted change(s) — NOT tested)"
+    else
+      tested_note="tested ${live_head:0:7} (live tree clean)"
+    fi
+    if [ -n "$live_ptr" ]; then
+      {
+        echo "NOTE  $name — the LIVE tree's submodule pointer is DIRTY (checkout != index):"
+        echo "        raw: $live_ptr"
+        echo "        Not what this run tests (the committed gitlink is), but whatever runs FROM"
+        echo "        that live tree runs an undeclared base. Fix: git -C $repo_dir submodule update --init --recursive"
+      } >&2
+    fi
+  fi
+
+  if [ "$SCRATCH" = "0" ] && [ ! -d "$repo_dir/$submodulePath" ]; then
     envelope "$name" "$tier" "skip" "submodule '$submodulePath' missing in working copy"
     echo "SKIP  $name ($tier) — submodule '$submodulePath' missing in working copy" >&2
     skip=$((skip + 1)); continue
@@ -224,7 +380,8 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # handled above. Pattern positive-controlled against synthetic `+`/`U` lines
   # before being trusted, because a zero from a broken pattern is
   # indistinguishable from a zero from a clean tree.
-  dirty_ptr="$(git -C "$repo_dir" submodule status 2>/dev/null | grep -E '^[+U]' || true)"
+  dirty_ptr=""
+  [ "$SCRATCH" = "0" ] && dirty_ptr="$(git -C "$repo_dir" submodule status 2>/dev/null | grep -E '^[+U]' || true)"
   if [ -n "$dirty_ptr" ]; then
     # Is this OUR OWN arm mid-swap? A live pid in the marker says a swap is in
     # progress; a dead one says it was abandoned, which is the actual incident.
@@ -259,7 +416,8 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # count, so the owning lane can see why it vanished from the gate rather than
   # discovering it as an absence. (This also subsumes the --against-head-only
   # refusal to move someone's submodule while they edit.)
-  dirty_files="$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  dirty_files=0
+  [ "$SCRATCH" = "0" ] && dirty_files="$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
   if [ "${dirty_files:-0}" -gt 0 ]; then
     envelope "$name" "$tier" "skip" "working tree DIRTY ($dirty_files files) — consumer is mid-edit"
     echo "SKIP  $name ($tier) — working tree DIRTY ($dirty_files files) at $repo_dir;" >&2
@@ -272,10 +430,30 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # otherwise `wired:true` (honest — the submodule IS mounted) would false-RED
   # the gate with exit 127. The instant the consumer commits the contract, this
   # auto-flips to a real PASS/FAIL. (testCmd's first token is the script path.)
+  #
+  # In scratch mode the clone is built FIRST, so this check — like everything
+  # after it — reads the COMMITTED contract: one that exists only as an
+  # uncommitted file in the live tree is not what a sibling's clone would run.
+  run_dir="$repo_dir"
+  run_home=""
+  if [ "$SCRATCH" = "1" ]; then
+    if ! scratch_begin "$repo_dir" "$live_head" "$submodulePath"; then
+      # ⇒ FAIL, not SKIP: a wired consumer the gate could not build is a consumer
+      # it did not validate, and a skip never blocks.
+      envelope "$name" "$tier" "fail" "SCRATCH SETUP FAILED: $SCRATCH_ERR"
+      echo "FAIL  $name ($tier) — SCRATCH SETUP FAILED: $SCRATCH_ERR" >&2
+      fail=$((fail + 1)); fails+=("$name"); continue
+    fi
+    run_dir="$SCRATCH_TMP/repo"
+    run_home="$SCRATCH_TMP/repo-home"
+    echo "SCRATCH $name: clone of $repo_dir at ${live_head:0:7}; $submodulePath = base ${BASE_HEAD:0:7}; live tree untouched" >&2
+    echo "        $tested_note" >&2
+  fi
   contract_script="${testCmd%% *}"
-  if [ ! -x "$repo_dir/$contract_script" ]; then
+  if [ ! -x "$run_dir/$contract_script" ]; then
+    if [ "$SCRATCH" = "1" ]; then scratch_end; fi
     envelope "$name" "$tier" "skip" "contract '$contract_script' not present (xrl4 adoption pending)"
-    echo "SKIP  $name ($tier) — contract '$contract_script' not present (xrl4 adoption pending)" >&2
+    echo "SKIP  $name ($tier) — contract '$contract_script' not present${live_head:+ in committed HEAD ${live_head:0:7}} (xrl4 adoption pending)" >&2
     skip=$((skip + 1)); continue
   fi
 
@@ -284,7 +462,18 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   sub_abs="$repo_dir/$submodulePath"
   orig_sha=""
   swapped_now=0
-  if [ "$AGAINST_HEAD" = "1" ]; then
+  if [ "$SCRATCH" = "1" ]; then
+    # Nothing is swapped in place; the candidate already sits in the clone. It
+    # still IS a swap from the contract's point of view whenever the committed
+    # gitlink names another commit — so WEBCTL_GATE_SWAPPED says exactly that.
+    declared_at_swap="$(git -C "$run_dir" ls-tree HEAD "$submodulePath" 2>/dev/null | awk '{print $3}')"
+    if [ "$declared_at_swap" = "$BASE_HEAD" ]; then
+      echo "NOTE  $name already declares base HEAD — no swap in the clone" >&2
+    else
+      echo "SWAP  $name (in the scratch clone): $submodulePath declared ${declared_at_swap:0:7} -> ${BASE_HEAD:0:7} (base HEAD)" >&2
+      swapped_now=1
+    fi
+  elif [ "$AGAINST_HEAD" = "1" ]; then
     orig_sha="$(git -C "$sub_abs" rev-parse HEAD)"
     if [ "$orig_sha" = "$BASE_HEAD" ]; then
       echo "NOTE  $name already pinned at base HEAD — no swap needed" >&2
@@ -314,13 +503,16 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # and attributed to the harness, because folding it into the consumer's column
   # would blame a lane for a candidate's bug.
   if [ "${swapped_now:-0}" = "1" ]; then
-    probe_declared="$(git -C "$repo_dir" ls-tree HEAD "$submodulePath" 2>/dev/null | awk '{print $3}')"
+    # In scratch mode the probe runs IN THE CLONE — the swap state exists there,
+    # and nowhere in the live tree.
+    probe_declared="$(git -C "$run_dir" ls-tree HEAD "$submodulePath" 2>/dev/null | awk '{print $3}')"
     probe_out=""
     set +e
-    probe_out="$(cd "$repo_dir" \
+    probe_out="$(cd "$run_dir" \
+      && { [ -z "$run_home" ] || export HOME="$run_home"; } \
       && WEBCTL_GATE_SWAPPED=1 WEBCTL_DECLARED_PIN="${probe_declared:-}" \
          node "$BASE_ROOT/scripts/contract-harness.mjs" gate-probe \
-           --repo "$repo_dir" --sub "$submodulePath" 2>&1)"
+           --repo "$run_dir" --sub "$submodulePath" 2>&1)"
     probe_rc=$?
     set -e
     case "$probe_rc" in
@@ -378,7 +570,11 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # the window in which they differ, so the gate is what should supply the
   # declaration rather than leaving each contract to compute it — during the
   # one moment it cannot.
-  declared_pin="$(git -C "$repo_dir" ls-tree HEAD "$submodulePath" 2>/dev/null | awk '{print $3}')"
+  declared_pin="$(git -C "$run_dir" ls-tree HEAD "$submodulePath" 2>/dev/null | awk '{print $3}')"
+  # In scratch mode the base under test is the clone AT the submodule path (a
+  # fixed commit, BASE_HEAD), and HOME is the throwaway one.
+  run_base_dir="$BASE_ROOT"
+  [ "$SCRATCH" = "1" ] && run_base_dir="$run_dir/$submodulePath"
   # ⭐ WEBCTL_GATE_SWAPPED — the gate's OWN knowledge of whether it swapped this
   # consumer, handed to the contract and everything it runs (unit suites included):
   #   "1" the gate swapped the submodule to the candidate · "0" the gate ran, no
@@ -388,8 +584,9 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # layer handled the swap correctly; the unit suite had no way to know. ⇒ A test
   # should not have to re-derive "am I under a swap?" from the very comparison it is
   # testing; the gate knows, so the gate says. Same reason gate-probe needed it.
-  ( cd "$repo_dir" \
-      && WEBCTL_BASE_DIR="$BASE_ROOT" \
+  ( cd "$run_dir" \
+      && { [ -z "$run_home" ] || export HOME="$run_home"; } \
+      && WEBCTL_BASE_DIR="$run_base_dir" \
          WEBCTL_DECLARED_PIN="${declared_pin:-}" \
          WEBCTL_GATE_SWAPPED="${swapped_now:-0}" \
          eval "$testCmd" ) 2>&1 | tee "$run_log" >&2
@@ -441,11 +638,15 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   fi
   rm -f "$run_log"
 
-  if [ "$AGAINST_HEAD" = "1" ] && [ -n "$orig_sha" ]; then
+  if [ "$SCRATCH" = "1" ]; then
+    scratch_end
+    scratch_n=$((scratch_n + 1))
+    if [ "${live_dirty:-0}" -gt 0 ]; then untested_live+=("$name ($live_dirty)"); fi
+  elif [ "$AGAINST_HEAD" = "1" ] && [ -n "$orig_sha" ]; then
     restore_submodule "$sub_abs" "$orig_sha" "$name"
   fi
   case "$rc" in
-    0) envelope "$name" "$tier" "pass"; echo "PASS  $name" >&2; pass=$((pass + 1)) ;;
+    0) envelope "$name" "$tier" "pass"; echo "PASS  $name${tested_note:+ — $tested_note}" >&2; pass=$((pass + 1)) ;;
     # ⛔ exit 2 is NO VERDICT, not "needs human". The gate used to assert the
     # latter, which is a cause it was never told: the consumer returns a NUMBER,
     # and the reason is the consumer's to state. Two states were wearing one
@@ -456,14 +657,23 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     # consumer's own words can. So the gate quotes it rather than guessing.
     2) envelope "$name" "$tier" "skip" "${reason:-}"
        echo "SKIP  $name — no verdict (exit 2): ${reason:-consumer stated no reason}" >&2
+       if [ -n "$tested_note" ]; then echo "        $tested_note" >&2; fi
        skip=$((skip + 1)) ;;
     *) envelope "$name" "$tier" "fail" "${reason:-}"
        echo "FAIL  $name (exit $rc): ${reason:-no reason stated}" >&2
+       if [ -n "$tested_note" ]; then echo "        $tested_note" >&2; fi
        fail=$((fail + 1)); fails+=("$name") ;;
   esac
 done < <(node "$HERE/read-consumers.mjs" ${WEBCTL_CONSUMERS_FILE:+"$WEBCTL_CONSUMERS_FILE"})
 
 echo "----- gate summary: pass=$pass skip=$skip fail=$fail -----" >&2
+if [ "$SCRATCH" = "1" ]; then
+  echo "----- scratch: $scratch_n consumer(s) run from a clone of their committed HEAD; no live tree was written -----" >&2
+  if [ "${#untested_live[@]}" -gt 0 ]; then
+    # Named, because "tested" is about a commit and these lanes have work past it.
+    echo "⚠ uncommitted live changes NOT tested: ${untested_live[*]}" >&2
+  fi
+fi
 if [ "$stale" -gt 0 ]; then
   # Counted SEPARATELY. Folded into `skip` it is invisible, which is the whole
   # defect: a lane the gate could validate, reported as one it cannot.

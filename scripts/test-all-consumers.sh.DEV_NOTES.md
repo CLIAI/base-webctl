@@ -8,6 +8,25 @@
   into `submodulePath`, run) is the eventual shape but is **FUTURE_WORK** — it
   needs SSH deploy keys and a runner. Logged under
   `FUTURE_WORK/test/260622-fresh-clone-ci-gate.md`.
+* **`--scratch`: never swap inside a live tree (2026-10-03).** The in-place
+  `--against-head` arm moved a consumer's submodule for the length of its
+  contract. Some live trees are what unattended timers run from (a janitor every
+  30 min), so a timer firing in the window ran an untested candidate. Scratch
+  mode clones the committed HEAD instead and places the candidate in the clone.
+  Choices worth knowing before changing it:
+  * `git clone --no-hardlinks` — not even inode link counts change in the live
+    repo; both clones get an unusable **push** url, so a contract that pushes
+    cannot reach the live repo (fetching from it is a read and stays allowed).
+  * `GIT_OPTIONAL_LOCKS=0` on every live-tree read. Without it `git status`
+    opportunistically rewrites `.git/index` (live and submodule) — caught by
+    `test/gate-scratch.test.js`'s snapshot, which records mtime as well as bytes.
+  * A scratch **setup** failure is a FAIL, not a SKIP: a wired consumer the gate
+    could not build is one it did not validate, and a skip never blocks.
+  * In-place mode is deliberately untouched (no behaviour change without the
+    flag); the scratch-only branches are guarded by `$SCRATCH`.
+  * Nested submodules other than base are NOT initialised in the clone (that may
+    need network). A contract depending on them fails in scratch — reported, and
+    arguably correct; revisit if a consumer genuinely needs one.
 * **`wired` flag drives graceful no-op.** Migration is one-small-refactoring-at-
   a-time (sb7q). Until a consumer's master actually mounts the submodule, its
   registry entry has `"wired": false` and the gate reports `skip`. This lets the
