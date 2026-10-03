@@ -1206,6 +1206,51 @@ test('⛔ nesting: every other fact satisfied (full mask, ro home) but the HOST 
   assert.equal(r.ran, false, 'a namespace sharing the host PIDs was accepted as `isolated`');
 });
 
+// ── every refusal is a tagged report line (what the gate greps for) ──────────
+
+/** The release gate's own grep for an isolation refusal (test-all-consumers.sh). */
+const GATE_REFUSAL = /^(FAIL|NO VERDICT) +isolated: /m;
+
+test('⛔ every `isolated` USAGE refusal prints a `FAIL  isolated: NOT RUN (usage):` line + JSONL, and keeps exit 3', async () => {
+  const dir = tmpdir();
+  const link = path.join(dir, 'to-home');
+  fs.symlinkSync(PW_HOME, link);
+  const cases = /** @type {[string, string[]][]} */ ([
+    ['no `--`', ['isolated', 'true']],
+    ['no command', ['isolated', '--']],
+    ['an unknown option', ['isolated', '--bogus', '--', 'true']],
+    ['a missing keep', ['isolated', '--keep', path.join(dir, 'missing'), '--', 'true']],
+    ['a keep that is /tmp', ['isolated', '--keep', '/tmp', '--', 'true']],
+    ['a keep symlinked to the home', ['isolated', '--keep', link, '--', 'true']],
+    ...(fs.existsSync('/run/user') ? [/** @type {[string, string[]]} */ (['a keep beneath /run', ['isolated', '--keep', '/run/user', '--', 'true']])] : []),
+  ]);
+  try {
+    for (const [what, args] of cases) {
+      const r = await run(args);
+      assert.equal(r.status, 3, `${what}: ${r.stderr}`);
+      assert.match(r.stderr, GATE_REFUSAL, `${what}: the gate's grep would miss this refusal:\n${r.stderr}`);
+      assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN \(usage\): /m, what);
+      const rec = JSON.parse(r.stdout.trim().split('\n').pop() || '{}');
+      assert.equal(rec.check, 'isolated', what);
+      assert.equal(rec.result, 'fail', what);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ a NESTED usage refusal and the inner half called on the host are tagged too', needsIsolation, async () => {
+  const nested = await run(['isolated', '--', process.execPath, TOOL, 'isolated', '--keep', '/tmp', '--', 'true']);
+  assert.equal(nested.status, 3, nested.stdout + nested.stderr);
+  assert.match(nested.stderr, /^FAIL {2}isolated: NOT RUN \(usage\): --keep #1 is \/tmp/m);
+  const inner = await run(['__isolated-inner', 'net:[0]', '--', 'true']);
+  assert.equal(inner.status, 1);
+  assert.match(inner.stderr, /^FAIL {2}isolated: NOT RUN: /m, inner.stderr);
+});
+
+test('CONTROL: the gate\'s grep DOES miss the old untagged shape (so the arm above can fail)', () => {
+  assert.doesNotMatch('isolated: --keep #1 is beneath /run, where host sockets live\n', GATE_REFUSAL);
+  assert.match('FAIL  isolated: NOT RUN (usage): --keep #1 is beneath /run\n', GATE_REFUSAL);
+});
+
 // ── import guard ─────────────────────────────────────────────────────────────
 
 test('⛔ importing the harness runs NO verb, even when the importer\'s argv names one', async () => {

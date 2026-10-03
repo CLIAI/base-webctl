@@ -94,7 +94,11 @@ function git(a, cwd) {
  * @param {Record<string, any>} [extra]
  */
 function report(check, code, reason, extra = {}) {
-  const result = code === EXIT.pass ? 'pass' : code === EXIT.fail ? 'fail' : 'no-verdict';
+  // ⚠ Anything that is neither pass nor NO VERDICT is a FAIL — a USAGE refusal (exit 3)
+  // included: it keeps its exit code, but its line must match `^(FAIL|NO VERDICT) +<check>: `,
+  // the one shape a caller greps for (the gate misdiagnosed untagged refusals as
+  // "user namespaces unavailable").
+  const result = code === EXIT.pass ? 'pass' : code === EXIT.noVerdict ? 'no-verdict' : 'fail';
   // JSONL on stdout (lszd); the human line on stderr, so a machine reader is
   // never parsing prose.
   process.stdout.write(`${JSON.stringify({
@@ -601,6 +605,19 @@ function exitCodeOf(code, signal) {
 const ISOLATED_USAGE = 'usage: contract-harness.mjs isolated [--keep <path>]… -- <cmd> [args…]\n';
 
 /**
+ * A USAGE refusal: the usage text, then a `FAIL  isolated: NOT RUN (usage): …` line +
+ * JSONL record, exit 3. ⛔ It used to be a bare `isolated: …` line, which the gate's grep
+ * for `^(FAIL|NO VERDICT) +isolated: ` missed — so a bad `--keep` (TMPDIR under /run)
+ * was reported as "isolated exited 3 and stated no reason … fix unshare / user
+ * namespaces" (final review, finding 7).
+ * @param {string} why @param {string[]} command @returns {number}
+ */
+function usageRefusal(why, command) {
+  process.stderr.write(ISOLATED_USAGE);
+  return report('isolated', EXIT.usage, `NOT RUN (usage): ${why}. The command was NOT started.`, { command });
+}
+
+/**
  * `isolated [--keep <path>]… -- <cmd> [args…]` — run <cmd> with NO host network and
  * NO host unix sockets.
  *
@@ -660,10 +677,7 @@ function runIsolated(a) {
     if (opts[i] === '--keep' && opts[i + 1]) keeps.push(opts[++i]);
     else bad = true;
   }
-  if (bad) {
-    process.stderr.write(ISOLATED_USAGE);
-    return Promise.resolve(EXIT.usage);
-  }
+  if (bad) return Promise.resolve(usageRefusal('expected `-- <cmd> [args…]` after the options', command));
   // ⛔ NESTED CALL: "already inside" is proven from the KERNEL. The marker alone is
   // trusted input — set on the host it would skip isolation entirely — so a marker
   // whose proof fails is REFUSED (no verdict, exit 2) before anything runs.
@@ -676,10 +690,7 @@ function runIsolated(a) {
           + '`isolated` sets it.', { command, namespace: proof.facts }));
     }
     const nestedPlan = planKeeps(keeps, [], { home: '', roots: recordedRoRoots() || [], sensitive: [] });
-    if (nestedPlan.usage) {
-      process.stderr.write(`isolated: ${nestedPlan.usage}\n${ISOLATED_USAGE}`);
-      return Promise.resolve(EXIT.usage);
-    }
+    if (nestedPlan.usage) return Promise.resolve(usageRefusal(nestedPlan.usage, command));
     // ⛔ and still capless: a nested call must not be the way back to capabilities
     const priv = privilegeDrop();
     if (priv.why) {
@@ -715,10 +726,7 @@ function runIsolated(a) {
     // a throwaway HOME under /tmp is the arm's own (the family's sandboxes isolate HOME)
     ...(throwawayHome() ? [{ p: throwawayHome(), label: 'HOME', rw: true }] : []),
   ], prot);
-  if (plan.usage) {
-    process.stderr.write(`isolated: ${plan.usage}\n${ISOLATED_USAGE}`);
-    return Promise.resolve(EXIT.usage);
-  }
+  if (plan.usage) return Promise.resolve(usageRefusal(plan.usage, command));
   if (plan.refuse) {
     return Promise.resolve(report('isolated', EXIT.fail,
       `NOT RUN: ${plan.refuse}. The command was NOT started.`, { command }));
@@ -805,7 +813,8 @@ async function runIsolatedInner(a) {
   /** @param {string} line */
   const tell = (line) => { try { fs.writeSync(3, `${line}\n`); return true; } catch { return false; } };
   const refuse = (/** @type {string} */ why) => {
-    if (!tell(`fail ${why}`)) process.stderr.write(`isolated: ${why}\n`);
+    // no status channel = not run via `isolated` (e.g. called on the host): report it here
+    if (!tell(`fail ${why}`)) report('isolated', EXIT.fail, `NOT RUN: ${why}. The command was NOT started.`);
     return EXIT.fail;
   };
   const [hostNs, sep, ...command] = a;
@@ -1416,8 +1425,7 @@ function runCommand(command, prefix = []) {
     const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', env });
     forwardSignals(child);
     child.on('error', (e) => {
-      process.stderr.write(`isolated: cannot run '${command[0]}': ${errMsg(e)}\n`);
-      resolve(127);
+      resolve(report('isolated', 127, `NOT RUN: cannot start '${argv[0]}': ${errMsg(e)}`));
     });
     child.on('close', (code, signal) => resolve(exitCodeOf(code, signal)));
   });

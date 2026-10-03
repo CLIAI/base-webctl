@@ -395,6 +395,18 @@ kernel SIGKILLs everything left in it — an arm's stray background processes in
   of its child → the SIGTERM arm red (`TIMEOUT` after 10 s — the trapper is bounded so a lost
   signal cannot leave an orphan); nested pid fact off → its nesting arm red.
 
+### Refusals are tagged lines — usage ones too (final review, finding 7)
+
+Usage refusals printed a bare `isolated: --keep #1 is beneath /run…`; the gate greps
+`^(FAIL|NO VERDICT) +isolated: `, missed it, and told the operator to fix unshare / user
+namespaces (e.g. TMPDIR under /run makes the gate's own `--keep` invalid). ⇒
+`usageRefusal()` → `report('isolated', EXIT.usage, 'NOT RUN (usage): …')`, and `report()`
+now tags every code that is neither pass nor no-verdict as FAIL (no caller passed exit 3
+before; the exit code is unchanged). The inner half called on the host reports too. Tested
+against the gate's literal regex, with a control that the regex misses the old shape;
+sabotage (old output restored) → both arms red. ⚠ A command that cannot be found is NOT a
+refusal: it was started, `setpriv` prints *"failed to execute …"* and the rc is 127.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

@@ -220,6 +220,11 @@ contract's output when it is used.
 | `sandbox-port [--bare]` | binds `127.0.0.1:0`, reads the port, closes it, **asserts a connect is refused**, prints it (JSONL + human line; `--bare` = the number only, for `$(…)`) | 0 |
 | `guard-live-port <port> [--pin-verified]` | defence in depth where `isolated` is not used: **REFUSES** when `127.0.0.1:<port>` listens **or** answers CDP (`GET /json/version` 200), naming both facts, unless `--pin-verified` | 0 pass · 1 refused · 3 usage |
 
+* ⭐ **Every refusal is ONE tagged line**: `FAIL  isolated: NOT RUN…` on stderr plus a JSONL
+  `"check":"isolated","result":"fail"` record — usage refusals included (`NOT RUN (usage): …`,
+  still exit **3**). Grep `^(FAIL|NO VERDICT) +isolated: ` and you have the reason. *(Usage
+  refusals used to be a bare `isolated: …` line; the gate's grep missed them and blamed
+  unshare / user namespaces.)*
 * ⛔ **`isolated` fails CLOSED.** No `unshare`, unprivileged user namespaces disabled, no
   `ip`/`ifconfig`, no `mount`, no `setpriv` (or one that leaves a capability), a loopback that will not come up, a mask that fails, a home
   (or any submount of it) that cannot be made read-only, a host
