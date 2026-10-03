@@ -369,6 +369,62 @@ nested `unshare -rm` WITH caps `umount -l /tmp` → "not mounted": inherited mou
   SUPERBLOCK remount that needs init-ns CAP_SYS_ADMIN and fails even with every namespace
   cap. The attack is `remount,bind,rw` (the per-mount flag); fixed, red. The nested-unshare
   arm survives the mutation **by design** — it tests mount locking, which holds with caps.
+* ⛔ **SUPERSEDED the same day** — see the next section: this drop broke nested namespaces.
+
+### ⛔ The setpriv drop broke NESTED namespaces — the command now runs as the real uid (2026-10-03)
+
+*Measured by a run over the real consumers:* a capless namespace-**root** process cannot
+create a nested user namespace — `unshare: write failed /proc/self/uid_map: Operation not
+permitted`. Mapping uid 0 (the writer's own euid, which is the parent namespace's root)
+needs CAP_SETFCAP since Linux 5.12. So under the release gate a lane whose contract
+self-isolates with its own `unshare -rn` FAILED, a lane probing for a netns went
+INCONCLUSIVE, and a lane launching a real Chromium failed with "CDP never came up" — its
+sandbox needs an unprivileged user namespace, and as uid 0 it refuses to start at all
+(*"Running as root without --no-sandbox is not supported"*, measured).
+
+⇒ `privilegeDrop(ids)`: `setpriv --no-new-privs -- unshare -U --map-user <uid> --map-group
+<gid> --` before the command, fresh AND nested path. The command runs in a CHILD user
+namespace as the REAL uid/gid number, mapped onto the outer namespace's root (= the
+caller). No new mount namespace: the masks stay in the one the OUTER user namespace owns.
+The real ids are read on the HOST side (inside, getuid() is 0) and passed in the masking
+plan (`ids`) and in `WEBCTL_HOST_IDS` for the nested path, as `WEBCTL_RO_ROOTS` is.
+Measured inside our `unshare -rnm`, after the masks and ro remounts:
+
+```
+inside the child               id -u = the real uid; CapInh/Prm/Eff/Amb 0 (CapBnd full)
+chmod-000 file                 EACCES
+umount -l /tmp                 refused; an unkept-dir socket stays ENOENT
+mount -o remount,bind,rw <ro>  refused; a write to the ro mount refused
+nested `unshare -rn`           OK, and `ip link set lo up` in it OK
+nested `unshare -rnm`          made; `umount -l /tmp`, `remount,bind,rw` both refused (locked)
+nested `unshare -Ur --pid --fork --mount-proc`   OK (pid 1)
+nested `unshare -U --map-user <uid>`             OK — the nested `isolated` path
+write to the fresh /tmp        OK
+Chromium --headless --dump-dom, sandbox ON   OK (under the setpriv drop: refused, uid 0)
+same, under setpriv --bounding-set=-all …   nested `unshare -rn`: uid_map EPERM
+```
+
+* **`--no-new-privs` is KEPT.** Measured with and without it: nested `unshare -rn` + lo up,
+  a nested pid ns, a nested `--map-user` and Chromium all work either way. It stops a setuid
+  or file-capability binary from handing the command capabilities in its child namespace.
+  The bounding set is NOT dropped: a new user namespace starts with a full one regardless,
+  and dropping it needs CAP_SETPCAP, which the nested caller lacks.
+* **Read back, not trusted.** The prefix runs node once and reports its `/proc/self/status`,
+  getuid/getgid and uid_map/gid_map: CapInh/Prm/Eff/Amb 0, NoNewPrivs 1, the real ids, and
+  EXACTLY one map line `<real id> <our euid/egid> 1`. Tested refusals: no setpriv; a setpriv
+  that execs its argv (NoNewPrivs 0); an `unshare` without `--map-user` (util-linux < 2.38);
+  one that accepts it and makes no namespace (caps, ids and map all wrong); a nested call
+  with `WEBCTL_HOST_IDS` unset. A real uid of 0 is refused up front. ⚠ The ids are passed
+  as SEPARATE argv words and redacted from any quoted stderr — getopt echoes `--opt=value`.
+* **The nesting proof is unchanged and still holds**: uid_map is now the child's (one line,
+  not the identity), netns/mntns/pidns are the outer level's. Tested: `isolation-check`
+  PASSES from the child and from a nested call's grandchild.
+* **Sabotage:** (1) child userns removed, read-back kept → every `isolated` arm red with the
+  refusal (fail closed). (2) Also the read-back removed → the CapEff, `id -u`, `umount -l
+  /tmp`, `remount,bind,rw` and chmod-000 arms red; the LOCKING arm stays green by design
+  (inherited mounts are locked with caps too). (3) be3471f's setpriv harness → the
+  REGRESSION arm (nested `unshare -rn` + lo up), the nested pid-ns arm and the LOCKING arm
+  (its nested namespace is no longer made — the old arm was vacuous there) red.
 
 ### ⛔ No PID namespace — host processes were signalable (2026-10-03)
 
@@ -405,7 +461,58 @@ now tags every code that is neither pass nor no-verdict as FAIL (no caller passe
 before; the exit code is unchanged). The inner half called on the host reports too. Tested
 against the gate's literal regex, with a control that the regex misses the old shape;
 sabotage (old output restored) → both arms red. ⚠ A command that cannot be found is NOT a
-refusal: it was started, `setpriv` prints *"failed to execute …"* and the rc is 127.
+refusal: it was started, `unshare` prints *"failed to execute …"* and the rc is 127.
+
+### ⛔ Under an outer `unshare -r` the "read-only home" was ROOT's (final review, 2026-10-03)
+
+Lanes self-isolate with `unshare -rn` and may call `isolated` inside it. There getuid() is 0
+and os.userInfo() answers root: the ro step protected root's home, and a file appeared in the
+REAL one (measured by the review). With the child-userns drop the same call was simply
+refused (uid 0) — a lane that self-isolates could not use `isolated` at all.
+
+⇒ `realIdentity()`, host side, at entry:
+
+* identity uid_map ⇒ getuid()/getgid() and os.userInfo() as before (NSS-aware);
+* otherwise two candidates — the OUTSIDE id of `/proc/self/{uid,gid}_map` (the `unshare -r`
+  case), and our own ids (a `--map-user=<uid>` namespace: the submount fixture's shape, and
+  `isolated`'s own child). Home: `getent passwd <uid>`, else `/etc/passwd` parsed;
+* ⭐ a candidate is ACCEPTED only when its home is owned by us as the kernel shows it here
+  (`stat().uid === getuid()`): a kernel fact, not a guess about how namespaces were stacked.
+  ⚠ The first draft refused "maps onto 0 one level up" outright — and the submount ARM went
+  red: its fixture (`unshare -rm` + `--map-user=<uid>`) is exactly that shape, legitimately;
+* refused, naming no id or path: unmapped ids; a stack of `unshare -r` (0 → 0); no passwd
+  entry; no candidate's home owned by us. ⚠ **No passwd entry is REFUSED, not noted**: the
+  home would go silently unprotected, and every other gap in this verb fails closed. A CI
+  container running an arbitrary uid without an entry will be refused — add one.
+
+Measured: inside `unshare -r`, a write into the real home → EROFS, absent on the host;
+`id -u` real; a nested `unshare -rn` works. Sabotage: home from os.userInfo() → the ARM red
+(the write landed); the old identity wholesale → the ARM and both refusal arms red.
+
+### ⛔ Ctrl-C did not stop the caller (final review, 2026-10-03)
+
+`isolated` forwarded SIGINT, then EXITED NORMALLY with 130. bash's wait-and-cooperative-exit
+rule reads a normal exit as "the child handled it" and carries on. ⇒ `exitOrDieBy()`: when
+a FORWARDED signal ended the child — killed by it, or exit 128+n, the shape it takes through
+unshare and the namespace's pid 1 (whose self-sent signals the kernel ignores) — remove the
+handlers and `process.kill(process.pid, sig)`. Fresh path, nested path, and a signal before
+the command started.
+
+```
+parent shape (INT to its group)            before         after
+bash, no trap: isolated …; echo AFTER      AFTER rc=130   dies by SIGINT
+bash, no trap: ( isolated … ) | cat        AFTER rc=130   dies by SIGINT
+bash WITH INT trap, gate shape             trap runs      trap runs   (bash 5.3)
+async-launched gate (`setsid bash … &`)    INT IGNORED from entry: `trap -p` → '' SIGINT
+```
+
+⚠ **The review's measurement was confounded**: its probe launched the gate as an async job
+from a script, and bash then starts it with SIGINT ignored — a non-interactive shell cannot
+trap a signal ignored at entry, so no harness change can make that trap run. With a real
+terminal Ctrl-C the trapped gate runs its trap on bash 5.3 either way; the fix matters for
+every caller WITHOUT a trap (lane scripts). A command that HANDLES the signal keeps its own
+code (the rc-7 trapper arm); `exit 130` without a signal stays 130 (CONTROL). Sabotage: no
+re-raise → the three no-trap arms red.
 
 ### The import guard
 
@@ -418,18 +525,17 @@ deliberately not re-indented, to keep the guard a two-line diff against concurre
 
 ### Known limits
 
-* **The home is whatever passwd says for the CALLER's uid.** Run from inside another user
-  namespace that maps the caller to 0 (a bare `unshare -r`), that is root's home, and the
-  real one stays writable — measured with the submount probe's first draft. No passwd entry
-  at all ⇒ nothing is protected. A profile directory configured OUTSIDE home (and not via a
-  symlinked dot-dir) is not covered either.
+* **The home is passwd's for the REAL uid** (realIdentity, below) — one level up at most: a
+  stack of `unshare -r` is refused, not resolved. No passwd entry ⇒ refused. A profile
+  directory configured OUTSIDE home (and not via a symlinked dot-dir) is not covered.
 * **`WEBCTL_RO_ROOTS` is recorded input.** `[]` would satisfy the nested home fact; the
   other five facts still require being inside a real masked namespace, so it does not let
   the host pass as "inside".
 
-* **Mapped root, no capabilities.** The command runs as uid 0 inside the namespace, with
-  every capability set empty (below). A tool that refuses root (Chromium without
-  `--no-sandbox`) refuses here; a port below 1024 cannot be bound.
+* **The real uid, no capabilities.** The command runs as the caller's own uid/gid in a
+  child user namespace (above); it can make namespaces of its own, but cannot bind a port
+  below 1024 in the isolated netns. Running `isolated` as host root is refused. Needs
+  util-linux ≥ 2.38 (`unshare --map-user`) and `setpriv`.
 * **`ip` or `ifconfig` is required** to bring `lo` up; node has no ioctl. Absent → FAIL.
   So is **`mount`** (util-linux, the package `unshare` comes from).
 * **Sockets the list misses.** One created on the host AFTER start-up (still masked if it
