@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
 import * as realDocker from '../lib/browser-location/docker-ctl.js';
+import { runAbsent } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC() {
   return {
@@ -97,7 +98,8 @@ async function bringUp(cfg, o = {}) {
     volumeRm: async () => ({ code: 0 }),
     volumeCreate: async () => ({ code: 0 }),
     exec: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
-    run: async () => ({ code: 0, stdout: 'container logs', stderr: '' }),
+    // inspect → absent (the ownership check); anything else → logs.
+    run: runAbsent({ code: 0, stdout: 'container logs', stderr: '' }),
     runDetached: async (/** @type {any} */ a) => { calls.push(a); return { code: 0, stderr: '' }; },
   };
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C), docker })

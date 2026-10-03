@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
 import * as realDocker from '../lib/browser-location/docker-ctl.js';
+import { INSPECT_ABSENT, inspectPresent } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC() {
   return {
@@ -58,6 +59,11 @@ async function bringUp(/** @type {any} */ lock) {
   /** @type {string[]} */
   const removed = [];
   let started = 0;
+  // The teardown proves the pair ours before removing it. Inspect reports what
+  // THIS bring-up actually started, with the labels it actually passed — so the
+  // teardown passes only because the driver labelled its own containers.
+  /** @type {Map<string, Record<string,string>>} */
+  const live = new Map();
   const docker = {
     ...realDocker,
     dockerAvailable: async () => true,
@@ -68,8 +74,14 @@ async function bringUp(/** @type {any} */ lock) {
     volumeRm: async () => ({ code: 0 }),
     volumeCreate: async () => ({ code: 0 }),
     exec: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
-    run: async () => ({ code: 0, stdout: '', stderr: '' }),
-    runDetached: async () => { started++; return { code: 0, stderr: '' }; },
+    run: async (/** @type {string[]} */ a) => {
+      if (a[0] !== 'inspect') return { code: 0, stdout: '', stderr: '' };
+      const n = a[a.length - 1];
+      return live.has(n) ? inspectPresent(n, { labels: live.get(n) }) : INSPECT_ABSENT;
+    },
+    runDetached: async (/** @type {any} */ o) => {
+      started++; live.set(o.name, o.labels || {}); return { code: 0, stderr: '' };
+    },
   };
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C), docker, profileLock: lock })
     // Portless: no CDP poll. force: skip the port pre-flight (a different `force`).

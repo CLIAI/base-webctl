@@ -18,6 +18,7 @@ import net from 'node:net';
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
 import * as realDocker from '../lib/browser-location/docker-ctl.js';
+import { runAbsent } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC() {
   return {
@@ -58,7 +59,7 @@ async function bringUp(cfg) {
     volumeRm: async () => ({ code: 0 }),
     volumeCreate: async () => ({ code: 0 }),
     exec: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
-    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+    run: runAbsent(), // the ownership inspect: no container exists
     runDetached: async (/** @type {any} */ a) => { runs.push(a); return { code: 0, stderr: '' }; },
   };
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C), docker })

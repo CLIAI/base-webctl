@@ -22,6 +22,7 @@ import assert from 'node:assert/strict';
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
 import * as realDocker from '../lib/browser-location/docker-ctl.js';
+import { runAbsent } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC(overrides = {}) {
   return {
@@ -72,6 +73,7 @@ async function captureDockerRun(cfg) {
     rm: async () => ({ code: 0 }),
     volumeRm: async () => ({ code: 0 }),
     volumeCreate: async () => ({ code: 0 }),
+    run: runAbsent(), // the ownership inspect: no container exists
     // Record, then fail so bring-up unwinds before touching a real daemon.
     runDetached: async (/** @type {any} */ a) => {
       calls.push(a);

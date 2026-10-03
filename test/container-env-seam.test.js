@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
 import * as realDocker from '../lib/browser-location/docker-ctl.js';
+import { runAbsent } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC() {
   return {
@@ -49,6 +50,7 @@ async function captureChromiumEnv(cfg) {
     rm: async () => ({ code: 0 }),
     volumeRm: async () => ({ code: 0 }),
     volumeCreate: async () => ({ code: 0 }),
+    run: runAbsent(), // the ownership inspect: no container exists
     // The X-server wait polls `xdpyinfo ... && echo ok` and checks stdout for
     // 'ok' — an empty stdout with code 0 is NOT success, and would have stalled
     // bring-up until its poll timed out. Answering the probe rather than just
