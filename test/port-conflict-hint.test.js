@@ -17,6 +17,7 @@ import net from 'node:net';
 
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
+import { TEST_CACHE_ROOT } from './helpers/test-cache-root.mjs';
 import { guardedDocker, assertHermetic, INSPECT_ABSENT } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC() {
@@ -32,7 +33,7 @@ function fakeC() {
 function hermeticMounts(C) {
   const m = createMounts(C, { dockerfilesDir: '/df' });
   const fake = (/** @type {string} */ s, /** @type {string} */ u) => u || `/tmp/no-mkdir/${s}`;
-  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => '/tmp/cache' };
+  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => TEST_CACHE_ROOT };
 }
 
 /** Hold a listener on an OS-assigned loopback port; the test owns it. */

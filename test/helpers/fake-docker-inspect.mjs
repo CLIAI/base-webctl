@@ -14,8 +14,9 @@ export const INSPECT_ABSENT = Object.freeze({
 /**
  * A successful inspect of one container.
  * @param {string} name  exact container name
- * @param {{labels?: Record<string,string>, binds?: string[], volumes?: string[]}} [o]
+ * @param {{labels?: Record<string,string>, binds?: string[], volumes?: string[], ports?: number[]}} [o]
  *   `volumes`: NAMED volumes (Type volume) — never ownership evidence.
+ *   `ports`: host ports it was started with (HostConfig.PortBindings).
  */
 export function inspectPresent(name, o = {}) {
   return {
@@ -24,6 +25,8 @@ export function inspectPresent(name, o = {}) {
     stdout: JSON.stringify([{
       Name: `/${name}`,
       Config: { Labels: o.labels || {} },
+      HostConfig: { PortBindings: Object.fromEntries((o.ports || []).map((p) => [
+        `${p}/tcp`, [{ HostIp: '127.0.0.1', HostPort: String(p) }]])) },
       Mounts: [
         ...(o.binds || []).map((s) => ({ Type: 'bind', Source: s, Destination: '/somewhere' })),
         // A named volume's Source is under docker's data root — absolute, so a

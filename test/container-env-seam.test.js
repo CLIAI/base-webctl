@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
+import { TEST_CACHE_ROOT } from './helpers/test-cache-root.mjs';
 import { guardedDocker, assertHermetic, INSPECT_ABSENT } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC() {
@@ -32,7 +33,7 @@ function hermeticMounts(C) {
   // resolveChromiumProfile leaves profilePathFor returning the REAL cache path,
   // and the profile LOCK then creates it under ~/.cache during a unit run.
   const fake = (/** @type {string} */ s, /** @type {string} */ u) => u || `/tmp/no-mkdir/${s}`;
-  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => '/tmp/cache' };
+  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => TEST_CACHE_ROOT };
 }
 
 /** Capture the CHROMIUM container's docker-run args (the second runDetached). */

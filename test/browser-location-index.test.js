@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 
 import { createBrowserLocation } from '../lib/browser-location/index.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
+import { TEST_CACHE_ROOT } from './helpers/test-cache-root.mjs';
 
 function fakeC(overrides = {}) {
   return {
@@ -35,7 +36,7 @@ function hermeticMounts(C) {
   return {
     ...m,
     resolveChromiumProfile: (slug, udd) => udd || `/tmp/no-mkdir/${slug}`,
-    cacheRoot: () => '/tmp/cache',
+    cacheRoot: () => TEST_CACHE_ROOT,
     migrationBannerMarker: () => '/tmp/no-mkdir/.banner-marker',
   };
 }

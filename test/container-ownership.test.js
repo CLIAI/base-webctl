@@ -33,6 +33,8 @@ import path from 'node:path';
 
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
+import { TEST_CACHE_ROOT } from './helpers/test-cache-root.mjs';
+import { createProcessMutex } from '../lib/process-mutex.js';
 import { createProfileLock } from '../lib/browser-location/profile-lock.js';
 import {
   guardedDocker, assertHermetic, INSPECT_ABSENT, inspectPresent,
@@ -65,7 +67,7 @@ function fakeC() {
 function hermeticMounts(/** @type {any} */ C) {
   const m = createMounts(C, { dockerfilesDir: '/df' });
   const fake = (/** @type {string} */ s, /** @type {string} */ u) => u || `/tmp/no-mkdir/${s}`;
-  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => '/tmp/cache' };
+  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => TEST_CACHE_ROOT };
 }
 /** No Preferences writes: the profile path is fictional. */
 const noPrefs = {
@@ -87,7 +89,7 @@ function freeLock() {
 }
 
 /**
- * @typedef {{running?: boolean, labels?: Record<string,string>, binds?: string[], volumes?: string[]}} Ctr
+ * @typedef {{running?: boolean, labels?: Record<string,string>, binds?: string[], volumes?: string[], ports?: number[]}} Ctr
  */
 
 /** Verbs that CHANGE daemon state — "no mutation" means none of these. */
@@ -97,7 +99,9 @@ const MUTATION = /^(rename|stop|rm|run|volumeRm|volumeCreate):/;
  * A stateful fake daemon. Each container has an ID and a StartedAt that a
  * rename keeps — as docker's does (measured on throwaway containers).
  * @param {Record<string, Ctr | 'fail' | 'garbage'>} initial  name → container
- * @param {{rmIsNoop?: boolean, renameFails?: (from: string, to: string) => boolean}} [o]
+ * @param {{rmIsNoop?: boolean, renameFails?: (from: string, to: string) => boolean,
+ *   onRename?: (from: string, to: string) => (void | Promise<void>)}} [o]
+ *   `onRename`: awaited BEFORE the rename takes effect — a hook to open a race window.
  */
 function daemon(initial, o = {}) {
   let seq = 0;
@@ -105,7 +109,7 @@ function daemon(initial, o = {}) {
   const ctrs = new Map(Object.entries(initial).map(([k, v]) => [k,
     typeof v === 'string' ? v : {
       id: `id-${k}`, startedAt: '2026-09-01T08:00:00Z', running: v.running !== false,
-      labels: v.labels || {}, binds: v.binds || [], volumes: v.volumes || [],
+      labels: v.labels || {}, binds: v.binds || [], volumes: v.volumes || [], ports: v.ports || [],
     }]));
   /** @type {string[]} */
   const verbs = [];
@@ -120,6 +124,7 @@ function daemon(initial, o = {}) {
     rm: async (/** @type {string} */ n) => { verbs.push(`rm:${n}`); if (!o.rmIsNoop) ctrs.delete(n); },
     rename: async (/** @type {string} */ from, /** @type {string} */ to) => {
       verbs.push(`rename:${from}->${to}`);
+      if (o.onRename) await o.onRename(from, to);
       if (o.renameFails && o.renameFails(from, to)) {
         return { code: 1, stdout: '', stderr: `Error response from daemon: (fake) cannot rename ${from}\n` };
       }
@@ -158,7 +163,7 @@ function daemon(initial, o = {}) {
       if (c === undefined) return INSPECT_ABSENT;
       if (c === 'fail') return { code: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon. Is the docker daemon running?\n' };
       if (c === 'garbage') return { code: 0, stdout: 'not json at all', stderr: '' };
-      return inspectPresent(n, { labels: c.labels, binds: c.binds, volumes: c.volumes });
+      return inspectPresent(n, { labels: c.labels, binds: c.binds, volumes: c.volumes, ports: c.ports });
     },
     logs: () => ({ code: 0, stdout: 'container logs', stderr: '' }),
   } });
@@ -172,7 +177,8 @@ function daemon(initial, o = {}) {
 
 /**
  * @param {any} docker
- * @param {{uid?: number|null, lock?: any, userDataDir?: string, logs?: string[], cdpPort?: number}} [o]
+ * @param {{uid?: number|null, lock?: any, userDataDir?: string, logs?: string[], cdpPort?: number,
+ *   attachOnly?: boolean, bringupMutex?: any}} [o]
  *   `cdpPort`: drive CDP at this port (a test server) instead of portless.
  */
 function driver(docker, o = {}) {
@@ -182,7 +188,9 @@ function driver(docker, o = {}) {
   return createChromiumDockerXpra(C, {
     mounts: hermeticMounts(C), docker, profileLock: o.lock || freeLock(), chromiumPrefs: noPrefs,
     ...(o.uid === null ? {} : { uid: o.uid ?? UID }),
+    ...(o.bringupMutex ? { bringupMutex: o.bringupMutex } : {}),
   }).createDriver({
+    ...(o.attachOnly ? { attachOnly: true } : {}),
     port: o.cdpPort || 45998, host: '127.0.0.1', slug: 'test', force: true,
     userDataDir: o.userDataDir || OUR_PROFILE,
     // portless unless a test CDP endpoint is supplied: no poll against a real port
@@ -199,7 +207,9 @@ function driver(docker, o = {}) {
  * Bring up against a daemon in the given state.
  * @param {Record<string, Ctr | 'fail' | 'garbage'>} initial
  * @param {{rmIsNoop?: boolean, renameFails?: (from: string, to: string) => boolean,
- *   lock?: any, userDataDir?: string, cdpPort?: number, d?: ReturnType<typeof daemon>}} [o]
+ *   onRename?: (from: string, to: string) => (void | Promise<void>),
+ *   lock?: any, userDataDir?: string, cdpPort?: number, d?: ReturnType<typeof daemon>,
+ *   attachOnly?: boolean, bringupMutex?: any}} [o]
  *   `d`: a daemon already built (when a test needs it before bring-up).
  */
 async function up(initial, o = {}) {
@@ -754,4 +764,217 @@ test('⛔ portless too: a running pair NOT provably ours is not reused', async (
   assert.match(String(r.error && r.error.message), /REFUSING to reuse container .*another account/s);
   assert.deepEqual(r.removed, []);
   assert.deepEqual(r.started, []);
+});
+
+// ── review round: never RESTART a running browser of ours ───────────────────
+
+test('⛔ A1: a RUNNING pre-owner browser whose xpra is ABSENT is refused with ZERO mutations — not even a rename', async () => {
+  const r = await up({ [L_CHROMIUM]: { binds: [OUR_PROFILE], running: true } });
+  assert.ok(r.error, 'must refuse');
+  assert.equal(r.error.exitCode, 4);
+  assert.match(String(r.error.message), /pre-owner browser demo-webctl-chromium-test is RUNNING/);
+  assert.match(String(r.error.message), /xpra partner demo-webctl-xpra-test does not exist/);
+  assert.match(String(r.error.message), /PARTIAL/);
+  assert.match(String(r.error.message), /docker stop demo-webctl-chromium-test/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), [], r.verbs.join(', '));
+  assert.deepEqual([...r.ctrs.keys()], [L_CHROMIUM]);
+  assert.equal(r.ctrs.get(L_CHROMIUM).id, `id-${L_CHROMIUM}`);
+  assert.ok(r.ctrs.get(L_CHROMIUM).running, 'still running');
+});
+
+test('⛔ A1: a RUNNING pre-owner browser whose xpra is NOT provably ours is refused with ZERO mutations', async () => {
+  const r = await up({
+    [L_CHROMIUM]: { binds: [OUR_PROFILE], running: true },
+    [L_XPRA]: { labels: { [OWNER]: '1001' }, running: true },
+  });
+  assert.ok(r.error, 'must refuse');
+  assert.equal(r.error.exitCode, 4);
+  assert.match(String(r.error.message), /xpra partner demo-webctl-xpra-test it belongs to another account/);
+  assert.match(String(r.error.message), /PARTIAL/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), [], r.verbs.join(', '));
+  assert.ok(r.ctrs.get(L_CHROMIUM).running && r.ctrs.get(L_XPRA).running);
+});
+
+test('CONTROL (A1): a STOPPED pre-owner browser with no xpra is still renamed and brought up — no browser runs to restart', async () => {
+  const r = await up({ [L_CHROMIUM]: { binds: [OUR_PROFILE], running: false } });
+  assert.equal(r.error, undefined, r.error && r.error.message);
+  assert.equal(r.verbs.filter((v) => MUTATION.test(v))[0], `rename:${L_CHROMIUM}->${CHROMIUM}`);
+  assert.deepEqual(r.started, [`run:${XPRA}`, `run:${CHROMIUM}`]);
+  assert.deepEqual(r.overlaps, []);
+});
+
+test('A1 (shutdown): a running partial pre-owner browser is STOPPED under its old name — not renamed, not removed', async () => {
+  const d = daemon({ [L_CHROMIUM]: { binds: [OUR_PROFILE], running: true } });
+  await driver(d.docker).shutdown();
+  assertHermetic(d.violations);
+  const muts = d.verbs.filter((v) => MUTATION.test(v));
+  assert.equal(muts[0], `stop:${L_CHROMIUM}`, muts.join(', '));
+  assert.ok(!muts.some((v) => /^(rename|rm|run):/.test(v)), muts.join(', '));
+  assert.equal(d.ctrs.get(L_CHROMIUM).running, false);
+});
+
+test('⛔ A2: a running pair renamed in THIS call whose CDP does not answer is REFUSED (both ports named) — never recreated, nor on the next command', async () => {
+  await withLegacyLock(async (dir, lock) => {
+    const pair = legacyPair(dir);
+    // the pre-owner xpra was started on DIFFERENT ports than this driver's cfg
+    /** @type {any} */ (pair[L_XPRA]).ports = [4327, 14327];
+    const d = daemon(pair);
+    const cdp = await cdpEndpoint(() => false); // nothing answers at the cfg port
+    try {
+      const r = await up({}, { d, lock, userDataDir: dir, cdpPort: cdp.port });
+      assert.ok(r.error, 'must refuse');
+      assert.equal(r.error.exitCode, 4);
+      const msg = String(r.error.message);
+      assert.match(msg, new RegExp(`RUNNING, but CDP did not answer at http://127\\.0\\.0\\.1:${cdp.port}`));
+      assert.match(msg, /never destroyed merely because CDP was slow/);
+      assert.match(msg, /still starting/);
+      assert.match(msg, new RegExp(`PORT MISMATCH: this driver's CDP port is ${cdp.port}; the running pair publishes host\\s+port\\(s\\) 4327, 14327`));
+      assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v) && !v.startsWith('rename:')), [], r.verbs.join(', '));
+      assert.deepEqual(r.renamed, [`rename:${L_CHROMIUM}->${CHROMIUM}`, `rename:${L_XPRA}->${XPRA}`], 'the migration itself stands');
+      assert.equal(r.ctrs.get(CHROMIUM).id, `id-${L_CHROMIUM}`);
+      assert.ok(r.ctrs.get(CHROMIUM).running, 'the browser still runs');
+      assert.equal(lock.readLock(dir).containerName, CHROMIUM);
+      // the NEXT command — no rename this time — still never recreates it: the
+      // pair still mounts the pre-owner volume, which marks it as migrated
+      const mark = d.verbs.length;
+      const again = await up({}, { d, lock, userDataDir: dir, cdpPort: cdp.port });
+      assert.ok(again.error, 'the next command must refuse too');
+      assert.match(String(again.error.message), /RUNNING, but CDP did not answer/);
+      assert.match(String(again.error.message), /publishes host\s+port\(s\) 4327, 14327/);
+      assert.deepEqual(d.verbs.slice(mark).filter((v) => MUTATION.test(v)), [], d.verbs.slice(mark).join(', '));
+      assert.equal(d.ctrs.get(CHROMIUM).id, `id-${L_CHROMIUM}`);
+    } finally { await cdp.close(); }
+  });
+});
+
+test('⛔ A3: two CONCURRENT bring-ups on one profile with a legacy pair → ONE migration, nothing removed, the second reuses', async () => {
+  await withLegacyLock(async (dir, lock) => {
+    const lockBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bringup-mutex-'));
+    try {
+      const bringupMutex = createProcessMutex(fakeC(), { assert: false, lockBaseDir, signalCleanup: false, retryMs: 5 });
+      /** @type {Promise<any>|null} */
+      let second = null;
+      /** @type {any} */
+      let d = null;
+      d = daemon(legacyPair(dir), {
+        // Runner B arrives in THE window: A's chromium already renamed, its xpra
+        // not yet, its lock not yet relabelled. A then pauses so B gets as far
+        // as it can before A continues.
+        onRename: async (from) => {
+          if (from === L_XPRA && !second) {
+            second = up({}, { d, lock, userDataDir: dir, bringupMutex });
+            await new Promise((res) => setTimeout(res, 60));
+          }
+        },
+      });
+      const first = await up({}, { d, lock, userDataDir: dir, bringupMutex });
+      assert.ok(second, 'premise: the second runner was started inside the window');
+      const b = await second;
+      assert.equal(first.error, undefined, first.error && first.error.message);
+      assert.equal(b.error, undefined, b.error && b.error.message);
+      assert.deepEqual(d.verbs.filter((/** @type {string} */ v) => v.startsWith('rename:')),
+        [`rename:${L_CHROMIUM}->${CHROMIUM}`, `rename:${L_XPRA}->${XPRA}`], 'exactly one migration');
+      assert.deepEqual(d.verbs.filter((/** @type {string} */ v) => /^(rm|stop|run):/.test(v)), [], d.verbs.join(', '));
+      assert.equal(d.ctrs.get(CHROMIUM).id, `id-${L_CHROMIUM}`);
+      assert.ok(d.ctrs.get(CHROMIUM).running && d.ctrs.get(XPRA).running);
+      assert.deepEqual(d.overlaps, []);
+      assert.ok(b.logs.some((/** @type {string} */ m) => /another bring-up of this profile is in progress — waiting/.test(m)), b.logs.join('\n'));
+      assert.equal(lock.readLock(dir).containerName, CHROMIUM);
+      assert.deepEqual(fs.readdirSync(lockBaseDir), [], 'the bring-up lock was released by both');
+    } finally {
+      fs.rmSync(lockBaseDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('⛔ A4: a pre-owner lock written on ANOTHER host → BOTH renames rolled back, refused, lock untouched', async () => {
+  await withLegacyLock(async (dir, lock) => {
+    const lp = lock.lockPath(dir);
+    const j = JSON.parse(fs.readFileSync(lp, 'utf8'));
+    j.hostname = 'another-host.example';
+    fs.writeFileSync(lp, JSON.stringify(j));
+    const r = await up(legacyPair(dir), { lock, userDataDir: dir });
+    assert.ok(r.error, 'must refuse');
+    assert.equal(r.error.exitCode, 4);
+    assert.match(String(r.error.message), /written on another host/);
+    assert.match(String(r.error.message), /Every rename was rolled back: the pair is exactly as it was/);
+    assert.deepEqual(r.renamed, [
+      `rename:${L_CHROMIUM}->${CHROMIUM}`, `rename:${L_XPRA}->${XPRA}`,
+      `rename:${XPRA}->${L_XPRA}`, `rename:${CHROMIUM}->${L_CHROMIUM}`,
+    ]);
+    assert.deepEqual([...r.ctrs.keys()].sort(), [L_CHROMIUM, L_XPRA]);
+    assert.ok(r.ctrs.get(L_CHROMIUM).running && r.ctrs.get(L_XPRA).running);
+    assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v) && !v.startsWith('rename:')), []);
+    const after = lock.readLock(dir);
+    assert.equal(after.containerName, L_CHROMIUM);
+    assert.equal(after.hostname, 'another-host.example');
+  });
+});
+
+test('⛔ A5: attachOnly — ensureRunning() and shutdown() REFUSE before ANY docker call; healthCheck/inspect/describe still work', async () => {
+  const cdp = await cdpEndpoint();
+  try {
+    /** @param {any} docker @param {string[]} calls */
+    const spy = (docker, calls) => new Proxy(docker, {
+      get(t, p) { if (typeof p === 'string' && p !== 'then') calls.push(p); return t[p]; },
+    });
+    /** @type {string[]} */
+    const mutexCalls = [];
+    const bringupMutex = {
+      acquireLock: async () => { mutexCalls.push('acquire'); return {}; },
+      releaseLock: () => { mutexCalls.push('release'); },
+    };
+    const d = daemon(legacyPair(OUR_PROFILE));
+    /** @type {string[]} */
+    const calls = [];
+    const drv = /** @type {any} */ (driver(spy(d.docker, calls), { cdpPort: cdp.port, attachOnly: true, bringupMutex }));
+    for (const verb of ['ensureRunning', 'shutdown']) {
+      /** @type {any} */
+      let error;
+      try { await drv[verb](); } catch (e) { error = e; }
+      assert.ok(error, `${verb} must refuse`);
+      assert.equal(error.exitCode, 4);
+      assert.match(String(error.message), /attach-only target: base will not start, build or restart anything for it/);
+    }
+    assert.deepEqual(calls, [], 'ZERO docker calls — not even a read');
+    assert.deepEqual(mutexCalls, [], 'not even the bring-up lock');
+    assert.equal(await drv.healthCheck(), true, 'healthCheck still works');
+    assert.equal(drv.inspect().attachOnly, true);
+    assert.match(drv.describe(), /CDP at/);
+    assertHermetic(d.violations);
+    assert.deepEqual(d.verbs, []);
+    assert.deepEqual([...d.ctrs.keys()].sort(), [L_CHROMIUM, L_XPRA]);
+    // CONTROL: the same spy DOES see the calls a managing driver makes
+    /** @type {string[]} */
+    const calls2 = [];
+    const d2 = daemon(legacyPair(OUR_PROFILE));
+    try { await driver(spy(d2.docker, calls2), { bringupMutex }).ensureRunning(); } catch { /* irrelevant */ }
+    assert.ok(calls2.length > 0 && mutexCalls.length > 0, 'premise: the spy and the mutex stub observe a managing driver');
+    assert.equal(/** @type {any} */ (driver(d2.docker)).inspect().attachOnly, false);
+  } finally { await cdp.close(); }
+});
+
+test('a bad opts.uid is a CONFIG error at createDriver — BrowserLocationError, exit 4', () => {
+  /** @type {any} */
+  let error;
+  try { driver(daemon({}).docker, { uid: /** @type {any} */ ('not-a-uid') }); } catch (e) { error = e; }
+  assert.ok(error, 'must refuse');
+  assert.equal(error.constructor.name, 'BrowserLocationError');
+  assert.equal(error.exitCode, 4);
+  assert.match(String(error.message), /owner uid must be a non-negative integer, got "not-a-uid"/);
+});
+
+test('DECIDED: shutdown() that cannot READ ownership (daemon down) refuses and does NOT release the lock', async () => {
+  const d = daemon({ [CHROMIUM]: 'fail' });
+  let released = 0;
+  const lock = { ...freeLock(), release: () => { released++; } };
+  /** @type {any} */
+  let error;
+  try { await driver(d.docker, { lock }).shutdown(); } catch (e) { error = e; }
+  assertHermetic(d.violations);
+  assert.ok(error, 'must refuse');
+  assert.equal(error.exitCode, 4);
+  assert.match(String(error.message), /REFUSING to stop container demo-webctl-u4242-chromium-test/);
+  assert.equal(released, 0, 'our lock is not released without proof the browser is stopped');
+  assert.deepEqual(d.verbs.filter((v) => MUTATION.test(v)), []);
 });

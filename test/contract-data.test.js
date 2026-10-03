@@ -27,6 +27,7 @@ import {
   CONTAINER_LIFECYCLE_CONTRACT,
 } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts, PROFILE_WARNING_SEVERITIES } from '../lib/browser-location/mounts.js';
+import { TEST_CACHE_ROOT } from './helpers/test-cache-root.mjs';
 import { guardedDocker, assertHermetic, INSPECT_ABSENT, inspectPresent } from './helpers/fake-docker-inspect.mjs';
 
 const C = {
@@ -68,7 +69,7 @@ function hermeticMounts() {
   // resolveChromiumProfile leaves profilePathFor returning the REAL cache path,
   // and the profile LOCK then creates it under ~/.cache during a unit run.
   const fake = (/** @type {string} */ s, /** @type {string} */ u) => u || `/tmp/no-mkdir/${s}`;
-  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => '/tmp/cache' };
+  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => TEST_CACHE_ROOT };
 }
 
 /** Bring a stack up against a fake docker and return the captured run args. */
