@@ -306,6 +306,12 @@ contract's output when it is used.
   gate runs every consumer against ONE base checkout.
   *npm:* `npm test` behaves as on the host; it only skips its debug logfile under
   `~/.npm/_logs` (set `npm_config_cache` under `/tmp` if you want it).
+  *xq:* a check that asks xq for machine names (e.g. a no-host-literals scan) can run
+  INSIDE: xq's read-only verbs no longer write the home (xq f9a7bad), and with
+  `UV_NO_CACHE=1` uv does not try to write its cache there either; `xq machine ls --json`
+  then works under `isolated` (measured by `fetlife`). Without it the check silently falls
+  back to fewer names, so a lane should treat "xq did not answer" as a FAIL, not a
+  warning, when xq is installed.
 * ⛔ **`/tmp` is masked, and your arm probably lives there.** A fixture, a marker file or
   anything else you share with the arm under `/tmp` needs `--keep <dir>` — otherwise the
   arm sees an empty `/tmp` and writes land in it, not on the host. Only `--keep` paths are
