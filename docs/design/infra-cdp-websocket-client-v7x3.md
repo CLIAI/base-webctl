@@ -3,7 +3,7 @@ id: v7x3
 title: "WebSocket CDP Client: Zero-Dependency Browser Automation RPC"
 category: infra
 created: "2026-03-03"
-updated: "2026-03-03"
+updated: "2026-10-03"
 status: draft
 tags: [websocket, cdp, chrome-devtools-protocol, rfc-6455, zero-dep, rpc]
 tech:
@@ -283,6 +283,107 @@ threaded through every factory to the session, consulted before each CDP call; `
 string refuses the call with that reason. A lane that needs an observer-only or
 credential-deny posture supplies its own policy — `ccew`'s subclass and wrappers collapse
 into one option — and no lane inherits a default it did not choose.
+
+## ⛔ base drives only a tab base opened — never the human's tab by default (v0.32.0)
+
+*Incident, 2026-10-03:* a mutation arm in a consumer lane navigated the human's ONLY tab in
+a signed-in browser. The mechanism is `openPage()`'s default: `existing = listPageTargets();
+target = existing[0]` → `reused: true`. The tab the human is reading is, by construction,
+the first page target. A lane reported it on 09-27; another lane already WITHHOLDS
+`openPage`/`navigate` from its own code for exactly this reason. So "reuse before minting"
+was a hard-won rule for an unattended browser, and it was carried over as the default for a
+browser a person is using.
+
+⇒ **Rule.** `openPage()` drives a tab that base did not open ONLY when the caller names it
+AND says how it knows the tab is its own. ⛔ An id alone is not enough. Base cannot tell "an
+id I minted" from "the human's tab id copied out of `listPageTargets()`". Ownership by
+inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
+
+| caller passes | `openPage` does | `reused` | `close()` closes the tab |
+|---|---|---|---|
+| nothing (the default) | **mints a new target, in the background** | `false` | yes, unless `keep: true` |
+| `{targetId, owner: 'minted'}` | drives it only if the id is in `ownedTargets` (below); else refused | `true` | no, unless `close: true` |
+| `{targetId, owner: 'adopted'}` | drives a tab base did NOT mint: an explicit per-call adoption | `true` | **never** |
+| `{targetId}` with no `owner`, or any other value | **refused**, naming the two choices | — | — |
+
+* **`ownedTargets`**: an object with `has(id)` (a `Set` works). It defaults to the ids THIS
+  process minted. A lane with a durable ledger (one own tab per browser, reused across
+  invocations) passes its ledger here. Base offers the mechanism and imposes no store. The
+  `1wsg` activity ledger is the natural one once it is in `lib/`. ⛔ Adopting a tab never
+  adds it to `ownedTargets`. An adoption lasts for that call only.
+* Whatever the owner, the target must exist and be a `page`; otherwise it is refused, naming
+  the id.
+* **Mint in the background:** `Target.createTarget({url, background: true, newWindow:
+  false})`. A foreground mint steals focus in the human's xpra window. Measured hidden on
+  Opera by `perplexity`.
+* **Minting order.** Primary: `Target.createTarget` over the browser endpoint. Fallback:
+  `/json/new` with PUT, then GET. Old decision 2 stands: `/json/new` is restricted in some
+  builds.
+* ⛔ **Mint through the tunnel.** `/json/version`'s `webSocketDebuggerUrl` names the REMOTE
+  host:port behind an ssh forward. Both minting paths use `getVersion()`'s REWRITTEN
+  authority (`rewriteWsUrl`), never the raw one.
+* ⛔ **If minting fails, REFUSE.** Never fall back to an existing tab. The error names the
+  opt-in: `{targetId, owner: 'adopted'}`. A fallback to `existing[0]` would rebuild the
+  incident on exactly the builds where minting is broken.
+* ⛔ **Mint in the DEFAULT browser context.** The `createTarget` request carries no
+  `browserContextId`. A fresh context lacks the human's sign-in, so every page would come
+  back walled. A caller then "recovers nothing", silently *(`substack`'s review)*.
+* ⛔ **Never close the LAST page target.** If ours is the only page left, closing it exits
+  Chromium. That is how the linkedin browser was lost. `close()` instead navigates it to
+  `about:blank` and leaves it open, and says so in its return value (`{closed: false,
+  reason: 'last-page'}`). "Last" is read from the browser endpoint at close time, never
+  remembered.
+* ⛔ **No "is this tab blank, so reusable?" heuristic, ever.** Blankness is not ownership.
+  Opera's new-tab page is `chrome://startpage`, not `chrome://newtab`, so a human's start
+  page would read as free. A URL describes what a tab shows, not whose it is.
+* **Lifetime.** `keep: true` on a mint leaves the tab open at `close()`. That is how a lane
+  creates its persistent own tab, records the id in its ledger, and reuses it later as
+  `{owner: 'minted'}` with no reload churn. Old decision 1, the tab-leak fix, survives this
+  way. `close: true` on an owned reuse closes it. An adopted tab is never closed by base.
+* ⛔ **Record before attach: `onMinted`.** `openPage()` attaches before it returns the id.
+  A process that dies between `createTarget` and its own ledger write (SIGKILL, OOM, a lost
+  tunnel) leaves a `keep: true` tab ORPHANED in the human's browser, and nothing will ever
+  close it, because nothing knows it is ours. ⇒ An optional awaited hook, `onMinted(id)`,
+  runs after `createTarget` returns and BEFORE the first attach. If it throws, the
+  just-minted tab is closed (under the last-page rule above) and `openPage` refuses,
+  carrying the hook's error. It works with or without `keep` *(`perplexity`, which records
+  before attach for this reason)*.
+* `navigate(base, url, opts)` passes `targetId` / `owner` / `ownedTargets` / `keep` / `close` /
+  `onMinted` through. Unknown option keys are refused (the rule above), so a stale `reuse: true` is told
+  so, never silently given a new tab.
+
+**BREAKING.** A caller that relied on the default reusing the first tab now gets a new tab.
+Where reuse was meant, it must say whose tab it is. Lanes adopt this deliberately: it
+changes what a signed-in browser shows.
+
+**Migration.** A caller that uses `openPage()` only to get a session for BROWSER-level
+calls (e.g. `Storage.getCookies`) must switch to `connectBrowser()`. Under mint-by-default,
+every such call would otherwise open, and possibly leave, a blank tab.
+
+**QA, each with its control:**
+
+1. A browser with one pre-existing (human) tab: `openPage()` creates a new target with
+   `background: true`. The human tab's URL is unchanged after a `navigate()` through it.
+   *Control:* `{targetId: <human tab>, owner: 'adopted'}` drives that tab, and `close()`
+   leaves it open.
+2. ⛔ A `listPageTargets()` id passed as `{owner: 'minted'}`, or with no `owner`: refused,
+   and the tab's URL is unchanged. *Control:* the id this process minted, as `'minted'`, is
+   driven. So is an id that a caller-supplied `ownedTargets` contains.
+3. Minting unavailable (both paths fail): refused with the opt-in hint. *Control:* the human
+   tab's URL is unchanged, and no target was attached to.
+4. Through a forward whose `/json/version` names a different (remote) authority: the mint
+   connects to the local forward. *Control:* the raw authority is never dialled; the fake
+   records every connection.
+5. `keep: true` → the minted tab survives `close()`. *Control:* without it, it is closed.
+6. The mint request carries no `browserContextId`. *Control:* a fake that records the
+   request sees exactly `{url, background: true, newWindow: false}`.
+7. ⛔ One page target, ours: `close()` leaves the browser with that page, at `about:blank`,
+   and returns `reason: 'last-page'`. *Control:* with a second page present, ours is closed.
+8. `onMinted` throws: no attach, the minted target is closed, and foreign tabs are
+   unchanged. *Control:* `onMinted` resolves, and the recording fake shows the record
+   strictly BEFORE the first attach to that target.
+9. `{targetId}` naming an absent id, or a non-page target: refused, naming it.
+   `openPage(base, {reuse: true})`: refused as an unknown option.
 
 ## Security Considerations
 
