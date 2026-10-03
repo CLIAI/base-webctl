@@ -318,6 +318,10 @@ on an adopted tab, `onMinted` or `owner` without a mint/`targetId` respectively.
   them over `$HOME`, so a test that set a temp HOME but inherited one resolved to the REAL
   dirs (`perplexity`; a sibling lane's suite wrote and deleted the human's real tab ledger and
   captcha lock through the same class of mistake). `v59v` §4 now states the rule for tests.
+* **A nested `isolated` gets its own PID namespace.** Its command cannot see or signal the
+  process that called it. Before, two lanes' "a pid outside cannot be signalled" arms failed
+  only under the gate, where their `isolated` was nested in the gate's (the host stayed
+  hidden; the caller did not). Network and masks are inherited, locked.
 * **xq inside `isolated`:** with xq ≥ f9a7bad and `UV_NO_CACHE=1`, `xq machine ls --json` runs
   inside, so a no-host-literals check need not weaken under the gate (harness README).
 * **Gate:** an unwritable scratch root is a named setup FAIL (it used to attempt a clone at the
