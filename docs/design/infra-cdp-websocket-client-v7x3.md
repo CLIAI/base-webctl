@@ -322,6 +322,11 @@ inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
 * ⛔ **Mint through the tunnel.** `/json/version`'s `webSocketDebuggerUrl` names the REMOTE
   host:port behind an ssh forward. Both minting paths use `getVersion()`'s REWRITTEN
   authority (`rewriteWsUrl`), never the raw one.
+* ⛔ **Fall back to `/json/new` only when nothing can have been minted**: the browser
+  endpoint was unreachable before `createTarget` was sent, or the browser ANSWERED it with
+  a CDP error. A LOST reply (timeout, dropped socket) may follow a tab the browser already
+  made; a fallback would add a second tab and leave the first an orphan `onMinted` never
+  saw. ⇒ Refuse, and say a tab may have been created *(measured by the review)*.
 * ⛔ **If minting fails, REFUSE.** Never fall back to an existing tab. The error names the
   opt-in: `{targetId, owner: 'adopted'}`. A fallback to `existing[0]` would rebuild the
   incident on exactly the builds where minting is broken.

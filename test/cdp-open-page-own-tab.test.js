@@ -33,6 +33,9 @@ async function withFake(opts, fn) {
   try { await fn(fake); } finally { await fake.stop(); }
 }
 
+/** @param {Awaited<ReturnType<typeof startFakeBrowser>>} fake */
+const newVerbsOf = (fake) => fake.log.filter((e) => e.t === 'http' && e.path === '/json/new').map((e) => e.method);
+
 // ── 1 ──────────────────────────────────────────────────────────────────────────
 test('⛔ QA1: with one human tab, openPage()/navigate() MINT a background tab; the human tab is untouched', async () => {
   await withFake({ targets: [HUMAN] }, async (fake) => {
@@ -165,6 +168,48 @@ test('QA3 control: with createTarget refused, the /json/new fallback mints (PUT,
       await p.close();
     });
   }
+});
+
+test('⛔ QA3: a LOST createTarget reply (timeout / dropped socket) is refused — never a second mint, never an unrecorded orphan', async () => {
+  // Measured by the review: a timed-out createTarget had ALREADY minted; the
+  // /json/new fallback minted a second tab, and onMinted saw only the second.
+  for (const createReply of /** @type {const} */ (['drop', 'hangup'])) {
+    await withFake({ targets: [HUMAN], createReply }, async (fake) => {
+      /** @type {string[]} */
+      const recorded = [];
+      await assert.rejects(() => openPage(fake.base,
+        { defaultTimeout: 300, keep: true, onMinted: (/** @type {string} */ id) => { recorded.push(id); } }),
+      (e) => /may have created a tab/i.test(e.message) && /reply was lost/.test(e.message), createReply);
+      const minted = [...fake.targets.keys()].filter((k) => k.startsWith('MINTED-'));
+      assert.ok(minted.length <= 1, `at most ONE tab, got ${minted} (${createReply})`);
+      assert.deepEqual(fake.log.filter((e) => e.t === 'http' && e.path === '/json/new'), [],
+        `no /json/new after a lost reply (${createReply})`);
+      assert.equal(fake.pageAttaches().length, 0);
+      assert.equal(fake.urlOf('HUMAN-1'), HUMAN_URL);
+    });
+  }
+});
+
+test('QA3 control: an explicit CDP ERROR reply, or no browser endpoint at all, still falls back to /json/new', async () => {
+  // An error reply means the browser answered "no": nothing was created.
+  await withFake({ targets: [HUMAN], createTarget: false }, async (fake) => {
+    const p = await openPage(fake.base, { defaultTimeout: 300 });
+    assert.equal(fake.calls('Target.createTarget').length, 1);
+    assert.deepEqual(newVerbsOf(fake), ['PUT']);
+    await p.close();
+  });
+  // Unreachable BEFORE the request was sent: nothing can have been created.
+  await withFake({ targets: [HUMAN], noBrowserEndpoint: true }, async (fake) => {
+    const p = await openPage(fake.base, { defaultTimeout: 300 });
+    assert.equal(fake.calls('Target.createTarget').length, 0);
+    assert.deepEqual(newVerbsOf(fake), ['PUT']);
+    // …and close() cannot read the page count without the browser endpoint, so it
+    // does not close: a failure is a result, never a throw.
+    const r = await p.close();
+    assert.equal(r.closed, false);
+    assert.equal(/** @type {any} */ (r).reason, 'close-failed');
+    assert.ok(fake.targets.has(p.targetId));
+  });
 });
 
 // ── 4 ──────────────────────────────────────────────────────────────────────────

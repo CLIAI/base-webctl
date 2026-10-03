@@ -107,6 +107,9 @@ export async function startTrap() {
  *   createTarget?: boolean,      // Target.createTarget succeeds (default true)
  *   jsonNew?: string[],          // verbs /json/new accepts (default ['PUT'])
  *   advertise?: string,          // authority printed in ws URLs (default: own)
+ *   createReply?: 'ok'|'drop'|'hangup', // after createTarget MINTS: reply / never reply /
+ *                                // drop the socket — the browser made a tab, the caller lost it
+ *   noBrowserEndpoint?: boolean, // /json/version -> 404 (an HTTP-only forward)
  *   getTargetsDelayMs?: number,  // hold every Target.getTargets reply this long, so
  *                                // concurrent readers are DETERMINISTICALLY in flight together
  * }} [opts]
@@ -121,6 +124,8 @@ export async function startFakeBrowser(opts = {}) {
     createTarget: opts.createTarget !== false,
     jsonNew: opts.jsonNew || ['PUT'],
     getTargetsDelayMs: opts.getTargetsDelayMs || 0,
+    createReply: opts.createReply || 'ok',
+    noBrowserEndpoint: !!opts.noBrowserEndpoint,
   };
   /** @type {LogEntry[]} */
   const log = [];
@@ -170,6 +175,7 @@ export async function startFakeBrowser(opts = {}) {
       res.end(JSON.stringify(body));
     };
     if (u.pathname === '/json/version') {
+      if (cfg.noBrowserEndpoint) return send(404, { error: 'not found' });
       return send(200, { Browser: 'FakeChromium/1.0', webSocketDebuggerUrl: `ws://${advertise}/devtools/browser/${BROWSER_ID}` });
     }
     if (u.pathname === '/json' || u.pathname === '/json/list') {
@@ -216,22 +222,26 @@ export async function startFakeBrowser(opts = {}) {
         let msg;
         try { msg = JSON.parse(f.payload.toString('utf8')); } catch { continue; }
         log.push({ t: 'cdp', kind, target: id, method: msg.method, params: msg.params });
-        handle(kind, id, msg, reply);
+        handle(kind, id, msg, reply, socket);
       }
     });
   });
 
   /**
    * @param {string} kind @param {string} id @param {any} msg @param {(o: any) => void} reply
+   * @param {import('node:stream').Duplex} socket
    */
-  function handle(kind, id, msg, reply) {
+  function handle(kind, id, msg, reply, socket) {
     const err = (/** @type {number} */ code, /** @type {string} */ message) => reply({ id: msg.id, error: { code, message } });
     const ok = (/** @type {any} */ result) => reply({ id: msg.id, result });
     const p = msg.params || {};
     if (kind === 'browser') {
       if (msg.method === 'Target.createTarget') {
         if (!cfg.createTarget) return err(-32000, 'Target.createTarget is not allowed in this build');
-        return ok({ targetId: mint(String(p.url)).id });
+        const t = mint(String(p.url));
+        if (cfg.createReply === 'drop') return;              // minted; the reply never comes
+        if (cfg.createReply === 'hangup') { socket.destroy(); return; } // minted; socket gone
+        return ok({ targetId: t.id });
       }
       if (msg.method === 'Target.closeTarget') {
         return remove(String(p.targetId)) ? ok({ success: true }) : err(-32602, `No target with given id ${p.targetId}`);

@@ -234,6 +234,11 @@ before minting", was right for an unattended browser and is superseded.
   one `/json/version` prints from behind an ssh forward.
 * **If both mint paths fail, `openPage` REFUSES** with the opt-in hint
   (`{targetId, owner: 'adopted'}`). It never falls back to an existing tab.
+* ⛔ **`/json/new` is tried only when nothing can have been minted**: the browser endpoint
+  was unreachable before the request left, or `createTarget` got an explicit CDP ERROR
+  reply. A LOST reply (timeout, dropped socket) is refused, saying a tab may have been
+  created — a fallback would mint a second tab and orphan the first. CDP error replies
+  now carry `err.cdpError` (`{code, message}`).
 * **`ownedTargets`** (any object with `has(id)`; a `Set` works) defaults to the ids THIS
   process minted. A lane with a durable ledger passes its own. Adopting never adds to it.
   ⛔ Only a literal `true` from `has()` vouches; a `has()` that returns a Promise (an async,
