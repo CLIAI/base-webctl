@@ -207,6 +207,26 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.30.0 — 2026-10-03
+
+### ⛔ BREAKING (for v0.29.0 adopters) — the shared default is the LOWEST layer
+
+* `loadSharedWebctlConfig().configLayer` is now **`{source: 'shared', …}`** (was
+  `'config'`), and `resolveTarget` ranks **flag > env > config (the lane's own) > shared**
+  (nl0c §1b). In v0.29.0 the shared default sat AT the lane-config rank. A lane wiring it
+  beside its own configured target would have raced them, and a signed-in lane would have
+  followed the family default to a machine with no profile and no login (raised by
+  `webctl:mgr` before any existing lane wired it).
+* **A record is whole, never merged.** The resolved name selects one file's record; a
+  lane's partial record never inherits from the shared default.
+* ⇒ **The two lanes started this morning on v0.29.0** should take v0.30.0 before wiring:
+  their code should not compare `source` against `'config'` for the shared layer.
+
+### Added
+
+* `TARGET_KNOBS` gains `shared`: a lane can name `~/.config/webctl/config.toml` in its
+  no-target refusal. The generic text is unchanged.
+
 ## v0.29.0 — 2026-10-03
 
 **Headline: one loader for the shared `~/.config/webctl/` (nl0c §1a).** Greg: every
