@@ -248,7 +248,8 @@ before minting", was right for an unattended browser and is superseded.
   refused, naming the id.
 * **`onMinted(id)`** is awaited after the mint and BEFORE the first attach. If it throws,
   the tab is closed (or blanked, if it is the last page) and `openPage` refuses, carrying
-  the hook's error (`cause`).
+  the hook's error (`cause`). Likewise, if the first ATTACH to a minted tab fails, the error
+  names the id and its fate: kept open (`keep: true`), closed, or NOT closed with the reason.
 * **`close()` is now on `openPage()`'s result too**, and returns `{closed: true}` or
   `{closed: false, reason}` with reason `'keep' | 'owned-reuse' | 'adopted' | 'last-page' |
   'close-failed'`. ⛔ **The LAST page target is never closed** — closing it exits Chromium;

@@ -110,6 +110,7 @@ export async function startTrap() {
  *   createReply?: 'ok'|'drop'|'hangup', // after createTarget MINTS: reply / never reply /
  *                                // drop the socket — the browser made a tab, the caller lost it
  *   noBrowserEndpoint?: boolean, // /json/version -> 404 (an HTTP-only forward)
+ *   refusePageAttach?: boolean,  // every /devtools/page/<id> upgrade -> 404
  *   getTargetsDelayMs?: number,  // hold every Target.getTargets reply this long, so
  *                                // concurrent readers are DETERMINISTICALLY in flight together
  * }} [opts]
@@ -126,6 +127,7 @@ export async function startFakeBrowser(opts = {}) {
     getTargetsDelayMs: opts.getTargetsDelayMs || 0,
     createReply: opts.createReply || 'ok',
     noBrowserEndpoint: !!opts.noBrowserEndpoint,
+    refusePageAttach: !!opts.refusePageAttach,
   };
   /** @type {LogEntry[]} */
   const log = [];
@@ -199,7 +201,7 @@ export async function startFakeBrowser(opts = {}) {
     const kind = m ? m[1] : 'unknown';
     const id = m ? decodeURIComponent(m[2]) : '';
     log.push({ t: 'ws', kind, id });
-    if (!m || (kind === 'page' && !targets.has(id)) || (kind === 'browser' && id !== BROWSER_ID)) {
+    if (!m || (kind === 'page' && (cfg.refusePageAttach || !targets.has(id))) || (kind === 'browser' && id !== BROWSER_ID)) {
       socket.end('HTTP/1.1 404 Not Found\r\n\r\n');
       return;
     }

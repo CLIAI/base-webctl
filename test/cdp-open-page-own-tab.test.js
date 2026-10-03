@@ -398,6 +398,38 @@ test('QA8 control: onMinted resolves, and the record lands strictly AFTER create
   });
 });
 
+test('an ATTACH failure after a mint names the minted id and its fate; a closed tab leaves ownedTargets', async () => {
+  // Without keep: closed, and no longer vouched for by this process.
+  await withFake({ targets: [HUMAN], refusePageAttach: true }, async (fake) => {
+    /** @type {any} */
+    let err;
+    await openPage(fake.base).catch((e) => { err = e; });
+    assert.ok(err, 'must refuse');
+    const id = 'MINTED-1'; // each fake numbers its mints from 1
+    assert.match(err.message, new RegExp(`'${id}'.*could not attach.*was closed`));
+    assert.ok(!fake.targets.has(id), 'closed');
+    fake.configure({ refusePageAttach: false });
+    await assert.rejects(() => openPage(fake.base, { targetId: id, owner: 'minted' }), /not in ownedTargets/,
+      'a tab that was closed must leave MINTED_BY_THIS_PROCESS');
+  });
+  // With keep: kept, named, and still ours.
+  await withFake({ targets: [HUMAN], refusePageAttach: true }, async (fake) => {
+    await assert.rejects(() => openPage(fake.base, { keep: true }),
+      (e) => /'MINTED-1'/.test(e.message) && /kept open/.test(e.message));
+    assert.ok(fake.targets.has('MINTED-1'));
+    fake.configure({ refusePageAttach: false });
+    const again = await openPage(fake.base, { targetId: 'MINTED-1', owner: 'minted' });
+    assert.equal(again.targetId, 'MINTED-1');
+    await again.close();
+  });
+  // Last page, and it cannot even be blanked: NOT closed, with the reason.
+  await withFake({ targets: [], refusePageAttach: true }, async (fake) => {
+    await assert.rejects(() => openPage(fake.base),
+      (e) => /'MINTED-1'/.test(e.message) && /NOT closed \(close-failed/.test(e.message));
+    assert.equal(fake.state.browserExited, false);
+  });
+});
+
 // ── 9 ──────────────────────────────────────────────────────────────────────────
 test('⛔ QA9: a targetId naming an ABSENT id, or a non-page target, is refused, naming it', async () => {
   await withFake({ targets: [HUMAN, { id: 'SW-1', type: 'service_worker', url: 'chrome-extension://x/sw.js' }] }, async (fake) => {
