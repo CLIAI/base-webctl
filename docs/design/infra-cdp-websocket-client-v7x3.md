@@ -340,8 +340,16 @@ inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
   creates its persistent own tab, records the id in its ledger, and reuses it later as
   `{owner: 'minted'}` with no reload churn. Old decision 1, the tab-leak fix, survives this
   way. `close: true` on an owned reuse closes it. An adopted tab is never closed by base.
-* `navigate(base, url, opts)` passes `targetId` / `owner` / `ownedTargets` / `keep` / `close`
-  through. Unknown option keys are refused (the rule above), so a stale `reuse: true` is told
+* ⛔ **Record before attach: `onMinted`.** `openPage()` attaches before it returns the id.
+  A process that dies between `createTarget` and its own ledger write (SIGKILL, OOM, a lost
+  tunnel) leaves a `keep: true` tab ORPHANED in the human's browser, and nothing will ever
+  close it, because nothing knows it is ours. ⇒ An optional awaited hook, `onMinted(id)`,
+  runs after `createTarget` returns and BEFORE the first attach. If it throws, the
+  just-minted tab is closed (under the last-page rule above) and `openPage` refuses,
+  carrying the hook's error. It works with or without `keep` *(`perplexity`, which records
+  before attach for this reason)*.
+* `navigate(base, url, opts)` passes `targetId` / `owner` / `ownedTargets` / `keep` / `close` /
+  `onMinted` through. Unknown option keys are refused (the rule above), so a stale `reuse: true` is told
   so, never silently given a new tab.
 
 **BREAKING.** A caller that relied on the default reusing the first tab now gets a new tab.
@@ -371,7 +379,10 @@ every such call would otherwise open, and possibly leave, a blank tab.
    request sees exactly `{url, background: true, newWindow: false}`.
 7. ⛔ One page target, ours: `close()` leaves the browser with that page, at `about:blank`,
    and returns `reason: 'last-page'`. *Control:* with a second page present, ours is closed.
-8. `{targetId}` naming an absent id, or a non-page target: refused, naming it.
+8. `onMinted` throws: no attach, the minted target is closed, and foreign tabs are
+   unchanged. *Control:* `onMinted` resolves, and the recording fake shows the record
+   strictly BEFORE the first attach to that target.
+9. `{targetId}` naming an absent id, or a non-page target: refused, naming it.
    `openPage(base, {reuse: true})`: refused as an unknown option.
 
 ## Security Considerations
