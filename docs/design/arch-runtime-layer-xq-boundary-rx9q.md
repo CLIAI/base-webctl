@@ -118,6 +118,17 @@ design doc, before any lane writes firefox code.
 | X7 | a `schema` on `zone ls --json` | inventory |
 | X8 | `--no-sandbox` is always passed: `lg1n` would flag it in login mode — rule whether login mode may drop it | login mode on xq |
 | X9 | ✅ ANSWERED by xq's lane (read AT the fork commit): see §5a | patching base meanwhile |
+| X10 | the **GL-docker attach** for the human viewer (ssh → 0700 socket → relay → GL client, with desktop scaling) — copied in 4 lanes + one kit | attach is xq's side (§1); retires the lane copies |
+| X11 | `app inspect --argv --listeners --json` — the in-container READING | login mode on xq: xq reads, base's `lg1n` judges |
+| X12 | a version **candidate** field in `app version` (the distro's package candidate) | "outdated" verdicts; closes opera's missing candidate |
+| X13 | `app restart --control none\|cdp`, keeping the profile | the login-mode cycle (with X8) |
+| X14 | **raw X primitives** as verbs: input injection, pixel/region capture, viewer-presence count | the X half of hover-proof click, displayed-tab-by-pixels and human presence — base composes them with CDP and owns the X-input LEASE identity (`ow9k`) |
+| X15 | `rm --purge` stops first and reports the removed path | lifecycle hygiene |
+
+*X10–X15 were reconciled by `webctl:mgr` from every lane's shared-core list, against this
+table, so xq is asked once.* The rule each was placed by is §1's: what touches the running
+app, its container or its display is xq's; what interprets the browser — a protocol, a
+verdict, an identity — is base's.
 
 ## 5a. What base's copies inherited from xq's fork point — fix NOW, migration or not
 
