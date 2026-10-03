@@ -310,9 +310,9 @@ test('guard-live-port: no listener → PASS; a bad port → usage', async () => 
   assert.equal((await run(['guard-live-port', 'abc'])).status, 3);
 });
 
-test('the new verbs are ADDITIVE: HARNESS_GENERATION is still 4', async () => {
+test('the new verbs are ADDITIVE: HARNESS_GENERATION stays at 5 (set by the no-revendor change; isolation adds none)', async () => {
   const r = await run(['generation']);
-  assert.equal(JSON.parse(r.stdout.trim()).generation, 4);
+  assert.equal(JSON.parse(r.stdout.trim()).generation, 5);
 });
 
 // ── isolation-check: the precondition a lane runs INSIDE `isolated` ───────────
@@ -447,6 +447,6 @@ test('⛔ importing the harness runs NO verb, even when the importer\'s argv nam
   });
   const res = /** @type {{status:number, stdout:string, stderr:string}} */ (r);
   assert.equal(res.status, 0, res.stdout + res.stderr);
-  assert.equal(res.stdout.trim(), 'IMPORTED 4', 'a verb ran on import');
+  assert.equal(res.stdout.trim(), 'IMPORTED 5', 'a verb ran on import');
   assert.equal(res.stderr, '');
 });
