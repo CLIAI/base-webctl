@@ -231,7 +231,9 @@ before minting", was right for an unattended browser and is superseded.
 * **Mint:** `Target.createTarget({url, background: true, newWindow: false})` over the
   browser endpoint — no `browserContextId` (a fresh context lacks the sign-in). Fallback:
   `/json/new` PUT, then GET. Both dial the caller's **rewritten** authority, never the raw
-  one `/json/version` prints from behind an ssh forward.
+  one `/json/version` prints from behind an ssh forward. ⚠ `/json/new` has **no background
+  flag**: on a build where only the fallback works, the new tab may take focus in the
+  person's window.
 * **If both mint paths fail, `openPage` REFUSES** with the opt-in hint
   (`{targetId, owner: 'adopted'}`). It never falls back to an existing tab.
 * ⛔ **`/json/new` is tried only when nothing can have been minted**: the browser endpoint
@@ -271,6 +273,17 @@ Where reuse was meant, say whose tab it is: record the id from a `keep: true` mi
 `onMinted`), pass your ledger as `ownedTargets`, and reuse with `{targetId, owner:
 'minted'}`. Lanes adopt this deliberately: it changes what a signed-in browser shows.
 
+### ⛔ BREAKING — what `openPage()` / `navigate()` need from the endpoint, and return
+
+* **`openPage()` now needs the BROWSER websocket on every path**: `/json/version` and its
+  `/devtools/browser/…` socket, for the mint (`Target.createTarget`), for a reuse
+  (`Target.getTargets`) and for `close()` (the page count and `Target.closeTarget`). Before,
+  it needed only HTTP `/json` and `/json/close` plus the page socket. A forward or proxy that
+  exposes HTTP and page sockets only used to work and now fails: the mint falls back to
+  `/json/new`, but a reuse is refused and `close()` returns `'close-failed'` (tab left open).
+* **`navigate().close()` closes through `Target.closeTarget`** (not `closePage`'s
+  `/json/close`) and returns a `CloseResult` instead of `undefined`.
+
 ### ⛔ BREAKING — unknown options are refused
 
 `openPage`, `navigate`, `connectBrowser` and `listTargetsCorroborated` throw a
@@ -293,10 +306,11 @@ on an adopted tab, `onMinted` or `owner` without a mint/`targetId` respectively.
 * `test/cdp-client-lifecycle.test.js`: arm 1 ("an existing page is REUSED") and the
   reuse half of arm 3 asserted the old default; both now assert the new one.
 
-### Fixed/Docs since v0.31.0
+### Docs — a correction to the v0.31.0 entry
 
-* the home-under-/run-or-/tmp refusal applies on the host path too, not only under an
-  outer `unshare -r` (a CI image whose passwd home is under /tmp is refused)
+* the v0.31.0 entry said the home-under-/run-or-/tmp refusal applies under an outer
+  `unshare -r`; it applies on the host path too (a CI image whose passwd home is under /tmp
+  is refused). This is v0.31.0 behaviour, not new code.
 
 ### ⛔ What this does NOT cover
 

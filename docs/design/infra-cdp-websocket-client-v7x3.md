@@ -310,7 +310,10 @@ inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
   process minted. A lane with a durable ledger (one own tab per browser, reused across
   invocations) passes its ledger here. Base offers the mechanism and imposes no store. The
   `1wsg` activity ledger is the natural one once it is in `lib/`. ⛔ Adopting a tab never
-  adds it to `ownedTargets`. An adoption lasts for that call only.
+  adds it to `ownedTargets`. An adoption lasts for that call only. ⛔ Only a literal `true`
+  from `has()` vouches. A `has()` that returns a Promise (an async, db- or file-backed
+  ledger) is REFUSED: a Promise is truthy, so it would vouch for ANY id, the human's tab
+  included *(measured by the review)*. Resolve the ledger first, e.g. into a `Set`.
 * Whatever the owner, the target must exist and be a `page`; otherwise it is refused, naming
   the id.
 * ⛔ **A tab is a `page` with no `subtype`.** CDP marks a prerendered page `{type: 'page',
@@ -322,7 +325,9 @@ inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
   Opera by `perplexity`.
 * **Minting order.** Primary: `Target.createTarget` over the browser endpoint. Fallback:
   `/json/new` with PUT, then GET. Old decision 2 stands: `/json/new` is restricted in some
-  builds.
+  builds. ⚠ **`/json/new` has no background flag**, so on a build where only the fallback
+  works the new tab MAY take focus in the human's window. That is the cost of minting at all
+  there; the alternative, driving an existing tab, is the incident.
 * ⛔ **Mint through the tunnel.** `/json/version`'s `webSocketDebuggerUrl` names the REMOTE
   host:port behind an ssh forward. Both minting paths use `getVersion()`'s REWRITTEN
   authority (`rewriteWsUrl`), never the raw one.
@@ -364,6 +369,15 @@ inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
 * `navigate(base, url, opts)` passes `targetId` / `owner` / `ownedTargets` / `keep` / `close` /
   `onMinted` through. Unknown option keys are refused (the rule above), so a stale `reuse: true` is told
   so, never silently given a new tab.
+* ⛔ **Options that cannot be honoured TOGETHER are refused too**, before any contact. The
+  same rule as an unknown key: a combination base would resolve silently is one the caller
+  did not get.
+  * `keep: true` with `close: true`: they contradict each other.
+  * `close: true` with `owner: 'adopted'`: base never closes an adopted tab.
+  * `owner` without `targetId`: there is no tab for it to describe; a mint needs no owner.
+  * `onMinted` with `targetId`: nothing is minted, so the hook would never run.
+  * ⚠ Accepted as harmless: `keep` on a reuse (it stays open anyway) and `close: true` on a
+    mint (closing is already the default).
 
 **BREAKING.** A caller that relied on the default reusing the first tab now gets a new tab.
 Where reuse was meant, it must say whose tab it is. Lanes adopt this deliberately: it
