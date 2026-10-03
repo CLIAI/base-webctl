@@ -40,7 +40,7 @@ function snapshot(dir) {
   return out.sort().join('\n');
 }
 
-test('a declared default resolves through resolveTarget as the CONFIG layer — flag and env still win', () => {
+test('a declared default resolves through resolveTarget as the SHARED layer — flag and env still win', () => {
   const h = home({ 'config.toml': ['default_target = "workstation"\n', 0o600],
                    'targets/workstation.toml': [RECORD, 0o600] });
   try {
@@ -51,11 +51,11 @@ test('a declared default resolves through resolveTarget as the CONFIG layer — 
     assert.equal(c.targets.workstation.ssh, 'browserhost');
     const r = /** @type {any} */ (resolveTarget([c.configLayer]));
     assert.equal(r.verdict, 'resolved');
-    assert.equal(r.source, 'config');
+    assert.equal(r.source, 'shared');
     assert.equal(r.value, 'workstation');
     const flagged = /** @type {any} */ (resolveTarget([{ source: 'flag', value: 'other' }, c.configLayer]));
     assert.equal(flagged.value, 'other', 'a stated flag wins over the shared default');
-    assert.deepEqual(flagged.shadowed, ['config']);
+    assert.deepEqual(flagged.shadowed, ['shared']);
   } finally { fs.rmSync(h, { recursive: true, force: true }); }
 });
 
@@ -132,4 +132,27 @@ test('parseTomlSubset: the subset parses; anything outside it is REFUSED with a 
 
 test('the loader is reachable from lib/index.js as sharedConfig', () => {
   assert.equal(typeof index.sharedConfig.loadSharedWebctlConfig, 'function');
+});
+
+test('⛔ nl0c §1b: a lane\'s OWN configured target outranks the shared default — control: a lane without one gets it', () => {
+  const h = home({ 'config.toml': ['default_target = "workstation"\n', 0o600],
+                   'targets/workstation.toml': [RECORD, 0o600] });
+  try {
+    const c = loadSharedWebctlConfig({ home: h });
+    // a signed-in lane declares its own (its browser lives where its profile is)
+    const own = /** @type {any} */ (resolveTarget([{ source: 'config', value: 'operator-local' }, c.configLayer]));
+    assert.equal(own.value, 'operator-local');
+    assert.equal(own.source, 'config');
+    assert.deepEqual(own.shadowed, ['shared'], 'the shared default is reported as shadowed, not silently dropped');
+    // order of the array does not matter — rank does
+    assert.equal(/** @type {any} */ (resolveTarget([c.configLayer, { source: 'config', value: 'operator-local' }])).value, 'operator-local');
+    // control: a lane that declares nothing gets the shared default
+    const none = /** @type {any} */ (resolveTarget([c.configLayer]));
+    assert.equal(none.value, 'workstation');
+    assert.equal(none.source, 'shared');
+    // and env still outranks the lane's own config, which outranks shared
+    const env = /** @type {any} */ (resolveTarget([{ source: 'env', value: 'from-env' }, { source: 'config', value: 'operator-local' }, c.configLayer]));
+    assert.equal(env.value, 'from-env');
+    assert.deepEqual(env.shadowed, ['config', 'shared']);
+  } finally { fs.rmSync(h, { recursive: true, force: true }); }
 });

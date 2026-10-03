@@ -63,7 +63,8 @@ duplication this family exists to stop, so base reads them:
 ```
 
 * **`loadSharedWebctlConfig({home})`** returns the default target's NAME as a
-  **config-layer** value for `resolveTarget` (so flag and env still win), every record
+  **`shared`-layer** value for `resolveTarget` — below flag, env AND the lane's own config
+  (§1b) — every record
   that validates, and an error per file that does not — naming the file and the key,
   never a value.
 * ⛔ **A file not mode 600 is refused, not read** (`checkConfigMode`). A record that fails
@@ -77,6 +78,32 @@ duplication this family exists to stop, so base reads them:
   directory; base's tests prove it does not write.
 * The DEFAULT is a person's declaration in their own home directory. The loader supplies
   no fallback of its own.
+
+## 1b. ✅ RULED: the shared default is the LOWEST layer — a lane's own declaration outranks it
+
+*Raised by `webctl:mgr` before any existing lane wired the loader.* Read literally,
+"everyone sources from the shared default" would point lanes at the wrong browser:
+lanes whose **signed-in** browsers live on one machine (profiles are never copied
+between machines) would follow a shared default to another machine with no profile and
+no login, and lanes running managed zones would read a `kind` that describes a different
+driver. ⇒ **Composition:**
+
+| rank | source | who declares it |
+|---|---|---|
+| 1 | **flag** | the person, on this command |
+| 2 | **env** | the person, for this shell or unit |
+| 3 | **config** | the LANE's own declaration (its config's default target) |
+| 4 | **shared** | `~/.config/webctl/config.toml` — the family default |
+
+* `loadSharedWebctlConfig().configLayer` is `{source: 'shared', …}`, never `config`. A
+  lane with its own declared target therefore **ignores** the shared default (it is
+  reported as `shadowed`); a lane that declares nothing **gets** it.
+* ⛔ **A record is WHOLE, never merged.** Resolution yields a target NAME; that name's
+  record comes from exactly one file. A lane's partial record does not inherit fields
+  from the shared default, and the shared default does not fill in a lane's missing keys
+  — two half-records combined is a location nobody wrote down.
+* Moving a signed-in lane to another machine is a **re-login there**, which is the
+  person's decision; changing the shared default never does it implicitly.
 
 ## 2. ✅ RULED: `--target` is THE location flag; `--client` never chooses a location
 
@@ -100,7 +127,8 @@ duplication this family exists to stop, so base reads them:
 |---|---|---|
 | **flag** | `--target workstation`, `--ssh workstation` | wins |
 | **environment** | `<TOOL>_TARGET` | the tool's own prefix |
-| **config** | a `default_target` the person wrote | the only place a default may live |
+| **config** | the lane's own `default_target` | a default a person wrote for THIS lane |
+| **shared** | `~/.config/webctl/config.toml` | the family default, for lanes that declare nothing (§1b) |
 | *none* | — | ⛔ **refused**, with instructions, before any contact |
 
 * The resolver reports **which layer won** and **which lower layers it shadowed**, so a

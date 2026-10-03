@@ -355,8 +355,8 @@ test('a refusal is a REASON OBJECT with a machine code — lanes map it to their
 });
 
 test('⛔ a test per LISTED source — and a source not listed is not a source', () => {
-  // The doc names exactly three: flag, env, config. Each, ALONE, must resolve and report itself.
-  for (const source of ['flag', 'env', 'config']) {
+  // The doc names exactly four: flag, env, config, shared. Each, ALONE, must resolve and report itself.
+  for (const source of ['flag', 'env', 'config', 'shared']) {
     const r = /** @type {any} */ (resolveTarget([{ source, value: `host-${source}` }]));
     assert.equal(r.verdict, 'resolved', source);
     assert.equal(r.value, `host-${source}`);
@@ -476,4 +476,10 @@ test('configKey: the refusal names the config key THIS tool reads — control: d
   const ok = [{ source: /** @type {const} */ ('flag'), value: 'w' }];
   assert.throws(() => resolveTarget(ok, { configKey: 'a b' }), /configKey must be/);
   assert.throws(() => resolveTarget(ok, { configKey: /** @type {any} */ (5) }), /configKey must be/);
+});
+
+test('supports "shared": the refusal names the family file — control: absent, it is not mentioned', () => {
+  const r = /** @type {any} */ (resolveTarget([], { supports: ['target', 'shared'] }));
+  assert.match(r.instructions, /~\/\.config\/webctl\/config\.toml/);
+  assert.doesNotMatch(/** @type {any} */ (resolveTarget([], { supports: ['target'] })).instructions, /webctl\/config\.toml/);
 });
