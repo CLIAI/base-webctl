@@ -256,7 +256,10 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
   removed CDP in v141), `resolveEngine` with the fixed codes `no-engine`, `invalid-engine`,
   `engine-conflict`, `engine-pending`; `targetEnvKey(tool, 'engine')`;
   `resolveSharedTarget(...)` — the shared-config glue two lanes had each hand-written.
-  No message prints the user's home path (`SHARED_CONFIG_DISPLAY`).
+  No message prints the user's home path (`SHARED_CONFIG_DISPLAY`). ⚠ `resolveTarget`'s human
+  `reason` for the shared layer now reads "from the shared config (~/.config/webctl)" (it was
+  the fragment "from the shared"). Match on the machine field `source` (still `'shared'`),
+  never on the reason text.
 * **`runtimeXq`** — base's reader of `xq capabilities --json` (`rx9q` §4): fail-closed on the
   schema and malformed known fields, tolerant of additive fields; `hasVerb`, `controlFor`
   (`null` = UNKNOWN, `[]` = NONE), and **`hasFlag`** — never send a flag the target xq does
@@ -280,12 +283,13 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
     normal permissions, and base's repo is writable when it is the cwd.
   * Host path sockets that are still reachable are masked.
   * The user's home directory is READ-ONLY, except the kept paths.
-  * The command runs as the REAL (non-root) uid and gid, in a child user namespace that has
+  * The command runs as the REAL uid and gid (a real uid of 0 is refused), in a child user
+    namespace that has
     no mount namespace of its own. So it holds NO capabilities over the masks and cannot
     unmount or remount them. Inherited mounts are locked even in a namespace it nests
-    itself. The no-new-privs bit is set, which blocks setuid binaries. A probe run in the
-    same child before the command starts must read back zero capabilities, the real ids and
-    exact single-line uid/gid maps, or the run is refused.
+    itself. The no-new-privs bit is set, which blocks setuid binaries. A probe run through
+    the same prefix before the command starts must read back zero capabilities, the real ids
+    and exact single-line uid/gid maps, or the run is refused.
     ⇒ **Nested namespaces still work**: a lane that self-isolates with its own `unshare -rn`
     can bring its own `lo` up, and Chromium's sandbox starts. An earlier design that dropped
     every capability from a namespace root broke both (measured on the first real gate run:
@@ -294,8 +298,10 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
     leaves running dies with it. A signal forwarded to it is re-raised, so the caller sees
     the command die BY that signal (a Ctrl-C is never an ordinary exit 130).
   * Called inside a lane's own `unshare -r`, it resolves the REAL uid and home from the
-    kernel's uid/gid maps and the passwd database, accepting a home only if the kernel shows
-    it owned by us. If it cannot resolve them, or there is no passwd entry, it refuses.
+    kernel's uid/gid maps and the passwd database (`getent` by absolute path, cross-checked
+    against `/etc/passwd`), accepting a home only if the kernel shows it owned by us. It
+    refuses when it cannot resolve them, when there is no passwd entry, when the two sources
+    disagree, or when the home lies under /run or /tmp (it would protect nothing).
   * A tool that writes under the home (e.g. npm's `~/.npm/_logs`) gets EROFS. npm itself
     carries on with one warning line; point `npm_config_cache` under `/tmp` to keep its logs.
   * DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK, DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST and
@@ -315,7 +321,9 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
 * **Gate `--against-head --scratch`** — the recommended pre-release arm. Each wired consumer
   is cloned at its committed HEAD, OUTSIDE /tmp (`WEBCTL_GATE_SCRATCH_DIR`, default
   `${XDG_CACHE_HOME:-~/.cache}/webctl-base/gate-scratch`, because lanes mask /tmp in their
-  own sandboxes), with the live tree's installed `node_modules` copied in, and base's
+  own sandboxes), with the live tree's INSTALLED `node_modules` copied in (not a fresh
+  `npm ci`; an `npm link` symlink inside still points at its live target, which is read-only
+  under the home and masked under /tmp), and base's
   candidate is placed in the clone's submodule.
   The contract runs there under `isolated`, with a throwaway HOME. **A change to the live
   tree BLOCKS:** its git-visible state (HEAD, submodule HEAD, `git status`) is fingerprinted
@@ -383,7 +391,8 @@ while the live pair has the old ones) — `inspect().legacy` comes in the next r
   Browser profiles kept outside the home dir are not covered,
   unless reached through a dot-dir (`~/.cache`, `~/.config`, …) that is ITSELF a symlink out
   of it. A deeper symlink (`~/.cache/<tool>` pointing elsewhere) is not covered.
-* A command under `isolated` cannot bind ports below 1024.
+* A command under `isolated` cannot bind ports below 1024 on the isolated namespace's own `lo`
+  (a network namespace it nests itself is its own, as intended).
 * The gate's default and plain `--against-head` modes are NOT isolated and still swap in
   place; only `--scratch` gives both guarantees.
 * **openPage() currently drives the first existing tab; v0.32.0 changes the default to a new
