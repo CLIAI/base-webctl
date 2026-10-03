@@ -718,9 +718,9 @@ console.log('SIB ' + t(process.argv[2])); console.log('UP ' + t(process.argv[3])
 test('⛔ keep refusals: /tmp, /run, an ancestor of them, a path under /run, $HOME, a missing path → usage 3, nothing run', async () => {
   const dir = tmpdir();
   try {
-    for (const k of ['/tmp', '/run', '/', os.homedir(), path.join(dir, 'missing')]) {
+    for (const k of ['/tmp', '/run', '/', os.userInfo().homedir, path.join(dir, 'missing')]) {
       const r = await run(['isolated', '--keep', k, '--', process.execPath, '-e', 'console.log("RAN-" + "MARKER")']);
-      assert.equal(r.status, 3, `--keep <${k === os.homedir() ? 'HOME' : k}>: ${r.stderr}`);
+      assert.equal(r.status, 3, `--keep <${k === os.userInfo().homedir ? 'HOME' : k}>: ${r.stderr}`);
       assert.doesNotMatch(r.stdout, /RAN-MARKER/);
     }
     if (fs.existsSync('/run/user') && fs.statSync('/run/user').isDirectory()) {
@@ -731,6 +731,18 @@ test('⛔ keep refusals: /tmp, /run, an ancestor of them, a path under /run, $HO
     assert.equal((await run(['isolated', '--keep', '--', 'true'])).status, 3, '--keep without a value');
     assert.equal((await run(['isolated', '--bogus', '--', 'true'])).status, 3, 'an unknown option');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('keep-binds: a throwaway HOME under /tmp stays visible inside without --keep (the gate\'s layout)', needsIsolation, async () => {
+  const home = tmpdir();
+  fs.writeFileSync(path.join(home, '.rc'), 'home-file');
+  try {
+    const r = await run(['isolated', '--', process.execPath, '-e',
+      'console.log("HOME " + require("fs").readFileSync(require("path").join(process.env.HOME, ".rc"), "utf8"))'],
+    { HOME: home });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^HOME home-file$/m);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
 test('⛔ a cwd that IS /tmp → FAIL, not run (re-exposing it would undo the mask)', async () => {

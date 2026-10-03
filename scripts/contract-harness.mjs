@@ -565,9 +565,11 @@ const ISOLATED_USAGE = 'usage: contract-harness.mjs isolated [--keep <path>]… 
  * ⛔ /tmp IS MASKED, AND THE ARM USUALLY LIVES THERE. Worktrees, the `--scratch` gate's
  * consumer clones and test fixtures are all commonly under /tmp. So these stay
  * visible at their SAME absolute paths: the cwd, base's own repo root, the command
- * if given by absolute path, node itself, and every `--keep <path>`. A keep may not
+ * if given by absolute path, node itself, a $HOME that lives under /tmp (a sandbox's
+ * throwaway one), and every `--keep <path>`. Anything else the arm shares with its
+ * caller under /tmp — a marker file, a fixture — needs a `--keep`. A keep may not
  * be /tmp or /run itself, an ancestor of either, a path under /run, or contain the
- * home directory. ⚠ Only `--keep` paths are EXEMPT from the socket check below — a
+ * (passwd) home directory. ⚠ Only `--keep` paths are EXEMPT from the socket check below — a
  * socket in the cwd is still covered if it answers, so `cwd = $HOME` cannot re-open
  * the ssh ControlMaster.
  *
@@ -631,6 +633,8 @@ function runIsolated(a) {
     { p: SELF_ROOT, label: "base's repo root" },
     ...(path.isAbsolute(command[0]) ? [{ p: command[0], label: 'the command' }] : []),
     { p: process.execPath, label: 'node' },
+    // a throwaway HOME under /tmp is the arm's own (the family's sandboxes isolate HOME)
+    ...(throwawayHome() ? [{ p: throwawayHome(), label: 'HOME' }] : []),
   ]);
   if (plan.usage) {
     process.stderr.write(`isolated: ${plan.usage}\n${ISOLATED_USAGE}`);
@@ -818,6 +822,17 @@ function maskedDirs() {
   return { run, tmp, all };
 }
 
+/** $HOME when it is strictly beneath /tmp (a sandbox's throwaway home), else ''. */
+function throwawayHome() {
+  const h = process.env.HOME;
+  if (!h) return '';
+  try {
+    const real = fs.realpathSync(h);
+    const { tmp } = maskedDirs();
+    return real !== tmp && isWithin(real, tmp) ? real : '';
+  } catch { return ''; }
+}
+
 /** Is `p` equal to `dir` or beneath it? @param {string} p @param {string} dir */
 function isWithin(p, dir) { return p === dir || p.startsWith(dir === '/' ? '/' : `${dir}/`); }
 
@@ -830,8 +845,11 @@ function isWithin(p, dir) { return p === dir || p.startsWith(dir === '/' ? '/' :
  */
 function planKeeps(explicit, implicit) {
   const { tmp, all } = maskedDirs();
+  // ⚠ The PASSWD home, not $HOME: os.homedir() honours $HOME, and an arm's throwaway
+  // HOME under a kept scratch dir is exactly what a keep is for (measured: the
+  // `--scratch` gate's layout was refused by the $HOME reading).
   let home = '';
-  try { home = fs.realpathSync(os.homedir()); } catch { /* no home: nothing to protect */ }
+  try { home = fs.realpathSync(os.userInfo().homedir); } catch { /* no home: nothing to protect */ }
   /** @type {string[]} */ const binds = [];
   /** @type {string[]} */ const exempt = [];
   const items = [...explicit.map((p, i) => ({ p, label: `--keep #${i + 1}`, explicit: true })),
