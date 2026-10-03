@@ -132,6 +132,168 @@ description — and the re-measurement found it was **worse** than reported, bec
 the nested half of base's lib was missing from the comparison set entirely, which
 the report had not identified.
 
+## ⛔ `no-revendor` found the copy by name and then excused it (generation 4 → 5)
+
+The name arm flagged a same-named file only if it *defined* a surface and did **not**
+match `(from|require\() '…<sub>/lib/…'` — i.e. it was excused by importing **anything**
+from base. An edited copy of `cdp-client.js` requires base's `cdp-rewrite.js`, because
+the original does; so the excuse fired on the realistic re-vendor. Reported by
+`substack` (its 237-line local `lib/cdp-client.js` → PASS, *"none is a copy by content
+or by name"*), reproduced by `webctl:mgr`, re-measured here with a fixture before the
+fix: sibling-importing edited copy → PASS, same copy importing nothing → FAIL. ⇒ The
+discriminator was "touches base", which a copy and a shim both do.
+
+⇒ Fixed by asking **what the file wraps**: the specifier must resolve to a base module
+of the **same basename**. Chosen over "defines nothing" because the fleet's real shims
+DO define things (wrappers that add `normalizeMaxFiles`, a bound
+`createClientConfigSurface`): a definition test would have turned them red, and a red
+that is wrong gets overridden. Surveyed every locally present consumer before and
+after: every real shim imports its own base module; the only new reds are two local
+`cdp-client.js` copies (`substack`, and the extension lane's — the source base's
+cdp-client was extracted from).
+
+Also fixed in passing: `byName` was single-valued, and base has **two** `index.js`
+(`lib/` and `lib/browser-location/`), so one silently shadowed the other.
+
+⚠ Rejected: accepting base's `lib/index.js` as a counterpart. It re-exports every
+module, so a copy could reach its siblings through it and be excused — the same hole
+by another door. No surveyed shim needs it.
+
+### Review of generation 5 (same generation; tightening + two exceptions)
+
+* ⛔ **"Comments stripped" was whole-line `//` only.** Measured in review: a copy
+  ending in `// forked from require('…/cdp-client.js')` → PASS, exit 0; the same text
+  in a string literal → PASS. The regex ran over text that still held prose. ⇒
+  Replaced by a zero-dependency **lexer** (`lexJs`): strings `' " \``, template
+  `${…}` nesting, regex literals (keyword/punctuation heuristic), line/trailing/
+  block comments. `moduleFacts` then takes a string as a specifier **only** in a
+  module-syntax position — `from` inside an `import`/`export {…}|*` clause (so a
+  plain identifier `from` followed by a string after ASI does not count),
+  `import '<s>'`, `import('<s>')`, `require('<s>')` with that single literal as the
+  argument and not `x.require`. `normHash` uses the same lexer's comment-free text,
+  so a TRAILING comment added to a copy no longer changes its hash (symmetric: both
+  sides go through it).
+* ⛔ ~~Lexer limits: a regex literal right after `)` or `}` is read as division~~ —
+  **that limit was stated as harmless and it FAILED OPEN.** See the re-review below.
+* ⭐ **Base's own house rule conflicted with generation 5.** AGENTS.md tells
+  consumers to import only `lib/index.js`, and gen 5 failed a same-named pure
+  re-export through it; it also failed a consumer's own local barrel `lib/index.js`
+  (gen 4 passed it). ⇒ Two exceptions, both gated on **defines nothing** (no
+  `function`, `class`, `=>`, or method shorthand `name(…) {`): a re-export through
+  base's top-level `lib/index.js`; and a local `index.js` whose every specifier is a
+  relative path outside the submodule. The rejection above still holds for any file
+  that **defines code**: the barrel reaches every sibling, so a copy can import it.
+  A false "defines" fails closed (not excused), the safe direction.
+* `byName` multi-valued now has a test (two base `util.js`, a shim of each); a
+  single-valued map fails it whatever order the walk takes. `walkJs` order is
+  readdir order, so the test does not rely on it.
+* The FAIL text no longer says "base's index.js does not count" (wrong for a file
+  that is itself `index.js`, misleading under the barrel exception) and now tells an
+  unrelated module that only shares a generic base name to **rename** itself.
+* Every new rule sabotaged once (12 mutations: regex-over-text, each exception off,
+  `defines` constant, single-valued `byName`, rename advice removed, regex / template
+  / spread lexing off, method shorthand ignored, `from` outside a clause, `x.require`
+  counted); each turned at least one test red.
+
+### Re-review of generation 5: the lexer failed OPEN (same generation)
+
+⛔ **The stated limit was the wrong way round.** The note above said a regex right
+after `)` or `}` "is read as division", and the code comment called that a false
+FAIL. Measured in re-review (25 probe repos, all exit 0 where they should have been
+1): when that regex holds a quote or a backtick, division-reading opens a **phantom
+string or template**, and then
+
+* comment text after it is lexed as CODE — `if (x) /'/.test(a) // ' ; require('…/cdp-client.js')`
+  made an edited copy a "shim" (also with a backtick, after `{ }`, and inside `${…}`);
+* real code is HIDDEN inside it, with no prose at all — a `cdp-client.js` requiring
+  base's `lib/index.js` with `if (name) /[\`]/.test(name) && …` "defined nothing", so
+  the barrel exception passed it (the same file without that line FAILed);
+* the content hash kept a comment, so a re-commented copy under a new name escaped.
+
+⇒ **Fixed in two layers, both failing closed:**
+
+1. **Precision** — a bracket stack. A `)` closing `if`/`while`/`for`/`with` is followed
+   by a regex, any other `)` by division; `${` by a regex; `]`, `++`, `--` by division.
+   These are decidable from tokens, so they are decided.
+2. **What is left is read BOTH ways.** A `/` after `}` (block → regex; object or
+   function expression → division) or after a contextual keyword (`of`, `yield`,
+   `await`), and an **HTML-like comment** — `<!--`, or `-->` leading a line, which is a
+   comment in a CommonJS script (Node runs `.js` CJS that way; measured) and code in an
+   ES module — are **fork points**. `readJs` lexes every combination (≤ 32), drops a
+   reading only if it is not lexically valid JS (unterminated string/regex/template,
+   bad flags, unbalanced brackets), and `analyse` uses the facts (specifiers, defines,
+   hash) only when every remaining reading agrees. **A disagreeing file is AMBIGUOUS:
+   it gets no shim, barrel or local-barrel exception**, and the FAIL names the line and
+   says how to make it read one way. The content arm compares **every** reading's
+   hash, on both sides. A fork exists only where a regex could close on the same line,
+   so real code almost never forks: the fleet's ~950 JS files (`--lib .` in every
+   local consumer) produced **zero** ambiguous files.
+
+Also from the re-review: "defines nothing" now counts **any** `( … ) {` that is not an
+`if/for/while/switch/catch/with` head (computed `['f']() {`, string `'f'() {`, computed
+getter `get ['x']() {` all were "nothing"), and string-to-code routes — `eval`,
+`Function`, `constructor`, `vm.*` as a name **or a string key**, a `data:` specifier,
+an `import()` whose argument is not one literal. Identifier escapes are decoded
+(`Function` is `Function`; `require` is `require`).
+
+⚠ **What remains, and which way each fails:**
+
+| limit | direction |
+|---|---|
+| more than 32 readings → ambiguous (the walk stops at the first fork with no room) | CLOSED for every exception |
+| …and its content arm compares only the readings explored | OPEN — needs a base module with > 5 forks AND a copy matching only past the cap |
+| a file invalid in EVERY reading → ambiguous | CLOSED |
+| a locally SHADOWED `require` (`function require(){}`) is still require | OPEN — only for a file written to look like a shim; no copy taken from base does |
+| code reached by a name built at runtime, a string timer, a worker | OPEN — same: an evasion, not a re-vendor |
+| an edited copy under a different name | OPEN — whole-file hashing, as stated since gen 2 |
+| a same-named file that imports its base module is a wrapper, however much it defines | OPEN — by design (the fleet's real wrappers add code) |
+| an UNREACHABLE import still counts — `if (false) require('<same module>')` makes a copy a wrapper | OPEN — reachability is control flow, not tokens; only for a file written to look like a shim |
+
+Sabotaged, each against the new tests (13 mutations, every one red): no dual lexing;
+no paren stack (`)` → division); `)` → fork instead of decided; `${` → division; `++`
+as two tokens; invalid readings kept; disagreeing readings trusted; `( … ) {` only after
+an identifier; EVALS ignored; escapes not decoded; HTML-like comments not forked;
+`data:`/computed `import()` not counted; content arm on the first reading only.
+
+### Final review of generation 5: three more ways to fail OPEN (same generation)
+
+Each measured by the reviewer as a **false PASS**, each now an arm that must FAIL:
+
+1. **ASI makes a `/` a regex where the lexer said division.** `REGEX_AFTER` lacked
+   `break`, `continue`, `debugger` (and `extends`). After one of them a `/` on the
+   same line is a syntax error, and after a line break ASI ends the statement — so
+   `break⏎/'/.test(s) // ' ; require('<same module>')` is a regex and a COMMENT to node
+   (the require never runs), while the lexer opened a phantom string and counted the
+   require. Same class, found while fixing it, all now decided from tokens: a label on
+   a `break`/`continue` line; a binding with no initializer (`let x⏎/…/`); a module
+   specifier (`import 'x'⏎/…/`, `… from 'x'⏎/…/`); a **prefix** `++`/`--` (after a line
+   break, or wherever a `/` would start a regex — `a⏎++/'/.lastIndex`). `var a = 1, b⏎/`
+   needs to know whether the declaration is still open, a parse question: **forked**.
+   Every arm is checked with `node --check` in the test before it is believed.
+2. **Line terminators.** Line comments, the regex scan and the line-leading `-->` test
+   knew only `\n`; node also ends a line at `\r`, U+2028 and U+2029. In a CR-only file,
+   `require(<index.js>); // x⏎function createCdpClient(){}` — node DEFINES the function,
+   the lexer hid it in the comment, so the file "defined nothing" and the barrel
+   exception passed it. Now every terminator ends a line comment and fails a regex;
+   a quoted string ends (unterminated) at `\r` as at `\n` (U+2028/9 are legal inside
+   one); line numbers in messages count every terminator, CRLF as one. A CRLF file is
+   read exactly like an LF one (control arms).
+3. **Cost was not bounded by the cap.** Each fork enqueued a prefix before the cap was
+   checked (O(F²) memory), and `lineAt` re-split the source per fork per reading. A
+   generated 132 KB line with 6000 forks took 91 s and 4.3 GB. Now at most
+   `MAX_READINGS − readings − todo` prefixes are ever queued; the first fork with no
+   room **stops the walk** and the file is AMBIGUOUS (closed); readings are summarised
+   as they are lexed (no token arrays kept); line numbers come from a line-start index
+   with binary search, and only the first 5 are kept. The test's 6000-fork file (120 KB)
+   measures 0.2–0.4 s CPU and ≈ 78 MB peak RSS (bare `node -e 0`: ≈ 40 MB) in a child that reports its own
+   `process.resourceUsage()` — CPU, not wall time, because the shared machine's load
+   swings wall time tenfold.
+
+Sabotaged, each against the new tests: the four keywords removed → the break,
+continue and debugger arms red; line comments ending at `\n` only → the CR, U+2028,
+U+2029 arms red; the enqueue cap removed → the cost test red (its child exhausts a
+1 GB heap; the pre-fix harness on the same file was at 4.2 GB RSS after 44 s of CPU).
+
 ## ⛔ A generation number renders TWO STATES IDENTICALLY
 
 *(Raised by `linkedin` as a consistency point against this repo's own spec, not as a
@@ -178,3 +340,14 @@ should land with the ownership work rather than alone.
   floor. Not built yet: a consumer's suite on an old base can fail for unrelated
   API reasons, so the probe must judge the *reason*, not the exit code, and that
   needs the JSONL `check` field rather than prose.
+
+## Identifier characters follow Unicode ID_Start / ID_Continue (final re-review)
+
+The lexer's identifier class once spanned every code point from U+0080 up. That swallowed
+U+2028/U+2029 line terminators, NBSP, the BOM and every Zs space INTO an identifier, so
+`break`+NBSP read as one non-keyword word: the ASI rule that makes the next `/` a regex never
+fired, and a comment hiding `require(<same module>)` was read as code — a false PASS. NBSP is
+common in copy-pasted code, so this needed no exotic input. Identifiers now use
+`\p{ID_Start}` / `\p{ID_Continue}` (plus `$`, `_`, `#`, ZWNJ, ZWJ). Six arms pin it
+(break/return/typeof/else/prefix-`++`/`-->` with NBSP, BOM or U+2028); restoring the old range
+turns them red. Unicode identifiers (`café`, `π`) still lex as identifiers.

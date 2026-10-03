@@ -40,7 +40,7 @@ Recording `CONTRACT_HARNESS_GENERATION` in a comment is not enforcing it. Put th
 first in your contract, and treat **any** non-zero as FAIL:
 
 ```bash
-node "$H" require-generation 4 || { echo "FAIL: base harness below generation 4 (downgraded submodule?)"; exit 1; }
+node "$H" require-generation 5 || { echo "FAIL: base harness below generation 5 (downgraded submodule?)"; exit 1; }
 ```
 
 * ⭐ **Why a VERB, not `generation --min N`.** Measured: every harness before
@@ -106,28 +106,83 @@ name, and a rename in place) all reported `pass`. ⇒ Generation 2 walks both tr
 **recursively** and matches by **normalised content** as well as by name, so a copy
 is caught under any name in any directory, and after reformatting or re-commenting.
 
-⛔ **What it still does NOT catch:** a copy that was **edited** and **renamed**.
-The PASS reason says so explicitly rather than leaving an impression of coverage.
+⛔ **GENERATION 5 CHANGED IT AGAIN — the name match found copies and then excused
+them.** Generation 4 cleared any same-named file that imported *anything* from base's
+lib. An edited copy of a base module imports that module's **siblings**, as the
+original does, so the realistic re-vendor was exactly the case the excuse fired on
+(`substack`: a stale `lib/cdp-client.js` requiring base's `cdp-rewrite.js` reported
+PASS). **The rule now:**
+
+* A local file whose **basename** equals that of any base module — at any depth on
+  either side; directory position is ignored, so moving a copy does not hide it — is
+  a **FAIL**,
+* **unless** its code imports, requires or re-exports **that same base module**: a
+  relative or absolute specifier resolving to a base module of the same basename. A
+  sibling module does not count — it is what a copy imports too.
+* **or** it **defines nothing** (no `function`, `class`, `=>` or method shorthand)
+  and either re-exports through base's **`lib/index.js`** (base's own rule: consumers
+  import only the barrel — `module.exports = require('…/lib/index.js').cdpClient`),
+  or is a local **`index.js`** whose every specifier is a relative path **outside** the
+  submodule (the consumer's own barrel). Importing the barrel **and** defining code is
+  judged by the main rule: the barrel reaches every sibling.
+* Specifiers are read from **tokens**, not text: only a string in a module-syntax
+  position counts (`… from '<s>'` in an import/export clause, `import '<s>'`,
+  `import('<s>')`, `require('<s>')`). Text in a line, trailing or block comment, or
+  inside another string or template, never counts.
+* "Defines nothing" means no `function`, `class`, `=>`, no `( … ) {` other than an
+  `if/for/while/switch/catch/with` head (so method shorthand under any key form), and
+  no string-to-code route (`eval`, `Function`, `constructor`, `vm.*`, a `data:` or
+  computed `import()`).
+* ⛔ **An AMBIGUOUS file gets no exception.** Where tokens cannot decide how a `/` reads
+  (after a `}`, or after `of`/`yield`/`await`) or whether `<!--` / a line-leading `-->`
+  is a comment (it is in CommonJS, not in an ES module), the file is lexed **both
+  ways**. If the readings disagree on what it imports, defines or contains, a
+  same-named file FAILs, naming the line — make it read one way (e.g. assign the regex
+  to a variable first). Any reading's hash matching base is a copy. A file not named
+  like a base module still PASSes, and the reason names it.
+* Bare specifiers (package names, import maps) are not resolved, so they do not
+  excuse a file: fails **closed**, naming it.
+* A same-named file that is an **unrelated** module (base has generic names:
+  `registry.js`, `mounts.js`, …) also FAILs; the message says to **rename it**.
+
+Measured 2026-10-03 across every locally present consumer: all same-named shims
+(bare re-exports, factories bound to local constants, wrappers that add functions)
+import their own base module and stay green; the only reds are two local
+`cdp-client.js` copies.
+
+⛔ **What it still does NOT catch:** a copy that was **edited** and **renamed**
+(whole-file hashing cannot see it), and a same-named file that imports its base
+module is treated as a wrapper however much else it defines. The PASS reason says
+both explicitly rather than leaving an impression of coverage. Also OPEN, but only for
+a file written to evade: a locally shadowed `require`, an unreachable import
+(`if (false) require('<same module>')` still counts as importing it), and code built
+from a string by a route the lexer does not name. The full table, with the direction each limit fails,
+is in DEV_NOTES ("the lexer failed OPEN").
 
 
-Asserts no local file shadows a base module. **Asserts code, never prose** —
-comments are stripped first, because the check this replaces grepped for the
-vendor path and matched the string inside the shim's own comment.
+Asserts no local file shadows a base module. **Asserts code, never prose** — a
+small zero-dependency lexer separates comments, strings and templates from code,
+because the check this replaces grepped for the vendor path and matched the string
+inside the shim's own comment (and the first fix stripped only WHOLE-LINE comments,
+so a trailing comment or a string literal still satisfied it).
 
 ⚠ Examining **zero** files FAILS. "No re-vendoring found" over nothing is the
 shape that let the original grep pass.
 
 ### `generation`
 
-⚠ **Now 4.** History, each a change in what a verdict MEANS:
+⚠ **Now 5.** History, each a change in what a verdict MEANS:
 
 * **2** — `no-revendor` sees copies in subdirectories and under new names.
 * **3** — `pin` FAILS on drift and on an undeclared submodule; only a mode-160000
   entry is a gitlink (`substack`).
 * **4** — the swap carve-out keys on `WEBCTL_GATE_SWAPPED=1` only (`fetlife`);
   `require-generation` added; `generation` refuses arguments.
+* **5** — `no-revendor`: a file named like a base module is a shim only if it imports
+  **that** module; importing a sibling no longer excuses an edited copy (`substack`).
+  ⚠ Lanes that were green on 4 with a same-named copy go **red** — that is the fix.
 
-A sweep asks *"who is below 4?"* — and, since generation 4, *"whose contract does not
+A sweep asks *"who is below 5?"* — and, since generation 4, *"whose contract does not
 call `require-generation`?"*, because a recorded number nobody checks protects nothing.
 
 ### `require-generation <N>`
