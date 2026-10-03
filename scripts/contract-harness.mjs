@@ -54,7 +54,7 @@ import { createHash } from 'node:crypto';
  * wording. A consumer records the generation it was written against; a sweep
  * then asks "who is below N?" rather than diffing five divergent copies.
  */
-export const HARNESS_GENERATION = 4;
+export const HARNESS_GENERATION = 5;
 
 /**
  * ⚠ NOT BUMPED BY `gate-probe`, DELIBERATELY. The marker answers "who is
@@ -369,12 +369,19 @@ function checkNoRevendor(repo, sub, libDir) {
 
   /** @type {Map<string,string>} normalised hash -> base path */
   const byHash = new Map();
-  /** @type {Map<string,string>} basename -> base path */
+  /**
+   * basename -> EVERY base module carrying it. ⚠ A list, not one path: base has
+   * both `lib/index.js` and `lib/browser-location/index.js`, and a single-valued
+   * map silently kept whichever the walk reached last.
+   * @type {Map<string,{rel:string, real:string}[]>}
+   */
   const byName = new Map();
   for (const abs of baseFiles) {
     const rel = path.relative(baseLib, abs);
     byHash.set(normHash(fs.readFileSync(abs, 'utf8')), rel);
-    byName.set(path.basename(abs), rel);
+    const list = byName.get(path.basename(abs)) || [];
+    list.push({ rel, real: fs.realpathSync(abs) });
+    byName.set(path.basename(abs), list);
   }
 
   // ⭐ SELF-CONTROL, EVERY RUN: the hash must DISCRIMINATE. A normaliser that
@@ -415,15 +422,28 @@ function checkNoRevendor(repo, sub, libDir) {
       continue;
     }
 
-    // (2) NAME — for a copy edited after it was taken. Still only a re-vendor if
-    // it DEFINES the surface rather than re-exporting base's.
+    // (2) NAME — for a copy edited after it was taken, which content cannot see.
+    //
+    // ⭐ THE RULE: a local file whose BASENAME equals that of any base module (at
+    // any depth on either side) is a re-vendor UNLESS its code imports, requires
+    // or re-exports THAT module — a specifier resolving to a base module of the
+    // SAME basename. Directory position is deliberately ignored, so moving a copy
+    // does not hide it. ⇒ A shim is identified by WHAT IT WRAPS, never by whether
+    // it touches base at all.
+    //
+    // ⛔ THE PREVIOUS RULE EXCUSED ANY FILE THAT IMPORTED ANYTHING FROM BASE's lib.
+    // An edited copy of a base module imports that module's SIBLINGS — the copy
+    // of cdp-client.js requires base's cdp-rewrite.js, exactly as base's own
+    // cdp-client.js does — so the realistic re-vendor was the case the excuse
+    // fired on. Measured 2026-10-03 (`substack`): a stale 237-line local
+    // lib/cdp-client.js reported PASS, "none is a copy by content or by name".
     const named = byName.get(path.basename(abs));
-    if (named) {
-      const reexports = new RegExp(`(from|require\\()\\s*['"][^'"]*${sub.replace(/[/\\]/g, '\\$&')}/lib/`).test(code);
-      const defines = /\b(export\s+(function|const|class)|module\.exports\s*=)/.test(code);
-      if (defines && !reexports) {
-        found.push({ local: rel, base: named, how: 'same module name, defines rather than re-exports' });
-      }
+    if (named && !wrapsCounterpart(abs, code, named)) {
+      found.push({
+        local: rel,
+        base: named.map((n) => n.rel).join(' | '),
+        how: `same module name, and it does not import base's own ${named.map((n) => `lib/${n.rel}`).join(' or ')}`,
+      });
     }
   }
 
@@ -431,14 +451,47 @@ function checkNoRevendor(repo, sub, libDir) {
     return report('no-revendor', EXIT.fail,
       `${found.length} local file(s) re-vendor base: `
       + found.map((f) => `${f.local} <- lib/${f.base} (${f.how})`).join('; ')
-      + '. The submodule is bypassed.',
+      + '. The submodule is bypassed. ⇒ Delete the copy and import base, or make the file a '
+      + 'shim that imports its same-named base module (a sibling module, or base\'s index.js, '
+      + 'does not count: it is what a copy imports too).',
       { found, examined: localFiles.length, baseModules: baseFiles.length });
   }
   return report('no-revendor', EXIT.pass,
     `${localFiles.length} local file(s) examined against ${baseFiles.length} base module(s); `
-    + 'none is a copy by content or by name. ⚠ An EDITED copy under a DIFFERENT name is '
-    + 'not detected by this check.',
+    + 'none is a normalised-content copy of a base module, and every file NAMED like a base '
+    + 'module imports that same base module. ⚠ NOT covered: an EDITED copy under a DIFFERENT '
+    + 'name is not detected by this check (whole-file hashing cannot see it); and a '
+    + 'same-named file that does import its base module is treated as a wrapper, however '
+    + 'much else it defines.',
     { examined: localFiles.length, baseModules: baseFiles.length });
+}
+
+/**
+ * Does the local file at `abs` import / require / re-export one of the base
+ * modules in `counterparts` (which all share its basename)?
+ *
+ * Only RELATIVE or ABSOLUTE specifiers are resolved — the form every consumer
+ * uses. A bare specifier (a package name, an import map) is not resolved, so it
+ * does not excuse a file: this fails CLOSED, with a FAIL that names the file.
+ *
+ * @param {string} abs local file, absolute
+ * @param {string} code its comment-stripped source (prose cannot satisfy this)
+ * @param {{rel:string, real:string}[]} counterparts
+ */
+function wrapsCounterpart(abs, code, counterparts) {
+  const want = new Set(counterparts.map((c) => c.real));
+  const spec = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"\n]+)\1/g;
+  for (const m of code.matchAll(spec)) {
+    const s = m[2];
+    if (!(s.startsWith('.') || path.isAbsolute(s))) continue;
+    const p = path.resolve(path.dirname(abs), s);
+    for (const cand of [p, `${p}.js`, `${p}.mjs`, `${p}.cjs`, path.join(p, 'index.js')]) {
+      let real;
+      try { real = fs.realpathSync(cand); } catch { continue; }
+      if (want.has(real)) return true;
+    }
+  }
+  return false;
 }
 
 /**

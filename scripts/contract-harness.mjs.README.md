@@ -106,8 +106,32 @@ name, and a rename in place) all reported `pass`. ⇒ Generation 2 walks both tr
 **recursively** and matches by **normalised content** as well as by name, so a copy
 is caught under any name in any directory, and after reformatting or re-commenting.
 
-⛔ **What it still does NOT catch:** a copy that was **edited** and **renamed**.
-The PASS reason says so explicitly rather than leaving an impression of coverage.
+⛔ **GENERATION 5 CHANGED IT AGAIN — the name match found copies and then excused
+them.** Generation 4 cleared any same-named file that imported *anything* from base's
+lib. An edited copy of a base module imports that module's **siblings**, as the
+original does, so the realistic re-vendor was exactly the case the excuse fired on
+(`substack`: a stale `lib/cdp-client.js` requiring base's `cdp-rewrite.js` reported
+PASS). **The rule now:**
+
+* A local file whose **basename** equals that of any base module — at any depth on
+  either side; directory position is ignored, so moving a copy does not hide it — is
+  a **FAIL**,
+* **unless** its code (comments stripped) imports, requires or re-exports **that same
+  base module**: a relative or absolute specifier resolving to a base module of the
+  same basename. A sibling module does not count, and neither does base's
+  `index.js` — both are what a copy imports too.
+* Bare specifiers (package names, import maps) are not resolved, so they do not
+  excuse a file: fails **closed**, naming it.
+
+Measured 2026-10-03 across every locally present consumer: all same-named shims
+(bare re-exports, factories bound to local constants, wrappers that add functions)
+import their own base module and stay green; the only reds are two local
+`cdp-client.js` copies.
+
+⛔ **What it still does NOT catch:** a copy that was **edited** and **renamed**
+(whole-file hashing cannot see it), and a same-named file that imports its base
+module is treated as a wrapper however much else it defines. The PASS reason says
+both explicitly rather than leaving an impression of coverage.
 
 
 Asserts no local file shadows a base module. **Asserts code, never prose** —
@@ -119,15 +143,18 @@ shape that let the original grep pass.
 
 ### `generation`
 
-⚠ **Now 4.** History, each a change in what a verdict MEANS:
+⚠ **Now 5.** History, each a change in what a verdict MEANS:
 
 * **2** — `no-revendor` sees copies in subdirectories and under new names.
 * **3** — `pin` FAILS on drift and on an undeclared submodule; only a mode-160000
   entry is a gitlink (`substack`).
 * **4** — the swap carve-out keys on `WEBCTL_GATE_SWAPPED=1` only (`fetlife`);
   `require-generation` added; `generation` refuses arguments.
+* **5** — `no-revendor`: a file named like a base module is a shim only if it imports
+  **that** module; importing a sibling no longer excuses an edited copy (`substack`).
+  ⚠ Lanes that were green on 4 with a same-named copy go **red** — that is the fix.
 
-A sweep asks *"who is below 4?"* — and, since generation 4, *"whose contract does not
+A sweep asks *"who is below 5?"* — and, since generation 4, *"whose contract does not
 call `require-generation`?"*, because a recorded number nobody checks protects nothing.
 
 ### `require-generation <N>`

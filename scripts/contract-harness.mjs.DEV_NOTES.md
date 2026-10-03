@@ -132,6 +132,33 @@ description — and the re-measurement found it was **worse** than reported, bec
 the nested half of base's lib was missing from the comparison set entirely, which
 the report had not identified.
 
+## ⛔ `no-revendor` found the copy by name and then excused it (generation 4 → 5)
+
+The name arm flagged a same-named file only if it *defined* a surface and did **not**
+match `(from|require\() '…<sub>/lib/…'` — i.e. it was excused by importing **anything**
+from base. An edited copy of `cdp-client.js` requires base's `cdp-rewrite.js`, because
+the original does; so the excuse fired on the realistic re-vendor. Reported by
+`substack` (its 237-line local `lib/cdp-client.js` → PASS, *"none is a copy by content
+or by name"*), reproduced by `webctl:mgr`, re-measured here with a fixture before the
+fix: sibling-importing edited copy → PASS, same copy importing nothing → FAIL. ⇒ The
+discriminator was "touches base", which a copy and a shim both do.
+
+⇒ Fixed by asking **what the file wraps**: the specifier must resolve to a base module
+of the **same basename**. Chosen over "defines nothing" because the fleet's real shims
+DO define things (wrappers that add `normalizeMaxFiles`, a bound
+`createClientConfigSurface`): a definition test would have turned them red, and a red
+that is wrong gets overridden. Surveyed every locally present consumer before and
+after: every real shim imports its own base module; the only new reds are two local
+`cdp-client.js` copies (`substack`, and the extension lane's — the source base's
+cdp-client was extracted from).
+
+Also fixed in passing: `byName` was single-valued, and base has **two** `index.js`
+(`lib/` and `lib/browser-location/`), so one silently shadowed the other.
+
+⚠ Rejected: accepting base's `lib/index.js` as a counterpart. It re-exports every
+module, so a copy could reach its siblings through it and be excused — the same hole
+by another door. No surveyed shim needs it.
+
 ## ⛔ A generation number renders TWO STATES IDENTICALLY
 
 *(Raised by `linkedin` as a consistency point against this repo's own spec, not as a

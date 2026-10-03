@@ -429,6 +429,91 @@ test('⭐ CONTROL: a legitimate RE-EXPORT shim is not flagged', () => {
   assert.equal(r.status, 0, `a shim must pass; got ${r.status}\n${r.stderr}`);
 });
 
+// ── no-revendor: a same-name EDITED copy (generation 5) ──────────────────────
+//
+// ⛔ THE NAME MATCH FOUND THE FILE AND THEN EXCUSED IT. Generation 4 cleared any
+// same-named file that imported ANYTHING from base's lib — and an edited copy of
+// a base module imports that module's SIBLINGS, exactly as the original does. So
+// the realistic re-vendor was the case the excuse fired on. Measured 2026-10-03
+// (`substack`): a stale local lib/cdp-client.js requiring base's cdp-rewrite.js
+// reported PASS, "none is a copy by content or by name". ⇒ A shim is now
+// recognised by WHAT IT WRAPS: it must import its own same-named base module.
+
+/** revendorFixture() plus base's real cdp-client → cdp-rewrite sibling edge. */
+function cdpFixture() {
+  const fx = revendorFixture();
+  fs.writeFileSync(path.join(fx.vlib, 'browser-location', 'cdp-rewrite.js'),
+    'function rewriteWsUrl(u) { return u; }\nmodule.exports = { rewriteWsUrl };\n');
+  fs.writeFileSync(path.join(fx.vlib, 'browser-location', 'docker-ctl.js'),
+    'function createDockerCtl() { return { run() { return 0; } }; }\nmodule.exports = { createDockerCtl };\n');
+  fs.writeFileSync(path.join(fx.vlib, 'cdp-client.js'),
+    "'use strict';\nconst { rewriteWsUrl } = require('./browser-location/cdp-rewrite.js');\n"
+    + 'class CdpSession { send(m) { return rewriteWsUrl(m); } }\nmodule.exports = { CdpSession };\n');
+  return fx;
+}
+
+test('⛔ MUTATION: a same-name EDITED copy that imports a base SIBLING is caught (the shape that shipped)', () => {
+  const { dir } = cdpFixture();
+  try {
+    // Content differs from base's (send() changed), so the hash cannot see it —
+    // and it requires base's cdp-rewrite.js, which is what excused it before.
+    fs.writeFileSync(path.join(dir, 'lib', 'cdp-client.js'),
+      "'use strict';\nconst { rewriteWsUrl } = require('../vendor/base-webctl/lib/browser-location/cdp-rewrite.js');\n"
+      + "class CdpSession { send(m) { return rewriteWsUrl(m) + '!'; } }\nmodule.exports = { CdpSession };\n");
+    const r = run(['no-revendor', '--repo', dir]);
+    assert.equal(r.status, 1, `a same-name edited copy must FAIL; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /lib\/cdp-client\.js <- lib\/cdp-client\.js/, 'it must name the file and the base module');
+    assert.match(r.stderr, /does not import base's own lib\/cdp-client\.js/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ MUTATION: a same-name edited copy in a SUBDIRECTORY is caught', () => {
+  const { dir } = cdpFixture();
+  try {
+    fs.mkdirSync(path.join(dir, 'lib', 'browser-location'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'lib', 'browser-location', 'docker-ctl.js'),
+      "const { rewriteWsUrl } = require('../../vendor/base-webctl/lib/browser-location/cdp-rewrite.js');\n"
+      + 'function createDockerCtl() { return { run() { return rewriteWsUrl(1); } }; }\n'
+      + 'module.exports = { createDockerCtl };\n');
+    const r = run(['no-revendor', '--repo', dir]);
+    assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /lib\/browser-location\/docker-ctl\.js <- lib\/browser-location\/docker-ctl\.js/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ CONTROL: same-name WRAPPERS that import their own base module pass (CJS, ESM, nested, with extras)', () => {
+  // The shapes the fleet actually ships (surveyed 2026-10-03): a bare re-export,
+  // a factory bound to local constants, and a wrapper that ADDS functions. All
+  // import their same-named base module, so all are shims.
+  const { dir } = cdpFixture();
+  try {
+    fs.mkdirSync(path.join(dir, 'lib', 'browser-location'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'lib', 'cdp-client.js'),
+      "module.exports = require('../vendor/base-webctl/lib/cdp-client.js');\n");
+    fs.writeFileSync(path.join(dir, 'lib', 'browser-location', 'docker-ctl.js'),
+      "const _base = require('../../vendor/base-webctl/lib/browser-location/docker-ctl.js');\n"
+      + 'function extra() { return 1; }\nmodule.exports = Object.assign(_base.createDockerCtl(), { extra });\n');
+    fs.writeFileSync(path.join(dir, 'lib', 'client-config.js'),
+      "import { createClientConfig } from '../vendor/base-webctl/lib/client-config.js';\n"
+      + 'export default createClientConfig({});\n');
+    const r = run(['no-revendor', '--repo', dir]);
+    assert.equal(r.status, 0, `wrappers must pass; got ${r.status}\n${r.stderr}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ a vendor path to the SAME module inside a COMMENT does not make a copy a shim', () => {
+  // Prose must not satisfy the counterpart test either — the original defect.
+  const { dir } = cdpFixture();
+  try {
+    fs.writeFileSync(path.join(dir, 'lib', 'cdp-client.js'),
+      "// was: require('../vendor/base-webctl/lib/cdp-client.js')\n"
+      + "/* from '../vendor/base-webctl/lib/cdp-client.js' */\n"
+      + "class CdpSession { send(m) { return m + '!'; } }\nmodule.exports = { CdpSession };\n");
+    const r = run(['no-revendor', '--repo', dir]);
+    assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('⛔ a base lib with ZERO modules FAILS rather than finding nothing to report', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'revendor-empty-'));
   fs.mkdirSync(path.join(dir, 'vendor', 'base-webctl', 'lib'), { recursive: true });
