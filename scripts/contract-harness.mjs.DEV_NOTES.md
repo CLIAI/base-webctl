@@ -340,3 +340,14 @@ should land with the ownership work rather than alone.
   floor. Not built yet: a consumer's suite on an old base can fail for unrelated
   API reasons, so the probe must judge the *reason*, not the exit code, and that
   needs the JSONL `check` field rather than prose.
+
+## Identifier characters follow Unicode ID_Start / ID_Continue (final re-review)
+
+The lexer's identifier class once spanned every code point from U+0080 up. That swallowed
+U+2028/U+2029 line terminators, NBSP, the BOM and every Zs space INTO an identifier, so
+`break`+NBSP read as one non-keyword word: the ASI rule that makes the next `/` a regex never
+fired, and a comment hiding `require(<same module>)` was read as code — a false PASS. NBSP is
+common in copy-pasted code, so this needed no exotic input. Identifiers now use
+`\p{ID_Start}` / `\p{ID_Continue}` (plus `$`, `_`, `#`, ZWNJ, ZWJ). Six arms pin it
+(break/return/typeof/else/prefix-`++`/`-->` with NBSP, BOM or U+2028); restoring the old range
+turns them red. Unicode identifiers (`café`, `π`) still lex as identifiers.

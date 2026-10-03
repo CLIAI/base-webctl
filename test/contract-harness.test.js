@@ -955,6 +955,37 @@ test('⛔ n9–n11: a `/` where ASI ends the statement is a REGEX — the requir
   assert.deepEqual(wrong, [], `each must FAIL:\n${wrong.join('\n')}`);
 });
 
+/** Unicode whitespace / line terminators INSIDE what the old lexer took for an identifier. */
+const UNICODE_WS_ARMS = {
+  'break + U+2028 + /': ['.js', `${HEAD}for (const k of []) { break\u2028${TAIL}\n}\n`],
+  'return + NBSP + /': ['.js', `${HEAD}function f() { return\u00a0/'/.test('a') // ' ; ${SAME}\n}\n`],
+  'typeof + BOM + /': ['.js', `${HEAD}typeof\ufeff/'/.test('a') // ' ; ${SAME}\n`],
+  'else + NBSP + /': ['.js', `${HEAD}if (0) {} else\u00a0/'/.test('a') // ' ; ${SAME}\n`],
+  'a + U+2028 + ++/ (prefix)': ['.js', `${HEAD}let q = 1\u2028++/'/.lastIndex // ' ; ${SAME}\n`],
+  'U+2028 + --> (HTML comment)': ['.js', `${HEAD}module.exports = 1\u2028--> ${SAME}\n`],
+};
+
+test('⛔ identifiers end at Unicode WHITESPACE and LINE TERMINATORS (NBSP, BOM, U+2028) — each FAILs', () => {
+  // The identifier class once spanned \u0080+ and swallowed these, so `break`+NBSP was one
+  // non-keyword word and the regex that followed was read as division (final re-review).
+  /** @type {string[]} */
+  const wrong = [];
+  for (const [id, [ext, src]] of Object.entries(UNICODE_WS_ARMS)) {
+    const c = nodeAccepts(src, ext);
+    assert.ok(c.ok, `${id}: the arm must be valid JS to node\n${c.err}`);
+    const r = probe({ 'cdp-client.js': src });
+    if (r.status !== 1) wrong.push(`${id}: got ${r.status}`);
+  }
+  assert.deepEqual(wrong, [], `each must FAIL:\n${wrong.join('\n')}`);
+});
+
+test('CONTROL: Unicode IDENTIFIERS (café, π) and NBSP as plain whitespace in a real wrapper still PASS', () => {
+  const src = `const base = ${SAME};\nconst café = 1, π = 3;\u00a0const w = (café + π) / 2;\nmodule.exports = { ...base, w };\n`;
+  const c = nodeAccepts(src, '.js');
+  assert.ok(c.ok, c.err);
+  assert.equal(probe({ 'cdp-client.js': src }).status, 0);
+});
+
 test('⭐ CONTROL: the ASI rules leave real code alone — division after a label use, a binding, a postfix ++', () => {
   const wrappers = {
     'binding WITH an initializer': `const base = ${SAME};\nlet w = 6\n/ 2;\nmodule.exports = { ...base, w };\n`,

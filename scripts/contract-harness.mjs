@@ -636,8 +636,12 @@ const SLASH_CONTEXTUAL = new Set(['of', 'yield', 'await']);
 const STMT_PAREN = new Set(['if', 'while', 'for', 'with']);
 /** Valid regex flags: each of d g i m s u v y, at most once. */
 const REGEX_FLAGS = /^(?!.*(.).*\1)[dgimsuvy]*$/;
-const ID_START = /[A-Za-z_$#\u0080-￿]/;
-const ID_PART = /[\w$\u0080-￿]/;
+// ⛔ Unicode ID_Start / ID_Continue — NOT a blanket \u0080+ range. That range swallowed
+// U+2028/U+2029 line terminators, NBSP, BOM and every Zs space INTO identifiers, so
+// `break`+NBSP read as one non-keyword word and the ASI-regex rule never fired (final
+// re-review; NBSP is common in copy-pasted code). ZWNJ/ZWJ are legal ID_Continue.
+const ID_START = /[\p{ID_Start}$_#]/u;
+const ID_PART = /[\p{ID_Continue}$\u200c\u200d]/u;
 /** `\uXXXX` / `\u{X…}` — legal inside an identifier, and `require` IS `require`. */
 const ID_ESCAPE = /^\\u(?:\{([0-9a-fA-F]{1,6})\}|([0-9a-fA-F]{4}))/;
 
