@@ -306,13 +306,19 @@ test('⛔ no message names the user\'s HOME: recordReason and the loader\'s erro
     'config.toml': 'default_target = "workstation"\nbogus = "x"\n',
     'targets/workstation.toml': 'control = "ssh"\nssh = "browserhost"\napp = "chromium"\n',
     'targets/broken.toml': 'control = "ssh"\nuser_data_dir = "/p"\n',
+    'targets/unparseable.toml': '[a table]\n',
+    'targets/widemode.toml': 'control = "ssh"\nssh = "browserhost"\n',
   });
+  // every message path the loader has: a validation error, a parse error, a mode refusal
+  fs.chmodSync(path.join(h, '.config', 'webctl', 'targets', 'widemode.toml'), 0o644);
   try {
     const r = /** @type {any} */ (resolveSharedTarget({ flag: 'nosuchtarget', home: h }));
     assert.ok(r.recordReason, 'premise: a named target with no shared record gives a reason');
     assert.ok(!r.recordReason.includes(h), `recordReason must not contain HOME: ${r.recordReason}`);
     assert.match(r.recordReason, /~\/\.config\/webctl\/targets\//);
-    assert.ok(r.sharedErrors.length >= 2, 'premise: the bogus key and the broken record produce errors');
+    assert.ok(r.sharedErrors.length >= 4, `premise: bogus key, broken record, parse error, mode refusal: ${r.sharedErrors.join(' | ')}`);
+    assert.ok(r.sharedErrors.some((e) => /unparseable\.toml: line 1/.test(e)), 'the parse-error path is exercised');
+    assert.ok(r.sharedErrors.some((e) => /widemode\.toml: mode 644/.test(e)), 'the mode-refusal path is exercised');
     for (const e of r.sharedErrors) {
       assert.ok(!e.includes(h), `a loader error leaked HOME: ${e}`);
       assert.match(e, /^~\/\.config\/webctl\//);
