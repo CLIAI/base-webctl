@@ -500,7 +500,9 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
   `isolated` dies BY it and bash's cooperative-exit rule stops a trap-less parent (before:
   it carried on with `$? = 130`).
 * **Env scrub** on the fresh and the nested path: `DISPLAY`, `WAYLAND_DISPLAY`,
-  `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `XDG_RUNTIME_DIR` unset;
+  `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `XDG_RUNTIME_DIR` unset, and the
+  state roots `XDG_{CACHE,CONFIG,STATE,DATA}_HOME` too (they beat `$HOME` in `v59v`, so a
+  temp HOME was silently bypassed);
   `TMPDIR=/tmp`, so an inherited value cannot name a directory the mask hid.
 * **Nesting.** "Already inside" now also needs `/proc/self/ns/mnt` ≠ `WEBCTL_HOST_MNTNS`
   and our tmpfs **on top of** `/run` and `/tmp` in `/proc/self/mountinfo` — "a tmpfs at

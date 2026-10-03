@@ -31,6 +31,21 @@ const GIT_ID = ['-c', 'user.email=t@t', '-c', 'user.name=t'];
 const USERNS = spawnSync('unshare', ['-rn', 'true']).status === 0;
 const NEEDS_NS = USERNS ? false : 'no unprivileged user+network namespaces on this host (unshare -rn true failed)';
 
+/**
+ * Wait until \`pred()\` holds, polling; return its final value. A DEADLINE, not an iteration
+ * count: a passing run returns the moment the condition holds, and only a run that will never
+ * get there waits the full bound. ⚠ The bound is generous on purpose: under a heavy host load
+ * (load average ~50–118 from other lanes' suites, measured) a contract inside \`isolated\` took
+ * longer than the old 10 s to start, and the signal tests failed their own positive control.
+ * @template T @param {() => T} pred @param {number} [ms]
+ */
+async function waitUntil(pred, ms = 120000) {
+  const end = Date.now() + ms;
+  let v = pred();
+  while (!v && Date.now() < end) { await new Promise((r) => setTimeout(r, 50)); v = pred(); }
+  return v;
+}
+
 /** @param {string[]} a @param {string} cwd */
 const git = (a, cwd) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
 
@@ -255,7 +270,7 @@ test('⛔ the gate FAILS LOUDLY when a live tree changes during its scratch run 
     try {
       const run = w.gateAsync(['--against-head', '--scratch'], { FAKE_PAUSE: '1' });
       const marker = () => w.scratchDirs().map((d) => path.join(w.tmp, d, 'repo', '.fake-started')).find((f) => fs.existsSync(f));
-      for (let i = 0; i < 400 && !marker(); i++) await new Promise((r) => setTimeout(r, 50));
+      await waitUntil(marker);
       const m = marker();
       assert.ok(m, 'positive control: the contract started inside the scratch clone');
       move(w);
@@ -410,7 +425,7 @@ test('scratch: every scratch dir is removed — on PASS, on FAIL, and on a signa
       { env: w.env({ FAKE_STARTED: '1' }), detached: true, stdio: 'ignore' });
     const done = new Promise((resolve) => child.on('exit', resolve));
     const started = () => w.scratchDirs().some((d) => fs.existsSync(path.join(w.tmp, d, 'repo', '.fake-started')));
-    for (let i = 0; i < 200 && !started(); i++) await new Promise((r) => setTimeout(r, 50));
+    await waitUntil(started);
     assert.ok(started(), 'the contract never started');
     assert.equal(w.scratchDirs().length, 1, 'positive control: one scratch dir exists mid-run');
     process.kill(-(/** @type {number} */ (child.pid)), 'SIGTERM');
@@ -505,7 +520,7 @@ test('scratch: TERM to the gate\'s process group ends it BY the signal, and its 
       { env: w.env({ FAKE_STARTED: '1' }), detached: true, stdio: 'ignore' });
     const done = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
     const started = () => w.scratchDirs().some((d) => fs.existsSync(path.join(w.tmp, d, 'repo', '.fake-started')));
-    for (let i = 0; i < 200 && !started(); i++) await new Promise((r) => setTimeout(r, 50));
+    await waitUntil(started);
     assert.ok(started(), 'positive control: the contract started');
     process.kill(-(/** @type {number} */ (child.pid)), 'SIGTERM');
     const end = /** @type {{code: number|null, signal: string|null}} */ (await done);
@@ -533,7 +548,7 @@ test('⛔ scratch: Ctrl-C (INT to the process group) ends the gate by the signal
     child.stderr.on('data', (d) => { out += d; });
     const done = new Promise((resolve) => child.on('close', (code, signal) => resolve({ code, signal })));
     const started = () => w.scratchDirs().some((d) => fs.existsSync(path.join(w.tmp, d, 'repo', '.fake-started')));
-    for (let i = 0; i < 200 && !started(); i++) await new Promise((r) => setTimeout(r, 50));
+    await waitUntil(started);
     assert.ok(started(), 'positive control: the contract started');
     process.kill(-(/** @type {number} */ (child.pid)), 'SIGINT');
     const end = /** @type {{code: number|null, signal: string|null}} */ (await done);
