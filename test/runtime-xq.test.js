@@ -396,3 +396,24 @@ test('a malformed "flags" makes the whole document UNKNOWN (never half-trusted)'
   j.verbs[0].flags = 'oops';
   assert.equal(/** @type {any} */ (parseCapabilities(JSON.stringify(j))).verdict, 'unknown');
 });
+
+test('⛔ hasFlag: an xq whose grouped verbs ALL list one flag set OVER-CLAIMS — refused for that group', () => {
+  // The flags fixture predates xq 70ff416: all six `zone` verbs listed the same ten flags, so
+  // `zone ls --purge` parsed and was IGNORED. hasFlag must not approve it.
+  const old = /** @type {any} */ (parseCapabilities(fixture('xq-capabilities.schema1.flags.measured.json')));
+  assert.equal(old.verdict, 'ok');
+  assert.ok(old.overclaimed.has('zone'), 'premise: the old fixture over-claims for zone');
+  const r = /** @type {any} */ (hasFlag(old, 'zone ls', ['--purge']));
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /over-reports flags for its 'zone' verbs/);
+  // an UNGROUPED verb in the same old document is still judged on its own list
+  assert.deepEqual(hasFlag(old, 'up', ['--profile-dir']), { ok: true });
+});
+
+test('CONTROL: a per-verb-correct xq (after 70ff416) is not flagged — two verbs sharing a set is fine', () => {
+  const cur = /** @type {any} */ (parseCapabilities(fixture('xq-capabilities.schema1.perverb-flags.measured.json')));
+  assert.equal(cur.verdict, 'ok', cur.reason);
+  assert.equal(cur.overclaimed.size, 0, `nothing over-claimed: ${[...cur.overclaimed]}`);
+  assert.equal(/** @type {any} */ (hasFlag(cur, 'zone ls', ['--purge'])).ok, false, 'zone ls genuinely lacks --purge now');
+  assert.deepEqual(hasFlag(cur, 'up', ['--profile-dir']), { ok: true });
+});
