@@ -151,10 +151,13 @@ design doc, before any lane writes firefox code.
 | X13 | `app restart --control none\|cdp`, keeping the profile | the login-mode cycle (with X8) |
 | X14 | **raw X primitives** as verbs: input injection, pixel/region capture, viewer-presence count | the X half of hover-proof click, displayed-tab-by-pixels and human presence — base composes them with CDP and owns the X-input LEASE identity (`ow9k`) |
 | X15 | `rm --purge` stops first and reports the removed path | lifecycle hygiene |
+| X18 | `machine status --json` — per-host health across `machine ls` (reachable, xq present + its capabilities, docker up, zones running); LOW, after X10 (`webctl:mgr`'s ruling) | base's inventory driver, which today composes per-host ssh reads; the CURRENT/stale verdict stays base's |
 | X16 | an explicit **`--config-dir <path relative to the TARGET's home>`**, carried by xq's own remote delegation — never the caller's environment forwarded implicitly | lanes keep PRIVATE images through a per-tool xq config on the browser host (`~/.config/<tool>/xq`); three lanes each hand-roll `ssh host 'XQ_CONFIG_DIR=… xq …'`, which ssh delegation cannot carry. A local env var naming a path on another machine is "assumed, not stated" (`nl0c`). Base's seam passes it from the target record; the lane wrappers retire |
 
-*Status (xq's lane, 2026-10-03, updated): X1–X7, X16 and X17 LANDED; next X11 + X13 (login
-mode on xq). Earlier status: X1–X3 landed; X4 partly — `zone create --exist-ok` + `up
+*Status (xq's lane, 2026-10-03, updated): X1–X7, X11–X13, X15, X16 and X17 LANDED, plus
+per-leaf `flags` (an older xq over-claims grouped verbs — base's `hasFlag` refuses them).
+Open: X10, X14 (late, agreed), X18 (low), X8 (Greg's), X4's full remote proof (the browser
+host's xq is outdated — Greg's call; that pull also gates moving the new lanes onto xq). Earlier status: X1–X3 landed; X4 partly — `zone create --exist-ok` + `up
 --no-attach` = ensureApp, and `capabilities --machine` = the skew guard. The full remote
 proof is blocked on the browser host's own state (an outdated xq; no xq config, so the
 SHARED image — built before control labels existed — refuses `--control cdp`). Fixing the
