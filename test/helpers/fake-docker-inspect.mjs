@@ -29,6 +29,67 @@ export function inspectPresent(name, o = {}) {
 }
 
 /**
+ * ⛔ A fake docker that CANNOT reach the real CLI (k3wn: behaviourally hermetic).
+ *
+ * Fakes used to be `{ ...realDocker, <overrides> }`. Every method NOT overridden
+ * was then the real one — and the real methods spawn `docker` through their own
+ * closure, not through the fake's `run`. So a fake whose driver grew a new call
+ * reached the operator's daemon and PASSED or FAILED by what happened to be on
+ * it. Measured while adding the ownership inspect: three fakes would have
+ * passed only because the containers were absent on the machine running them.
+ *
+ * Here an unstubbed METHOD, or a `run` of an unstubbed VERB (args[0]), records a
+ * violation and throws. The throw alone is not enough — the driver catches some
+ * errors (an inspect that throws is a refusal, a failed teardown rm is
+ * swallowed) — so callers also assert `violations` is empty.
+ *
+ * @param {Record<string, any>} stubs  method name → implementation
+ * @param {{run?: Record<string, (args: string[]) => any>}} [o]
+ *   `run` verb → handler; absent means `run` itself is unstubbed.
+ * @returns {{docker: any, violations: string[]}}
+ */
+export function guardedDocker(stubs, o = {}) {
+  /** @type {string[]} */
+  const violations = [];
+  /** @param {string} what */
+  const refuse = (what) => {
+    violations.push(what);
+    throw new Error(`hermetic fake docker: ${what} is not stubbed — it would reach the real docker CLI`);
+  };
+  /** @type {Record<string, any>} */
+  const target = { ...stubs };
+  if (o.run) {
+    const verbs = o.run;
+    target.run = async (/** @type {string[]} */ args) => (
+      Object.prototype.hasOwnProperty.call(verbs, args[0])
+        ? verbs[args[0]](args)
+        : refuse(`docker.run(${JSON.stringify(args)})`));
+  }
+  const docker = new Proxy(target, {
+    get(t, p) {
+      // Symbols and `then` are probed by the runtime (await, inspection), not by
+      // the driver; answering them as "unstubbed" would be a false violation.
+      if (typeof p === 'symbol' || p === 'then' || p in t) return t[/** @type {any} */ (p)];
+      return (/** @type {any[]} */ ...args) => refuse(`docker.${p}(${JSON.stringify(args)})`);
+    },
+  });
+  return { docker, violations };
+}
+
+/**
+ * Fail loudly if a guarded fake was asked for anything unstubbed — even when
+ * the driver caught the throw.
+ * @param {string[]} violations
+ */
+export function assertHermetic(violations) {
+  if (violations.length) {
+    throw new Error(
+      `NOT HERMETIC: the driver asked the fake docker for ${violations.length} unstubbed call(s), ` +
+      `each of which would have reached the real docker CLI:\n  ${violations.join('\n  ')}`);
+  }
+}
+
+/**
  * A `run` for fakes in which no container exists: inspect → absent, anything
  * else → `other`.
  * @param {{code: number, stdout: string, stderr: string}} [other]

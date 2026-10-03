@@ -13,8 +13,7 @@ import assert from 'node:assert/strict';
 
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
-import * as realDocker from '../lib/browser-location/docker-ctl.js';
-import { runAbsent } from './helpers/fake-docker-inspect.mjs';
+import { guardedDocker, assertHermetic, INSPECT_ABSENT } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC() {
   return {
@@ -41,8 +40,7 @@ async function captureChromiumEnv(cfg) {
   const C = fakeC();
   /** @type {any[]} */
   const calls = [];
-  const docker = {
-    ...realDocker,
+  const { docker, violations } = guardedDocker({
     dockerAvailable: async () => true,
     containerExists: async () => false,
     containerRunning: async () => false,
@@ -50,7 +48,6 @@ async function captureChromiumEnv(cfg) {
     rm: async () => ({ code: 0 }),
     volumeRm: async () => ({ code: 0 }),
     volumeCreate: async () => ({ code: 0 }),
-    run: runAbsent(), // the ownership inspect: no container exists
     // The X-server wait polls `xdpyinfo ... && echo ok` and checks stdout for
     // 'ok' — an empty stdout with code 0 is NOT success, and would have stalled
     // bring-up until its poll timed out. Answering the probe rather than just
@@ -62,10 +59,11 @@ async function captureChromiumEnv(cfg) {
       // chromium one so it unwinds right after we have its args.
       return a.name.includes('chromium') ? { code: 1, stderr: 'halted by test' } : { code: 0, stderr: '' };
     },
-  };
+  }, { run: { inspect: () => INSPECT_ABSENT } }); // the ownership inspect: no container exists
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C), docker })
     .createDriver({ port: 4327, host: '127.0.0.1', slug: 'test', force: true, ...cfg });
   try { await drv.ensureRunning(); } catch { /* expected */ }
+  assertHermetic(violations);
   const chromium = calls.find((c) => String(c.name).includes('chromium'));
   if (!chromium) {
     throw new Error(

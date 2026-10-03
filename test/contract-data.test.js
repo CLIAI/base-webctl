@@ -27,8 +27,7 @@ import {
   CONTAINER_LIFECYCLE_CONTRACT,
 } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts, PROFILE_WARNING_SEVERITIES } from '../lib/browser-location/mounts.js';
-import * as realDocker from '../lib/browser-location/docker-ctl.js';
-import { runAbsent, inspectPresent } from './helpers/fake-docker-inspect.mjs';
+import { guardedDocker, assertHermetic, INSPECT_ABSENT, inspectPresent } from './helpers/fake-docker-inspect.mjs';
 
 const C = {
   PROJECT: 'demo-webctl', ARTIFACT_PREFIX: 'demo-webctl-',
@@ -76,8 +75,7 @@ function hermeticMounts() {
 async function captureDockerRun() {
   /** @type {any[]} */
   const calls = [];
-  const docker = {
-    ...realDocker,
+  const { docker, violations } = guardedDocker({
     dockerAvailable: async () => true,
     containerExists: async () => false,
     containerRunning: async (/** @type {string} */ n) => n.includes('chromium'),
@@ -86,15 +84,15 @@ async function captureDockerRun() {
     volumeRm: async () => ({ code: 0 }),
     volumeCreate: async () => ({ code: 0 }),
     exec: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
-    run: runAbsent(), // the ownership inspect: no container exists
     runDetached: async (/** @type {any} */ a) => { calls.push(a); return { code: 0, stderr: '' }; },
-  };
+  }, { run: { inspect: () => INSPECT_ABSENT } }); // the ownership inspect: no container exists
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(), docker })
     .createDriver({
       port: 4427, host: '127.0.0.1', slug: 'test', force: true,
       containerEnv: { LWC_CDP_PORT: null }, // portless: no CDP poll against a real port
     });
   try { await drv.ensureRunning(); } catch { /* the stub cannot satisfy everything */ }
+  assertHermetic(violations);
   return calls;
 }
 
@@ -141,8 +139,7 @@ test('⛔ TEARDOWN_CONTRACT matches what shutdown() ACTUALLY calls', async () =>
   // Right and wrong gave the same answer, which looks like coverage and is not.
   /** @type {string[]} */
   const verbs = [];
-  const docker = {
-    ...realDocker,
+  const { docker, violations } = guardedDocker({
     dockerAvailable: async () => true,
     containerExists: async () => true,
     containerRunning: async () => true,
@@ -151,14 +148,14 @@ test('⛔ TEARDOWN_CONTRACT matches what shutdown() ACTUALLY calls', async () =>
     rm: async (/** @type {string} */ n) => { verbs.push(`rm:${n}`); return { code: 0 }; },
     volumeRm: async (/** @type {string} */ n) => { verbs.push(`volumeRm:${n}`); return { code: 0 }; },
     networkRm: async (/** @type {string} */ n) => { verbs.push(`networkRm:${n}`); return { code: 0 }; },
+  }, { run: {
     // shutdown() proves the pair ours before stopping it: both carry our label.
-    run: async (/** @type {string[]} */ a) => (a[0] === 'inspect'
-      ? inspectPresent(a[a.length - 1], { labels: { 'demo-webctl.owner.uid': '4242' } })
-      : { code: 0, stdout: '', stderr: '' }),
-  };
+    inspect: (a) => inspectPresent(a[a.length - 1], { labels: { 'demo-webctl.owner.uid': '4242' } }),
+  } });
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(), docker, uid: 4242 })
     .createDriver({ port: 4427, host: '127.0.0.1', slug: 'test', force: true });
   await drv.shutdown();
+  assertHermetic(violations);
 
   assert.ok(verbs.some((v) => v.startsWith('stop:')), `shutdown() must stop; saw ${verbs.join(', ')}`);
   for (const forbidden of ['rm:', 'volumeRm:', 'networkRm:']) {
