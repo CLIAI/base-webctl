@@ -148,7 +148,7 @@ test('⛔ CLOSED: an unknown key is refused BY NAME — and the error never echo
 });
 
 test('⛔ every enum refuses an out-of-range value, each with a valid control', () => {
-  const bad = { role: 'prod', placement: 'cloud', lifecycle: 'nonsense', app: 'firefox',
+  const bad = { role: 'prod', placement: 'cloud', lifecycle: 'nonsense', app: 'netscape',
     tunnel: 'persistent', kind: 'vm', base: 'alpine', view: 'tcp' };
   for (const [k, v] of Object.entries(bad)) {
     assert.equal(validateTarget(gem({ [k]: v })).verdict, 'invalid', `${k}=${v} must be refused`);
@@ -344,6 +344,10 @@ test('targetEnvKey: one family pattern, matching the first lane exactly', () => 
   assert.equal(targetEnvKey('grok-webctl', 'ssh'), 'CLIAI_GROK_WEBCTL_BROWSER_SSH_TARGET');
   assert.equal(targetEnvKey('substack-webctl'), 'CLIAI_SUBSTACK_WEBCTL_BROWSER_TARGET');
   assert.throws(() => targetEnvKey(''));
+  assert.equal(targetEnvKey('grok-webctl', 'target'), 'CLIAI_GROK_WEBCTL_BROWSER_TARGET', 'explicit target = default');
+  assert.equal(targetEnvKey('grok-webctl', 'engine'), 'CLIAI_GROK_WEBCTL_BROWSER_ENGINE');
+  // ⛔ An unknown kind used to fall through to …_BROWSER_TARGET — a typo read the wrong variable.
+  assert.throws(() => targetEnvKey('grok-webctl', /** @type {any} */ ('engin')), /unknown kind/);
 });
 
 test('a refusal is a REASON OBJECT with a machine code — lanes map it to their own exit table', () => {

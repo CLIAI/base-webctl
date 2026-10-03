@@ -207,6 +207,105 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.31.0 — 2026-10-03
+
+**Headline: the docker driver never touches, reuses or restarts a container that is not
+proven ours — and upgrading base never restarts a running signed-in browser.** Plus the
+engine vocabulary, base's reader of xq's capabilities, and the design that makes **xq the
+runtime layer** (`rx9q`).
+
+### ⛔ BREAKING — container names carry the owner
+
+The driver named containers `<prefix>chromium-<slug>` / `<prefix>xpra-<slug>` with no owner,
+and force-removed and stopped them by that name. On a shared docker daemon, two accounts
+running the same tool with the same slug (the default is `default`) would remove or DRIVE
+each other's signed-in browser. Inherited from the early xq the driver was adapted from
+(xq's lane traced it, reading xq as it stood at the fork commit).
+
+| old | new |
+|---|---|
+| `<prefix>chromium-<slug>` | `<prefix>u<uid>-chromium-<slug>` |
+| `<prefix>xpra-<slug>` | `<prefix>u<uid>-xpra-<slug>` |
+| `<prefix>x11-<slug>` (volume) | `<prefix>u<uid>-x11-<slug>` |
+| `<prefix>net-<slug>` | `<prefix>u<uid>-net-<slug>` |
+
+* **Proof of "ours" is what a container MOUNTS**: a chromium is ours only if a bind-mount
+  Source is our resolved profile path; an xpra only if its same-slug chromium is ours. The
+  new owner label is a FILTER (another uid → not ours), never proof alone.
+* Every rm / stop / **reuse** goes through that proof; a container not proven ours is
+  refused (exit 4) — never removed, never stopped, never driven.
+* **What happens after a lane bumps:** on the first **`ensureRunning()`** (never on a read
+  — `healthCheck`, `describe`, `inspect` never mutate), a running browser in a
+  pre-owner-named container is **renamed in place** (`docker rename`) — it keeps running,
+  same container, same CDP URL, NOT restarted — and its profile lock is rewritten to the new
+  name. One info line says so. `shutdown()` stops a pre-owner pair under its old names
+  (renaming it first when it can), never removes it. A partial pre-owner pair, or a migrated pair whose CDP does
+  not answer, is REFUSED with instructions, never repaired by a restart.
+* Bring-up and shutdown are serialised per PROFILE (process mutex), so two commands at once
+  cannot both migrate one profile.
+* New consumer-facing API: `mounts.names(slug, base, uid)` (uid defaults to the process),
+  `names().owner`, `mounts.legacyNames(slug)`, `docker-ctl.rename`, the driver's `opts.uid`
+  and **`opts.attachOnly`** (ensureRunning/shutdown refuse before any docker call — lanes pass
+  it from resolveTarget's `attachOnly`), `inspect().names` reports the new names.
+
+### Added
+
+* **Engine vocabulary** (`nl0c` §1c): `firefox` is a valid `app`; `ENGINES`,
+  `ENGINES_PENDING = ['firefox']` (base's WebDriver BiDi backend has not shipped — Firefox
+  removed CDP in v141), `resolveEngine` with the fixed codes `no-engine`, `invalid-engine`,
+  `engine-conflict`, `engine-pending`; `targetEnvKey(tool, 'engine')`;
+  `resolveSharedTarget(...)` — the shared-config glue two lanes had each hand-written.
+  No message prints the user's home path (`SHARED_CONFIG_DISPLAY`).
+* **`runtimeXq`** — base's reader of `xq capabilities --json` (`rx9q` §4): fail-closed on the
+  schema and malformed known fields, tolerant of additive fields; `hasVerb`, `controlFor`
+  (`null` = UNKNOWN, `[]` = NONE), and **`hasFlag`** — never send a flag the target xq does
+  not list (an older xq passes unknown flags to the APP with exit 0; an xq without a `flags`
+  field is too old to vouch → refused). Pin capabilities, never `xq --version`.
+* `docker-ctl.createDockerCtl({dockerHost})` — the same interface bound to a remote daemon.
+* **The driver REFUSES a remote docker-ctl** (one carrying `dockerHost`) at construction,
+  exit 4, with zero docker calls: its paths, uid, port check, prefs and lock are local, so a
+  remote bring-up would run half-local (measured by `webctl:mgr`). Remote browsers run
+  through xq (`rx9q`).
+
+### Docs
+
+* `rx9q` — **the runtime layer is xq**: xq runs the app up to a declared control port; base
+  speaks CDP/BiDi above it. Capability-pinned, fleet-required via a run-time check. Asks
+  X1–X17 to xq; most have landed.
+* `rb7s` — remote bring-up over ssh: phases 2–3 SUPERSEDED by `rx9q` (§1's survey of the
+  driver's ten local assumptions stays valid).
+* `bd1x` — the WebDriver BiDi client spec, with four constraints measured on Firefox 156.
+* `v7x3` + `k3wn` — an option a library does not honour is refused, never ignored (to be
+  implemented in cdp-client next).
+
+### ⛔ Lanes: anything that looks a container up by its OLD name now finds it ABSENT
+
+A guard keyed on a container name (e.g. "the protected browser is unchanged") then passes
+**vacuously** — it reads "not running" before and after. Get names from `describe().names`.
+Measured exposure (`webctl:mgr`, git grep at each lane's HEAD): **ccew** HIGH (tool scripts
+hard-code `ccew-xpra-$SLUG` / `ccew-chromium-$SLUG`); **linkedin** (a test asserts the old
+names; a QA guard is keyed on the old name — vacuous after the rename); **chatgpt** (a test,
+README commands); **substack** (AGENTS.md commands). xq-zone lanes and the new lanes: none.
+⚠ Read paths do not yet report a pre-owner pair (`describe().names` shows the new names
+while the live pair has the old ones) — `inspect().legacy` comes in the next release.
+
+### ⛔ What this does NOT cover
+
+* A runner still on an OLDER base takes no mutex; a few milliseconds of race remain against it.
+* A pair that was NEVER migrated is still recreated when its CDP is unreachable or only one of
+  its containers runs (pre-existing behaviour).
+* The process mutex treats a holder with pid 1, or one in another pid namespace, as dead; its
+  10-minute timeout message assumes the dead holder's pid is not reused.
+* A uid in the name identifies the owner on ONE docker daemon; two machines whose users share a
+  uid are not distinguished (remote containers move to xq per `rx9q`).
+* Firefox is still `ENGINES_PENDING`: the BiDi client is specified (`bd1x`), not built.
+* cdp-client still ignores unknown options (the rule is written; the code is next).
+* **Harness generation stays 4.** The `no-revendor` same-name fix (generation 5) is held for
+  the next release: its final review found the lexer still fails open after `break` /
+  `continue` / `debugger`. The generation-4 gap it closes is not new.
+* Network isolation of consumers' mutation arms (two incidents today: mutation controls
+  reached live signed-in browsers) ships in the next release (`xrl4`).
+
 ## v0.30.0 — 2026-10-03
 
 ### ⛔ BREAKING (for v0.29.0 adopters) — the shared default is the LOWEST layer

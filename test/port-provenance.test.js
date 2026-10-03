@@ -22,6 +22,7 @@ import assert from 'node:assert/strict';
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createClientConfig } from '../lib/client-config.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
+import { TEST_CACHE_ROOT } from './helpers/test-cache-root.mjs';
 
 const C = {
   PROJECT: 'demo-webctl', ARTIFACT_PREFIX: 'demo-webctl-',
@@ -36,7 +37,7 @@ const C = {
 function hermeticMounts() {
   const m = createMounts(C, { dockerfilesDir: '/df' });
   const fake = (/** @type {string} */ s, /** @type {string} */ u) => u || `/tmp/no-mkdir/${s}`;
-  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => '/tmp/cache' };
+  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => TEST_CACHE_ROOT };
 }
 
 /** @param {Record<string, any>} jsonc */
