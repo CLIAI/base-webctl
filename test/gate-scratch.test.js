@@ -111,7 +111,8 @@ function world(o = {}) {
     consumerHead: git(['rev-parse', 'HEAD'], repo),
     /** @param {Record<string,string>} [extra] */
     env(extra = {}) {
-      const e = { ...process.env, WEBCTL_CONSUMERS_FILE: reg, WEBCTL_CONSUMERS_DIR: dir, TMPDIR: tmp, ...extra };
+      const e = { ...process.env, WEBCTL_CONSUMERS_FILE: reg, WEBCTL_CONSUMERS_DIR: dir, TMPDIR: tmp,
+        WEBCTL_GATE_LOG_DIR: path.join(dir, 'gate-logs'), ...extra };
       delete e.NODE_TEST_CONTEXT;
       delete e.WEBCTL_HOST_NETNS;
       return e;

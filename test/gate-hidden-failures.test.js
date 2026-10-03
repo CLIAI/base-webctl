@@ -19,9 +19,9 @@ const GATE = path.join(ROOT, 'scripts', 'test-all-consumers.sh');
 
 /**
  * One fake consumer whose contract prints `output` and exits `code`.
- * @param {string} output @param {number} code
+ * @param {string} output @param {number} code @param {string} [logDir] keep logs here (outlives the fixture)
  */
-function runGate(output, code) {
+function runGate(output, code, logDir) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-hidden-'));
   try {
     const repo = path.join(dir, 'fake-webctl');
@@ -43,7 +43,8 @@ function runGate(output, code) {
       name: 'fake-webctl', submodulePath: 'vendor/base-webctl', testCmd: './test-against-base.sh',
       tier: 'full', wired: true, localDir: repo,
     }] }));
-    const env = { ...process.env, WEBCTL_CONSUMERS_FILE: reg, WEBCTL_CONSUMERS_DIR: dir };
+    const env = { ...process.env, WEBCTL_CONSUMERS_FILE: reg, WEBCTL_CONSUMERS_DIR: dir,
+      WEBCTL_GATE_LOG_DIR: logDir ?? path.join(dir, 'gate-logs') };
     delete env.NODE_TEST_CONTEXT;
     const r = spawnSync('bash', [GATE], { encoding: 'utf8', env });
     return { status: r.status, out: (r.stdout || '') + (r.stderr || '') };
@@ -105,4 +106,32 @@ test('the strict reporter\'s verdict is authoritative: 0 failures PASSES; a fail
   assert.match(swallowed.out, /strict reporter/);
   const zero = runGate('STRICT: ZERO tests ran — a run that tested nothing is not a pass.\n', 0);
   assert.equal(zero.status, 1, zero.out);
+});
+
+test('every run KEEPS its logs in its own directory — a second run never overwrites the first', () => {
+  const logs = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-logs-'));
+  try {
+    const a = runGate('ok 1 - FIRST-RUN-MARKER\n# tests 1\n# pass 1\n# fail 0\n', 0, logs);
+    const b = runGate('ok 1 - SECOND-RUN-MARKER\n# tests 1\n# pass 1\n# fail 0\n', 0, logs);
+    assert.equal(a.status, 0, a.out); assert.equal(b.status, 0, b.out);
+    const runs = fs.readdirSync(logs).sort();
+    assert.equal(runs.length, 2, `two runs, two directories: ${runs.join(', ')}`);
+    /** @param {string} run */
+    const consumerLog = (run) => {
+      const f = fs.readdirSync(path.join(logs, run)).filter((n) => /^fake-webctl\..*\.log$/.test(n));
+      assert.equal(f.length, 1, `one consumer log in ${run}: ${f.join(', ')}`);
+      return fs.readFileSync(path.join(logs, run, f[0]), 'utf8');
+    };
+    const texts = runs.map(consumerLog);
+    // each run's evidence survives, and is that run's own
+    assert.equal(texts.filter((t) => t.includes('FIRST-RUN-MARKER')).length, 1);
+    assert.equal(texts.filter((t) => t.includes('SECOND-RUN-MARKER')).length, 1);
+    for (const run of runs) {
+      assert.equal(fs.statSync(path.join(logs, run)).mode & 0o777, 0o700, `${run} is private`);
+      assert.match(fs.readFileSync(path.join(logs, run, 'gate.err'), 'utf8'), /gate summary: pass=1/);
+      assert.match(fs.readFileSync(path.join(logs, run, 'gate.jsonl'), 'utf8'), /"result":"pass"/);
+    }
+    // the human report names where they are
+    assert.match(a.out, /logs kept: /);
+  } finally { fs.rmSync(logs, { recursive: true, force: true }); }
 });

@@ -266,6 +266,22 @@ envelope() {
   fi
 }
 
+# ⭐ EVERY RUN KEEPS ITS LOGS, IN ITS OWN DIRECTORY, NEVER OVERWRITTEN. A failure line
+# without the lines above it says nothing about which file or which subtest. One run
+# removed its per-consumer log as soon as it was judged, and a later question about a
+# line in it had to be settled by timestamps. ⇒ mktemp -d under a timestamped name: a
+# second run cannot reuse the directory, so it cannot clobber the first run's evidence.
+# Mode 700: consumer output is local evidence, not something to publish.
+#   WEBCTL_GATE_LOG_DIR   where run directories go
+#                         (default ${XDG_STATE_HOME:-~/.local/state}/webctl-base/gate-logs)
+GATE_LOG_ROOT="${WEBCTL_GATE_LOG_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/webctl-base/gate-logs}"
+mkdir -p "$GATE_LOG_ROOT"
+RUN_LOG_DIR="$(mktemp -d "$GATE_LOG_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-${BASE_HEAD:0:12}-XXXXXX")"
+chmod 700 "$RUN_LOG_DIR"
+# The whole run as well: stdout (the JSONL) and stderr (the human report) each copied.
+exec > >(tee -a "$RUN_LOG_DIR/gate.jsonl") 2> >(tee -a "$RUN_LOG_DIR/gate.err" >&2)
+echo "gate logs: $RUN_LOG_DIR" >&2
+
 pass=0 fail=0 skip=0 stale=0
 probe_ok=0 probe_bad=0 probe_none=0
 declare -a probe_fails=()
@@ -585,7 +601,8 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # side effect: gate chatter already lives on stderr, and this leaves stdout as
   # pure JSONL for the lszd machine interface, which consumer stdout used to
   # interleave with.
-  run_log="$(mktemp "${TMPDIR:-/tmp}/webctl-gate-XXXXXX")"
+  # kept: one file per consumer in this run's log directory (see RUN_LOG_DIR)
+  run_log="$(mktemp "$RUN_LOG_DIR/$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_').XXXX.log")"
   set +e
   # ⭐ WEBCTL_DECLARED_PIN — what the consumer DECLARES, from its committed
   # gitlink, handed over because the swap makes it unknowable from inside.
@@ -702,7 +719,6 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
       reason="exit 0, but the run REPORTED FAILURES (${n} TAP 'not ok'${spec_fail:+; spec: $spec_fail}${strict_bad:+; strict reporter}): ${first:-see log}. A describe() that throws while registering vanishes from the counts — use base's scripts/run-tests-strict.mjs"
     fi
   fi
-  rm -f "$run_log"
 
   if [ "$SCRATCH" = "1" ]; then
     scratch_end
@@ -782,6 +798,7 @@ if [ "$AGAINST_HEAD" = "1" ]; then
   fi
 fi
 echo "----- validated against: $VALIDATED_AGAINST -----" >&2
+echo "----- logs kept: $RUN_LOG_DIR -----" >&2
 if [ "$AGAINST_HEAD" != "1" ]; then
   echo "NOTE: this run says NOTHING about releasing base HEAD. Use --against-head before tagging." >&2
 fi
