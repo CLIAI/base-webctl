@@ -807,24 +807,28 @@ test('⭐ CONTROL: a `--keep` dir under home is WRITABLE inside, and the write l
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('⭐ a cwd under home is writable; `..` from it (= the home) is EROFS — the cwd is re-entered BY PATH', needsIsolation, async () => {
+test('⭐ a cwd under home is writable; `..` out of it is EROFS — the cwd is re-entered BY PATH', needsIsolation, async () => {
   // ⚠ The inherited cwd is a reference into the OLD, writable home mount: without the
-  // re-chdir, `../x` would resolve through it and land in the real home.
+  // re-chdir, `../x` resolves through it and lands on the writable tree.
+  // ⛔ The cwd is TWO levels below home. From a DIRECT child, `..` is the home dentry —
+  // now a mount point — and the walk crosses INTO the new ro mount, which hid a missing
+  // re-chdir (measured: the mutation SURVIVED; the same trap the /tmp keep-bind test hit).
+  // One level deeper, `..` is an ordinary directory of the OLD mount. It is the throwaway
+  // dir, so even a failing arm writes nowhere but there.
   const dir = homeTmpdir();
+  const cwd = path.join(dir, 'cwd');
+  fs.mkdirSync(cwd);
   const name = probeName();
   try {
     const r = await run(['isolated', '--', process.execPath, '-e',
       `${TRY_CREATE}; try { require('fs').writeFileSync(process.argv[2], 'x', { flag: 'wx' }); console.log('UP ok'); } catch (e) { console.log('UP ' + e.code); }`,
-      'in-cwd.txt', path.join('..', name)], {}, process.execPath, dir);
+      'in-cwd.txt', path.join('..', name)], {}, process.execPath, cwd);
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.equal(writeOf(r.stdout), 'ok', 'the cwd under home is not writable');
-    assert.equal(fs.readFileSync(path.join(dir, 'in-cwd.txt'), 'utf8'), 'x');
-    assert.match(r.stdout, /^UP EROFS$/m, 'a relative path out of the cwd reached the writable home');
-    assert.equal(fs.existsSync(path.join(PW_HOME, name)), false);
-  } finally {
-    fs.rmSync(path.join(PW_HOME, name), { force: true });
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+    assert.equal(fs.readFileSync(path.join(cwd, 'in-cwd.txt'), 'utf8'), 'x');
+    assert.match(r.stdout, /^UP EROFS$/m, 'a relative path out of the cwd reached the writable tree');
+    assert.equal(fs.existsSync(path.join(dir, name)), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('⛔ base\'s repo root is READ-ONLY unless it is the cwd (the gate shares it across consumers)', needsIsolation, async () => {
