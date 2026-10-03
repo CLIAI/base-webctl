@@ -268,6 +268,11 @@ Where reuse was meant, say whose tab it is: record the id from a `keep: true` mi
 now told so. Contradictory combinations are refused too: `keep` + `close`, `close: true`
 on an adopted tab, `onMinted` or `owner` without a mint/`targetId` respectively.
 
+* ⛔ **BREAKING: the `CdpSession` CONSTRUCTOR refuses unknown option keys too** (honours
+  only `defaultTimeout`, `WebSocketImpl`): `new CdpSession(url, {readOnly: true})` returned
+  an unguarded session that looked guarded. A subclass must strip its own keys before
+  `super()` *(raised by `webctl:mgr`)*.
+
 ### Tests
 
 * `test/cdp-open-page-own-tab.test.js`: the nine `v7x3` QA arms, each with its control,

@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 
 import {
-  openPage, navigate, listPageTargets, connectBrowser, listTargetsCorroborated,
+  openPage, navigate, listPageTargets, connectBrowser, listTargetsCorroborated, CdpSession,
 } from '../lib/cdp-client.js';
 import { startFakeBrowser, startTrap } from './helpers/fake-cdp-browser.mjs';
 
@@ -323,6 +323,19 @@ test('⛔ QA9: an UNKNOWN option is refused, naming it — a stale reuse: true i
     const b = await connectBrowser(fake.base, { defaultTimeout: 5000 });
     b.close();
   });
+});
+
+test('⛔ the CdpSession CONSTRUCTOR refuses an unknown option too — new CdpSession(url, {readOnly}) is not a guarded session', () => {
+  // Same hazard as the factories: a subclass or caller passing a guard got an
+  // unguarded session that looked guarded. Constructing opens no socket.
+  assert.throws(() => new CdpSession('ws://127.0.0.1:1/devtools/page/x', /** @type {any} */ ({ readOnly: true })),
+    (e) => e instanceof TypeError && /'readOnly'/.test(e.message));
+  // Control: the honoured keys construct.
+  const s = new CdpSession('ws://127.0.0.1:1/devtools/page/x', { defaultTimeout: 5 });
+  assert.equal(s.defaultTimeout, 5);
+  const fakeWs = function () {};
+  assert.equal(new CdpSession('ws://127.0.0.1:1/devtools/page/x', { WebSocketImpl: fakeWs }).WebSocketImpl, fakeWs);
+  assert.equal(new CdpSession('ws://127.0.0.1:1/devtools/page/x').defaultTimeout, 15000, 'no options still constructs');
 });
 
 test('options that cannot be honoured TOGETHER are refused, not silently resolved', async () => {
