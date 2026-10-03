@@ -1,4 +1,5 @@
-// contract-harness-isolation.test.js — mutation arms run with NO HOST NETWORK.
+// contract-harness-isolation.test.js — mutation arms run with NO HOST NETWORK and
+// NO HOST UNIX SOCKETS (see the "no host UNIX SOCKETS" section below).
 //
 // ⛔ INCIDENT (2026-10-02, a consumer lane's mutation control): a mutant re-derived
 // the default port, the arm attached to the REAL signed-in browser on the host's
