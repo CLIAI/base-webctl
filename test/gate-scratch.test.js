@@ -500,6 +500,33 @@ test('scratch: TERM to the gate\'s process group ends it BY the signal, and its 
   } finally { w.cleanup(); }
 });
 
+test('⛔ scratch: Ctrl-C (INT to the process group) ends the gate by the signal — never a lane FAIL', { skip: NEEDS_NS }, async () => {
+  // A REGRESSION GUARD, not proof of a fix. The final review reported an interrupt
+  // turning into "FAIL fake-webctl … failed against this base". Re-measured: its probe
+  // started the gate with SIGINT already IGNORED (bash does that to background jobs
+  // of a script), so no trap could run. In the real shape the gate's INT trap fires.
+  // This test passes against the harness from BEFORE the re-raise fix as well (checked
+  // by hand). It pins the property: a human's interrupt is never a verdict about a lane.
+  const w = world();
+  try {
+    let out = '';
+    const child = spawn('bash', [path.join(w.base, 'scripts', 'test-all-consumers.sh'), '--against-head', '--scratch'],
+      { env: w.env({ FAKE_STARTED: '1' }), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { out += d; });
+    const done = new Promise((resolve) => child.on('close', (code, signal) => resolve({ code, signal })));
+    const started = () => w.scratchDirs().some((d) => fs.existsSync(path.join(w.tmp, d, 'repo', '.fake-started')));
+    for (let i = 0; i < 200 && !started(); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(started(), 'positive control: the contract started');
+    process.kill(-(/** @type {number} */ (child.pid)), 'SIGINT');
+    const end = /** @type {{code: number|null, signal: string|null}} */ (await done);
+    assert.ok(end.signal === 'SIGINT' || end.code === 130, `ended by INT, not ${JSON.stringify(end)}\n${out}`);
+    assert.doesNotMatch(out, /FAIL {2}fake-webctl/, 'an interrupt is not reported as the lane failing');
+    assert.doesNotMatch(out, /BLOCKED: fake-webctl failed/);
+    assert.deepEqual(w.scratchDirs(), [], 'the scratch dir is still removed');
+  } finally { w.cleanup(); }
+});
+
 test('scratch: a hidden failure (exit 0 + TAP `not ok`) is a FAIL, reported exactly as in-place', { skip: NEEDS_NS }, () => {
   const output = 'not ok 1 - needs a fixture\nok 2 - survivor\n# tests 1\n# pass 1\n# fail 0\n';
   const s = world({ output, code: 0 });
