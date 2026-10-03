@@ -463,6 +463,57 @@ against the gate's literal regex, with a control that the regex misses the old s
 sabotage (old output restored) → both arms red. ⚠ A command that cannot be found is NOT a
 refusal: it was started, `unshare` prints *"failed to execute …"* and the rc is 127.
 
+### ⛔ Under an outer `unshare -r` the "read-only home" was ROOT's (final review, 2026-10-03)
+
+Lanes self-isolate with `unshare -rn` and may call `isolated` inside it. There getuid() is 0
+and os.userInfo() answers root: the ro step protected root's home, and a file appeared in the
+REAL one (measured by the review). With the child-userns drop the same call was simply
+refused (uid 0) — a lane that self-isolates could not use `isolated` at all.
+
+⇒ `realIdentity()`, host side, at entry:
+
+* identity uid_map ⇒ getuid()/getgid() and os.userInfo() as before (NSS-aware);
+* otherwise two candidates — the OUTSIDE id of `/proc/self/{uid,gid}_map` (the `unshare -r`
+  case), and our own ids (a `--map-user=<uid>` namespace: the submount fixture's shape, and
+  `isolated`'s own child). Home: `getent passwd <uid>`, else `/etc/passwd` parsed;
+* ⭐ a candidate is ACCEPTED only when its home is owned by us as the kernel shows it here
+  (`stat().uid === getuid()`): a kernel fact, not a guess about how namespaces were stacked.
+  ⚠ The first draft refused "maps onto 0 one level up" outright — and the submount ARM went
+  red: its fixture (`unshare -rm` + `--map-user=<uid>`) is exactly that shape, legitimately;
+* refused, naming no id or path: unmapped ids; a stack of `unshare -r` (0 → 0); no passwd
+  entry; no candidate's home owned by us. ⚠ **No passwd entry is REFUSED, not noted**: the
+  home would go silently unprotected, and every other gap in this verb fails closed. A CI
+  container running an arbitrary uid without an entry will be refused — add one.
+
+Measured: inside `unshare -r`, a write into the real home → EROFS, absent on the host;
+`id -u` real; a nested `unshare -rn` works. Sabotage: home from os.userInfo() → the ARM red
+(the write landed); the old identity wholesale → the ARM and both refusal arms red.
+
+### ⛔ Ctrl-C did not stop the caller (final review, 2026-10-03)
+
+`isolated` forwarded SIGINT, then EXITED NORMALLY with 130. bash's wait-and-cooperative-exit
+rule reads a normal exit as "the child handled it" and carries on. ⇒ `exitOrDieBy()`: when
+a FORWARDED signal ended the child — killed by it, or exit 128+n, the shape it takes through
+unshare and the namespace's pid 1 (whose self-sent signals the kernel ignores) — remove the
+handlers and `process.kill(process.pid, sig)`. Fresh path, nested path, and a signal before
+the command started.
+
+```
+parent shape (INT to its group)            before         after
+bash, no trap: isolated …; echo AFTER      AFTER rc=130   dies by SIGINT
+bash, no trap: ( isolated … ) | cat        AFTER rc=130   dies by SIGINT
+bash WITH INT trap, gate shape             trap runs      trap runs   (bash 5.3)
+async-launched gate (`setsid bash … &`)    INT IGNORED from entry: `trap -p` → '' SIGINT
+```
+
+⚠ **The review's measurement was confounded**: its probe launched the gate as an async job
+from a script, and bash then starts it with SIGINT ignored — a non-interactive shell cannot
+trap a signal ignored at entry, so no harness change can make that trap run. With a real
+terminal Ctrl-C the trapped gate runs its trap on bash 5.3 either way; the fix matters for
+every caller WITHOUT a trap (lane scripts). A command that HANDLES the signal keeps its own
+code (the rc-7 trapper arm); `exit 130` without a signal stays 130 (CONTROL). Sabotage: no
+re-raise → the three no-trap arms red.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
@@ -474,11 +525,9 @@ deliberately not re-indented, to keep the guard a two-line diff against concurre
 
 ### Known limits
 
-* **The home is whatever passwd says for the CALLER's uid.** Run from inside another user
-  namespace that maps the caller to 0 (a bare `unshare -r`), that is root's home, and the
-  real one stays writable — measured with the submount probe's first draft. No passwd entry
-  at all ⇒ nothing is protected. A profile directory configured OUTSIDE home (and not via a
-  symlinked dot-dir) is not covered either.
+* **The home is passwd's for the REAL uid** (realIdentity, below) — one level up at most: a
+  stack of `unshare -r` is refused, not resolved. No passwd entry ⇒ refused. A profile
+  directory configured OUTSIDE home (and not via a symlinked dot-dir) is not covered.
 * **`WEBCTL_RO_ROOTS` is recorded input.** `[]` would satisfy the nested home fact; the
   other five facts still require being inside a real masked namespace, so it does not let
   the host pass as "inside".

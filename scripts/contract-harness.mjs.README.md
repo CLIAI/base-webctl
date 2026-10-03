@@ -289,6 +289,16 @@ contract's output when it is used.
   make its own namespaces — `unshare -rn` (and bring that `lo` up), a pid ns, Chromium's
   sandbox — but a nested mount namespace cannot unmount or remount what it inherited (the
   mounts are locked).
+* ⭐ **Calling `isolated` from inside your own `unshare -r` / `unshare -rn` works**, and protects
+  YOUR home: the real uid/gid are read from the outside of `/proc/self/{uid,gid}_map` and the
+  home from passwd for that uid, accepted only if the kernel shows it owned by us. ⛔ Before,
+  getuid() was 0 there and the "read-only home" was root's — the real one stayed writable
+  (measured). A STACK of `unshare -r` (the real uid two levels up), no passwd entry, or a
+  home not owned by us → FAIL, nothing run.
+* ⭐ **Ctrl-C stops your script.** When a signal `isolated` forwarded ended the command, it
+  re-raises it and dies BY it, so a parent bash without an INT trap stops instead of carrying
+  on with `$? = 130` (bash's cooperative-exit rule). A command that HANDLES the signal and
+  picks its own exit code keeps that code; a plain `exit 130` stays an exit.
 * ⚠ **A harness older than these verbs exits 3 on `isolated`** — which, since your
   contract must treat it as FAIL, fails closed too. Do NOT write `isolated … || <run it
   anyway>`: that is the host fallback this verb exists to remove.

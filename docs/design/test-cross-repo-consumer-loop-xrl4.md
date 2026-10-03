@@ -487,6 +487,14 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
   CDP up. As a non-root uid, a nested `unshare -rn` (+ `lo` up), a nested pid ns and
   Chromium's sandbox all work (measured), while a nested `unshare -rnm`'s inherited mounts
   stay **locked**: `umount -l /tmp` and `remount,bind,rw` are refused there.
+* **The real user, under an outer `unshare -r` too.** Lanes self-isolate with
+  `unshare -rn` and may call `isolated` inside it, where getuid() is 0 and os.userInfo() is
+  root: the review measured a write landing in the REAL home. ⇒ The ids come from the
+  outside of `/proc/self/{uid,gid}_map`, the home from passwd for that uid, accepted only if
+  the kernel shows it owned by us. A stack of `unshare -r`, no passwd entry ⇒ refused.
+* **Ctrl-C stops the caller.** A forwarded signal that ended the command is re-raised, so
+  `isolated` dies BY it and bash's cooperative-exit rule stops a trap-less parent (before:
+  it carried on with `$? = 130`).
 * **Env scrub** on the fresh and the nested path: `DISPLAY`, `WAYLAND_DISPLAY`,
   `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `XDG_RUNTIME_DIR` unset;
   `TMPDIR=/tmp`, so an inherited value cannot name a directory the mask hid.
