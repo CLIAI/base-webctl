@@ -338,6 +338,21 @@ test('⛔ QA7: two of OUR tabs closed CONCURRENTLY — one closes, the other is 
   });
 });
 
+test('⛔ QA7: concurrent closes through two SPELLINGS of one browser (127.0.0.1 / localhost) share one chain — still one \'last-page\'', async () => {
+  // Re-review N3: the chain was keyed by the literal host string, so two spellings
+  // of the same loopback authority got two chains and could both close.
+  await withFake({ targets: [] }, async (fake) => {
+    const viaLocalhost = fake.base.replace('127.0.0.1', 'localhost');
+    const a = await openPage(fake.base);                                  // host 127.0.0.1
+    const b = await openPage(viaLocalhost, { host: 'localhost' });        // host localhost
+    fake.configure({ getTargetsDelayMs: 50 }); // both reads in flight together if unserialised
+    const r = await Promise.all([a.close(), b.close()]);
+    assert.ok(r.some((x) => !x.closed && x.reason === 'last-page'), JSON.stringify(r));
+    assert.equal(fake.targets.size, 1);
+    assert.equal(fake.state.browserExited, false);
+  });
+});
+
 test('⛔ QA7: a PRERENDER (type page + subtype) is not a tab — it does not count as a second page', async () => {
   const PRERENDER = { id: 'PRE-1', type: 'page', subtype: 'prerender', url: 'https://work.example.test/next' };
   await withFake({ targets: [PRERENDER] }, async (fake) => {
