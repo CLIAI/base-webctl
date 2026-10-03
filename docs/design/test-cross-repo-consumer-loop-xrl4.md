@@ -504,6 +504,11 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
   state roots `XDG_{CACHE,CONFIG,STATE,DATA}_HOME` too (they beat `$HOME` in `v59v`, so a
   temp HOME was silently bypassed);
   `TMPDIR=/tmp`, so an inherited value cannot name a directory the mask hid.
+* **A nested call still gets its own PID namespace.** Network and masks are inherited (the
+  mounts stay locked), but the process table is not: a lane that runs its suite through
+  `isolated`, under the gate's own `isolated`, must not let the suite signal the contract
+  that called it. Two lanes' arms failed only under the gate until this held (measured on
+  the v0.32.0 gate run). A small node pid 1 forwards signals; exit 128+n is re-raised.
 * **Nesting.** "Already inside" now also needs `/proc/self/ns/mnt` ≠ `WEBCTL_HOST_MNTNS`
   and our tmpfs **on top of** `/run` and `/tmp` in `/proc/self/mountinfo` — "a tmpfs at
   /run" alone is a proxy, the host's already is one. The old net-only namespace is refused.

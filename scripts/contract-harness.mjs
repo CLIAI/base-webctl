@@ -1171,6 +1171,8 @@ const SELF = fileURLToPath(import.meta.url);
 /** base's repo root (SELF is <root>/scripts/…) — kept visible under the /tmp mask. */
 const SELF_ROOT = path.resolve(path.dirname(SELF), '..');
 const ISOLATED_INNER = '__isolated-inner';
+/** pid 1 of a NESTED call's PID namespace: runs the command, forwards signals. */
+const PID1_INNER = '__isolated-pid1';
 /** The tmpfs source tag `isolated` mounts with; the nesting proof looks for it. */
 const MASK_SOURCE = 'webctl-isolated';
 /**
@@ -1288,6 +1290,24 @@ function forwardSignalsPastUnshare(unshare) {
   });
 }
 
+/**
+ * pid 1 of a nested call's PID namespace (`__isolated-pid1 -- <cmd…>`): spawn the command with
+ * the env it was given (already scrubbed), forward termination signals to it, and return its
+ * exit code (128+n when killed — a pid 1 cannot die by its own signal, so the caller re-raises).
+ * ⚠ Internal: reached only through the nested path's prefix, never documented as a verb.
+ * @param {string[]} a @returns {Promise<number>}
+ */
+function runPid1(a) {
+  const command = a[0] === '--' ? a.slice(1) : [];
+  if (command.length === 0) return Promise.resolve(report('isolated', EXIT.fail, 'internal: malformed pid-1 invocation'));
+  return new Promise((resolve) => {
+    const child = spawn(command[0], command.slice(1), { stdio: 'inherit' });
+    const fwd = forwardSignals(child);
+    child.on('error', (e) => { fwd.remove(); resolve(report('isolated', 127, `NOT RUN: cannot start '${command[0]}': ${errMsg(e)}`)); });
+    child.on('close', (code, signal) => { fwd.remove(); resolve(exitCodeOf(code, signal)); });
+  });
+}
+
 /** @param {number|null} code @param {NodeJS.Signals|null} signal */
 function exitCodeOf(code, signal) {
   if (code != null) return code;
@@ -1390,11 +1410,17 @@ function runIsolated(a) {
     if (nestedPlan.usage) return Promise.resolve(usageRefusal(nestedPlan.usage, command));
     // ⛔ and still capless: a nested call must not be the way back to capabilities — its
     // command, too, enters a uid-mapped child user namespace (read back as on the fresh path)
-    const priv = privilegeDrop(recordedHostIds());
+    // ⛔ …and still a fresh PID namespace. A nested call used to share its caller's, so
+    // the command could see and signal the process that called it. Two lanes' own arms ("a
+    // pid outside cannot be signalled from inside") failed ONLY under the gate, where their
+    // `isolated` is nested in the gate's (measured on the v0.32.0 gate run). The network and
+    // the masks are inherited (already isolated); the process table is not.
+    const priv = privilegeDrop(recordedHostIds(), { pidns: true });
     if (priv.why) {
       return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${priv.why}. The command was NOT started.`, { command }));
     }
-    return runCommand(command, priv.prefix); // provably inside already: do not unshare again
+    // a small node pid 1: a bare command as pid 1 would IGNORE signals it has no handler for
+    return runCommand([process.execPath, SELF, PID1_INNER, '--', ...command], priv.prefix, { pastUnshare: true });
   }
   let hostNs = '';
   let hostMnt = '';
@@ -2255,14 +2281,18 @@ function singleMapping(map, inside, outside) {
  * @param {{uid: number, gid: number} | null} ids the REAL uid/gid (host namespace)
  * @returns {{prefix: string[], why: string}}
  */
-function privilegeDrop(ids) {
+function privilegeDrop(ids, { pidns = false } = {}) {
   if (!ids) return { prefix: [], why: 'internal: the real uid/gid were not recorded at entry — run via `isolated`' };
   if (ids.uid === 0) {
     return { prefix: [], why: 'the real uid is 0 (root): a child user namespace mapped onto it would keep every '
       + 'capability — run `isolated` as an ordinary user' };
   }
+  // pidns (the NESTED path): a fresh PID namespace too, so the command cannot see or signal
+  // its CALLER's processes either. -m only to mount that namespace's /proc: inherited mounts
+  // stay locked, and the command (a non-root uid after exec) holds no capabilities in it.
+  const pid = pidns ? ['-m', '--pid', '--fork', '--mount-proc', '--kill-child'] : [];
   const prefix = ['setpriv', '--no-new-privs', '--', 'unshare', '-U', '--map-user', String(ids.uid),
-    '--map-group', String(ids.gid), '--'];
+    '--map-group', String(ids.gid), ...pid, '--'];
   const r = spawnSync(prefix[0], [...prefix.slice(1), process.execPath, '-e',
     'const f = require("fs"); process.stdout.write(JSON.stringify({ status: f.readFileSync("/proc/self/status", "utf8"),'
       + ' uidMap: f.readFileSync("/proc/self/uid_map", "utf8"), gidMap: f.readFileSync("/proc/self/gid_map", "utf8"),'
@@ -2309,14 +2339,15 @@ function privilegeDrop(ids) {
  * directory the /tmp mask just hid.
  * @param {string[]} command @param {string[]} [prefix] @returns {Promise<number>}
  */
-function runCommand(command, prefix = []) {
+function runCommand(command, prefix = [], { pastUnshare = false } = {}) {
   /** @type {NodeJS.ProcessEnv} */
   const env = { ...process.env, TMPDIR: '/tmp' };
   for (const k of SCRUBBED_ENV) delete env[k];
   const argv = [...prefix, ...command];
   return new Promise((resolve) => {
     const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', env });
-    const fwd = forwardSignals(child);
+    // through `unshare --fork` a signal must go to unshare's CHILD (see forwardSignalsPastUnshare)
+    const fwd = pastUnshare ? forwardSignalsPastUnshare(child) : forwardSignals(child);
     child.on('error', (e) => {
       resolve(report('isolated', 127, `NOT RUN: cannot start '${argv[0]}': ${errMsg(e)}`));
     });
@@ -2707,6 +2738,7 @@ switch (cmd) {
   // ⇩ network isolation for mutation arms — additive, generation unchanged (see DEV_NOTES)
   case 'isolated': code = await runIsolated(args); break;
   case ISOLATED_INNER: code = await runIsolatedInner(args); break;
+  case PID1_INNER: code = await runPid1(args); break;
   case 'sandbox-port': code = await checkSandboxPort(args); break;
   case 'guard-live-port': code = await checkGuardLivePort(args); break;
   case 'isolation-check': code = await checkIsolation(args); break;

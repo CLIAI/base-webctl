@@ -434,6 +434,28 @@ test('⛔ nesting: a FABRICATED host id on the host → refused rc 2 (uid_map is
   assert.equal(r.ran, false);
 });
 
+const NESTED_KILL0 = 'try { process.kill(Number(process.argv[1]), 0); console.log("PID REACHABLE"); } catch (e) { console.log("PID " + e.code); }';
+
+test('⛔ a NESTED `isolated` gets its own PID namespace: its command cannot signal its CALLER (ESRCH) — CONTROL: without the nested call it can', needsIsolation, async () => {
+  // Measured on the v0.32.0 gate run: two lanes call `isolated` from their contract, and under
+  // the gate that call is NESTED. It shared the caller's PID namespace, so their arm "a pid
+  // outside cannot be signalled" saw the contract's own pid as REACHABLE.
+  const r = await run(['isolated', '--', 'sh', '-c', '"$0" "$1" isolated -- "$0" -e "$2" $$',
+    process.execPath, TOOL, NESTED_KILL0]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^PID ESRCH$/m, `the nested command could see its caller:\n${r.stdout}${r.stderr}`);
+  const c = await run(['isolated', '--', 'sh', '-c', '"$0" -e "$1" $$', process.execPath, NESTED_KILL0]);
+  assert.equal(c.status, 0, c.stderr);
+  assert.match(c.stdout, /^PID REACHABLE$/m, 'CONTROL: in the SAME namespace the caller is reachable — the probe works');
+});
+
+test('a NESTED `isolated` still passes signals through its pid 1: TERM ends the command, exit 143', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'sh', '-c',
+    '"$0" "$1" isolated -- sleep 30 & p=$!; sleep 2; kill -TERM $p; wait $p; echo "RC=$?"', process.execPath, TOOL]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^RC=143$/m, `${r.stdout}${r.stderr}`);
+});
+
 test('⛔ nesting: inside `unshare -r` (NO -n) with the recorded id = current netns → refused rc 2', needsIsolation, async () => {
   const r = await nestedAttempt(HOST_NS, ['unshare', '-r']);
   assert.equal(r.status, 2, r.stdout + r.stderr);
@@ -479,16 +501,24 @@ test('⛔ nesting: `unshare -rnm` (a mount ns, NOTHING masked) + fabricated ids 
   assert.equal(r.ran, false, 'a fresh mount ns with the host /run and /tmp was accepted');
 });
 
-test('nesting CONTROL: a real nested `isolated` inside `isolated` proceeds WITHOUT unsharing again', needsIsolation, async () => {
+test('nesting CONTROL: a real nested `isolated` inside `isolated` keeps the outer NETWORK and MASKS (no second isolation of either)', needsIsolation, async () => {
+  // A nested call now makes a PID namespace (and a mount namespace only to mount its /proc),
+  // so the mount ns id differs — what must NOT change is the network, and the masks must be
+  // the SAME ones, inherited (locked), not re-made: our tmpfs tag is still on /run and /tmp.
+  const MASKS = 'awk \'$5 == "/run" || $5 == "/tmp" {for (i = 7; i <= NF; i++) if ($i == "-") {print "MASK", $5, $(i + 2); break}}\' /proc/self/mountinfo';
   const r = await run(['isolated', '--', 'sh', '-c',
-    'readlink /proc/self/ns/net /proc/self/ns/mnt; "$0" "$1" isolated -- readlink /proc/self/ns/net /proc/self/ns/mnt',
+    `readlink /proc/self/ns/net /proc/self/ns/mnt; echo OUTER; ${MASKS}; "$0" "$1" isolated -- sh -c 'readlink /proc/self/ns/net; echo INNER; ${MASKS.replace(/'/g, "'\\''")}'`,
     process.execPath, TOOL]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  const [outerNet, outerMnt, innerNet, innerMnt] = r.stdout.trim().split('\n');
+  const [outerNet, outerMnt] = r.stdout.trim().split('\n');
+  const innerNet = (r.stdout.split('OUTER')[1] || '').split('\n').find((l) => l.startsWith('net:')) || '';
   assert.notEqual(outerNet, HOST_NS, 'the outer level is not network-isolated');
   assert.notEqual(outerMnt, HOST_MNT, 'the outer level has no mount namespace');
-  assert.equal(innerNet, outerNet, 'the nested call unshared AGAIN (or ran elsewhere)');
-  assert.equal(innerMnt, outerMnt, 'the nested call made another mount namespace');
+  assert.equal(innerNet, outerNet, 'the nested call unshared the network AGAIN (or ran elsewhere)');
+  const inner = r.stdout.split('INNER')[1] || '';
+  for (const at of ['/run', '/tmp']) {
+    assert.match(inner, new RegExp(`^MASK ${at} webctl-isolated$`, 'm'), `the nested level lost the ${at} mask:\n${r.stdout}`);
+  }
 });
 
 test('nesting: the kernel proof holds from inside the uid-mapped CHILD user namespace — and from a nested call\'s', needsIsolation, async () => {
