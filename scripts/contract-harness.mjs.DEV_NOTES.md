@@ -277,6 +277,136 @@ host path sockets in /proc/net/unix   307
   unkept-/tmp test fails; no keep-binds → keep-binds fails; exemption ignored → `--keep`
   test fails. Restored → all green.
 
+### ⛔ The home directory is READ-ONLY (2026-10-03)
+
+The coordinator `webctl:mgr` measured that, with the network and the sockets gone, the real
+home was still writable from inside — profiles under `~/.cache/<tool>`, `~/.config/webctl`,
+`~/.ssh`. A mutant restoring a literal path needs no network. Measured while building it:
+
+```
+inside unshare -rnm: rbind H H; remount,bind,ro H          create in H      EROFS
+  + bind <dir under H> onto itself; remount,bind,rw         create there     ok
+locked nosuid,nodev mount (inherited): remount,bind,ro      OK (util-linux 2.42 keeps the flags)
+top-only ro remount of an rbind with a tmpfs submount       touch in submount SUCCEEDED
+  + remount the submount too                                EROFS
+mount --move onto a directory of a ro tree                  OK
+```
+
+* **Order** (`maskSocketDirs`): cover /run → **stage the keeps** (copies of the untouched
+  tree, host modes and submounts intact) → **rbind each root onto itself, remount it and
+  every reachable submount ro** → cover /tmp → move the keeps back on top, outer first,
+  remounting a read-only keep (base's root under /tmp) ro right after its move — before an
+  inner writable keep lands on it.
+* **Reachable** (`reachableMountsUnder`, exported for the unit test): start at the bottom
+  mount AT the root, follow each same-path stack to its top, recurse into children, skip a
+  child that a sibling mounted later on an ancestor path shadows. The ORIGINAL submounts
+  (beneath the new rbind) descend from a different parent and are never selected. Octal
+  escapes (`\040`) in mountinfo are decoded.
+* **Roots are computed on the HOST side.** Inside the user namespace we are uid 0, and
+  `os.userInfo()` answers root's home — the inner half gets the roots in the fd-4 plan, the
+  nested proof gets them from `WEBCTL_RO_ROOTS`. Measured: the submount probe's outer
+  `unshare -r` made the harness protect `/root`, hence its second userns mapping back to the
+  caller's uid.
+* **Protected roots**: the passwd home, plus the real path of `.ssh`, `.gnupg`, `.config`,
+  `.cache`, `.local`, `.mozilla`, `.pki` when one symlinks OUT of home. A root containing
+  /run or /tmp (home = `/`) is refused; a root under them is dropped (the mask hides it).
+* **Writable vs read-only keeps.** cwd, `$HOME` under /tmp and `--keep` are writable;
+  base's root, node and an absolute command are read-only — **under /tmp too**. Decided for
+  base's root because the release gate runs every consumer against ONE base checkout (and it
+  is the harness's own code); base's own suite has cwd = its root and is unaffected. Dedup:
+  a keep inside a writable keep is covered; a writable keep inside a read-only one gets its
+  own mount on top.
+* **Refusals.** A cwd containing the home: **was not refused before** (only `--keep` was) —
+  now FAIL, cwd `/` included. `throwawayHome()` never returns something containing the
+  passwd home.
+* **Not covered by `ro`: unix sockets.** `connect(2)` checks write permission on the inode,
+  not the mount's ro flag, so the residual socket check still matters under home.
+* **Nesting fact** uses `access(W_OK)` = `EROFS` on each recorded root rather than a
+  mountinfo walk: it asks the exact question through path resolution; the full submount
+  sweep needs the writable keeps, which only the inner half knows.
+* **npm** (12.0.2): `npm test` / `npm install` under the ro home: rc 0, rc 1 propagated;
+  the debug logfile is skipped (EROFS), a one-line notice on error. No change needed.
+
+**Sabotage, each run against the test file, each red, restored → green:** ro step off +
+read-back off → the home arm created the file (and its `finally` removed it); ro step off
+alone → refused by the read-back; top-only remount + read-back off → submount arm `ok`;
+top-only alone → refused by the read-back; no re-chdir → the `..` arm — **which first
+SURVIVED**: from a cwd one level below home, `..` is the home dentry, now a mount point, so
+the walk crossed into the ro mount (the /tmp keep-bind test's trap, again). Moved two
+levels down; red. Base root writable → its arm red; no recursion into submounts → both
+logic units red; cwd-contains-home unrefused → red; keeps not realpath'd → the symlink arm
+red; no note → red; no nested home fact → the previous-`isolated` nesting arm red.
+
+### ⛔ The command held EVERY capability — and could undo every mask (2026-10-03)
+
+*Measured by the final review:* inside `isolated`, `id -u` 0 and CapEff `000001ffffffffff`.
+`umount <cwd>/m2.sock` (the /dev/null cover) and `umount -l /tmp` took both probe sockets
+from ENOENT/ECONNREFUSED to CONNECTED; the same root could `remount,bind,rw` the ro home.
+CAP_DAC_OVERRIDE also read a chmod-000 file — a consumer's `EACCES` test went false-red
+only under the gate.
+
+⇒ `privilegeDrop()`: `setpriv --no-new-privs --bounding-set=-all --inh-caps=-all
+--ambient-caps=-all --` before the command, on the fresh AND the nested path. Measured:
+
+```
+inside, after setpriv          CapInh/Prm/Eff/Bnd/Amb 0, NoNewPrivs 1
+umount -l /tmp                 "must be superuser to unmount"
+mount -o remount,bind,rw <H>   "permission denied", rc 32
+chmod-000 file                 EACCES (raw `unshare -r`: readable)
+setpriv --bounding-set=-all    "Operation not permitted" when ALREADY capless (needs
+                               CAP_SETPCAP) ⇒ passed only while CapBnd is non-zero
+nested `unshare -rm` (capless) "write failed /proc/self/uid_map: Operation not permitted"
+nested `unshare -Um`           CapEff 0; `umount -l /tmp` EINVAL
+nested `unshare -rm` WITH caps `umount -l /tmp` → "not mounted": inherited mounts LOCKED
+```
+
+* **The drop is asserted, not trusted.** The prefix runs node once to print its own
+  `/proc/self/status`; every CapXxx must be 0 and NoNewPrivs 1. A missing setpriv and a fake
+  one that execs its argv are both tested refusals.
+* **Last, after every mount**, just before `started`: the inner half itself needs the caps.
+* **Sabotage:** drop removed → CapEff arm, `umount -l /tmp` arm, chmod-000 arm, both
+  fail-closed arms red. ⚠ The remount arm first **SURVIVED**: it used `remount,rw`, a
+  SUPERBLOCK remount that needs init-ns CAP_SYS_ADMIN and fails even with every namespace
+  cap. The attack is `remount,bind,rw` (the per-mount flag); fixed, red. The nested-unshare
+  arm survives the mutation **by design** — it tests mount locking, which holds with caps.
+
+### ⛔ No PID namespace — host processes were signalable (2026-10-03)
+
+*Measured by the final review:* `kill -0 <host pid>` from inside succeeded (same kuid, no
+pid ns) and `/proc` showed every host process. ⇒ `unshare -rnm --pid --fork --mount-proc
+--kill-child`. The inner half is now **pid 1** of the new namespace; when it exits, the
+kernel SIGKILLs everything left in it — an arm's stray background processes included.
+
+* ⛔ **`unshare --fork` BLOCKS SIGTERM in its own process until its child exits** (and
+  ignores INT/QUIT: `SigIgn 0x6`). Measured: TERM to unshare never reached the child, which
+  ran to completion. The old `forwardSignals(unshare)` would have silently stopped
+  delivering — no test covered it (the brief assumed one did). ⇒
+  `forwardSignalsPastUnshare`: signal unshare's CHILD (from
+  `/proc/<pid>/task/<pid>/children`, else a `/proc` scan); none yet ⇒ SIGKILL unshare, and
+  `--kill-child` takes the namespace down — nothing had started.
+* **pid 1 ignores a signal it has no handler for.** So the inner half installs exit-on-signal
+  handlers from its first line and swaps them for runCommand's forwarders only when the
+  command starts. ⚠ That pre-command window has no test: it needs a signal inside a ~100 ms
+  masking window, which is a race, not an arm.
+* **Nesting fact 7:** `/proc/self/ns/pid` ≠ `WEBCTL_HOST_PIDNS`. Recorded, so fabricable —
+  like the netns/mntns ids; the env-free facts carry the rest.
+* **Sabotage:** no `--pid --fork --mount-proc` → the ESRCH arm red (the SIGTERM arm stays
+  green: without `--fork` unshare execs, and the old path works); signals to unshare instead
+  of its child → the SIGTERM arm red (`TIMEOUT` after 10 s — the trapper is bounded so a lost
+  signal cannot leave an orphan); nested pid fact off → its nesting arm red.
+
+### Refusals are tagged lines — usage ones too (final review, finding 7)
+
+Usage refusals printed a bare `isolated: --keep #1 is beneath /run…`; the gate greps
+`^(FAIL|NO VERDICT) +isolated: `, missed it, and told the operator to fix unshare / user
+namespaces (e.g. TMPDIR under /run makes the gate's own `--keep` invalid). ⇒
+`usageRefusal()` → `report('isolated', EXIT.usage, 'NOT RUN (usage): …')`, and `report()`
+now tags every code that is neither pass nor no-verdict as FAIL (no caller passed exit 3
+before; the exit code is unchanged). The inner half called on the host reports too. Tested
+against the gate's literal regex, with a control that the regex misses the old shape;
+sabotage (old output restored) → both arms red. ⚠ A command that cannot be found is NOT a
+refusal: it was started, `setpriv` prints *"failed to execute …"* and the rc is 127.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
@@ -288,9 +418,18 @@ deliberately not re-indented, to keep the guard a two-line diff against concurre
 
 ### Known limits
 
-* **Mapped root.** The command runs as uid 0 inside the namespace. A tool that refuses
-  root (Chromium without `--no-sandbox`) refuses here. A nested `unshare --map-user` back
-  to the caller's uid would lift this; not built — no arm needs it yet.
+* **The home is whatever passwd says for the CALLER's uid.** Run from inside another user
+  namespace that maps the caller to 0 (a bare `unshare -r`), that is root's home, and the
+  real one stays writable — measured with the submount probe's first draft. No passwd entry
+  at all ⇒ nothing is protected. A profile directory configured OUTSIDE home (and not via a
+  symlinked dot-dir) is not covered either.
+* **`WEBCTL_RO_ROOTS` is recorded input.** `[]` would satisfy the nested home fact; the
+  other five facts still require being inside a real masked namespace, so it does not let
+  the host pass as "inside".
+
+* **Mapped root, no capabilities.** The command runs as uid 0 inside the namespace, with
+  every capability set empty (below). A tool that refuses root (Chromium without
+  `--no-sandbox`) refuses here; a port below 1024 cannot be bound.
 * **`ip` or `ifconfig` is required** to bring `lo` up; node has no ioctl. Absent → FAIL.
   So is **`mount`** (util-linux, the package `unshare` comes from).
 * **Sockets the list misses.** One created on the host AFTER start-up (still masked if it

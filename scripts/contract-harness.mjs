@@ -94,7 +94,11 @@ function git(a, cwd) {
  * @param {Record<string, any>} [extra]
  */
 function report(check, code, reason, extra = {}) {
-  const result = code === EXIT.pass ? 'pass' : code === EXIT.fail ? 'fail' : 'no-verdict';
+  // ⚠ Anything that is neither pass nor NO VERDICT is a FAIL — a USAGE refusal (exit 3)
+  // included: it keeps its exit code, but its line must match `^(FAIL|NO VERDICT) +<check>: `,
+  // the one shape a caller greps for (the gate misdiagnosed untagged refusals as
+  // "user namespaces unavailable").
+  const result = code === EXIT.pass ? 'pass' : code === EXIT.noVerdict ? 'no-verdict' : 'fail';
   // JSONL on stdout (lszd); the human line on stderr, so a machine reader is
   // never parsing prose.
   process.stdout.write(`${JSON.stringify({
@@ -517,6 +521,11 @@ function normHash(src) {
 //     /tmp (and /var/run when it is a real directory), the paths the arm needs bound
 //     back, every host path socket still listed connect-tested and covered with
 //     /dev/null if it answers, and the env vars that NAME host sockets scrubbed.
+//   * ⛔ THE HOME DIRECTORY IS READ-ONLY. It holds the signed-in browser profiles
+//     (~/.cache/<tool>), ~/.config/webctl and ~/.ssh, and a mutant restoring a LITERAL
+//     path corrupts a live profile with no network at all. ⇒ the PASSWD home is rbound
+//     onto itself and remounted ro — with EVERY submount (a remount hits only the top) —
+//     and only the cwd and each `--keep` are re-opened writable on top of it.
 //
 // It FAILS CLOSED: there is no path on which the command runs on the host.
 
@@ -529,6 +538,13 @@ const MASK_SOURCE = 'webctl-isolated';
 /** Env vars the command never inherits: each one NAMES a host socket or display. */
 const SCRUBBED_ENV = Object.freeze(['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK',
   'DBUS_SESSION_BUS_ADDRESS', 'DOCKER_HOST', 'XDG_RUNTIME_DIR']);
+/**
+ * Home dot-directories that hold LIVE state: signed-in browser profiles (~/.cache/<tool>),
+ * the family's config (~/.config/webctl), keys and ControlMaster sockets (~/.ssh). A keep
+ * in (or containing) one is allowed — it is the caller's choice — but NAMED on stderr.
+ * One that is a SYMLINK out of home is read-only-protected at its real path too.
+ */
+const SENSITIVE_DOTDIRS = Object.freeze(['.ssh', '.gnupg', '.config', '.cache', '.local', '.mozilla', '.pki']);
 
 /**
  * Forward termination signals to a child, so killing the harness kills the arm
@@ -537,6 +553,45 @@ const SCRUBBED_ENV = Object.freeze(['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK
 function forwardSignals(child) {
   for (const s of /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM', 'SIGHUP'])) {
     process.on(s, () => { try { child.kill(s); } catch { /* already gone */ } });
+  }
+}
+
+/**
+ * Host pids of `pid`'s children: /proc/<pid>/task/<pid>/children, else a /proc scan.
+ * @param {number} pid @returns {number[]}
+ */
+function childrenOf(pid) {
+  try {
+    return fs.readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number);
+  } catch { /* CONFIG_PROC_CHILDREN off: scan */ }
+  /** @type {number[]} */ const out = [];
+  for (const d of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(d)) continue;
+    try {
+      const st = fs.readFileSync(`/proc/${d}/stat`, 'utf8');
+      if (Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[1]) === pid) out.push(Number(d));
+    } catch { /* gone */ }
+  }
+  return out;
+}
+
+/**
+ * Forward termination signals THROUGH `unshare --fork` to the inner half.
+ *
+ * ⛔ `unshare --fork` BLOCKS SIGTERM (and ignores SIGINT/SIGQUIT) in its own process until
+ * its child exits — measured: a SIGTERM to it never reached the child, which ran to the
+ * end. So the signal goes to unshare's CHILD, the inner half (pid 1 of the new namespace;
+ * it installs handlers, which a namespace init needs to receive anything). No child yet ⇒
+ * SIGKILL unshare, and `--kill-child` takes the namespace with it — nothing has started.
+ * @param {import('node:child_process').ChildProcess} unshare
+ */
+function forwardSignalsPastUnshare(unshare) {
+  for (const s of /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM', 'SIGHUP'])) {
+    process.on(s, () => {
+      const kids = unshare.pid ? childrenOf(unshare.pid) : [];
+      if (kids.length === 0) { try { unshare.kill('SIGKILL'); } catch { /* gone */ } return; }
+      for (const k of kids) { try { process.kill(k, s); } catch { /* gone */ } }
+    });
   }
 }
 
@@ -550,11 +605,24 @@ function exitCodeOf(code, signal) {
 const ISOLATED_USAGE = 'usage: contract-harness.mjs isolated [--keep <path>]… -- <cmd> [args…]\n';
 
 /**
+ * A USAGE refusal: the usage text, then a `FAIL  isolated: NOT RUN (usage): …` line +
+ * JSONL record, exit 3. ⛔ It used to be a bare `isolated: …` line, which the gate's grep
+ * for `^(FAIL|NO VERDICT) +isolated: ` missed — so a bad `--keep` (TMPDIR under /run)
+ * was reported as "isolated exited 3 and stated no reason … fix unshare / user
+ * namespaces" (final review, finding 7).
+ * @param {string} why @param {string[]} command @returns {number}
+ */
+function usageRefusal(why, command) {
+  process.stderr.write(ISOLATED_USAGE);
+  return report('isolated', EXIT.usage, `NOT RUN (usage): ${why}. The command was NOT started.`, { command });
+}
+
+/**
  * `isolated [--keep <path>]… -- <cmd> [args…]` — run <cmd> with NO host network and
  * NO host unix sockets.
  *
  * The outer half spawns
- * `unshare -rnm --propagation=private <node> <this file> __isolated-inner <netns> -- <cmd…>`
+ * `unshare -rnm --pid --fork --mount-proc --kill-child --propagation=private <node> <this file> __isolated-inner <netns> -- <cmd…>`
  * with two extra pipes: fd 3 is the STATUS channel, fd 4 carries the masking PLAN
  * (host mount-ns id, cwd, paths to re-expose, the host's path sockets — a list that
  * can be long, so never argv). The inner half proves the isolation and masks (below),
@@ -570,14 +638,27 @@ const ISOLATED_USAGE = 'usage: contract-harness.mjs isolated [--keep <path>]… 
  * caller under /tmp — a marker file, a fixture — needs a `--keep`. A keep may not
  * be /tmp or /run itself, an ancestor of either, a path under /run, or contain the
  * (passwd) home directory. ⚠ Only `--keep` paths are EXEMPT from the socket check below — a
- * socket in the cwd is still covered if it answers, so `cwd = $HOME` cannot re-open
- * the ssh ControlMaster.
+ * socket in the cwd is still covered if it answers.
+ *
+ * ⛔ THE PASSWD HOME IS READ-ONLY (not $HOME — the gate points that at a throwaway dir).
+ * It is rbound onto itself and it and every reachable submount remounted ro; a dot-dir
+ * of SENSITIVE_DOTDIRS that symlinks OUT of home is treated the same at its real path.
+ * Re-opened WRITABLE on top: the cwd and each `--keep` under home. NOT base's repo root,
+ * node or the command — those are only read, and base's root is shared by every consumer
+ * under the release gate. A cwd containing the home is REFUSED (fail); a `--keep`
+ * containing it is a usage error; a writable keep in or containing ~/.ssh, ~/.config,
+ * ~/.cache … is allowed but NAMED on stderr (`isolated: note: …`). Every path is realpath'd
+ * first, so a symlink cannot smuggle the home in. Any mount that fails → refused; and the
+ * result is READ BACK from /proc/self/mountinfo before the command starts.
  *
  * ⛔ NEVER FALLS BACK TO THE HOST. No unshare, userns disabled, no `ip`/`ifconfig`, no
  * `mount`, a loopback that will not come up, a namespace that still sees a non-loopback
  * interface or a listener, a mount that fails, a host socket that still answers after
  * masking — each is FAIL, and the command is not started. Refusals carry COUNTS,
  * never socket paths: they get pasted into a public repo's logs.
+ *
+ * ⛔ The command runs with NO CAPABILITIES (privilegeDrop: setpriv, checked) — otherwise
+ * namespace root could simply unmount every mask above (measured).
  *
  * The command's env drops DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK,
  * DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST and XDG_RUNTIME_DIR and gets TMPDIR=/tmp —
@@ -596,10 +677,7 @@ function runIsolated(a) {
     if (opts[i] === '--keep' && opts[i + 1]) keeps.push(opts[++i]);
     else bad = true;
   }
-  if (bad) {
-    process.stderr.write(ISOLATED_USAGE);
-    return Promise.resolve(EXIT.usage);
-  }
+  if (bad) return Promise.resolve(usageRefusal('expected `-- <cmd> [args…]` after the options', command));
   // ⛔ NESTED CALL: "already inside" is proven from the KERNEL. The marker alone is
   // trusted input — set on the host it would skip isolation entirely — so a marker
   // whose proof fails is REFUSED (no verdict, exit 2) before anything runs.
@@ -611,35 +689,44 @@ function runIsolated(a) {
           + `namespace, but the kernel says otherwise — ${proof.why}. Unset it on the host; only `
           + '`isolated` sets it.', { command, namespace: proof.facts }));
     }
-    const nestedPlan = planKeeps(keeps, []);
-    if (nestedPlan.usage) {
-      process.stderr.write(`isolated: ${nestedPlan.usage}\n${ISOLATED_USAGE}`);
-      return Promise.resolve(EXIT.usage);
+    const nestedPlan = planKeeps(keeps, [], { home: '', roots: recordedRoRoots() || [], sensitive: [] });
+    if (nestedPlan.usage) return Promise.resolve(usageRefusal(nestedPlan.usage, command));
+    // ⛔ and still capless: a nested call must not be the way back to capabilities
+    const priv = privilegeDrop();
+    if (priv.why) {
+      return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${priv.why}. The command was NOT started.`, { command }));
     }
-    return runCommand(command); // provably inside already: do not unshare again
+    return runCommand(command, priv.prefix); // provably inside already: do not unshare again
   }
   let hostNs = '';
   let hostMnt = '';
+  let hostPid = '';
   try {
     hostNs = fs.readlinkSync('/proc/self/ns/net');
     hostMnt = fs.readlinkSync('/proc/self/ns/mnt');
+    hostPid = fs.readlinkSync('/proc/self/ns/pid');
   } catch (e) {
     return Promise.resolve(report('isolated', EXIT.fail,
       `cannot read this process's namespaces (${errMsg(e)}), so isolation cannot be PROVEN; `
       + 'refusing to run the command on the host'));
   }
-  const plan = planKeeps(keeps, [
-    { p: process.cwd(), label: 'the working directory' },
-    { p: SELF_ROOT, label: "base's repo root" },
-    ...(path.isAbsolute(command[0]) ? [{ p: command[0], label: 'the command' }] : []),
-    { p: process.execPath, label: 'node' },
-    // a throwaway HOME under /tmp is the arm's own (the family's sandboxes isolate HOME)
-    ...(throwawayHome() ? [{ p: throwawayHome(), label: 'HOME' }] : []),
-  ]);
-  if (plan.usage) {
-    process.stderr.write(`isolated: ${plan.usage}\n${ISOLATED_USAGE}`);
-    return Promise.resolve(EXIT.usage);
+  const prot = protectedRoots();
+  if (prot.refuse) {
+    return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${prot.refuse}. The command was NOT started.`, { command }));
   }
+  const plan = planKeeps(keeps, [
+    { p: process.cwd(), label: 'the working directory', rw: true },
+    // ⛔ READ-ONLY: under the release gate ONE base checkout serves every consumer in turn,
+    // so a mutant writing into it would change what the NEXT consumer is judged against —
+    // and it is the harness's own code. base's own suite runs with cwd = its root, which
+    // re-opens it writable through the cwd.
+    { p: SELF_ROOT, label: "base's repo root", rw: false },
+    ...(path.isAbsolute(command[0]) ? [{ p: command[0], label: 'the command', rw: false }] : []),
+    { p: process.execPath, label: 'node', rw: false },
+    // a throwaway HOME under /tmp is the arm's own (the family's sandboxes isolate HOME)
+    ...(throwawayHome() ? [{ p: throwawayHome(), label: 'HOME', rw: true }] : []),
+  ], prot);
+  if (plan.usage) return Promise.resolve(usageRefusal(plan.usage, command));
   if (plan.refuse) {
     return Promise.resolve(report('isolated', EXIT.fail,
       `NOT RUN: ${plan.refuse}. The command was NOT started.`, { command }));
@@ -650,20 +737,27 @@ function runIsolated(a) {
       'NOT RUN: /proc/self/net/unix is unreadable, so the host\'s unix sockets cannot be listed and '
       + 'their masking cannot be PROVEN. The command was NOT started.', { command }));
   }
-  const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, exempt: plan.exempt, sockets });
+  for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
+  const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots,
+    exempt: plan.exempt, sockets });
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
     let child;
     try {
       child = spawn('unshare',
-        ['-rnm', '--propagation=private', process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
+        // --pid --fork --mount-proc: a private PID namespace with its own /proc, so no host
+        // process can be signalled or even seen. --kill-child: if unshare dies, so does
+        // everything inside (the inner half is the namespace's pid 1).
+        ['-rnm', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
+          process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'],
-          env: { ...process.env, [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt } });
+          env: { ...process.env, [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt, [HOST_PIDNS_ENV]: hostPid,
+            [RO_ROOTS_ENV]: JSON.stringify(prot.roots) } });
     } catch (e) {
       resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
       return;
     }
-    forwardSignals(child);
+    forwardSignalsPastUnshare(child);
     const planPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[4]);
     planPipe?.on('error', () => { /* the inner side refused or never started */ });
     planPipe?.end(payload);
@@ -702,8 +796,10 @@ function errMsg(e) { return e instanceof Error ? e.message : String(e); }
  *   4. the mount namespace differs from the caller's;
  *   5. `lo` is brought up (`ip`, else `ifconfig`) and a self-connect on
  *      127.0.0.1 works, so local fakes and stubs still run;
- *   6. /run, /tmp (and a real /var/run) are covered with a fresh tmpfs, the kept
- *      paths bound back — and /proc/self/mountinfo then SHOWS our tmpfs on top;
+ *   6. /run, /tmp (and a real /var/run) are covered with a fresh tmpfs, the protected
+ *      roots (the passwd home) made read-only with every submount, the kept paths bound
+ *      back — and /proc/self/mountinfo then SHOWS our tmpfs on top, and NO writable
+ *      mount under a protected root outside a writable keep;
  *   7. every host path socket the outer half listed (except under a `--keep`) is
  *      connect-tested; one that still answers gets /dev/null bound over it and is
  *      tested again. Any that still answers → refuse.
@@ -717,11 +813,18 @@ async function runIsolatedInner(a) {
   /** @param {string} line */
   const tell = (line) => { try { fs.writeSync(3, `${line}\n`); return true; } catch { return false; } };
   const refuse = (/** @type {string} */ why) => {
-    if (!tell(`fail ${why}`)) process.stderr.write(`isolated: ${why}\n`);
+    // no status channel = not run via `isolated` (e.g. called on the host): report it here
+    if (!tell(`fail ${why}`)) report('isolated', EXIT.fail, `NOT RUN: ${why}. The command was NOT started.`);
     return EXIT.fail;
   };
   const [hostNs, sep, ...command] = a;
   if (!hostNs || sep !== '--' || command.length === 0) return refuse('internal: malformed inner invocation');
+  // ⚠ We are pid 1 of the new PID namespace: a signal with no handler is IGNORED. Until the
+  // command runs (runCommand forwards from then on), a termination signal ends us — and the
+  // namespace with us — rather than letting the command start after the caller gave up.
+  const SIGS = /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM', 'SIGHUP']);
+  const early = (/** @type {NodeJS.Signals} */ s) => process.exit(128 + (os.constants.signals[s] || 1));
+  for (const s of SIGS) process.on(s, early);
 
   let ns = '';
   try { ns = fs.readlinkSync('/proc/self/ns/net'); } catch (e) {
@@ -753,7 +856,7 @@ async function runIsolatedInner(a) {
 
   // ⇩ only now, provably off the host network, read the plan. (On the host the
   // proofs above refuse first, so an unrelated fd 4 is never read.)
-  /** @type {{hostMnt: string, cwd: string, binds: string[], exempt: string[], sockets: string[]}} */
+  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], exempt: string[], sockets: string[]}} */
   let plan;
   try {
     // node's stdio 'pipe' is a socketpair, not a FIFO; anything else is not ours
@@ -762,8 +865,10 @@ async function runIsolatedInner(a) {
     plan = JSON.parse(fs.readFileSync(4, 'utf8'));
     try { fs.closeSync(4); } catch { /* the command must not inherit it */ }
     const strs = (/** @type {unknown} */ x) => Array.isArray(x) && x.every((s) => typeof s === 'string');
-    if (typeof plan.hostMnt !== 'string' || typeof plan.cwd !== 'string' || !strs(plan.binds)
-      || !strs(plan.exempt) || !strs(plan.sockets)) throw new Error('malformed');
+    const binds = (/** @type {unknown} */ x) => Array.isArray(x)
+      && x.every((b) => b && typeof b.p === 'string' && typeof b.rw === 'boolean');
+    if (typeof plan.hostMnt !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
+      || !strs(plan.roots) || !strs(plan.exempt) || !strs(plan.sockets)) throw new Error('malformed');
   } catch (e) {
     return refuse(`internal: no masking plan on fd 4 (${errMsg(e)}) — run via \`isolated\``);
   }
@@ -782,11 +887,21 @@ async function runIsolatedInner(a) {
     return refuse(`the namespace loopback does not work after bringing it up (${errMsg(e)})`);
   }
 
-  const masked = maskSocketDirs(plan.binds);
+  const masked = maskSocketDirs(plan.binds, plan.roots);
   if (masked) return refuse(masked);
   const unmasked = unmaskedDirs();
   if (unmasked.length) {
     return refuse(`after masking, ${unmasked.join(', ')} still lack(s) the '${MASK_SOURCE}' tmpfs on top`);
+  }
+  // ⭐ ASSERT THE PROPERTY: every mount reachable under a protected root, or under a
+  // read-only keep, is ro — except beneath a writable keep. Read back from the kernel.
+  const mounts = readMountinfo();
+  const gaps = mounts ? readOnlyGaps(mounts, [...plan.roots, ...plan.binds.filter((b) => !b.rw).map((b) => b.p)],
+    plan.binds.filter((b) => b.rw).map((b) => b.p)) : null;
+  if (!gaps) return refuse('cannot read /proc/self/mountinfo to verify the home directory is read-only');
+  if (gaps.length) {
+    return refuse(`after the read-only step, ${gaps.length} mount(s) under the home directory or a read-only `
+      + 'keep are still WRITABLE (or not mounted at all)');
   }
   const res = await closeResidualSockets(plan.sockets, plan.exempt);
   if (res.still > 0) {
@@ -800,10 +915,15 @@ async function runIsolatedInner(a) {
     return refuse(`cannot re-enter the working directory after masking (${errMsg(e).split(plan.cwd).join('<cwd>')})`);
   }
 
+  // ⛔ LAST, after every mount: the command gets NO capabilities, so it cannot undo them.
+  const priv = privilegeDrop();
+  if (priv.why) return refuse(priv.why);
+
   if (!tell('started')) return refuse('internal: the status channel (fd 3) is missing — run via `isolated`');
   try { fs.closeSync(3); } catch { /* the command must not inherit it */ }
 
-  return runCommand(command);
+  for (const s of SIGS) process.off(s, early);
+  return runCommand(command, priv.prefix);
 }
 
 /**
@@ -822,13 +942,19 @@ function maskedDirs() {
   return { run, tmp, all };
 }
 
-/** $HOME when it is strictly beneath /tmp (a sandbox's throwaway home), else ''. */
+/**
+ * $HOME when it is strictly beneath /tmp (a sandbox's throwaway home), else ''. Never the
+ * PASSWD home (or anything containing it), even under /tmp: that would re-open it writable.
+ */
 function throwawayHome() {
   const h = process.env.HOME;
   if (!h) return '';
   try {
     const real = fs.realpathSync(h);
     const { tmp } = maskedDirs();
+    let pw = '';
+    try { pw = fs.realpathSync(os.userInfo().homedir); } catch { /* none */ }
+    if (pw && isWithin(pw, real)) return '';
     return real !== tmp && isWithin(real, tmp) ? real : '';
   } catch { return ''; }
 }
@@ -837,58 +963,231 @@ function throwawayHome() {
 function isWithin(p, dir) { return p === dir || p.startsWith(dir === '/' ? '/' : `${dir}/`); }
 
 /**
- * Decide what must stay visible once /tmp is masked. ⚠ Messages name the keep by
- * its LABEL and the masked directory, never by its path.
- * @param {string[]} explicit `--keep` paths
- * @param {{p: string, label: string}[]} implicit
- * @returns {{binds: string[], exempt: string[], usage?: string, refuse?: string}}
+ * The directories `isolated` makes READ-ONLY: the PASSWD home (realpath), plus the real
+ * path of every SENSITIVE_DOTDIRS entry that is a symlink OUT of home (a ~/.cache on a
+ * bigger disk still holds the profiles). Roots under a masked dir are dropped — the mask
+ * already hides them; nested roots collapse to the outer one.
+ *
+ * ⚠ Computed on the HOST side only: inside the user namespace we are uid 0, and
+ * os.userInfo() there answers root's home, not the caller's.
+ * @returns {{home: string, roots: string[], sensitive: {name: string, real: string}[], refuse?: string}}
  */
-function planKeeps(explicit, implicit) {
-  const { tmp, all } = maskedDirs();
-  // ⚠ The PASSWD home, not $HOME: os.homedir() honours $HOME, and an arm's throwaway
-  // HOME under a kept scratch dir is exactly what a keep is for (measured: the
-  // `--scratch` gate's layout was refused by the $HOME reading).
+function protectedRoots() {
   let home = '';
-  try { home = fs.realpathSync(os.userInfo().homedir); } catch { /* no home: nothing to protect */ }
-  /** @type {string[]} */ const binds = [];
+  try { home = fs.realpathSync(os.userInfo().homedir); } catch { return { home, roots: [], sensitive: [] }; }
+  /** @type {{name: string, real: string}[]} */
+  const sensitive = [];
+  for (const d of SENSITIVE_DOTDIRS) {
+    try { sensitive.push({ name: `~/${d}`, real: fs.realpathSync(path.join(home, d)) }); } catch { /* absent */ }
+  }
+  const { all } = maskedDirs();
+  /** @type {string[]} */
+  const roots = [];
+  const cands = [home, ...sensitive.map((s) => s.real).filter((r) => !isWithin(r, home))]
+    .sort((x, y) => x.length - y.length);
+  for (const r of cands) {
+    if (all.some((m) => isWithin(m, r))) {
+      return { home, roots: [], sensitive, refuse: `${r === home ? 'the home directory' : 'a sensitive home directory\'s real path'} `
+        + 'CONTAINS /run or /tmp, so it cannot be made read-only without undoing the socket masking' };
+    }
+    if (all.some((m) => isWithin(r, m))) continue; // hidden by the mask already
+    if (!roots.some((o) => isWithin(r, o))) roots.push(r);
+  }
+  return { home, roots, sensitive };
+}
+
+/**
+ * @typedef {{id: string, parent: string, at: string, opts: string[], fstype: string, source: string}} MountRow
+ */
+
+/**
+ * Parse /proc/self/mountinfo. Mount points are OCTAL-ESCAPED there (`\040` = space).
+ * @param {string} txt @returns {MountRow[]}
+ */
+export function parseMountinfo(txt) {
+  const unesc = (/** @type {string} */ s) => s.replace(/\\([0-7]{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8)));
+  return txt.split('\n').filter(Boolean).map((l) => {
+    const [pre, post = ''] = l.split(' - ');
+    const f = pre.split(' ');
+    const g = post.split(' ');
+    return { id: f[0], parent: f[1], at: unesc(f[4] || ''), opts: (f[5] || '').split(','),
+      fstype: g[0], source: unesc(g[1] || '') };
+  });
+}
+
+/**
+ * The mounts REACHABLE by path at or beneath `root`, topmost-at-root first — i.e. the set
+ * a ro remount must cover. `null` when nothing is mounted AT root.
+ *
+ * ⛔ A ro remount of an rbind hits only its TOP mount; every submount stays writable
+ * (measured: `touch` into a submount succeeded after the top was remounted ro). So each
+ * reachable submount is listed. Unreachable ones are left out — a remount by path could
+ * not reach them, and neither can a write:
+ *   * one with a mount stacked on it at the SAME path (only the top of a stack is seen);
+ *   * one whose path a SIBLING mounted later on an ancestor directory shadows.
+ * @param {MountRow[]} mounts @param {string} root @returns {MountRow[]|null}
+ */
+export function reachableMountsUnder(mounts, root) {
+  /** @param {MountRow} m @returns {MountRow} the top of the stack on m */
+  const topOf = (m) => {
+    const on = mounts.filter((c) => c.parent === m.id && c.at === m.at);
+    if (on.length === 0) return m;
+    return topOf(on.reduce((a, b) => (Number(b.id) > Number(a.id) ? b : a)));
+  };
+  const atRoot = mounts.filter((m) => m.at === root);
+  // the bottom of the stack at root: a mount whose parent is NOT another mount at root
+  const bottom = atRoot.filter((m) => !atRoot.some((o) => o.id === m.parent));
+  if (bottom.length === 0) return null;
+  /** @type {MountRow[]} */
+  const out = [];
+  /** @param {MountRow} m */
+  const walk = (m) => {
+    const top = topOf(m);
+    out.push(top);
+    const kids = mounts.filter((c) => c.parent === top.id && c.at !== top.at);
+    for (const c of kids) {
+      const shadowed = kids.some((o) => o !== c && o.at !== c.at && isWithin(c.at, o.at));
+      if (!shadowed) walk(c);
+    }
+  };
+  // several bottoms = several independent stacks at one path (not something mount(8)
+  // produces); walk them all — over-covering is safe, under-covering is not.
+  for (const b of bottom) walk(b);
+  return out;
+}
+
+/**
+ * Reachable mounts at/under each ro root that are still WRITABLE, except at/under a
+ * writable keep. ⇒ The post-condition of the read-only step, read from the kernel.
+ * @param {MountRow[]} mounts @param {string[]} roots @param {string[]} rwKeeps
+ * @returns {{root: string, at: string}[]} '' at = nothing is mounted at that root
+ */
+export function readOnlyGaps(mounts, roots, rwKeeps) {
+  /** @type {{root: string, at: string}[]} */
+  const gaps = [];
+  for (const r of roots) {
+    const under = reachableMountsUnder(mounts, r);
+    if (!under) { gaps.push({ root: r, at: '' }); continue; }
+    for (const m of under) {
+      if (rwKeeps.some((k) => isWithin(m.at, k))) continue;
+      if (!m.opts.includes('ro')) gaps.push({ root: r, at: m.at });
+    }
+  }
+  return gaps;
+}
+
+/** @returns {MountRow[]|null} null when /proc/self/mountinfo is unreadable */
+function readMountinfo() {
+  try { return parseMountinfo(fs.readFileSync('/proc/self/mountinfo', 'utf8')); } catch { return null; }
+}
+
+/**
+ * rbind `root` onto itself and remount it AND every reachable submount read-only.
+ * @param {string} root @param {boolean} rbindFirst false when `root` is already a mount
+ *   of its own (a staged keep just moved back) @returns {string} '' on success, else why
+ */
+function makeTreeReadOnly(root, rbindFirst) {
+  if (rbindFirst) {
+    const e = mountOrWhy(['--rbind', root, root], 'bind a read-only root onto itself', [root]);
+    if (e) return e;
+  }
+  const mounts = readMountinfo();
+  if (!mounts) return 'cannot read /proc/self/mountinfo to find the submounts to make read-only';
+  const under = reachableMountsUnder(mounts, root);
+  if (!under) return 'a read-only root is not a mount point after binding it onto itself';
+  const redact = under.map((m) => m.at).sort((x, y) => y.length - x.length);
+  for (const [i, m] of under.entries()) {
+    const e = mountOrWhy(['-o', 'remount,bind,ro', m.at],
+      `remount mount ${i + 1} of ${under.length} under a protected root read-only`, redact);
+    if (e) return e;
+  }
+  return '';
+}
+
+/**
+ * @typedef {{p: string, rw: boolean}} Bind a real path re-exposed by its own mount;
+ *   rw=false is READ-ONLY (base's repo root, node, the command: the arm reads them only)
+ */
+
+/**
+ * Decide what must stay visible once /tmp is masked, and what is re-opened WRITABLE under
+ * the read-only protected roots (the passwd home). ⚠ Messages name the keep by its LABEL
+ * and the masked directory, never by its path.
+ *
+ * A bind is needed for (a) any keep strictly under /tmp — the mask hides it otherwise —
+ * and (b) a WRITABLE keep under a protected root; a read-only one there is covered by the
+ * root's own ro mount. Writable: the cwd, $HOME under /tmp, every `--keep`. Read-only:
+ * base's repo root, node, an absolute command.
+ * @param {string[]} explicit `--keep` paths
+ * @param {{p: string, label: string, rw: boolean}[]} implicit
+ * @param {{home: string, roots: string[], sensitive: {name: string, real: string}[]}} prot
+ * @returns {{binds: Bind[], exempt: string[], notes: string[], usage?: string, refuse?: string}}
+ */
+function planKeeps(explicit, implicit, prot) {
+  const { tmp, all } = maskedDirs();
+  // ⚠ The roots hold the PASSWD home, not $HOME: os.homedir() honours $HOME, and an arm's
+  // throwaway HOME under a kept scratch dir is exactly what a keep is for (measured: the
+  // `--scratch` gate's layout was refused by the $HOME reading).
+  /** @type {Bind[]} */ const binds = [];
   /** @type {string[]} */ const exempt = [];
-  const items = [...explicit.map((p, i) => ({ p, label: `--keep #${i + 1}`, explicit: true })),
+  /** @type {string[]} */ const notes = [];
+  const items = [...explicit.map((p, i) => ({ p, label: `--keep #${i + 1}`, explicit: true, rw: true })),
     ...implicit.map((k) => ({ ...k, explicit: false }))];
   for (const k of items) {
     let real = '';
     try { real = fs.realpathSync(path.resolve(k.p)); } catch {
-      if (k.explicit) return { binds, exempt, usage: `${k.label} does not exist` };
+      if (k.explicit) return { binds, exempt, notes, usage: `${k.label} does not exist` };
       continue; // an absent command fails on its own (127), visibly
     }
     for (const m of all) {
       if (isWithin(m, real)) { // real IS a masked dir, or an ancestor of one
         if (k.explicit) {
-          return { binds, exempt, usage: `${k.label} is ${real === m ? m : `an ancestor of ${m}`} — `
+          return { binds, exempt, notes, usage: `${k.label} is ${real === m ? m : `an ancestor of ${m}`} — `
             + 'keeping it would undo the masking; keep a test-owned directory beneath it' };
         }
         if (real === m) {
-          return { binds, exempt, refuse: `${k.label} is ${m} itself, which is masked — run from a `
+          return { binds, exempt, notes, refuse: `${k.label} is ${m} itself, which is masked — run from a `
             + 'test-owned directory beneath it' };
         }
         // e.g. cwd '/': nothing beneath it needs re-exposing
       } else if (m !== tmp && isWithin(real, m)) {
         const why = `${k.label} is beneath ${m}, where host sockets live, and cannot be re-exposed `
           + 'without re-exposing them';
-        return k.explicit ? { binds, exempt, usage: why } : { binds, exempt, refuse: why };
+        return k.explicit ? { binds, exempt, notes, usage: why } : { binds, exempt, notes, refuse: why };
       }
     }
-    if (k.explicit && home && isWithin(home, real)) {
-      return { binds, exempt, usage: `${k.label} contains the home directory — a keep exempts the `
-        + 'sockets beneath it, and home holds the ssh ones; keep a test-owned directory' };
+    // ⛔ A WRITABLE keep that IS a protected root, or contains one, re-opens all of it.
+    const contained = prot.roots.find((r) => isWithin(r, real));
+    if (contained && k.rw) {
+      const what = contained === prot.home ? 'the home directory' : 'the real path of a sensitive home directory';
+      if (k.explicit) {
+        return { binds, exempt, notes, usage: `${k.label} contains ${what} — a keep is re-exposed WRITABLE and `
+          + 'exempts the sockets beneath it, and home holds the browser profiles, ~/.config and the ssh '
+          + 'sockets; keep a test-owned directory' };
+      }
+      return { binds, exempt, notes, refuse: `${k.label} contains ${what}, which isolation makes READ-ONLY — `
+        + 'run from a test-owned directory' };
     }
-    if (isWithin(real, tmp) && real !== tmp) binds.push(real);
+    if (contained) continue; // read-only and containing a root: nothing beneath needs a bind
+    if (k.rw) {
+      for (const s of prot.sensitive) {
+        if (isWithin(real, s.real) || isWithin(s.real, real)) {
+          notes.push(`${k.label} ${isWithin(real, s.real) ? 'is in' : 'contains'} ${s.name} — re-exposed WRITABLE`
+            + `${k.explicit ? ', and its sockets exempt from the socket check,' : ''} at the caller's request`);
+          break;
+        }
+      }
+    }
+    const underRoot = prot.roots.some((r) => isWithin(real, r));
+    if ((isWithin(real, tmp) && real !== tmp) || (underRoot && k.rw)) binds.push({ p: real, rw: k.rw });
     if (k.explicit) exempt.push(real);
   }
-  // A path beneath another kept path is already re-exposed by it.
-  const sorted = [...new Set(binds)].sort((x, y) => x.length - y.length);
-  /** @type {string[]} */ const outer = [];
-  for (const b of sorted) if (!outer.some((o) => isWithin(b, o))) outer.push(b);
-  return { binds: outer, exempt };
+  // A path beneath another kept path is already re-exposed by it — unless the outer one is
+  // read-only and the inner writable: then the inner gets its own (later) mount on top.
+  const sorted = [...binds].sort((x, y) => x.p.length - y.p.length || Number(y.rw) - Number(x.rw));
+  /** @type {Bind[]} */ const outer = [];
+  for (const b of sorted) if (!outer.some((o) => isWithin(b.p, o.p) && (o.rw || !b.rw))) outer.push(b);
+  return { binds: outer, exempt, notes };
 }
 
 /**
@@ -928,44 +1227,66 @@ function mountOrWhy(argv, what, redact = []) {
 }
 
 /**
- * Cover /run, /tmp (and a real /var/run) with a fresh tmpfs, re-exposing `binds`
- * (absolute real paths beneath /tmp) at the SAME paths.
+ * Cover /run, /tmp (and a real /var/run) with a fresh tmpfs, make every protected root
+ * (the passwd home) READ-ONLY, and re-expose `binds` at the SAME paths — each with its
+ * own mode.
  *
  * ⛔ /tmp hides the arm itself, so: mount the new /run FIRST, rbind each kept path to
  * a staging point INSIDE it while the old /tmp is still visible, mount the new /tmp,
  * recreate the skeleton, and MOVE each staged mount back to its original path.
- * @param {string[]} binds @returns {string} '' on success, else the reason
+ *
+ * ⛔ THE ORDER AGAINST THE READ-ONLY ROOTS: stage FIRST — the staged copies are taken
+ * from the untouched tree, so they keep the host's modes, submounts included — THEN
+ * rbind each root onto itself and remount it and every reachable submount ro, THEN move
+ * the staged keeps back on top, outer before inner. A writable keep therefore sits ON TOP
+ * of the ro root; the ro remount never touches it. (Re-binding a keep AFTER the ro step
+ * would copy the ro submounts beneath it, and remounting those rw can fail on a mount
+ * that was ro on the host.)
+ * @param {Bind[]} binds @param {string[]} roots @returns {string} '' on success, else the reason
  */
-function maskSocketDirs(binds) {
+function maskSocketDirs(binds, roots) {
   const { run, tmp, all } = maskedDirs();
   const opts = (/** @type {string} */ d) => (d === tmp ? 'mode=1777' : 'mode=0755') + ',nosuid,nodev';
   const cover = (/** @type {string} */ d) => mountOrWhy(['-t', 'tmpfs', '-o', opts(d), MASK_SOURCE, d],
     `cover ${d} with a fresh tmpfs`);
   const stage = path.join(run, '.webctl-keep');
+  const secret = [...binds.map((b) => b.p), ...roots].sort((x, y) => y.length - x.length);
   try {
     for (const d of all.filter((x) => x !== tmp)) { const e = cover(d); if (e) return e; }
     fs.mkdirSync(stage);
-    const isDir = binds.map((b) => fs.statSync(b).isDirectory());
+    const isDir = binds.map((b) => fs.statSync(b.p).isDirectory());
     for (const [i, b] of binds.entries()) {
       const s = path.join(stage, String(i));
       if (isDir[i]) fs.mkdirSync(s); else fs.writeFileSync(s, '');
-      const e = mountOrWhy(['--rbind', b, s], `stage kept path ${i + 1} of ${binds.length}`, [b]);
+      const e = mountOrWhy(['--rbind', b.p, s], `stage kept path ${i + 1} of ${binds.length}`, secret);
       if (e) return e;
+    }
+    for (const r of roots) {
+      const e = makeTreeReadOnly(r, true);
+      if (e) return `${e} — the home directory would stay WRITABLE`;
     }
     const e = cover(tmp);
     if (e) return e;
     for (const [i, b] of binds.entries()) {
       const s = path.join(stage, String(i));
-      if (isDir[i]) fs.mkdirSync(b, { recursive: true });
-      else { fs.mkdirSync(path.dirname(b), { recursive: true }); fs.writeFileSync(b, ''); }
-      const m = mountOrWhy(['--move', s, b], `re-expose kept path ${i + 1} of ${binds.length}`, [b]);
+      // ⚠ Create the mount point only when MISSING (the fresh /tmp). Under a ro root it
+      // exists — and writing '' to an existing FILE keep would truncate the real file.
+      if (!fs.existsSync(b.p)) {
+        if (isDir[i]) fs.mkdirSync(b.p, { recursive: true });
+        else { fs.mkdirSync(path.dirname(b.p), { recursive: true }); fs.writeFileSync(b.p, ''); }
+      }
+      const m = mountOrWhy(['--move', s, b.p], `re-expose kept path ${i + 1} of ${binds.length}`, secret);
       if (m) return m;
+      if (!b.rw) {
+        const r = makeTreeReadOnly(b.p, false);
+        if (r) return r.split(b.p).join('<path>');
+      }
       try { if (isDir[i]) fs.rmdirSync(s); else fs.unlinkSync(s); } catch { /* left empty: harmless */ }
     }
     try { fs.rmdirSync(stage); } catch { /* left empty: harmless */ }
   } catch (e) {
     let msg = errMsg(e);
-    for (const b of binds) msg = msg.split(b).join('<path>');
+    for (const b of secret) msg = msg.split(b).join('<path>');
     return `masking failed (${msg})`;
   }
   return '';
@@ -978,14 +1299,8 @@ function maskSocketDirs(binds) {
  * @returns {string[]}
  */
 function unmaskedDirs() {
-  let txt = '';
-  try { txt = fs.readFileSync('/proc/self/mountinfo', 'utf8'); } catch { return ['/proc/self/mountinfo (unreadable)']; }
-  const mounts = txt.split('\n').filter(Boolean).map((l) => {
-    const [pre, post = ''] = l.split(' - ');
-    const f = pre.split(' ');
-    const g = post.split(' ');
-    return { id: f[0], parent: f[1], at: f[4], fstype: g[0], source: g[1] };
-  });
+  const mounts = readMountinfo();
+  if (!mounts) return ['/proc/self/mountinfo (unreadable)'];
   return maskedDirs().all.filter((d) => {
     const here = mounts.filter((m) => m.at === d);
     const top = here.find((m) => !here.some((o) => o.parent === m.id));
@@ -1035,25 +1350,82 @@ async function closeResidualSockets(sockets, exempt) {
     covered: open.length, coverFailed, still: again.filter((o) => !SOCKET_UNREACHABLE.has(o)).length };
 }
 
+/** The capability fields /proc/<pid>/status must show as ZERO for the command. */
+const CAP_FIELDS = Object.freeze(['CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb']);
+
+/** @param {string} status /proc/<pid>/status text @returns {Record<string, string>} */
+function statusFields(status) {
+  return Object.fromEntries(status.split('\n').map((l) => l.split(':\t')).filter((f) => f.length === 2)
+    .map(([k, v]) => [k, v.trim()]));
+}
+
+/**
+ * The argv prefix that runs the command with NO capabilities — and the PROOF that it does.
+ *
+ * ⛔ WITHOUT THIS THE ARM IS NAMESPACE ROOT WITH EVERY CAPABILITY (measured by the final
+ * review: CapEff 000001ffffffffff). It could `umount` a /dev/null cover, `umount -l /tmp`
+ * (both probe sockets went ENOENT/ECONNREFUSED → CONNECTED), `mount -o remount,rw` the
+ * read-only home — every mask undone by one call. And CAP_DAC_OVERRIDE made a chmod-000
+ * file READABLE inside: a consumer test asserting EACCES went false-red only under the gate.
+ *
+ * ⇒ `setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all`. uid
+ * stays 0 (the files it owns are the caller's); every capability set is emptied.
+ * ⚠ `--bounding-set=-all` needs CAP_SETPCAP, which a nested call (already capless) lacks —
+ * measured: "apply bounding set: Operation not permitted" — so it is passed only while the
+ * bounding set is non-empty.
+ *
+ * ⭐ ASSERTS THE PROPERTY, not setpriv's exit: the same prefix runs node once to print its
+ * own /proc/self/status, and every CapXxx must be 0 and NoNewPrivs 1. A missing setpriv,
+ * or one that ignores its flags, is refused — the command never runs with capabilities.
+ * @returns {{prefix: string[], why: string}}
+ */
+function privilegeDrop() {
+  let bnd = '';
+  try { bnd = statusFields(fs.readFileSync('/proc/self/status', 'utf8')).CapBnd || ''; } catch { /* below */ }
+  if (!bnd) return { prefix: [], why: 'cannot read this process\'s capability bounding set (/proc/self/status)' };
+  const prefix = ['setpriv', '--no-new-privs', ...(/^0+$/.test(bnd) ? [] : ['--bounding-set=-all']),
+    '--inh-caps=-all', '--ambient-caps=-all', '--'];
+  const r = spawnSync(prefix[0], [...prefix.slice(1), process.execPath, '-e',
+    'process.stdout.write(require("fs").readFileSync("/proc/self/status", "utf8"))'],
+  { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (r.error) {
+    const err = /** @type {NodeJS.ErrnoException} */ (r.error);
+    return { prefix, why: `cannot drop capabilities: ${err.code === 'ENOENT' ? "'setpriv' not found — install util-linux"
+      : errMsg(err)}; the command would run as namespace root with every capability (it could unmount the masks)` };
+  }
+  if (r.status !== 0) {
+    return { prefix, why: `cannot drop capabilities: setpriv exited ${r.status ?? r.signal} `
+      + `(${String(r.stderr || '').trim().split('\n').pop()})` };
+  }
+  const f = statusFields(r.stdout);
+  const held = CAP_FIELDS.filter((k) => !/^0+$/.test(f[k] || 'x'));
+  if (held.length || f.NoNewPrivs !== '1') {
+    return { prefix, why: `after setpriv the command would still hold ${held.length ? held.join(', ') : 'no caps'}`
+      + `${f.NoNewPrivs !== '1' ? ' and NoNewPrivs is not set' : ''} — it is not dropping privileges` };
+  }
+  return { prefix, why: '' };
+}
+
 /**
  * Run the user command with the caller's cwd/stdio and a SCRUBBED env; resolve with
- * its exit code (128+signal when killed, 127 when it cannot be started).
+ * its exit code (128+signal when killed, 127 when it cannot be started). `prefix` is the
+ * privilege drop (privilegeDrop).
  *
  * ⛔ The scrub applies on BOTH paths (fresh and nested): the vars it drops NAME host
  * sockets and displays, and TMPDIR is reset because an inherited one may name a
  * directory the /tmp mask just hid.
- * @param {string[]} command @returns {Promise<number>}
+ * @param {string[]} command @param {string[]} [prefix] @returns {Promise<number>}
  */
-function runCommand(command) {
+function runCommand(command, prefix = []) {
   /** @type {NodeJS.ProcessEnv} */
   const env = { ...process.env, TMPDIR: '/tmp' };
   for (const k of SCRUBBED_ENV) delete env[k];
+  const argv = [...prefix, ...command];
   return new Promise((resolve) => {
-    const child = spawn(command[0], command.slice(1), { stdio: 'inherit', env });
+    const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', env });
     forwardSignals(child);
     child.on('error', (e) => {
-      process.stderr.write(`isolated: cannot run '${command[0]}': ${errMsg(e)}\n`);
-      resolve(127);
+      resolve(report('isolated', 127, `NOT RUN: cannot start '${argv[0]}': ${errMsg(e)}`));
     });
     child.on('close', (code, signal) => resolve(exitCodeOf(code, signal)));
   });
@@ -1085,9 +1457,43 @@ function runCommand(command) {
 // (5) is the fact about the SOCKETS; (4) alone is beaten by `unshare -rnm` plus a
 // fabricated id. ⚠ "a tmpfs at /run" would be a proxy: the host's /run and /tmp are
 // usually tmpfs already.
+//
+// ⛔ AND THE HOME DIRECTORY. The previous `isolated` passes (1)–(5) with the passwd home
+// WRITABLE — signed-in profiles, ~/.config, ~/.ssh. So a sixth:
+//
+//   6. each root in WEBCTL_RO_ROOTS (recorded at entry) answers access(W_OK) with EROFS
+//      (or is absent — masked);
+//   7. /proc/self/ns/pid DIFFERS from WEBCTL_HOST_PIDNS — no host process is signalable.
+//
+// ⚠ The roots are RECORDED, not re-derived: inside the user namespace we are uid 0 and
+// the passwd lookup answers root's home. access(2) rather than mountinfo because it asks
+// the kernel the exact question — "is THIS path on a read-only mount", through path
+// resolution, stacking and shadowing included; the full submount sweep (mountinfo) runs
+// once, where the writable keeps are known: in the inner half, before `started`.
 
 const HOST_NETNS_ENV = 'WEBCTL_HOST_NETNS';
 const HOST_MNTNS_ENV = 'WEBCTL_HOST_MNTNS';
+const HOST_PIDNS_ENV = 'WEBCTL_HOST_PIDNS';
+const RO_ROOTS_ENV = 'WEBCTL_RO_ROOTS';
+
+/** The protected roots `isolated` recorded at entry, or null when absent/malformed. */
+function recordedRoRoots() {
+  try {
+    const v = JSON.parse(process.env[RO_ROOTS_ENV] ?? 'null');
+    return Array.isArray(v) && v.every((r) => typeof r === 'string' && path.isAbsolute(r)) ? v : null;
+  } catch { return null; }
+}
+
+/**
+ * Is `p` NOT writable through its mount — 'EROFS', or 'ENOENT' (masked away)? Anything
+ * else (success = 'WRITABLE', another errno) means the read-only step is not in effect.
+ * @param {string} p @returns {string}
+ */
+function writeOutcome(p) {
+  try { fs.accessSync(p, fs.constants.W_OK); return 'WRITABLE'; } catch (e) {
+    return /** @type {NodeJS.ErrnoException} */ (e).code || 'ERROR';
+  }
+}
 
 /** @returns {'identity'|'mapped'|'unreadable'} */
 function uidMapKind() {
@@ -1112,7 +1518,8 @@ function extraInterfaces() {
 
 /**
  * Is this process provably inside the namespaces `isolated` made — no host network,
- * no host unix sockets? All five facts must hold; every one that fails is named.
+ * no host unix sockets, a read-only home, no host processes? All seven facts must hold; every one that fails
+ * is named.
  * @returns {{inside: boolean, why: string, facts: Record<string, any>}}
  */
 function kernelInsideProof() {
@@ -1122,9 +1529,14 @@ function kernelInsideProof() {
   try { netns = fs.readlinkSync('/proc/self/ns/net'); } catch { /* named below */ }
   let mntns = '';
   try { mntns = fs.readlinkSync('/proc/self/ns/mnt'); } catch { /* named below */ }
+  const recordedPid = process.env[HOST_PIDNS_ENV];
+  let pidns = '';
+  try { pidns = fs.readlinkSync('/proc/self/ns/pid'); } catch { /* named below */ }
   const uidMap = uidMapKind();
   const extra = extraInterfaces();
   const unmasked = unmaskedDirs();
+  const roRoots = recordedRoRoots();
+  const writable = (roRoots || []).filter((r) => !['EROFS', 'ENOENT'].includes(writeOutcome(r))).length;
   /** @type {string[]} */
   const fails = [];
   if (!netns) fails.push('/proc/self/ns/net is unreadable');
@@ -1141,9 +1553,16 @@ function kernelInsideProof() {
   if (unmasked.length) {
     fails.push(`no '${MASK_SOURCE}' tmpfs on top of ${unmasked.join(', ')} (the host's unix sockets there are reachable)`);
   }
+  if (!pidns) fails.push('/proc/self/ns/pid is unreadable');
+  if (!recordedPid) fails.push(`${HOST_PIDNS_ENV} is not set, so there is no recorded host PID namespace to differ from`);
+  else if (pidns === recordedPid) fails.push(`the current PID namespace ${pidns} EQUALS the recorded host one (host processes can be signalled)`);
+  if (!roRoots) fails.push(`${RO_ROOTS_ENV} is not set (or malformed), so there is no recorded home directory to find read-only`);
+  else if (writable) fails.push(`${writable} of ${roRoots.length} protected root(s) — the home directory — are WRITABLE here`);
+  // ⚠ counts, never the roots: they are home paths, and refusals get pasted
   return { inside: fails.length === 0, why: fails.join('; '),
     facts: { netns, recorded: recorded ?? null, uidMap, extraInterfaces: extra,
-      mntns, recordedMnt: recordedMnt ?? null, unmasked } };
+      mntns, recordedMnt: recordedMnt ?? null, pidns, recordedPid: recordedPid ?? null, unmasked,
+      roRoots: roRoots ? roRoots.length : null, writableRoRoots: writable } };
 }
 
 /**
