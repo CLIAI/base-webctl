@@ -47,8 +47,10 @@ test('no input at all → no-engine, naming --engine, the env key from hints, an
   assert.match(r.instructions, /CLIAI_X_BROWSER_ENGINE/);
   assert.match(r.instructions, /app in the target record/);
   assert.equal(/** @type {any} */ (resolveEngine()).code, 'no-engine', 'no argument at all');
-  // Empty and whitespace are UNSET, not an engine — control: a real value resolves.
-  assert.equal(/** @type {any} */ (resolveEngine({ flag: '', env: '   ', record: rec('  ') })).code, 'no-engine');
+  // Empty and whitespace FLAG/ENV are UNSET, not an engine — control: a real value resolves.
+  // (A RECORD whose app is whitespace is not "unset" but MALFORMED — refused invalid-engine;
+  // see the quality-review test below. Here the record has no app field at all.)
+  assert.equal(/** @type {any} */ (resolveEngine({ flag: '', env: '   ', record: rec() })).code, 'no-engine');
   assert.equal(resolveEngine({ flag: 'chromium' }).verdict, 'resolved');
 });
 
@@ -282,4 +284,49 @@ test('no shared dir: refuses as resolveTarget always has; hints pass through; lo
     assert.equal(r.sharedErrors.length, 1);
     assert.match(r.sharedErrors[0], /broken\.toml/);
   }, { 'targets/broken.toml': 'control = "ssh"\napp = "netscape"\n' });
+});
+
+// ── quality-review fixes ──────────────────────────────────────────────────────
+
+test('⛔ a record whose app is MALFORMED is refused invalid-engine — never "no app" for a flag to fill', () => {
+  for (const app of [42, '   ', true, {}]) {
+    const r = /** @type {any} */ (resolveEngine({ record: { app }, flag: 'chromium' }));
+    assert.equal(r.verdict, 'refused', JSON.stringify(app));
+    assert.equal(r.code, 'invalid-engine', JSON.stringify(app));
+    assert.match(r.reason, /record's app is not an engine name/);
+  }
+  // control: a record with NO app field at all lets the flag decide
+  assert.equal(/** @type {any} */ (resolveEngine({ record: { control: 'ssh' }, flag: 'chromium' })).value, 'chromium');
+  // and app: null is "no app", the same as absent
+  assert.equal(/** @type {any} */ (resolveEngine({ record: { app: null }, flag: 'opera' })).value, 'opera');
+});
+
+test('⛔ no message names the user\'s HOME: recordReason and the loader\'s errors use ~/.config/webctl', () => {
+  const h = home({
+    'config.toml': 'default_target = "workstation"\nbogus = "x"\n',
+    'targets/workstation.toml': 'control = "ssh"\nssh = "browserhost"\napp = "chromium"\n',
+    'targets/broken.toml': 'control = "ssh"\nuser_data_dir = "/p"\n',
+  });
+  try {
+    const r = /** @type {any} */ (resolveSharedTarget({ flag: 'nosuchtarget', home: h }));
+    assert.ok(r.recordReason, 'premise: a named target with no shared record gives a reason');
+    assert.ok(!r.recordReason.includes(h), `recordReason must not contain HOME: ${r.recordReason}`);
+    assert.match(r.recordReason, /~\/\.config\/webctl\/targets\//);
+    assert.ok(r.sharedErrors.length >= 2, 'premise: the bogus key and the broken record produce errors');
+    for (const e of r.sharedErrors) {
+      assert.ok(!e.includes(h), `a loader error leaked HOME: ${e}`);
+      assert.match(e, /^~\/\.config\/webctl\//);
+    }
+  } finally { fs.rmSync(h, { recursive: true, force: true }); }
+});
+
+test('an engine word in the wrong case gets a lowercase hint; junk does not', () => {
+  assert.match(/** @type {any} */ (resolveEngine({ flag: 'Chromium' })).reason, /engine names are lowercase/);
+  const junk = /** @type {any} */ (resolveEngine({ flag: 'rm -rf' })).reason;
+  assert.doesNotMatch(junk, /lowercase/);
+  assert.ok(!junk.includes('rm -rf'), 'junk is never echoed');
+});
+
+test('a pending engine\'s reason is keyed per engine (firefox names BiDi)', () => {
+  assert.match(/** @type {any} */ (resolveEngine({ flag: 'firefox' })).reason, /WebDriver BiDi/);
 });
