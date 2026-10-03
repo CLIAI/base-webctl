@@ -298,7 +298,9 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
   is cloned at its committed HEAD, and base's candidate is placed in the clone's submodule.
   The contract runs there under `isolated`, with a throwaway HOME. **A change to the live
   tree BLOCKS:** its git-visible state (HEAD, submodule HEAD, `git status`) is fingerprinted
-  before and after. Ignored files are not covered, but they sit under the read-only home. A live tree with
+  before and after. Gitignored files (`.env`, profile or state dirs) are NOT covered. A live
+  tree under the home dir is read-only from inside, so it cannot be written; a live tree
+  elsewhere can be, and an ignored-file write there goes unseen. A live tree with
   uncommitted tracked changes → SKIP, because the commit is not what runs. Isolation
   unavailable → a GATE-ENVIRONMENT fault, never a lane FAIL. Why: some live trees are what
   unattended timers run from, so the in-place swap could run an untested candidate.
