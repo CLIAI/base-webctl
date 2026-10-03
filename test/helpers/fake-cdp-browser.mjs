@@ -32,7 +32,8 @@ import { createHash } from 'node:crypto';
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 /**
- * @typedef {{id: string, type?: string, url?: string, title?: string}} FakeTarget
+ * `subtype` (e.g. 'prerender') rides on a type:'page' target that is NOT a tab.
+ * @typedef {{id: string, type?: string, url?: string, title?: string, subtype?: string}} FakeTarget
  * @typedef {{t: string, [k: string]: any}} LogEntry
  */
 
@@ -107,17 +108,27 @@ export async function startTrap() {
  *   createTarget?: boolean,      // Target.createTarget succeeds (default true)
  *   jsonNew?: string[],          // verbs /json/new accepts (default ['PUT'])
  *   advertise?: string,          // authority printed in ws URLs (default: own)
+ *   createReply?: 'ok'|'drop'|'hangup', // after createTarget MINTS: reply / never reply /
+ *                                // drop the socket — the browser made a tab, the caller lost it
+ *   noBrowserEndpoint?: boolean, // /json/version -> 404 (an HTTP-only forward)
+ *   refusePageAttach?: boolean,  // every /devtools/page/<id> upgrade -> 404
+ *   getTargetsDelayMs?: number,  // hold every Target.getTargets reply this long, so
+ *                                // concurrent readers are DETERMINISTICALLY in flight together
  * }} [opts]
  */
 export async function startFakeBrowser(opts = {}) {
   /** @type {Map<string, Required<FakeTarget>>} */
   const targets = new Map();
   for (const t of opts.targets || []) {
-    targets.set(t.id, { id: t.id, type: t.type || 'page', url: t.url || 'about:blank', title: t.title || '' });
+    targets.set(t.id, { id: t.id, type: t.type || 'page', url: t.url || 'about:blank', title: t.title || '', subtype: t.subtype || '' });
   }
   const cfg = {
     createTarget: opts.createTarget !== false,
     jsonNew: opts.jsonNew || ['PUT'],
+    getTargetsDelayMs: opts.getTargetsDelayMs || 0,
+    createReply: opts.createReply || 'ok',
+    noBrowserEndpoint: !!opts.noBrowserEndpoint,
+    refusePageAttach: !!opts.refusePageAttach,
   };
   /** @type {LogEntry[]} */
   const log = [];
@@ -141,7 +152,7 @@ export async function startFakeBrowser(opts = {}) {
   /** @param {string} url */
   const mint = (url) => {
     state.minted += 1;
-    const t = { id: `MINTED-${state.minted}`, type: 'page', url, title: '' };
+    const t = { id: `MINTED-${state.minted}`, type: 'page', url, title: '', subtype: '' };
     targets.set(t.id, t);
     return t;
   };
@@ -151,7 +162,8 @@ export async function startFakeBrowser(opts = {}) {
     const had = targets.delete(id);
     // A real Chromium EXITS when its last page closes — the failure the last-page
     // rule exists to prevent. Record it so a test can assert it did not happen.
-    if (had && ![...targets.values()].some((t) => t.type === 'page')) state.browserExited = true;
+    // A subtype'd page (a prerender) is not a window, so it does not keep it alive.
+    if (had && ![...targets.values()].some((t) => t.type === 'page' && !t.subtype)) state.browserExited = true;
     return had;
   };
 
@@ -167,6 +179,7 @@ export async function startFakeBrowser(opts = {}) {
       res.end(JSON.stringify(body));
     };
     if (u.pathname === '/json/version') {
+      if (cfg.noBrowserEndpoint) return send(404, { error: 'not found' });
       return send(200, { Browser: 'FakeChromium/1.0', webSocketDebuggerUrl: `ws://${advertise}/devtools/browser/${BROWSER_ID}` });
     }
     if (u.pathname === '/json' || u.pathname === '/json/list') {
@@ -190,7 +203,7 @@ export async function startFakeBrowser(opts = {}) {
     const kind = m ? m[1] : 'unknown';
     const id = m ? decodeURIComponent(m[2]) : '';
     log.push({ t: 'ws', kind, id });
-    if (!m || (kind === 'page' && !targets.has(id)) || (kind === 'browser' && id !== BROWSER_ID)) {
+    if (!m || (kind === 'page' && (cfg.refusePageAttach || !targets.has(id))) || (kind === 'browser' && id !== BROWSER_ID)) {
       socket.end('HTTP/1.1 404 Not Found\r\n\r\n');
       return;
     }
@@ -213,28 +226,39 @@ export async function startFakeBrowser(opts = {}) {
         let msg;
         try { msg = JSON.parse(f.payload.toString('utf8')); } catch { continue; }
         log.push({ t: 'cdp', kind, target: id, method: msg.method, params: msg.params });
-        handle(kind, id, msg, reply);
+        handle(kind, id, msg, reply, socket);
       }
     });
   });
 
   /**
    * @param {string} kind @param {string} id @param {any} msg @param {(o: any) => void} reply
+   * @param {import('node:stream').Duplex} socket
    */
-  function handle(kind, id, msg, reply) {
+  function handle(kind, id, msg, reply, socket) {
     const err = (/** @type {number} */ code, /** @type {string} */ message) => reply({ id: msg.id, error: { code, message } });
     const ok = (/** @type {any} */ result) => reply({ id: msg.id, result });
     const p = msg.params || {};
     if (kind === 'browser') {
       if (msg.method === 'Target.createTarget') {
         if (!cfg.createTarget) return err(-32000, 'Target.createTarget is not allowed in this build');
-        return ok({ targetId: mint(String(p.url)).id });
+        const t = mint(String(p.url));
+        if (cfg.createReply === 'drop') return;              // minted; the reply never comes
+        if (cfg.createReply === 'hangup') { socket.destroy(); return; } // minted; socket gone
+        return ok({ targetId: t.id });
       }
       if (msg.method === 'Target.closeTarget') {
         return remove(String(p.targetId)) ? ok({ success: true }) : err(-32602, `No target with given id ${p.targetId}`);
       }
       if (msg.method === 'Target.getTargets') {
-        return ok({ targetInfos: [...targets.values()].map((t) => ({ targetId: t.id, type: t.type, url: t.url, title: t.title, attached: false })) });
+        // The snapshot is taken NOW, at receipt; only the reply is delayed. That is
+        // the check-then-act window of a real browser, widened.
+        const infos = [...targets.values()].map((t) => ({
+          targetId: t.id, type: t.type, url: t.url, title: t.title, attached: false,
+          ...(t.subtype ? { subtype: t.subtype } : {}),
+        }));
+        if (cfg.getTargetsDelayMs) { setTimeout(() => ok({ targetInfos: infos }), cfg.getTargetsDelayMs); return; }
+        return ok({ targetInfos: infos });
       }
       return err(-32601, `'${msg.method}' wasn't found`);
     }

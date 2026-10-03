@@ -231,21 +231,37 @@ before minting", was right for an unattended browser and is superseded.
 * **Mint:** `Target.createTarget({url, background: true, newWindow: false})` over the
   browser endpoint — no `browserContextId` (a fresh context lacks the sign-in). Fallback:
   `/json/new` PUT, then GET. Both dial the caller's **rewritten** authority, never the raw
-  one `/json/version` prints from behind an ssh forward.
+  one `/json/version` prints from behind an ssh forward. ⚠ `/json/new` has **no background
+  flag**: on a build where only the fallback works, the new tab may take focus in the
+  person's window.
 * **If both mint paths fail, `openPage` REFUSES** with the opt-in hint
   (`{targetId, owner: 'adopted'}`). It never falls back to an existing tab.
+* ⛔ **`/json/new` is tried only when nothing can have been minted**: the browser endpoint
+  was unreachable before the request left, or `createTarget` got an explicit CDP ERROR
+  reply. A LOST reply (timeout, dropped socket) is refused, saying a tab may have been
+  created — a fallback would mint a second tab and orphan the first. CDP error replies
+  now carry `err.cdpError` (`{code, message}`).
 * **`ownedTargets`** (any object with `has(id)`; a `Set` works) defaults to the ids THIS
   process minted. A lane with a durable ledger passes its own. Adopting never adds to it.
-* A reused target must exist and be a `page` (checked on `Target.getTargets`); otherwise
-  refused, naming the id.
+  ⛔ Only a literal `true` from `has()` vouches; a `has()` that returns a Promise (an async,
+  db- or file-backed ledger) is REFUSED — a Promise is truthy and would vouch for any id.
+  Resolve the ledger first (e.g. into a `Set`).
+* A reused target must exist and be a `page` with no `subtype` (checked on
+  `Target.getTargets`); otherwise refused, naming the id. A `subtype`'d page (a prerender) is
+  not a tab, and does not count toward the last-page rule either.
 * **`onMinted(id)`** is awaited after the mint and BEFORE the first attach. If it throws,
   the tab is closed (or blanked, if it is the last page) and `openPage` refuses, carrying
-  the hook's error (`cause`).
+  the hook's error (`cause`). Likewise, if the first ATTACH to a minted tab fails, the error
+  names the id and its fate: kept open (`keep: true`), closed, or NOT closed with the reason.
 * **`close()` is now on `openPage()`'s result too**, and returns `{closed: true}` or
   `{closed: false, reason}` with reason `'keep' | 'owned-reuse' | 'adopted' | 'last-page' |
-  'close-failed'`. ⛔ **The LAST page target is never closed** — closing it exits Chromium;
+  'not-a-tab' | 'close-failed'` (`'not-a-tab'`: our target is still there but now carries a
+  `subtype`, so it is left, never reported closed). ⛔ **The LAST page target is never closed** — closing it exits Chromium;
   it is navigated to `about:blank` instead (`reason: 'last-page'`). "Last" is read from the
-  browser endpoint at close time.
+  browser endpoint at close time. Closes of our own tabs are serialised per browser
+  authority within a process (the loopback spellings `localhost`, `127.0.0.1` and `[::1]`
+  count as one authority). ⚠ A person or another process closing a tab in the same
+  instant is a residual race: the read and the close cannot be made atomic.
 * `navigate(base, url, opts)` passes `targetId` / `owner` / `ownedTargets` / `keep` /
   `close` / `onMinted` (and now `defaultTimeout`) through, returns `openPage()`'s result,
   and closes a minted tab if the navigation itself fails.
@@ -259,6 +275,17 @@ Where reuse was meant, say whose tab it is: record the id from a `keep: true` mi
 `onMinted`), pass your ledger as `ownedTargets`, and reuse with `{targetId, owner:
 'minted'}`. Lanes adopt this deliberately: it changes what a signed-in browser shows.
 
+### ⛔ BREAKING — what `openPage()` / `navigate()` need from the endpoint, and return
+
+* **`openPage()` now needs the BROWSER websocket on every path**: `/json/version` and its
+  `/devtools/browser/…` socket, for the mint (`Target.createTarget`), for a reuse
+  (`Target.getTargets`) and for `close()` (the page count and `Target.closeTarget`). Before,
+  it needed only HTTP `/json` and `/json/close` plus the page socket. A forward or proxy that
+  exposes HTTP and page sockets only used to work and now fails: the mint falls back to
+  `/json/new`, but a reuse is refused and `close()` returns `'close-failed'` (tab left open).
+* **`navigate().close()` closes through `Target.closeTarget`** (not `closePage`'s
+  `/json/close`) and returns a `CloseResult` instead of `undefined`.
+
 ### ⛔ BREAKING — unknown options are refused
 
 `openPage`, `navigate`, `connectBrowser` and `listTargetsCorroborated` throw a
@@ -268,18 +295,28 @@ Where reuse was meant, say whose tab it is: record the id from a `keep: true` mi
 now told so. Contradictory combinations are refused too: `keep` + `close`, `close: true`
 on an adopted tab, `onMinted` or `owner` without a mint/`targetId` respectively.
 
+* ⛔ **BREAKING: the `CdpSession` CONSTRUCTOR refuses unknown option keys too** (honours
+  only `defaultTimeout`, `WebSocketImpl`): `new CdpSession(url, {readOnly: true})` returned
+  an unguarded session that looked guarded. A subclass must strip its own keys before
+  `super()` *(raised by `webctl:mgr`)*.
+
 ### Tests
 
-* `test/cdp-open-page-own-tab.test.js`: the nine `v7x3` QA arms, each with its control,
-  against a recording fake CDP browser (`test/helpers/fake-cdp-browser.mjs`, ephemeral
-  ports, a trap that records any dial of the raw authority).
+* `test/cdp-open-page-own-tab.test.js` (29 tests): the nine `v7x3` QA arms and the ten
+  added after review (`v7x3` QA 10–19: async `has()`, a lost `createTarget` reply,
+  concurrent closes and two loopback spellings, prerender ×2, present-but-not-a-tab, the
+  attach-failure fate, the `CdpSession` constructor, refused combinations), each with its
+  control, against a recording fake CDP browser (`test/helpers/fake-cdp-browser.mjs`:
+  ephemeral ports, a trap that records any dial of the raw authority, a delayed
+  `getTargets`, a lost `createTarget` reply, refused attaches, `subtype` targets).
 * `test/cdp-client-lifecycle.test.js`: arm 1 ("an existing page is REUSED") and the
   reuse half of arm 3 asserted the old default; both now assert the new one.
 
-### Fixed/Docs since v0.31.0
+### Docs — a correction to the v0.31.0 entry
 
-* the home-under-/run-or-/tmp refusal applies on the host path too, not only under an
-  outer `unshare -r` (a CI image whose passwd home is under /tmp is refused)
+* the v0.31.0 entry said the home-under-/run-or-/tmp refusal applies under an outer
+  `unshare -r`; it applies on the host path too (a CI image whose passwd home is under /tmp
+  is refused). This is v0.31.0 behaviour, not new code.
 
 ### ⛔ What this does NOT cover
 
@@ -289,6 +326,10 @@ on an adopted tab, `onMinted` or `owner` without a mint/`targetId` respectively.
   last-page rule. Use the `close()` that `openPage()` / `navigate()` return.
 * Unknown-key refusal covers the four factories above, not `getVersion`, `listTargets`,
   `listPageTargets` or `listTargetsViaBrowser`.
+* ⚠ **An HTTP-only forward leaks a tab per mint.** Without the browser websocket each mint
+  goes through `/json/new`, but `close()` cannot read the page count and returns
+  `'close-failed'`, leaving the tab open — safe (it never closes a last page), but a long run
+  piles up tabs. Use a forward that exposes the browser websocket (`/devtools/browser/…`).
 * Nothing here was run against a real browser; the arms use a fake that implements only
   the CDP surface listed in its header.
 

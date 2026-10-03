@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 
 import {
-  openPage, navigate, listPageTargets, connectBrowser, listTargetsCorroborated,
+  openPage, navigate, listPageTargets, connectBrowser, listTargetsCorroborated, CdpSession,
 } from '../lib/cdp-client.js';
 import { startFakeBrowser, startTrap } from './helpers/fake-cdp-browser.mjs';
 
@@ -32,6 +32,9 @@ async function withFake(opts, fn) {
   const fake = await startFakeBrowser(opts);
   try { await fn(fake); } finally { await fake.stop(); }
 }
+
+/** @param {Awaited<ReturnType<typeof startFakeBrowser>>} fake */
+const newVerbsOf = (fake) => fake.log.filter((e) => e.t === 'http' && e.path === '/json/new').map((e) => e.method);
 
 // ── 1 ──────────────────────────────────────────────────────────────────────────
 test('⛔ QA1: with one human tab, openPage()/navigate() MINT a background tab; the human tab is untouched', async () => {
@@ -113,6 +116,33 @@ test('QA2 control: the id THIS process minted is driven as owner:\'minted\'; so 
   });
 });
 
+test('⛔ QA2: an ASYNC ownedTargets.has() (a db-backed ledger) is refused — a Promise is truthy and would vouch for ANY id', async () => {
+  // Measured by the review: has: async id => id === 'LEDGER-1' returned a truthy
+  // Promise for the HUMAN tab, and navigate drove it.
+  await withFake({ targets: [HUMAN, { id: 'LEDGER-1', type: 'page', url: 'about:blank' }] }, async (fake) => {
+    const asyncLedger = { has: async (/** @type {string} */ id) => id === 'LEDGER-1' };
+    await assert.rejects(() => navigate(fake.base, WORK_URL,
+      { ...NAV, targetId: 'HUMAN-1', owner: 'minted', ownedTargets: asyncLedger }),
+    (e) => /has\(\) must return a boolean/.test(e.message) && /resolve your ledger first/.test(e.message));
+    // Even for an id the ledger DOES hold: a Promise is never an answer.
+    await assert.rejects(() => openPage(fake.base,
+      { targetId: 'LEDGER-1', owner: 'minted', ownedTargets: asyncLedger }), /must return a boolean/);
+    // A truthy NON-boolean is not true either.
+    await assert.rejects(() => openPage(fake.base,
+      { targetId: 'HUMAN-1', owner: 'minted', ownedTargets: { has: () => /** @type {any} */ ('yes') } }), /HUMAN-1/);
+    assert.equal(fake.urlOf('HUMAN-1'), HUMAN_URL, 'the human tab\'s URL is unchanged');
+    assert.equal(fake.log.length, 0, 'refused before any contact');
+    // Control: the same ledger, synchronous, drives the ledger tab and refuses the human one.
+    const syncLedger = { has: (/** @type {string} */ id) => id === 'LEDGER-1' };
+    const ok = await openPage(fake.base, { targetId: 'LEDGER-1', owner: 'minted', ownedTargets: syncLedger });
+    assert.equal(ok.targetId, 'LEDGER-1');
+    await ok.close();
+    await assert.rejects(() => openPage(fake.base,
+      { targetId: 'HUMAN-1', owner: 'minted', ownedTargets: syncLedger }), /HUMAN-1/);
+    assert.equal(fake.urlOf('HUMAN-1'), HUMAN_URL);
+  });
+});
+
 // ── 3 ──────────────────────────────────────────────────────────────────────────
 test('⛔ QA3: minting unavailable on BOTH paths -> refused with the opt-in hint, never a fallback to an existing tab', async () => {
   await withFake({ targets: [HUMAN], createTarget: false, jsonNew: [] }, async (fake) => {
@@ -138,6 +168,50 @@ test('QA3 control: with createTarget refused, the /json/new fallback mints (PUT,
       await p.close();
     });
   }
+});
+
+test('⛔ QA3: a LOST createTarget reply (timeout / dropped socket) is refused — never a second mint, never an unrecorded orphan', async () => {
+  // Measured by the review: a timed-out createTarget had ALREADY minted; the
+  // /json/new fallback minted a second tab, and onMinted saw only the second.
+  for (const createReply of /** @type {const} */ (['drop', 'hangup'])) {
+    await withFake({ targets: [HUMAN], createReply }, async (fake) => {
+      /** @type {string[]} */
+      const recorded = [];
+      await assert.rejects(() => openPage(fake.base,
+        { defaultTimeout: 300, keep: true, onMinted: (/** @type {string} */ id) => { recorded.push(id); } }),
+      (e) => /may have created a tab/i.test(e.message) && /reply was lost/.test(e.message), createReply);
+      const minted = [...fake.targets.keys()].filter((k) => k.startsWith('MINTED-'));
+      // EXACTLY one: the browser did mint (so the error's "may have created a tab" is
+      // true), and nothing minted a second. `<= 1` would pass with no mint at all.
+      assert.equal(minted.length, 1, `exactly ONE tab, got ${minted} (${createReply})`);
+      assert.deepEqual(fake.log.filter((e) => e.t === 'http' && e.path === '/json/new'), [],
+        `no /json/new after a lost reply (${createReply})`);
+      assert.equal(fake.pageAttaches().length, 0);
+      assert.equal(fake.urlOf('HUMAN-1'), HUMAN_URL);
+    });
+  }
+});
+
+test('QA3 control: an explicit CDP ERROR reply, or no browser endpoint at all, still falls back to /json/new', async () => {
+  // An error reply means the browser answered "no": nothing was created.
+  await withFake({ targets: [HUMAN], createTarget: false }, async (fake) => {
+    const p = await openPage(fake.base, { defaultTimeout: 300 });
+    assert.equal(fake.calls('Target.createTarget').length, 1);
+    assert.deepEqual(newVerbsOf(fake), ['PUT']);
+    await p.close();
+  });
+  // Unreachable BEFORE the request was sent: nothing can have been created.
+  await withFake({ targets: [HUMAN], noBrowserEndpoint: true }, async (fake) => {
+    const p = await openPage(fake.base, { defaultTimeout: 300 });
+    assert.equal(fake.calls('Target.createTarget').length, 0);
+    assert.deepEqual(newVerbsOf(fake), ['PUT']);
+    // …and close() cannot read the page count without the browser endpoint, so it
+    // does not close: a failure is a result, never a throw.
+    const r = await p.close();
+    assert.equal(r.closed, false);
+    assert.equal(/** @type {any} */ (r).reason, 'close-failed');
+    assert.ok(fake.targets.has(p.targetId));
+  });
 });
 
 // ── 4 ──────────────────────────────────────────────────────────────────────────
@@ -233,6 +307,88 @@ test('QA7: an owned reuse with close: true is also bound by the last-page rule',
   });
 });
 
+test('⛔ QA7: two of OUR tabs closed CONCURRENTLY — one closes, the other is the last page and stays; the browser stays up', async () => {
+  // Measured by the review: each close read "2 pages", both closed, 0 pages
+  // left -> Chromium exits. Closes are serialised per browser authority.
+  await withFake({ targets: [] }, async (fake) => {
+    const a = await openPage(fake.base);
+    const b = await openPage(fake.base);
+    fake.configure({ getTargetsDelayMs: 50 }); // both reads in flight together, every run
+    const r = await Promise.all([a.close(), b.close()]);
+    assert.deepEqual(r.map((x) => x.closed).sort(), [false, true], JSON.stringify(r));
+    assert.ok(r.some((x) => !x.closed && x.reason === 'last-page'), JSON.stringify(r));
+    assert.equal(fake.targets.size, 1);
+    assert.equal(fake.urlOf([...fake.targets.keys()][0]), 'about:blank');
+    assert.equal(fake.state.browserExited, false);
+  });
+  // Control: sequential closes give the same outcome.
+  await withFake({ targets: [] }, async (fake) => {
+    const a = await openPage(fake.base);
+    const b = await openPage(fake.base);
+    assert.deepEqual([await a.close(), await b.close()], [{ closed: true }, { closed: false, reason: 'last-page' }]);
+    assert.equal(fake.state.browserExited, false);
+  });
+  // Control: with a human tab present, concurrent closes close BOTH of ours.
+  await withFake({ targets: [HUMAN] }, async (fake) => {
+    const a = await openPage(fake.base);
+    const b = await openPage(fake.base);
+    fake.configure({ getTargetsDelayMs: 50 });
+    assert.deepEqual(await Promise.all([a.close(), b.close()]), [{ closed: true }, { closed: true }]);
+    assert.deepEqual([...fake.targets.keys()], ['HUMAN-1']);
+  });
+});
+
+test('⛔ QA7: concurrent closes through two SPELLINGS of one browser (127.0.0.1 / localhost) share one chain — still one \'last-page\'', async () => {
+  // Re-review N3: the chain was keyed by the literal host string, so two spellings
+  // of the same loopback authority got two chains and could both close.
+  await withFake({ targets: [] }, async (fake) => {
+    const viaLocalhost = fake.base.replace('127.0.0.1', 'localhost');
+    const a = await openPage(fake.base);                                  // host 127.0.0.1
+    const b = await openPage(viaLocalhost, { host: 'localhost' });        // host localhost
+    fake.configure({ getTargetsDelayMs: 50 }); // both reads in flight together if unserialised
+    const r = await Promise.all([a.close(), b.close()]);
+    assert.ok(r.some((x) => !x.closed && x.reason === 'last-page'), JSON.stringify(r));
+    assert.equal(fake.targets.size, 1);
+    assert.equal(fake.state.browserExited, false);
+  });
+});
+
+test('close(): our target PRESENT but no longer a tab is never reported {closed: true}; an ABSENT one is', async () => {
+  // Re-review N4: the "already gone" check ran over TABS only, so a target of
+  // ours that is present but carries a subtype read as closed.
+  await withFake({ targets: [HUMAN] }, async (fake) => {
+    const n = await openPage(fake.base);
+    /** @type {any} */ (fake.targets.get(n.targetId)).subtype = 'prerender';
+    assert.deepEqual(await n.close(), { closed: false, reason: 'not-a-tab' });
+    assert.ok(fake.targets.has(n.targetId), 'left as it is: base closes only a tab it can count');
+    assert.equal(fake.calls('Target.closeTarget').length, 0);
+  });
+  // Control: absent at close time (the person closed it) -> {closed: true}, nothing sent.
+  await withFake({ targets: [HUMAN] }, async (fake) => {
+    const n = await openPage(fake.base);
+    fake.targets.delete(n.targetId);
+    assert.deepEqual(await n.close(), { closed: true });
+    assert.equal(fake.calls('Target.closeTarget').length, 0);
+  });
+});
+
+test('⛔ QA7: a PRERENDER (type page + subtype) is not a tab — it does not count as a second page', async () => {
+  const PRERENDER = { id: 'PRE-1', type: 'page', subtype: 'prerender', url: 'https://work.example.test/next' };
+  await withFake({ targets: [PRERENDER] }, async (fake) => {
+    const n = await openPage(fake.base);
+    assert.deepEqual(await n.close(), { closed: false, reason: 'last-page' },
+      'ours is the last TAB; closing it would exit Chromium');
+    assert.ok(fake.targets.has(n.targetId));
+    assert.equal(fake.state.browserExited, false);
+  });
+  // Control: a real second tab beside the prerender -> ours is closed.
+  await withFake({ targets: [PRERENDER, HUMAN] }, async (fake) => {
+    const n = await openPage(fake.base);
+    assert.deepEqual(await n.close(), { closed: true });
+    assert.equal(fake.state.browserExited, false);
+  });
+});
+
 test('QA7 control: with a second page present, ours IS closed', async () => {
   await withFake({ targets: [HUMAN] }, async (fake) => {
     const n = await navigate(fake.base, WORK_URL, NAV);
@@ -295,6 +451,38 @@ test('QA8 control: onMinted resolves, and the record lands strictly AFTER create
   });
 });
 
+test('an ATTACH failure after a mint names the minted id and its fate; a closed tab leaves ownedTargets', async () => {
+  // Without keep: closed, and no longer vouched for by this process.
+  await withFake({ targets: [HUMAN], refusePageAttach: true }, async (fake) => {
+    /** @type {any} */
+    let err;
+    await openPage(fake.base).catch((e) => { err = e; });
+    assert.ok(err, 'must refuse');
+    const id = 'MINTED-1'; // each fake numbers its mints from 1
+    assert.match(err.message, new RegExp(`'${id}'.*could not attach.*was closed`));
+    assert.ok(!fake.targets.has(id), 'closed');
+    fake.configure({ refusePageAttach: false });
+    await assert.rejects(() => openPage(fake.base, { targetId: id, owner: 'minted' }), /not in ownedTargets/,
+      'a tab that was closed must leave MINTED_BY_THIS_PROCESS');
+  });
+  // With keep: kept, named, and still ours.
+  await withFake({ targets: [HUMAN], refusePageAttach: true }, async (fake) => {
+    await assert.rejects(() => openPage(fake.base, { keep: true }),
+      (e) => /'MINTED-1'/.test(e.message) && /kept open/.test(e.message));
+    assert.ok(fake.targets.has('MINTED-1'));
+    fake.configure({ refusePageAttach: false });
+    const again = await openPage(fake.base, { targetId: 'MINTED-1', owner: 'minted' });
+    assert.equal(again.targetId, 'MINTED-1');
+    await again.close();
+  });
+  // Last page, and it cannot even be blanked: NOT closed, with the reason.
+  await withFake({ targets: [], refusePageAttach: true }, async (fake) => {
+    await assert.rejects(() => openPage(fake.base),
+      (e) => /'MINTED-1'/.test(e.message) && /NOT closed \(close-failed/.test(e.message));
+    assert.equal(fake.state.browserExited, false);
+  });
+});
+
 // ── 9 ──────────────────────────────────────────────────────────────────────────
 test('⛔ QA9: a targetId naming an ABSENT id, or a non-page target, is refused, naming it', async () => {
   await withFake({ targets: [HUMAN, { id: 'SW-1', type: 'service_worker', url: 'chrome-extension://x/sw.js' }] }, async (fake) => {
@@ -305,6 +493,20 @@ test('⛔ QA9: a targetId naming an ABSENT id, or a non-page target, is refused,
     // Control: the same call with an existing page is accepted.
     const ok = await openPage(fake.base, { targetId: 'HUMAN-1', owner: 'adopted' });
     assert.equal(ok.targetId, 'HUMAN-1');
+    await ok.close();
+  });
+});
+
+test('⛔ QA9: a page target with a SUBTYPE (prerender) is not a tab — refused for reuse, naming it', async () => {
+  const PRERENDER = { id: 'PRE-1', type: 'page', subtype: 'prerender', url: 'https://work.example.test/next' };
+  await withFake({ targets: [HUMAN, PRERENDER] }, async (fake) => {
+    await assert.rejects(() => openPage(fake.base, { targetId: 'PRE-1', owner: 'adopted' }),
+      (e) => /PRE-1/.test(e.message) && /prerender/.test(e.message));
+    await assert.rejects(() => openPage(fake.base,
+      { targetId: 'PRE-1', owner: 'minted', ownedTargets: new Set(['PRE-1']) }), /prerender/);
+    assert.equal(fake.pageAttaches().length, 0);
+    // Control: the plain page beside it is accepted.
+    const ok = await openPage(fake.base, { targetId: 'HUMAN-1', owner: 'adopted' });
     await ok.close();
   });
 });
@@ -323,6 +525,19 @@ test('⛔ QA9: an UNKNOWN option is refused, naming it — a stale reuse: true i
     const b = await connectBrowser(fake.base, { defaultTimeout: 5000 });
     b.close();
   });
+});
+
+test('⛔ the CdpSession CONSTRUCTOR refuses an unknown option too — new CdpSession(url, {readOnly}) is not a guarded session', () => {
+  // Same hazard as the factories: a subclass or caller passing a guard got an
+  // unguarded session that looked guarded. Constructing opens no socket.
+  assert.throws(() => new CdpSession('ws://127.0.0.1:1/devtools/page/x', /** @type {any} */ ({ readOnly: true })),
+    (e) => e instanceof TypeError && /'readOnly'/.test(e.message));
+  // Control: the honoured keys construct.
+  const s = new CdpSession('ws://127.0.0.1:1/devtools/page/x', { defaultTimeout: 5 });
+  assert.equal(s.defaultTimeout, 5);
+  const fakeWs = function () {};
+  assert.equal(new CdpSession('ws://127.0.0.1:1/devtools/page/x', { WebSocketImpl: fakeWs }).WebSocketImpl, fakeWs);
+  assert.equal(new CdpSession('ws://127.0.0.1:1/devtools/page/x').defaultTimeout, 15000, 'no options still constructs');
 });
 
 test('options that cannot be honoured TOGETHER are refused, not silently resolved', async () => {

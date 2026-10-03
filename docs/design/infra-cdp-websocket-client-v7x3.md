@@ -310,18 +310,32 @@ inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
   process minted. A lane with a durable ledger (one own tab per browser, reused across
   invocations) passes its ledger here. Base offers the mechanism and imposes no store. The
   `1wsg` activity ledger is the natural one once it is in `lib/`. ⛔ Adopting a tab never
-  adds it to `ownedTargets`. An adoption lasts for that call only.
+  adds it to `ownedTargets`. An adoption lasts for that call only. ⛔ Only a literal `true`
+  from `has()` vouches. A `has()` that returns a Promise (an async, db- or file-backed
+  ledger) is REFUSED: a Promise is truthy, so it would vouch for ANY id, the human's tab
+  included *(measured by the review)*. Resolve the ledger first, e.g. into a `Set`.
 * Whatever the owner, the target must exist and be a `page`; otherwise it is refused, naming
   the id.
+* ⛔ **A tab is a `page` with no `subtype`.** CDP marks a prerendered page `{type: 'page',
+  subtype: 'prerender'}`; it is not a window. It is excluded from the last-page count
+  (counted, it would make our real last tab look like one of two, and closing it would exit
+  Chromium) and refused for reuse, naming its subtype *(the review)*.
 * **Mint in the background:** `Target.createTarget({url, background: true, newWindow:
   false})`. A foreground mint steals focus in the human's xpra window. Measured hidden on
   Opera by `perplexity`.
 * **Minting order.** Primary: `Target.createTarget` over the browser endpoint. Fallback:
   `/json/new` with PUT, then GET. Old decision 2 stands: `/json/new` is restricted in some
-  builds.
+  builds. ⚠ **`/json/new` has no background flag**, so on a build where only the fallback
+  works the new tab MAY take focus in the human's window. That is the cost of minting at all
+  there; the alternative, driving an existing tab, is the incident.
 * ⛔ **Mint through the tunnel.** `/json/version`'s `webSocketDebuggerUrl` names the REMOTE
   host:port behind an ssh forward. Both minting paths use `getVersion()`'s REWRITTEN
   authority (`rewriteWsUrl`), never the raw one.
+* ⛔ **Fall back to `/json/new` only when nothing can have been minted**: the browser
+  endpoint was unreachable before `createTarget` was sent, or the browser ANSWERED it with
+  a CDP error. A LOST reply (timeout, dropped socket) may follow a tab the browser already
+  made; a fallback would add a second tab and leave the first an orphan `onMinted` never
+  saw. ⇒ Refuse, and say a tab may have been created *(measured by the review)*.
 * ⛔ **If minting fails, REFUSE.** Never fall back to an existing tab. The error names the
   opt-in: `{targetId, owner: 'adopted'}`. A fallback to `existing[0]` would rebuild the
   incident on exactly the builds where minting is broken.
@@ -332,7 +346,11 @@ inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
   Chromium. That is how the linkedin browser was lost. `close()` instead navigates it to
   `about:blank` and leaves it open, and says so in its return value (`{closed: false,
   reason: 'last-page'}`). "Last" is read from the browser endpoint at close time, never
-  remembered.
+  remembered. Within one process, closes of base's own tabs are SERIALISED per browser
+  authority (the loopback spellings `localhost`, `127.0.0.1` and `[::1]` are one authority): two concurrent closes each read "2 pages" and both closed, so Chromium exited
+  *(measured by the review)*. ⚠ **Residual, which base cannot close:** a PERSON, or another
+  process, closing a tab in the same instant. Reading the count and closing are two calls,
+  and no CDP primitive makes them atomic.
 * ⛔ **No "is this tab blank, so reusable?" heuristic, ever.** Blankness is not ownership.
   Opera's new-tab page is `chrome://startpage`, not `chrome://newtab`, so a human's start
   page would read as free. A URL describes what a tab shows, not whose it is.
@@ -351,6 +369,15 @@ inference would leave the hijack one copy-paste away *(`perplexity`'s review)*.
 * `navigate(base, url, opts)` passes `targetId` / `owner` / `ownedTargets` / `keep` / `close` /
   `onMinted` through. Unknown option keys are refused (the rule above), so a stale `reuse: true` is told
   so, never silently given a new tab.
+* ⛔ **Options that cannot be honoured TOGETHER are refused too**, before any contact. The
+  same rule as an unknown key: a combination base would resolve silently is one the caller
+  did not get.
+  * `keep: true` with `close: true`: they contradict each other.
+  * `close: true` with `owner: 'adopted'`: base never closes an adopted tab.
+  * `owner` without `targetId`: there is no tab for it to describe; a mint needs no owner.
+  * `onMinted` with `targetId`: nothing is minted, so the hook would never run.
+  * ⚠ Accepted as harmless: `keep` on a reuse (it stays open anyway) and `close: true` on a
+    mint (closing is already the default).
 
 **BREAKING.** A caller that relied on the default reusing the first tab now gets a new tab.
 Where reuse was meant, it must say whose tab it is. Lanes adopt this deliberately: it
@@ -384,6 +411,33 @@ every such call would otherwise open, and possibly leave, a blank tab.
    strictly BEFORE the first attach to that target.
 9. `{targetId}` naming an absent id, or a non-page target: refused, naming it.
    `openPage(base, {reuse: true})`: refused as an unknown option.
+
+**QA added after review, each with its control** (`test/cdp-open-page-own-tab.test.js`; the
+file holds 29 tests: these, arms 1–9, their controls, and extra variants of 7 and 8 —
+"last" read at close time, an owned reuse with `close: true`, an async `onMinted`):
+
+10. An ASYNC `ownedTargets.has()` (a Promise) is refused, also for an id it holds, and so is
+    a truthy non-boolean; the human tab's URL is unchanged. *Control:* the same ledger,
+    synchronous, drives its own tab and still refuses the human's.
+11. A LOST `createTarget` reply (no reply; dropped socket) is refused, naming that a tab may
+    exist; EXACTLY one tab was minted, and no `/json/new`. *Control:* an explicit CDP error
+    reply, and an unreachable browser endpoint, still fall back to `/json/new`.
+12. Two of our tabs closed CONCURRENTLY: one closed, one `'last-page'`, browser up.
+    *Controls:* sequential closes give the same; with a human tab, both of ours close.
+13. The same, through two spellings of one loopback authority (`127.0.0.1`, `localhost`):
+    still one `'last-page'`.
+14. A prerender (`page` + `subtype`) does not count as a second page: ours is `'last-page'`.
+    *Control:* plus a human tab, ours is closed.
+15. A prerender id is refused for reuse, naming the subtype. *Control:* the plain page
+    beside it is accepted.
+16. Our target, present but now carrying a `subtype`: `close()` returns `'not-a-tab'` and
+    sends nothing. *Control:* absent at close time → `{closed: true}`, nothing sent.
+17. The first ATTACH to a mint fails: the error names the id and its fate — closed (and no
+    longer in `ownedTargets`), kept open (`keep: true`, still reusable), or NOT closed
+    (`close-failed`, last page).
+18. `new CdpSession(url, {readOnly: true})`: a `TypeError` naming `readOnly`. *Control:*
+    `defaultTimeout`, `WebSocketImpl` and no options construct.
+19. Options that cannot be honoured together are refused before any contact.
 
 ## Security Considerations
 
