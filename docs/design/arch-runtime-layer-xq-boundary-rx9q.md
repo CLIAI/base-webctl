@@ -108,6 +108,21 @@ ownedForward(...)     -> a tunnel with a handle: started, reported, torn down by
 appVersion(...)       -> the existing schema-1 contract
 ```
 
+⛔ **Three seam rules from xq's landed work (2026-10-03):**
+
+* **Per-target config dir (X16):** `xq --config-dir <path>` is a ROOT option (before the
+  verb), resolved on the machine the command runs on (relative = that machine's home). A
+  target record that names a config dir gets `--config-dir` on **every** call to that target
+  — **including `capabilities --machine`**, or the pinned capabilities describe the DEFAULT
+  image scope, not the lane's. Base adds an `xq_config_dir` key to the target record
+  (closed key set, `validateTarget`) for this.
+* **Never send a flag the target xq does not list (`hasFlag`):** an older xq passes unknown
+  flags after the target THROUGH TO THE APP and exits 0 — an old checkout given
+  `--profile-dir` started chromium on the default profile. Capabilities list each verb's
+  `flags`; an xq without that field is too old to vouch for any flag (fail closed).
+* **"Restart needed" is exit 4 + `refused: "restart-needed"` (X17)** — routed to
+  `lifecycleGuard`, never acted on automatically.
+
 ⛔ **The seam keys on xq's `adapter`, using xq's own field names** — a field renamed to
 base's vocabulary is a copy that drifts (xq's lane). Base picks its CDP or BiDi backend
 from `adapter`.
@@ -138,7 +153,8 @@ design doc, before any lane writes firefox code.
 | X15 | `rm --purge` stops first and reports the removed path | lifecycle hygiene |
 | X16 | an explicit **`--config-dir <path relative to the TARGET's home>`**, carried by xq's own remote delegation — never the caller's environment forwarded implicitly | lanes keep PRIVATE images through a per-tool xq config on the browser host (`~/.config/<tool>/xq`); three lanes each hand-roll `ssh host 'XQ_CONFIG_DIR=… xq …'`, which ssh delegation cannot carry. A local env var naming a path on another machine is "assumed, not stated" (`nl0c`). Base's seam passes it from the target record; the lane wrappers retire |
 
-*Status (xq's lane, 2026-10-03): X1–X3 landed; X4 partly — `zone create --exist-ok` + `up
+*Status (xq's lane, 2026-10-03, updated): X1–X7, X16 and X17 LANDED; next X11 + X13 (login
+mode on xq). Earlier status: X1–X3 landed; X4 partly — `zone create --exist-ok` + `up
 --no-attach` = ensureApp, and `capabilities --machine` = the skew guard. The full remote
 proof is blocked on the browser host's own state (an outdated xq; no xq config, so the
 SHARED image — built before control labels existed — refuses `--control cdp`). Fixing the
