@@ -302,17 +302,40 @@ test('readCapabilities: a non-executable file ⇒ xq-failed, not absent', async 
   assert.equal(/** @type {any} */ (c).code, 'xq-failed');
 });
 
-test('readCapabilities: a hanging xq times out PROMPTLY ⇒ xq-failed (grandchild holding the pipe included)', async () => {
-  // `sleep` is a grandchild that keeps stdout open after sh is killed — the
-  // promise must not wait for the pipe to close.
-  const xqBin = stub('xq-hang', 'sleep 30');
+test('readCapabilities: a hanging xq times out PROMPTLY ⇒ xq-failed — and its GRANDCHILD is actually killed', async () => {
+  // A grandchild `sleep` keeps stdout open after sh is killed: the promise must not wait for
+  // the pipe, AND the process-group kill must reach it. (Review: replacing the group kill
+  // with a no-op left this test green and leaked a `sleep 30` — it only checked promptness.)
+  const pidFile = path.join(TMP, 'grandchild.pid');
+  const xqBin = stub('xq-hang', `sleep 30 &\necho $! > '${pidFile}'\nwait`);
   const t0 = Date.now();
-  const c = await readCapabilities({ xqBin, timeoutMs: 200 });
+  const c = await readCapabilities({ xqBin, timeoutMs: 300 });
   const took = Date.now() - t0;
   assert.equal(c.verdict, 'unknown');
   assert.equal(/** @type {any} */ (c).code, 'xq-failed');
-  assert.match(c.reason, /timed out after 200 ms/);
+  assert.match(c.reason, /timed out after 300 ms/);
   assert.ok(took < 5000, `must return promptly, took ${took} ms`);
+  const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
+  assert.ok(pid > 1, 'premise: the grandchild recorded its pid');
+  // the group kill is asynchronous: give the kernel a moment, then the pid must be gone
+  let alive = true;
+  for (let i = 0; i < 40 && alive; i++) {
+    try { process.kill(pid, 0); await new Promise((r) => setTimeout(r, 50)); } catch { alive = false; }
+  }
+  if (alive) { try { process.kill(pid, 'SIGKILL'); } catch {} } // never leak it, even on failure
+  assert.equal(alive, false, `the grandchild ${pid} survived the timeout — the process-group kill did not reach it`);
+});
+
+test('unknown keys on app / image / control objects are tolerated (additive), known ones still checked', () => {
+  const j = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
+  j.apps[0].future = { x: 1 };
+  j.apps[0].images[0].future = true;
+  const withControl = j.apps.flatMap((a) => a.images).find((im) => Array.isArray(im.control) && im.control.length);
+  if (withControl) withControl.control[0].future = 'y';
+  assert.equal(/** @type {any} */ (parseCapabilities(JSON.stringify(j))).verdict, 'ok');
+  // control: a malformed KNOWN field on the same objects is refused
+  j.verbs[0].schemas = 'x';
+  assert.equal(/** @type {any} */ (parseCapabilities(JSON.stringify(j))).verdict, 'unknown');
 });
 
 test('readCapabilities: spawn THROWING synchronously ⇒ xq-failed, never a throw', async () => {
