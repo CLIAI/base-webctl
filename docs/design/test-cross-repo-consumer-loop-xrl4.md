@@ -3,7 +3,7 @@ id: xrl4
 title: "Cross-Repo Consumer Test Loop & test-against-base Contract"
 category: test
 created: "2026-06-22"
-updated: "2026-08-31"
+updated: "2026-10-03"
 status: draft
 tags: [cross-repo, ci, test-loop, contract, headless, exit-codes, jsonl, drift-canary, semver-gate, gate-validity, vacuous-green, mutation-testing]
 tech:
@@ -407,7 +407,7 @@ RECOVERABILITY, and the two come apart exactly where an argument is malformed.
 When the only options are a loud stop and an irreversible one, prefer the loud
 stop even where a silence argument otherwise holds.
 
-### ⛔ Mutation arms run with NO HOST NETWORK — sandboxes isolated everything but the network
+### ⛔ Mutation arms run with no host network AND no host unix sockets — sandboxes isolated everything but the network
 
 *INCIDENT, 2026-10-02 18:43 UTC (verified with docker inspect by `webctl:mgr`):* a lane's
 mutation control planted "the default port is a location". The arms then ATTACHED to the
@@ -422,10 +422,11 @@ network namespace (`unshare -rn`) works, and inside it `127.0.0.1:<live browser 
 *Network is unreachable* — a fresh namespace has its own loopback and none of the host's
 listeners. The harness provides:
 
-* **`isolated -- <cmd…>`** — runs the command in a private network namespace with its OWN
-  loopback brought up (local fakes and stubs still work; the host's listeners are absent).
-  Unavailable isolation **fails closed** (exit non-zero), never silently runs on the host.
-  Every runner-spawning mutation arm runs under it.
+* **`isolated [--keep <path>]… -- <cmd…>`** — runs the command in a private network
+  namespace with its OWN loopback brought up (local fakes and stubs still work; the host's
+  listeners are absent) **and with no host unix sockets** (below). Unavailable isolation
+  **fails closed** (exit non-zero), never silently runs on the host. Every runner-spawning
+  mutation arm runs under it.
 * **`sandbox-port`** — binds port 0, reads it, closes it, asserts nothing listens: a port the
   lane exports into its PORT variable so any port derived from it is dead.
 * **`guard-live-port <port> [--pin-verified]`** — defence in depth where isolation is not
@@ -435,6 +436,45 @@ listeners. The harness provides:
 * *QA:* a mutant that re-derives the default port, with a FAKE listener on the host default
   → under `isolated` the fake sees **zero** connections; *control:* the same mutant without
   `isolated` reaches the fake (proving the arm can fail).
+
+#### ⛔ A network namespace does not cover PATH unix sockets
+
+*Measured 2026-10-03 in the `webctl:base` lane:* inside `unshare -rn`,
+`curl --unix-socket /var/run/docker.sock http://x/version` was **answered by the daemon**.
+Path sockets are filesystem objects, not network: a mutant there can `docker stop` or
+`docker exec` the human's browser container, inject keys through the X display
+(`/tmp/.X11-unix`), use the ssh-agent and the session bus (`$XDG_RUNTIME_DIR` under `/run`).
+*(Abstract sockets, `@…`, ARE per-netns — `-n` already hides those.)*
+
+⇒ `isolated` is `unshare -rnm --propagation=private`, and before the command starts:
+
+* **Mask.** A fresh tmpfs (source `webctl-isolated`) over `/run` and `/tmp`, and over
+  `/var/run` when it is a real directory rather than a symlink into `/run`.
+* **Keep-binds — the /tmp trap.** The arm usually lives under `/tmp` itself (worktrees,
+  the `--scratch` gate's clones, fixtures). The cwd, base's repo root, an absolute argv[0],
+  node, a `$HOME` under `/tmp`, and every `--keep <path>` are rbound to staging points in
+  the NEW `/run` while the old `/tmp` is still visible, then moved back to the same absolute
+  paths over the new `/tmp`; the inner half then re-enters the cwd **by path** — an
+  inherited cwd still walks into the old `/tmp` through `..` (measured). A keep may not be
+  `/tmp` or `/run`, an ancestor of them, under `/run`, or contain the passwd home.
+  Anything else shared with the caller under `/tmp` (a marker file) needs a `--keep`.
+* **Assert the property, not the proxy.** The outer half lists the host's path sockets from
+  `/proc/self/net/unix`; inside, after masking, each one not under a `--keep` is
+  connect-tested. One that still answers (e.g. an ssh ControlMaster socket under home) gets
+  `/dev/null` bound over it and is tested again; any that still answers ⇒ refused. Refusals
+  carry **counts, never paths**. *Measured on a workstation:* 307 listed, 220 answer on the
+  host, **0** inside.
+* **Env scrub** on the fresh and the nested path: `DISPLAY`, `WAYLAND_DISPLAY`,
+  `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `XDG_RUNTIME_DIR` unset;
+  `TMPDIR=/tmp`, so an inherited value cannot name a directory the mask hid.
+* **Nesting.** "Already inside" now also needs `/proc/self/ns/mnt` ≠ `WEBCTL_HOST_MNTNS`
+  and our tmpfs **on top of** `/run` and `/tmp` in `/proc/self/mountinfo` — "a tmpfs at
+  /run" alone is a proxy, the host's already is one. The old net-only namespace is refused.
+
+*Limits.* A socket created on the host **after** start-up is not in the list (it is still
+masked if it lives under `/run` or `/tmp`). Sockets that are bound in other network
+namespaces are not in this netns's `/proc/net/unix`. `/proc/<host-pid>/root/…` was
+measured as permission-denied from inside the user namespace.
 
 ### ⛔ A contract MUST keep TWO directory variables
 
