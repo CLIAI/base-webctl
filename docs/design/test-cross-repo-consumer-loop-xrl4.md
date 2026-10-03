@@ -407,7 +407,7 @@ RECOVERABILITY, and the two come apart exactly where an argument is malformed.
 When the only options are a loud stop and an irreversible one, prefer the loud
 stop even where a silence argument otherwise holds.
 
-### ⛔ Mutation arms run with no host network AND no host unix sockets — sandboxes isolated everything but the network
+### ⛔ Mutation arms run with no host network, no host unix sockets and a read-only home — sandboxes isolated everything but the network
 
 *INCIDENT, 2026-10-02 18:43 UTC (verified with docker inspect by `webctl:mgr`):* a lane's
 mutation control planted "the default port is a location". The arms then ATTACHED to the
@@ -464,6 +464,21 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
   `/dev/null` bound over it and is tested again; any that still answers ⇒ refused. Refusals
   carry **counts, never paths**. *Measured on a workstation:* 307 listed, 220 answer on the
   host, **0** inside.
+* **No host processes.** *Measured by the final review:* `kill -0 <host pid>` succeeded from
+  inside and `/proc` listed every host process — a mutant of an ownership check (`ow9k`)
+  that kills by pid kills the human's live browser, without any network. ⇒
+  `unshare --pid --fork --mount-proc --kill-child`: inside, a host pid is `ESRCH` and absent
+  from `/proc`; the arm's own leftovers die with the namespace's pid 1. ⚠ `unshare --fork`
+  **blocks SIGTERM** in its own process until the child exits (measured), so the harness
+  forwards termination signals to unshare's CHILD — the inner half — not to unshare.
+* **No capabilities.** *Measured by the final review:* the command was namespace root with
+  **every** capability, so `umount -l /tmp` or unmounting a `/dev/null` cover re-exposed host
+  sockets (ENOENT/ECONNREFUSED → CONNECTED). ⇒ It runs under `setpriv --no-new-privs
+  --bounding-set=-all --inh-caps=-all --ambient-caps=-all`, on the nested path too, and the
+  drop is **checked** by reading the prefix's own `/proc/self/status` (all CapXxx 0,
+  NoNewPrivs 1); no `setpriv` ⇒ refused. A nested `unshare -rm` from inside cannot write its
+  uid_map, and even with capabilities the inherited mounts are **locked** (`umount -l /tmp`
+  → "not mounted") — measured, both.
 * **Env scrub** on the fresh and the nested path: `DISPLAY`, `WAYLAND_DISPLAY`,
   `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `XDG_RUNTIME_DIR` unset;
   `TMPDIR=/tmp`, so an inherited value cannot name a directory the mask hid.
@@ -475,6 +490,57 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
 masked if it lives under `/run` or `/tmp`). Sockets that are bound in other network
 namespaces are not in this netns's `/proc/net/unix`. `/proc/<host-pid>/root/…` was
 measured as permission-denied from inside the user namespace.
+
+#### ⛔ The home directory is READ-ONLY — no network is needed to corrupt a profile
+
+*Raised and measured by `webctl:mgr`, 2026-10-03:* with the network and the sockets gone,
+the real user's home was still **writable** from inside. It holds the signed-in browser
+**profiles** (`~/.cache/<tool>/…`), the family's config (`~/.config/webctl`) and `~/.ssh`.
+A mutant that restores a **literal** path — the same shape as the port incident — corrupts
+a live profile with no network at all.
+
+⇒ Inside `isolated`, the **passwd** home (`os.userInfo().homedir`, realpath'd — **not**
+`$HOME`, which the gate points at a throwaway directory) is read-only, and only these are
+re-opened writable on top of it:
+
+* the **cwd**, when it is under home;
+* every **`--keep`** under home.
+
+**Not** base's repo root, node or the command: the arm only *reads* them. ⛔ base's root
+in particular stays read-only (under `/tmp` as well): under the release gate **one** base
+checkout serves every consumer in turn, so a mutant writing into it would change what the
+**next** consumer is judged against — and it is the harness's own code. base's own suite
+runs with cwd = its root, which re-opens it through the cwd.
+
+* **The submount rule.** `mount -o remount,bind,ro` on an rbind hits only its **top**
+  mount. *Measured:* after a top-only remount, `touch` into a submount **succeeded**. ⇒ The
+  home is rbound onto itself, and it **and every reachable submount** (read from
+  `/proc/self/mountinfo`; stacked and shadowed mounts are unreachable and skipped) are
+  remounted read-only. A submount that cannot be remounted ⇒ **refused**.
+* **The order.** The keeps are staged **before** the read-only step, so the staged copies
+  keep the host's modes (submounts included); then the home goes read-only; then the keeps
+  are moved back **on top**, outer before inner. Re-binding a keep afterwards would copy the
+  read-only submounts beneath it.
+* **Read back, fail closed.** Before `started`, every reachable mount under the home outside
+  a writable keep must show `ro` in mountinfo; any gap ⇒ refused, with a **count**.
+* **What a keep may not do.** A cwd that **is or contains** the home is refused (it would
+  re-open all of it); a `--keep` that contains it is a usage error. Every keep is
+  **realpath'd first**, so a symlink to home is refused as containing it. A writable keep in
+  or containing `~/.ssh`, `~/.config`, `~/.cache` (and `.gnupg`, `.local`, `.mozilla`,
+  `.pki`) is **allowed — it is the caller's choice — but named** on stderr
+  (`isolated: note: --keep #1 is in ~/.cache — re-exposed WRITABLE …`). One of those
+  dot-dirs that **symlinks out of home** is protected at its real path as well.
+* **Unix sockets are not covered by `ro`.** `connect(2)` on a socket in a read-only mount
+  still succeeds (the ro check is for regular files, directories and links). The residual
+  socket check above is what closes those.
+* **Nesting.** "Already inside" also needs each root recorded in `WEBCTL_RO_ROOTS` to answer
+  `access(W_OK)` with `EROFS` — so the previous `isolated` (every other fact satisfied, home
+  writable) is refused. The roots are recorded, not re-derived: inside the user namespace
+  we are uid 0, and the passwd lookup answers root's home.
+* **Callers' caches.** *Measured with npm 12:* `npm test` under a read-only home behaves
+  exactly as on the host (rc 0 / rc 1); npm only skips its debug logfile (`EROFS` on
+  `~/.npm/_logs`), printing *"Log files were not written …"* on error. No harness change
+  needed; a lane that wants those logs sets `npm_config_cache` to a directory under `/tmp`.
 
 ### ⛔ A contract MUST keep TWO directory variables
 

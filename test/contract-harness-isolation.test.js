@@ -403,11 +403,12 @@ const HOST_MNT = fs.readlinkSync('/proc/self/ns/mnt');
  * ⚠ The marker goes to STDOUT, not to a file: a prefix that masks /tmp would hide a
  * marker FILE from this test, and "no marker" would then pass whether or not it ran.
  * @param {string} recorded @param {string[]} [prefix] @param {string} [recordedMnt]
+ * @param {Record<string,string>} [extraEnv]
  */
-async function nestedAttempt(recorded, prefix = [], recordedMnt) {
+async function nestedAttempt(recorded, prefix = [], recordedMnt, extraEnv = {}) {
   const argv = [...prefix, process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
     'console.log("RAN-" + "MARKER")'];
-  const env = cleanEnv({ WEBCTL_HOST_NETNS: recorded, ...(recordedMnt ? { WEBCTL_HOST_MNTNS: recordedMnt } : {}) });
+  const env = cleanEnv({ WEBCTL_HOST_NETNS: recorded, ...(recordedMnt ? { WEBCTL_HOST_MNTNS: recordedMnt } : {}), ...extraEnv });
   if (!recordedMnt) delete env.WEBCTL_HOST_MNTNS;
   const r = /** @type {{status:number, stdout:string, stderr:string}} */ (await new Promise((resolve) => {
     const c = spawn(argv[0], argv.slice(1), { env });
@@ -751,6 +752,503 @@ test('⛔ a cwd that IS /tmp → FAIL, not run (re-exposing it would undo the ma
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stderr, /NOT RUN: the working directory is \/tmp itself, which is masked/);
   assert.doesNotMatch(r.stdout, /RAN-MARKER/);
+});
+
+// ── the home directory is READ-ONLY (profiles, ~/.config, ~/.ssh) ────────────
+//
+// ⛔ A mutant restoring a LITERAL path corrupts a signed-in browser profile under
+// ~/.cache with no network at all. ⇒ `isolated` makes the PASSWD home read-only, with
+// every submount, and re-opens only the cwd and each `--keep` writable.
+//
+// ⚠ These arms must not write into the real home: the arm tries to create a NEW, uniquely
+// named file (EROFS inside = never created) and deletes it in `finally` should the arm
+// ever unexpectedly succeed; the controls use a throwaway dir they create and remove.
+
+const PW_HOME = fs.realpathSync(os.userInfo().homedir);
+/** A name that cannot collide with a real file. */
+const probeName = () => `.webctl-ro-probe-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+/** Prints `WRITE <ok|errno>` for an exclusive create of argv[1]. */
+const TRY_CREATE = `
+try { require('fs').writeFileSync(process.argv[1], 'x', { flag: 'wx' }); console.log('WRITE ok'); }
+catch (e) { console.log('WRITE ' + e.code); }`;
+/** @param {string} out */
+const writeOf = (out) => (out.match(/WRITE (\S+)/) || [])[1] || `none in: ${out}`;
+/** A throwaway dir directly under the passwd home — the controls' ONLY footprint there. */
+const homeTmpdir = () => fs.mkdtempSync(path.join(PW_HOME, '.webctl-iso-test-'));
+
+test('⭐ ARM: creating a new file directly under the passwd home → EROFS inside; it does NOT exist on the host', needsIsolation, async () => {
+  const target = path.join(PW_HOME, probeName());
+  try {
+    const r = await run(['isolated', '--', process.execPath, '-e', TRY_CREATE, target]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(writeOf(r.stdout), 'EROFS', 'the home directory is writable inside `isolated`');
+    assert.equal(fs.existsSync(target), false, 'the file reached the real home directory');
+  } finally { fs.rmSync(target, { force: true }); }
+});
+
+test('⭐ CONTROL: the same create WITHOUT `isolated` succeeds (the arm can fail) — into a throwaway dir, removed', async () => {
+  const dir = homeTmpdir();
+  const target = path.join(dir, probeName());
+  try {
+    const r = await runRaw([process.execPath, '-e', TRY_CREATE, target]);
+    assert.equal(writeOf(r.stdout), 'ok');
+    assert.equal(fs.existsSync(target), true);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ CONTROL: a `--keep` dir under home is WRITABLE inside, and the write lands on the host', needsIsolation, async () => {
+  const dir = homeTmpdir();
+  const target = path.join(dir, 'written-inside.txt');
+  try {
+    const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e', TRY_CREATE, target]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(writeOf(r.stdout), 'ok', 'a --keep under home was not re-opened writable');
+    assert.equal(fs.readFileSync(target, 'utf8'), 'x', 'the write did not reach the host (a copy, not a bind?)');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ a cwd under home is writable; `..` out of it is EROFS — the cwd is re-entered BY PATH', needsIsolation, async () => {
+  // ⚠ The inherited cwd is a reference into the OLD, writable home mount: without the
+  // re-chdir, `../x` resolves through it and lands on the writable tree.
+  // ⛔ The cwd is TWO levels below home. From a DIRECT child, `..` is the home dentry —
+  // now a mount point — and the walk crosses INTO the new ro mount, which hid a missing
+  // re-chdir (measured: the mutation SURVIVED; the same trap the /tmp keep-bind test hit).
+  // One level deeper, `..` is an ordinary directory of the OLD mount. It is the throwaway
+  // dir, so even a failing arm writes nowhere but there.
+  const dir = homeTmpdir();
+  const cwd = path.join(dir, 'cwd');
+  fs.mkdirSync(cwd);
+  const name = probeName();
+  try {
+    const r = await run(['isolated', '--', process.execPath, '-e',
+      `${TRY_CREATE}; try { require('fs').writeFileSync(process.argv[2], 'x', { flag: 'wx' }); console.log('UP ok'); } catch (e) { console.log('UP ' + e.code); }`,
+      'in-cwd.txt', path.join('..', name)], {}, process.execPath, cwd);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(writeOf(r.stdout), 'ok', 'the cwd under home is not writable');
+    assert.equal(fs.readFileSync(path.join(cwd, 'in-cwd.txt'), 'utf8'), 'x');
+    assert.match(r.stdout, /^UP EROFS$/m, 'a relative path out of the cwd reached the writable tree');
+    assert.equal(fs.existsSync(path.join(dir, name)), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ base\'s repo root is READ-ONLY unless it is the cwd (the gate shares it across consumers)', needsIsolation, async () => {
+  const cwd = tmpdir();
+  const name = probeName();
+  const target = path.join(ROOT, name);
+  try {
+    const ro = await run(['isolated', '--', process.execPath, '-e', TRY_CREATE, target], {}, process.execPath, cwd);
+    assert.equal(ro.status, 0, ro.stdout + ro.stderr);
+    assert.equal(writeOf(ro.stdout), 'EROFS', 'a mutant can write into base\'s tree');
+    assert.equal(fs.existsSync(target), false);
+    // CONTROL: cwd = base's root (base's own suite) → writable through the cwd
+    const rw = await run(['isolated', '--', process.execPath, '-e', TRY_CREATE, target], {}, process.execPath, ROOT);
+    assert.equal(writeOf(rw.stdout), 'ok', rw.stdout + rw.stderr);
+    assert.equal(fs.existsSync(target), true);
+  } finally { fs.rmSync(target, { force: true }); fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test('⛔ a cwd that IS (or contains) the home directory → FAIL, not run (it would re-open all of it)', async () => {
+  for (const cwd of [PW_HOME, '/']) {
+    const r = await run(['isolated', '--', process.execPath, '-e', 'console.log("RAN-" + "MARKER")'], {}, process.execPath, cwd);
+    assert.equal(r.status, 1, `cwd ${cwd === PW_HOME ? '<HOME>' : cwd}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /NOT RUN: the working directory contains the home directory, which isolation makes READ-ONLY/);
+    assert.doesNotMatch(r.stdout, /RAN-MARKER/);
+  }
+});
+
+test('⛔ a `--keep` SYMLINK to the home directory is realpath\'d → refused as containing it (usage 3)', async () => {
+  const dir = tmpdir();
+  const link = path.join(dir, 'innocent');
+  fs.symlinkSync(PW_HOME, link);
+  try {
+    const r = await run(['isolated', '--keep', link, '--', process.execPath, '-e', 'console.log("RAN-" + "MARKER")']);
+    assert.equal(r.status, 3, r.stdout + r.stderr);
+    assert.match(r.stderr, /--keep #1 contains the home directory/);
+    assert.doesNotMatch(r.stdout, /RAN-MARKER/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a `--keep` inside ~/.cache is ALLOWED but NAMED on stderr (the caller\'s choice, made visible)', needsIsolation, async (t) => {
+  const cache = path.join(PW_HOME, '.cache');
+  if (!fs.existsSync(cache)) { t.skip('SKIP (host): no ~/.cache here'); return; }
+  const dir = fs.mkdtempSync(path.join(cache, '.webctl-iso-test-'));
+  try {
+    const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e', TRY_CREATE, path.join(dir, 'f')]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stderr, /isolated: note: --keep #1 is in ~\/\.cache — re-exposed WRITABLE/);
+    assert.equal(writeOf(r.stdout), 'ok');
+    // CONTROL: an unremarkable keep gets no note
+    const plain = tmpdir();
+    try {
+      const q = await run(['isolated', '--keep', plain, '--', 'true']);
+      assert.equal(q.status, 0, q.stderr);
+      assert.doesNotMatch(q.stderr, /note:/);
+    } finally { fs.rmSync(plain, { recursive: true, force: true }); }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── submounts: a ro remount hits only the TOP mount ──────────────────────────
+
+/**
+ * Run `inner` (sh) with a tmpfs SUBMOUNT at <dir>/sub that exists only in an OUTER mount
+ * namespace — so nothing written to it ever reaches the disk — and as the caller's own
+ * uid there (a second userns maps 0 back), so the passwd lookup still names the real home.
+ * @param {string} dir @param {string} inner
+ */
+function withHomeSubmount(dir, inner) {
+  return runRaw(['unshare', '-rm', '--propagation=private', 'sh', '-c',
+    'mount -t tmpfs webctl-test-sub "$0/sub" && exec unshare --map-user="$1" --map-group="$2" sh -c "$3" "$0"',
+    dir, String(process.getuid?.()), String(process.getgid?.()), inner]);
+}
+const SUBMOUNT_UNAVAILABLE = NO_ISOLATION || (() => {
+  const r = spawnSync('unshare', ['-r', 'unshare', `--map-user=${process.getuid?.()}`, 'true'], { encoding: 'utf8' });
+  return r.status === 0 ? '' : `nested userns with --map-user unavailable: ${(r.stderr || '').trim()}`;
+})();
+const needsSubmount = SUBMOUNT_UNAVAILABLE ? { skip: `SKIP (submount probe): ${SUBMOUNT_UNAVAILABLE}` } : {};
+
+test('⭐ CONTROL: a submount under home is WRITABLE without `isolated` (in a throwaway outer namespace)', needsSubmount, async () => {
+  const dir = homeTmpdir();
+  fs.mkdirSync(path.join(dir, 'sub'));
+  try {
+    const r = await withHomeSubmount(dir, 'touch "$0/sub/f" && echo WRITE ok');
+    assert.equal(writeOf(r.stdout), 'ok', r.stdout + r.stderr);
+    assert.deepEqual(fs.readdirSync(path.join(dir, 'sub')), [], 'the tmpfs submount leaked onto the disk');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ ARM: that submount under home is EROFS inside `isolated` — every submount is remounted, not just the top', needsSubmount, async () => {
+  const dir = homeTmpdir();
+  fs.mkdirSync(path.join(dir, 'sub'));
+  // readable inside (home is ro, not hidden); argv[2], since argv[1] is the script itself
+  fs.writeFileSync(path.join(dir, 'try.cjs'), TRY_CREATE.replace('process.argv[1]', 'process.argv[2]'));
+  try {
+    const r = await withHomeSubmount(dir,
+      `"${process.execPath}" "${TOOL}" isolated -- "${process.execPath}" "$0/try.cjs" "$0/sub/f"`);
+    assert.equal(writeOf(r.stdout), 'EROFS', `a submount under home stayed writable:\n${r.stdout}${r.stderr}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── the submount LOGIC, from an explicit mountinfo (no host dependency) ──────
+
+const { parseMountinfo, reachableMountsUnder, readOnlyGaps } = await import(pathToFileURL(TOOL).href);
+
+/** One mountinfo line. @param {number} id @param {number} parent @param {string} at @param {string} [o] */
+const mi = (id, parent, at, o = 'rw,relatime') => `${id} ${parent} 0:${id} / ${at} ${o} shared:1 - tmpfs src rw`;
+const MOUNTINFO = [
+  mi(1, 0, '/'),
+  mi(30, 1, '/home'),
+  mi(50, 30, '/home/u/data'),           // the ORIGINAL submount, under the bind: unreachable
+  mi(100, 30, '/home/u'),               // our rbind of the home onto itself
+  mi(101, 100, '/home/u/data'),         // its copy of the submount
+  mi(102, 101, '/home/u/data/deep'),    // a submount of a submount
+  mi(103, 100, '/home/u/with\\040space'), // octal-escaped in mountinfo
+  mi(104, 100, '/home/u/stack'),        // a stack: 105 on top of 104 at the same path
+  mi(105, 104, '/home/u/stack'),
+  mi(106, 100, '/home/u/a/b'),          // shadowed by 107, mounted later on its ancestor
+  mi(107, 100, '/home/u/a'),
+  mi(108, 30, '/home/uu'),              // a PREFIX trap: not under /home/u
+].join('\n');
+
+test('⭐ logic: EVERY reachable submount under the home is selected for the ro remount (and nothing else)', () => {
+  const mounts = parseMountinfo(MOUNTINFO);
+  const got = reachableMountsUnder(mounts, '/home/u').map((/** @type {any} */ m) => m.id).sort((a, b) => a - b);
+  assert.deepEqual(got, ['100', '101', '102', '103', '105', '107'],
+    'submount, nested submount, escaped path, top of a stack, the shadowing sibling — and not 50/104/106/108');
+  assert.equal(mounts.find((/** @type {any} */ m) => m.id === '103').at, '/home/u/with space', 'octal escapes decoded');
+  assert.equal(reachableMountsUnder(mounts, '/home/v'), null, 'nothing mounted at a root → null, not []');
+});
+
+test('⭐ logic: readOnlyGaps names every writable reachable mount, exempts writable keeps, and passes an all-ro tree', () => {
+  const allRw = parseMountinfo(MOUNTINFO);
+  assert.equal(readOnlyGaps(allRw, ['/home/u'], []).length, 6);
+  // a writable keep exempts itself and everything beneath it — and nothing that merely shares a prefix
+  const keep = readOnlyGaps(allRw, ['/home/u'], ['/home/u/data']).map((/** @type {any} */ g) => g.at).sort();
+  assert.deepEqual(keep, ['/home/u', '/home/u/a', '/home/u/stack', '/home/u/with space']);
+  const ro = parseMountinfo(MOUNTINFO.replace(/ rw,relatime /g, ' ro,relatime '));
+  assert.deepEqual(readOnlyGaps(ro, ['/home/u'], []), []);
+  // CONTROL: only the TOP ro (what a single `remount,bind,ro` of the rbind does) → the submounts are gaps
+  const topOnly = parseMountinfo(MOUNTINFO.replace(`100 30 0:100 / /home/u rw,relatime`, `100 30 0:100 / /home/u ro,relatime`));
+  assert.equal(readOnlyGaps(topOnly, ['/home/u'], []).length, 5);
+  assert.deepEqual(readOnlyGaps(ro, ['/home/v'], []), [{ root: '/home/v', at: '' }], 'an unmounted root is a gap');
+});
+
+// ── nesting: the previous `isolated` (writable home) is not "inside" ─────────
+
+test('⛔ nesting: every OLD fact satisfied (netns, mntns, our tmpfs on /run+/tmp) but home WRITABLE → refused by the home fact alone', needsIsolation, async () => {
+  // What the PREVIOUS `isolated` produced: a full mask, no read-only home.
+  const stage = 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
+    + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
+    + ' && mount -t tmpfs webctl-isolated /tmp && mkdir -p "$0" && mount --move /run/k "$0" && exec "$@"';
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage, ROOT],
+    'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]' });
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /1 of 1 protected root\(s\) — the home directory — are WRITABLE here/);
+  assert.doesNotMatch(r.stderr, /EQUALS|uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|PID namespace/, 'only the home fact should refuse');
+  assert.equal(r.ran, false, 'a namespace with a writable home was accepted as `isolated`');
+});
+
+// ── the command runs with NO capabilities (it cannot undo the masks) ────────
+//
+// ⛔ Measured by the final review: inside `isolated` the command was namespace root with
+// CapEff 000001ffffffffff — `umount -l /tmp` and `umount <covered socket>` re-exposed host
+// sockets, and CAP_DAC_OVERRIDE read a chmod-000 file. ⇒ setpriv drops every set.
+// Each CONTROL runs the same act in a raw `unshare` WITH capabilities, to show it works
+// there — so the arm's refusal is the privilege drop, not some other accident.
+
+/** `unshare -rnm` + a fresh /tmp, NOT via the harness: namespace root with every cap. */
+const RAW_NS = ['unshare', '-rnm', '--propagation=private', 'sh', '-c'];
+const PRINT_CAPS = 'grep -E "^(CapEff|CapBnd|NoNewPrivs):" /proc/self/status | tr "\\t" " "';
+
+test('⭐ ARM: inside `isolated` CapEff, CapBnd are 0 and NoNewPrivs is 1', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'sh', '-c', PRINT_CAPS]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^CapEff: 0{16}$/m, `the command holds capabilities:\n${r.stdout}`);
+  assert.match(r.stdout, /^CapBnd: 0{16}$/m);
+  assert.match(r.stdout, /^NoNewPrivs: 1$/m);
+});
+
+test('⭐ CONTROL: a raw `unshare -rnm` gives the command EVERY capability (what the arm removes)', needsIsolation, async () => {
+  const r = await runRaw([...RAW_NS, PRINT_CAPS]);
+  assert.doesNotMatch(r.stdout, /^CapEff: 0{16}$/m, r.stdout + r.stderr);
+});
+
+test('⭐ ARM: `umount -l /tmp` FAILS inside, and a host socket under an unkept /tmp dir stays ENOENT', needsIsolation, async () => {
+  const dir = tmpdir();
+  const sock = path.join(dir, 's.sock');
+  const srv = await unixServer(sock);
+  try {
+    const r = await run(['isolated', '--', 'sh', '-c',
+      'umount -l /tmp; echo "UMOUNT $?"; "$0" -e "$1" "$2"', process.execPath, UNIX_CONNECT, sock]);
+    await settle();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.doesNotMatch(r.stdout, /^UMOUNT 0$/m, 'the command could unmount the /tmp mask');
+    assert.equal(outcomeOf(r.stdout), 'ENOENT');
+    assert.equal(srv.count(), 0, 'the host socket was reached from inside');
+  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ CONTROL: WITH capabilities, `umount -l /tmp` re-exposes that socket → CONNECTED (why the drop matters)', needsIsolation, async () => {
+  const dir = tmpdir();
+  const sock = path.join(dir, 's.sock');
+  const srv = await unixServer(sock);
+  try {
+    const r = await runRaw([...RAW_NS,
+      'mount -t tmpfs t /tmp && "$0" -e "$1" "$2" && umount -l /tmp && "$0" -e "$1" "$2"', process.execPath, UNIX_CONNECT, sock]);
+    await settle();
+    const outs = [...r.stdout.matchAll(/OUTCOME (\S+)/g)].map((m) => m[1]);
+    assert.deepEqual(outs, ['ENOENT', 'CONNECTED'], r.stdout + r.stderr);
+  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ ARM: `mount -o remount,bind,rw <home>` FAILS inside, and the home stays EROFS', needsIsolation, async () => {
+  // ⚠ `remount,BIND,rw` — the per-mount flag the ro step set. A plain `remount,rw` is a
+  // SUPERBLOCK remount, which needs init-namespace CAP_SYS_ADMIN and fails even WITH every
+  // namespace capability: an arm using it SURVIVED the no-setpriv mutation (measured).
+  const target = path.join(PW_HOME, probeName());
+  try {
+    const r = await run(['isolated', '--', 'sh', '-c',
+      'mount -o remount,bind,rw "$3"; echo "REMOUNT $?"; "$0" -e "$1" "$2"', process.execPath, TRY_CREATE, target, PW_HOME]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^REMOUNT [1-9]\d*$/m, 'the command could remount the home read-write');
+    assert.equal(writeOf(r.stdout), 'EROFS');
+    assert.equal(fs.existsSync(target), false);
+  } finally { fs.rmSync(target, { force: true }); }
+});
+
+test('⭐ CONTROL: WITH capabilities, a ro bind of the home CAN be remounted rw (nothing is written)', needsIsolation, async () => {
+  const r = await runRaw([...RAW_NS,
+    'mount --rbind "$0" "$0" && mount -o remount,bind,ro "$0" && mount -o remount,bind,rw "$0"; echo "REMOUNT $?"', PW_HOME]);
+  assert.match(r.stdout, /^REMOUNT 0$/m, r.stdout + r.stderr);
+});
+
+test('⛔ a NESTED `unshare -rm` + `umount -l /tmp` inside still cannot reach the host socket (measured, not assumed)', needsIsolation, async () => {
+  // Inherited mounts are LOCKED in a child user namespace — and, measured here, a capless
+  // process cannot even write the child's uid_map. Either way: no route back to the host.
+  const dir = tmpdir();
+  const sock = path.join(dir, 's.sock');
+  const srv = await unixServer(sock);
+  try {
+    const r = await run(['isolated', '--', 'sh', '-c',
+      'unshare -rm sh -c \'umount -l /tmp; "$0" -e "$1" "$2"\' "$0" "$1" "$2"; echo "NESTED $?"; '
+      + 'unshare -Um sh -c \'umount -l /tmp; "$0" -e "$1" "$2"\' "$0" "$1" "$2"; echo "NESTED-U $?"',
+      process.execPath, UNIX_CONNECT, sock]);
+    await settle();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.doesNotMatch(r.stdout, /OUTCOME CONNECTED/, `a nested namespace re-exposed the host socket:\n${r.stdout}${r.stderr}`);
+    assert.equal(srv.count(), 0);
+  } finally { await srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ ARM: a chmod-000 file is NOT readable inside (no CAP_DAC_OVERRIDE: no false greens) — CONTROL: raw unshare reads it', needsIsolation, async () => {
+  const dir = tmpdir();
+  const f = path.join(dir, 'locked');
+  fs.writeFileSync(f, 'secret');
+  fs.chmodSync(f, 0o000);
+  const READ = `try { require('fs').readFileSync(process.argv[1]); console.log('READ ok'); } catch (e) { console.log('READ ' + e.code); }`;
+  try {
+    const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e', READ, f]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^READ EACCES$/m, 'a chmod-000 file was readable inside: a test asserting EACCES goes false-red only here');
+    const c = await runRaw(['unshare', '-r', process.execPath, '-e', READ, f]);
+    assert.match(c.stdout, /^READ ok$/m, `CONTROL: namespace root WITH caps should read it:\n${c.stdout}${c.stderr}`);
+  } finally { fs.chmodSync(f, 0o600); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: no `setpriv` → FAIL naming it, command NOT run (never with capabilities)', needsIsolation, async () => {
+  // ⚠ the PATH dir lives in a throwaway HOME dir: one under /tmp vanishes while /tmp is
+  // masked, and `mount` itself would go missing first (measured)
+  const dir = tmpdir();
+  const marker = path.join(dir, 'RAN');
+  const binHome = homeTmpdir();
+  const bin = path.join(binHome, 'bin');
+  fs.mkdirSync(bin);
+  const which = (/** @type {string} */ b) => spawnSync('sh', ['-c', `command -v ${b}`], { encoding: 'utf8' }).stdout.trim();
+  for (const b of ['unshare', 'mount', which('ip') ? 'ip' : 'ifconfig']) fs.symlinkSync(which(b), path.join(bin, b));
+  try {
+    const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e',
+      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: bin });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot drop capabilities: 'setpriv' not found/);
+    assert.equal(fs.existsSync(marker), false, 'the command ran with capabilities');
+  } finally { for (const d of [dir, binHome]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: a `setpriv` that does NOT drop (runs its argv as-is) → FAIL, command NOT run (the property is checked)', needsIsolation, async () => {
+  const dir = tmpdir();
+  const marker = path.join(dir, 'RAN');
+  const bin = path.join(dir, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'setpriv'), '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done; shift\nexec "$@"\n', { mode: 0o755 });
+  try {
+    const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e',
+      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: `${bin}:${process.env.PATH}` });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /after setpriv the command would still hold CapPrm, CapEff, CapBnd/);
+    assert.equal(fs.existsSync(marker), false, 'the command ran with capabilities');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── signals and exit codes reach through the namespaces ─────────────────────
+
+/**
+ * Wait for READY, SIGTERM the process, resolve with its exit code + stdout. The command
+ * gives up by itself after ~10 s, so a LOST signal ends as `TIMEOUT` rc 9 — never as an
+ * orphan looping forever. @param {string[]} argv
+ */
+function termAfterReady(argv) {
+  return /** @type {Promise<{status: number|null, signal: string|null, stdout: string}>} */ (new Promise((resolve) => {
+    const c = spawn(argv[0], argv.slice(1), { env: cleanEnv() });
+    let stdout = ''; let sent = false;
+    c.stdout.on('data', (d) => {
+      stdout += d;
+      if (!sent && /READY/.test(stdout)) { sent = true; c.kill('SIGTERM'); }
+    });
+    c.on('close', (status, signal) => resolve({ status, signal, stdout }));
+  }));
+}
+const TRAPPER = 'trap "echo GOT-TERM; exit 7" TERM; echo READY; i=0; '
+  + 'while [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; echo TIMEOUT; exit 9';
+
+test('⭐ SIGTERM to the harness reaches the command inside (its trap runs, its exit code comes back)', needsIsolation, async () => {
+  const r = await termAfterReady([process.execPath, TOOL, 'isolated', '--', 'sh', '-c', TRAPPER]);
+  assert.match(r.stdout, /GOT-TERM/, `the command never saw the SIGTERM:\n${r.stdout}`);
+  assert.equal(r.status, 7, r.stdout);
+});
+
+test('⭐ CONTROL: the same trapper WITHOUT `isolated` → GOT-TERM, rc 7', async () => {
+  const r = await termAfterReady(['sh', '-c', TRAPPER]);
+  assert.match(r.stdout, /GOT-TERM/);
+  assert.equal(r.status, 7);
+});
+
+test('isolated: a command killed by a signal → 128+signal (143 for SIGTERM)', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'sh', '-c', 'kill -TERM $$']);
+  assert.equal(r.status, 143, r.stdout + r.stderr);
+});
+
+// ── no host PROCESSES: a private PID namespace ───────────────────────────────
+//
+// ⛔ Measured by the final review: `kill -0 <host pid>` SUCCEEDED from inside (same kuid,
+// no PID namespace) and /proc listed every host process. A mutant of an ownership check
+// ("is this browser mine?", ow9k) that kills by pid would kill the human's live browser.
+// These arms only ever signal 0 at a `sleep` THIS test started.
+
+/** Prints `KILL0 <ok|errno>` for kill(argv[1], 0), and `PROC <yes|no>` for /proc/<pid>. */
+const KILL0 = `const p = Number(process.argv[1]);
+try { process.kill(p, 0); console.log('KILL0 ok'); } catch (e) { console.log('KILL0 ' + e.code); }
+console.log('PROC ' + (require('fs').existsSync('/proc/' + p) ? 'yes' : 'no'));`;
+
+test('⭐ ARM: a host process this test started → kill(pid, 0) is ESRCH inside, and /proc does not list it', needsIsolation, async () => {
+  const victim = spawn('sleep', ['30'], { stdio: 'ignore' });
+  try {
+    const r = await run(['isolated', '--', process.execPath, '-e', KILL0, String(victim.pid)]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^KILL0 ESRCH$/m, `a host process can be signalled from inside:\n${r.stdout}`);
+    assert.match(r.stdout, /^PROC no$/m, 'host processes are visible in /proc inside');
+    // CONTROL: on the host the same pid is alive and signalable — ESRCH above is the namespace
+    const c = await runRaw([process.execPath, '-e', KILL0, String(victim.pid)]);
+    assert.match(c.stdout, /^KILL0 ok$/m);
+    assert.match(c.stdout, /^PROC yes$/m);
+  } finally { victim.kill('SIGKILL'); }
+});
+
+test('⛔ nesting: every other fact satisfied (full mask, ro home) but the HOST PID namespace → refused by the pid fact alone', needsIsolation, async () => {
+  const stage = 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
+    + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
+    + ' && mount -t tmpfs webctl-isolated /tmp && mkdir -p "$0" && mount --move /run/k "$0"'
+    + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift && exec "$@"';
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage, ROOT, PW_HOME],
+    'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: fs.readlinkSync('/proc/self/ns/pid') });
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /the current PID namespace .* EQUALS the recorded host one/);
+  assert.doesNotMatch(r.stderr, /uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|WRITABLE here|mount namespace .* EQUALS/,
+    'only the pid fact should refuse');
+  assert.equal(r.ran, false, 'a namespace sharing the host PIDs was accepted as `isolated`');
+});
+
+// ── every refusal is a tagged report line (what the gate greps for) ──────────
+
+/** The release gate's own grep for an isolation refusal (test-all-consumers.sh). */
+const GATE_REFUSAL = /^(FAIL|NO VERDICT) +isolated: /m;
+
+test('⛔ every `isolated` USAGE refusal prints a `FAIL  isolated: NOT RUN (usage):` line + JSONL, and keeps exit 3', async () => {
+  const dir = tmpdir();
+  const link = path.join(dir, 'to-home');
+  fs.symlinkSync(PW_HOME, link);
+  const cases = /** @type {[string, string[]][]} */ ([
+    ['no `--`', ['isolated', 'true']],
+    ['no command', ['isolated', '--']],
+    ['an unknown option', ['isolated', '--bogus', '--', 'true']],
+    ['a missing keep', ['isolated', '--keep', path.join(dir, 'missing'), '--', 'true']],
+    ['a keep that is /tmp', ['isolated', '--keep', '/tmp', '--', 'true']],
+    ['a keep symlinked to the home', ['isolated', '--keep', link, '--', 'true']],
+    ...(fs.existsSync('/run/user') ? [/** @type {[string, string[]]} */ (['a keep beneath /run', ['isolated', '--keep', '/run/user', '--', 'true']])] : []),
+  ]);
+  try {
+    for (const [what, args] of cases) {
+      const r = await run(args);
+      assert.equal(r.status, 3, `${what}: ${r.stderr}`);
+      assert.match(r.stderr, GATE_REFUSAL, `${what}: the gate's grep would miss this refusal:\n${r.stderr}`);
+      assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN \(usage\): /m, what);
+      const rec = JSON.parse(r.stdout.trim().split('\n').pop() || '{}');
+      assert.equal(rec.check, 'isolated', what);
+      assert.equal(rec.result, 'fail', what);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ a NESTED usage refusal and the inner half called on the host are tagged too', needsIsolation, async () => {
+  const nested = await run(['isolated', '--', process.execPath, TOOL, 'isolated', '--keep', '/tmp', '--', 'true']);
+  assert.equal(nested.status, 3, nested.stdout + nested.stderr);
+  assert.match(nested.stderr, /^FAIL {2}isolated: NOT RUN \(usage\): --keep #1 is \/tmp/m);
+  const inner = await run(['__isolated-inner', 'net:[0]', '--', 'true']);
+  assert.equal(inner.status, 1);
+  assert.match(inner.stderr, /^FAIL {2}isolated: NOT RUN: /m, inner.stderr);
+});
+
+test('CONTROL: the gate\'s grep DOES miss the old untagged shape (so the arm above can fail)', () => {
+  assert.doesNotMatch('isolated: --keep #1 is beneath /run, where host sockets live\n', GATE_REFUSAL);
+  assert.match('FAIL  isolated: NOT RUN (usage): --keep #1 is beneath /run\n', GATE_REFUSAL);
 });
 
 // ── import guard ─────────────────────────────────────────────────────────────

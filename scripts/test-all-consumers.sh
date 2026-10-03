@@ -643,28 +643,29 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     #
     # ⭐ HOW "NOT RUN" IS TOLD FROM "RAN AND FAILED". `isolated` exits 1 when it
     # refuses AND propagates the contract's own exit code, so an exit status
-    # cannot separate them. The wrapper INSIDE the namespace writes a marker
-    # before it evals testCmd; no marker ⇒ the contract never started ⇒ a
-    # GATE-ENVIRONMENT fault, never a lane FAIL. There is no host-network
-    # fallback: refused isolation means the consumer is not run, full stop.
+    # cannot separate them. The wrapper INSIDE the namespace prints a line carrying
+    # a per-run NONCE before it evals testCmd; that line is captured in run_log.
+    # No line ⇒ the contract never started ⇒ a GATE-ENVIRONMENT fault, never a
+    # lane FAIL. There is no host-network fallback: refused isolation means the
+    # consumer is not run, full stop.
     #
-    # ⛔ `isolated` gives the arm a FRESH /tmp (no host unix sockets), so the
-    # marker, which lives in $SCRATCH_TMP and outside the cwd, would be written to
-    # the namespace's private /tmp and never seen here. Every consumer would then
-    # read as a GATE-ENVIRONMENT fault (measured). ⇒ --keep binds the scratch
-    # tree back. It is the gate's own throwaway tree, so exempting it from the
-    # host-socket check exposes nothing of the host.
-    started_file="$SCRATCH_TMP/contract-started"
-    rm -f "$started_file"
+    # ⛔ A LINE IN THE CAPTURED LOG, NOT A FILE. It was a marker file in
+    # $SCRATCH_TMP, which needed `--keep "$SCRATCH_TMP"` because `isolated` gives
+    # the arm a fresh /tmp. A contract running `rm -rf /tmp/*` then deleted the
+    # marker, and a contract that really ran was reported as a gate fault (final
+    # review). Output already written through tee cannot be taken back, and no
+    # keep is needed: the cwd and a $HOME under /tmp are kept by `isolated` itself.
+    started_nonce="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+    started_line="WEBCTL-GATE-CONTRACT-STARTED $started_nonce"
     # shellcheck disable=SC2016  # $1/$2 belong to the inner bash
     ( cd "$run_dir" \
         && export HOME="$run_home" \
         && WEBCTL_BASE_DIR="$run_base_dir" \
            WEBCTL_DECLARED_PIN="${declared_pin:-}" \
            WEBCTL_GATE_SWAPPED="${swapped_now:-0}" \
-           node "$BASE_ROOT/scripts/contract-harness.mjs" isolated --keep "$SCRATCH_TMP" -- \
-             bash -c 'm="$2"; c="$1"; set --; : > "$m" || exit 97; eval "$c"' \
-             webctl-gate-contract "$testCmd" "$started_file" ) 2>&1 | tee "$run_log" >&2
+           node "$BASE_ROOT/scripts/contract-harness.mjs" isolated -- \
+             bash -c 'l="$2"; c="$1"; set --; printf "%s\n" "$l" >&2; eval "$c"' \
+             webctl-gate-contract "$testCmd" "$started_line" ) 2>&1 | tee "$run_log" >&2
     rc=${PIPESTATUS[0]}
   else
     ( cd "$run_dir" \
@@ -676,7 +677,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   fi
   set -e
   isolation_refused=""
-  if [ "$SCRATCH" = "1" ] && [ ! -f "$started_file" ]; then
+  if [ "$SCRATCH" = "1" ] && ! grep -qxF "$started_line" "$run_log"; then
     # quote the verb's own reason (its human line), as the gate quotes consumers
     isolation_refused="$(grep -E '^(FAIL|NO VERDICT) +isolated: ' "$run_log" | tail -n 1 \
                            | sed -E 's/^(FAIL|NO VERDICT) +isolated: //' | cut -c1-400 || true)"
@@ -693,7 +694,8 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # faithfully. Takes the last contiguous run of non-blank lines, capped, so a
   # failing contract's stack trace cannot flood the summary either.
   reason="$(awk 'BEGIN{n=0} {if ($0 ~ /^[[:space:]]*$/) {n=0; next} lines[n++]=$0; if (n>3) {for(i=0;i<n-1;i++) lines[i]=lines[i+1]; n=3}}
-                 END{for(i=0;i<n;i++) printf "%s ", lines[i]}' "$run_log" \
+                 END{for(i=0;i<n;i++) printf "%s ", lines[i]}' \
+               < <(grep -v '^WEBCTL-GATE-CONTRACT-STARTED ' "$run_log" || true) \
              | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//' | cut -c1-300)"
 
   # ⛔ A GREEN EXIT IS NOT A GREEN RUN. node:test lets a describe() that throws while
