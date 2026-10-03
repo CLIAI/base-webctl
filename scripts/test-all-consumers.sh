@@ -168,7 +168,17 @@ scratch_end() {
 scratch_begin() {
   local live="$1" head="$2" sub="$3" dst got log
   SCRATCH_ERR=""
-  SCRATCH_TMP="$(mktemp -d "${TMPDIR:-/tmp}/webctl-gate-scratch-XXXXXX")"
+  # ⛔ NOT UNDER /tmp. Lanes now mask /tmp themselves inside their own contracts (a
+  # fresh tmpfs, for the same unix-socket reason `isolated` does). A clone under /tmp
+  # then VANISHED from inside the lane's own sandbox ("Cannot find module …/repo/…"),
+  # and a lane test asserting "my repo is outside /tmp" failed (measured on the second
+  # real scratch run, three lanes). The live trees these lanes normally run from are
+  # outside /tmp, so the clone goes where they are. Inside `isolated` it is the cwd, so
+  # it stays writable even under the read-only home.
+  #   WEBCTL_GATE_SCRATCH_DIR  where clones go (default ${XDG_CACHE_HOME:-~/.cache}/webctl-base/gate-scratch)
+  local scratch_root="${WEBCTL_GATE_SCRATCH_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/webctl-base/gate-scratch}"
+  mkdir -p "$scratch_root"
+  SCRATCH_TMP="$(mktemp -d "$scratch_root/webctl-gate-scratch-XXXXXX")"
   # Registered BEFORE anything is written into it, for the same reason the swap's
   # restore is: an EXIT trap alone does not run when the shell dies by a signal.
   trap 'scratch_end' EXIT
