@@ -714,7 +714,12 @@ function runIsolated(a) {
       `cannot read this process's namespaces (${errMsg(e)}), so isolation cannot be PROVEN; `
       + 'refusing to run the command on the host'));
   }
-  const prot = protectedRoots();
+  // ⇩ WHO: the real uid/gid and home — under an outer `unshare -r` getuid() is 0 (realIdentity)
+  const ident = realIdentity();
+  if (ident.refuse) {
+    return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${ident.refuse}. The command was NOT started.`, { command }));
+  }
+  const prot = protectedRoots(ident.home);
   if (prot.refuse) {
     return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${prot.refuse}. The command was NOT started.`, { command }));
   }
@@ -728,7 +733,7 @@ function runIsolated(a) {
     ...(path.isAbsolute(command[0]) ? [{ p: command[0], label: 'the command', rw: false }] : []),
     { p: process.execPath, label: 'node', rw: false },
     // a throwaway HOME under /tmp is the arm's own (the family's sandboxes isolate HOME)
-    ...(throwawayHome() ? [{ p: throwawayHome(), label: 'HOME', rw: true }] : []),
+    ...(throwawayHome(ident.home) ? [{ p: throwawayHome(ident.home), label: 'HOME', rw: true }] : []),
   ], prot);
   if (plan.usage) return Promise.resolve(usageRefusal(plan.usage, command));
   if (plan.refuse) {
@@ -742,8 +747,8 @@ function runIsolated(a) {
       + 'their masking cannot be PROVEN. The command was NOT started.', { command }));
   }
   for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
-  // ⇩ the REAL uid/gid, read HERE: inside, getuid() is 0. The command runs as them (privilegeDrop).
-  const ids = { uid: process.getuid?.() ?? -1, gid: process.getgid?.() ?? -1 };
+  // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
+  const ids = { uid: ident.uid, gid: ident.gid };
   const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots,
     exempt: plan.exempt, sockets, ids });
   return new Promise((resolve) => {
@@ -952,15 +957,16 @@ function maskedDirs() {
 /**
  * $HOME when it is strictly beneath /tmp (a sandbox's throwaway home), else ''. Never the
  * PASSWD home (or anything containing it), even under /tmp: that would re-open it writable.
+ * @param {string} pwHome the real user's passwd home (realIdentity)
  */
-function throwawayHome() {
+function throwawayHome(pwHome) {
   const h = process.env.HOME;
   if (!h) return '';
   try {
     const real = fs.realpathSync(h);
     const { tmp } = maskedDirs();
     let pw = '';
-    try { pw = fs.realpathSync(os.userInfo().homedir); } catch { /* none */ }
+    try { pw = fs.realpathSync(pwHome); } catch { /* none */ }
     if (pw && isWithin(pw, real)) return '';
     return real !== tmp && isWithin(real, tmp) ? real : '';
   } catch { return ''; }
@@ -970,18 +976,112 @@ function throwawayHome() {
 function isWithin(p, dir) { return p === dir || p.startsWith(dir === '/' ? '/' : `${dir}/`); }
 
 /**
+ * The id `id` of THIS user namespace is, one level up, in its PARENT — per /proc/self/{uid,gid}_map.
+ * `identity` when the map is the full identity map (the initial namespace, or one just like
+ * it); `outside` -1 when `id` is in no extent (unmapped) or the map is unreadable.
+ * @param {string} file @param {number} id @returns {{outside: number, identity: boolean}}
+ */
+function parentIdOf(file, id) {
+  let txt = '';
+  try { txt = fs.readFileSync(file, 'utf8'); } catch { return { outside: -1, identity: false }; }
+  const ext = txt.trim().split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter((e) => e.length === 3);
+  if (ext.length === 1 && ext[0][0] === 0 && ext[0][1] === 0 && ext[0][2] === 4294967295) return { outside: id, identity: true };
+  const hit = ext.find(([inside, , count]) => id >= inside && id < inside + count);
+  return { outside: hit ? hit[1] + (id - hit[0]) : -1, identity: false };
+}
+
+/**
+ * The passwd home of `uid`: `getent passwd <uid>` (NSS: LDAP/sssd/homed users too), else
+ * /etc/passwd parsed directly. '' when there is no entry. ⚠ Not os.userInfo(): under an outer
+ * `unshare -r` that answers for uid 0 — root's home.
+ * @param {number} uid @returns {string}
+ */
+function passwdHomeOf(uid) {
+  /** @param {string} l */
+  const homeOf = (l) => { const f = l.split(':'); return f.length >= 7 && f[2] === String(uid) ? f[5] : ''; };
+  const r = spawnSync('getent', ['passwd', String(uid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const viaNss = r.status === 0 ? homeOf(String(r.stdout).split('\n')[0]) : '';
+  if (viaNss) return viaNss;
+  try {
+    return fs.readFileSync('/etc/passwd', 'utf8').split('\n').map(homeOf).find(Boolean) || '';
+  } catch { return ''; }
+}
+
+/**
+ * WHO the arm runs on behalf of: the REAL uid/gid and their passwd home. Read on the host
+ * side, at entry.
+ *
+ * ⛔ UNDER AN OUTER `unshare -r` (lanes self-isolate with `unshare -rn` and may call
+ * `isolated` inside it) getuid() is 0 and os.userInfo() is ROOT: the "read-only home" was
+ * root's, and the REAL home stayed writable — measured by the final review, a file appeared
+ * in it. ⇒ In a user namespace that is not the identity map, two candidates are tried:
+ *   1. the OUTSIDE id of /proc/self/{uid,gid}_map (one level up) — the `unshare -r` case;
+ *   2. our own uid/gid — a namespace that maps the real uid NUMBER onto its parent's root
+ *      (`unshare --map-user=<uid>`, as `isolated`'s own child namespace does).
+ * A candidate is accepted only when its passwd home is OWNED BY US as the kernel shows it
+ * here (stat uid === getuid()): the same on-disk owner as this process. That is a kernel
+ * fact, not a guess about how the namespaces were stacked.
+ * ⛔ Nothing accepted → refuse, never a quiet no-op: an unmapped id; a stack of `unshare -r`
+ * (uid 0 mapped onto 0 — the real uid is further up and cannot be read from here); no
+ * passwd entry (nothing to protect would be a SILENT gap — refused, not noted); a home not
+ * owned by us or absent.
+ * ⚠ Refusals name no id and no path: they get pasted into a public repo's logs.
+ * @returns {{uid: number, gid: number, home: string, refuse: string}}
+ */
+function realIdentity() {
+  const none = (/** @type {string} */ refuse) => ({ uid: -1, gid: -1, home: '', refuse });
+  const uid = process.getuid?.() ?? -1;
+  const gid = process.getgid?.() ?? -1;
+  const u = parentIdOf('/proc/self/uid_map', uid);
+  const g = parentIdOf('/proc/self/gid_map', gid);
+  if (u.outside < 0 || g.outside < 0) {
+    return none('cannot resolve the real uid/gid: this process\'s ids are not mapped in /proc/self/uid_map or gid_map');
+  }
+  const noEntry = 'the real user has NO passwd entry, so there is no home directory to make read-only — '
+    + 'refusing rather than running with the home unprotected';
+  if (u.identity) {
+    let home = '';
+    try { home = os.userInfo().homedir; } catch { /* below */ }
+    if (!home) return none(noEntry);
+    try { return { uid, gid, home: fs.realpathSync(home), refuse: '' }; } catch {
+      return none('the real user\'s passwd home directory does not exist here, so it cannot be made read-only');
+    }
+  }
+  /** @type {{uid: number, gid: number}[]} */
+  const cands = [];
+  if (u.outside > 0) cands.push({ uid: u.outside, gid: g.outside });
+  if (uid > 0 && uid !== u.outside) cands.push({ uid, gid });
+  if (cands.length === 0) {
+    return none('cannot resolve the real uid: this user namespace maps uid 0 onto uid 0 of its PARENT (a stack '
+      + 'of `unshare -r`?) — the real uid is further up and cannot be read from here. Call `isolated` from the '
+      + 'host or from directly inside ONE `unshare -r`');
+  }
+  let entries = 0;
+  for (const c of cands) {
+    const home = passwdHomeOf(c.uid);
+    if (!home) continue;
+    entries++;
+    try {
+      if (fs.statSync(home).uid === uid) return { ...c, home: fs.realpathSync(home), refuse: '' };
+    } catch { /* absent: not accepted */ }
+  }
+  return none(entries === 0 ? noEntry
+    : 'cannot resolve the real user: no candidate uid\'s passwd home is owned by this process here, so it '
+      + 'is unknown whose home to make read-only');
+}
+
+/**
  * The directories `isolated` makes READ-ONLY: the PASSWD home (realpath), plus the real
  * path of every SENSITIVE_DOTDIRS entry that is a symlink OUT of home (a ~/.cache on a
  * bigger disk still holds the profiles). Roots under a masked dir are dropped — the mask
  * already hides them; nested roots collapse to the outer one.
  *
- * ⚠ Computed on the HOST side only: inside the user namespace we are uid 0, and
- * os.userInfo() there answers root's home, not the caller's.
+ * ⚠ Computed on the HOST side only, from realIdentity()'s home: inside the user namespace
+ * we are uid 0, and os.userInfo() there answers root's home, not the caller's.
+ * @param {string} home the real user's passwd home, realpath'd (realIdentity)
  * @returns {{home: string, roots: string[], sensitive: {name: string, real: string}[], refuse?: string}}
  */
-function protectedRoots() {
-  let home = '';
-  try { home = fs.realpathSync(os.userInfo().homedir); } catch { return { home, roots: [], sensitive: [] }; }
+function protectedRoots(home) {
   /** @type {{name: string, real: string}[]} */
   const sensitive = [];
   for (const d of SENSITIVE_DOTDIRS) {

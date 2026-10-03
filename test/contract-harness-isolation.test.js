@@ -1245,6 +1245,73 @@ test('⛔ fail closed: a NESTED call without the recorded real ids (WEBCTL_HOST_
   assert.match(r.stderr, /the real uid\/gid were not recorded at entry/);
 });
 
+// ── WHO the arm runs as, under an OUTER `unshare -r` ────────────────────────
+//
+// ⛔ Measured by the final review: lanes self-isolate with `unshare -rn` and may call
+// `isolated` inside it. There getuid() is 0 and os.userInfo() is ROOT, so the "read-only
+// home" was root's and a file appeared in the REAL home. ⇒ realIdentity(): the ids from the
+// OUTSIDE of /proc/self/{uid,gid}_map, the home from passwd for that uid.
+
+test('⭐ ARM: `isolated` inside `unshare -r` → a write into the REAL home is EROFS (absent on the host), uid is the real one, nesting still works — CONTROL: the same write without `isolated` lands', needsIsolation, async () => {
+  const dir = homeTmpdir(); // a throwaway dir under the real home — removed in finally
+  const target = path.join(dir, 'arm');
+  const ctl = path.join(dir, 'control');
+  try {
+    const r = await runRaw(['unshare', '-r', process.execPath, TOOL, 'isolated', '--', 'sh', '-c',
+      '"$0" -e "$1" "$2"; id -u; unshare -rn sh -c "(ip link set lo up 2>/dev/null || ifconfig lo up) && echo NESTED-RN-OK"',
+      process.execPath, TRY_CREATE, target], { cwd: ROOT });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(writeOf(r.stdout), 'EROFS', `a write into the real home was not EROFS under an outer unshare -r:\n${r.stderr}`);
+    assert.equal(fs.existsSync(target), false, 'the file appeared in the real home');
+    assert.ok(r.stdout.split('\n').includes(String(process.getuid?.())), 'the command does not run as the real uid');
+    assert.match(r.stdout, /^NESTED-RN-OK$/m, r.stderr);
+    const c = await runRaw(['unshare', '-r', process.execPath, '-e', TRY_CREATE, ctl]);
+    assert.equal(writeOf(c.stdout), 'ok', `CONTROL: inside the same unshare -r the write should land:\n${c.stderr}`);
+    assert.equal(fs.existsSync(ctl), true);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: inside a STACK of `unshare -r` (the real uid is two levels up) → FAIL, nothing run', needsIsolation, async () => {
+  const dir = tmpdir();
+  const marker = path.join(dir, 'RAN');
+  try {
+    const r = await runRaw(['unshare', '-r', 'unshare', '-r', process.execPath, TOOL, 'isolated', '--keep', dir, '--',
+      process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { cwd: ROOT });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot resolve the real uid: this user namespace maps uid 0 onto uid 0 of its PARENT/);
+    assert.equal(fs.existsSync(marker), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: the real uid has NO passwd entry → FAIL (the home cannot be protected), nothing run', needsIsolation, async (t) => {
+  // an empty file bound over /etc/passwd in a throwaway `unshare -rm`; skipped when NSS
+  // (LDAP, sssd…) still answers for the uid, since then there IS an entry
+  const dir = tmpdir();
+  const empty = path.join(dir, 'passwd');
+  fs.writeFileSync(empty, '');
+  const marker = path.join(dir, 'RAN');
+  try {
+    const r = await runRaw(['unshare', '-rm', '--propagation=private', 'sh', '-c',
+      'mount --bind "$0" /etc/passwd || exit 9; getent passwd "$1" >/dev/null && { echo NSS-STILL-ANSWERS; exit 0; }; shift; exec "$@"',
+      empty, String(process.getuid?.()), process.execPath, TOOL, 'isolated', '--keep', dir, '--',
+      process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { cwd: ROOT });
+    if (/NSS-STILL-ANSWERS/.test(r.stdout)) { t.skip('SKIP (host): NSS answers for this uid without /etc/passwd'); return; }
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: the real user has NO passwd entry/);
+    assert.equal(fs.existsSync(marker), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ ARM: the command cannot bind a port below 1024 (the netns belongs to the OUTER user namespace) — EACCES', needsIsolation, async (t) => {
+  const BIND = `const s = require('net').createServer().on('error', (e) => console.log('BIND ' + e.code))
+  .listen(Number(process.argv[1]), '127.0.0.1', () => { console.log('BIND ok'); s.close(); });`;
+  const r = await run(['isolated', '--', 'sh', '-c', 'cat /proc/sys/net/ipv4/ip_unprivileged_port_start; "$0" -e "$1" 80',
+    process.execPath, BIND]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  if (Number(r.stdout.split('\n')[0]) <= 80) { t.skip('SKIP (host): ip_unprivileged_port_start allows port 80 here'); return; }
+  assert.match(r.stdout, /^BIND EACCES$/m, r.stdout + r.stderr);
+});
+
 // ── signals and exit codes reach through the namespaces ─────────────────────
 
 /**
