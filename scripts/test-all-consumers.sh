@@ -31,14 +31,17 @@
 # --against-head --scratch   ⭐ THE RECOMMENDED PRE-RELEASE ARM. Each wired
 #                  consumer is CLONED at its committed HEAD into a throwaway dir,
 #                  base's candidate is cloned into the submodule path THERE, and
-#                  the contract runs in the clone with a throwaway HOME. The live
-#                  working tree is NEVER written. Uncommitted edits are NOT tested
-#                  — the gate says so per consumer — and a dirty tree no longer
-#                  forces a SKIP. Why: some live trees are what UNATTENDED TIMERS
-#                  run from, so an in-place swap let a timer firing inside the gate
-#                  window run an untested candidate.
+#                  the contract runs in the clone, NETWORK-ISOLATED (harness
+#                  `isolated`), with a throwaway HOME. The live tree is NEVER
+#                  written, and the gate re-checks it after each run. Uncommitted
+#                  TRACKED changes -> SKIP (the commit is not what runs). Isolation
+#                  unavailable -> GATE-ENVIRONMENT fault, consumer not run. Why:
+#                  some live trees are what UNATTENDED TIMERS run from, so an
+#                  in-place swap let a timer firing inside the gate window run an
+#                  untested candidate.
 #
-# Exit: 0 if no consumer FAILs (skips allowed); 1 if any consumer FAILs.
+# Exit: 0 if no consumer FAILs (skips allowed); 1 if any consumer FAILs, or (scratch)
+# a live tree changed, or a GATE-ENVIRONMENT fault left a consumer unrun.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,10 +56,14 @@ for arg in "$@"; do
   case "$arg" in
     --against-head) AGAINST_HEAD=1 ;;
     --scratch) SCRATCH=1 ;;
-    -h|--help) sed -n '2,41p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
+# Live-tree git reads in scratch mode must not take optional locks: a plain
+# `git status` rewrites .git/index (measured), and scratch promises no writes.
+LIVE_OPTIONAL_LOCKS=1
+[ "$SCRATCH" = "1" ] && LIVE_OPTIONAL_LOCKS=0
 if [ "$SCRATCH" = "1" ] && [ "$AGAINST_HEAD" != "1" ]; then
   # Own-pin mode reads each consumer's mounted vendor/; a scratch clone has none
   # to read without fetching it from the network. Refuse rather than guess.
@@ -209,7 +216,37 @@ scratch_begin() {
   return 0
 }
 
+# ⛔ THE GATE VERIFIES ITS OWN PROMISE. "Scratch never writes the live tree" is
+# asserted per consumer, not assumed: the fingerprint is taken before the clone is
+# built and again after it is removed, and any difference FAILs the run loudly.
+# Fields: HEAD, the submodule's HEAD, the index and the submodule's index (by
+# content hash), and the full `git status --porcelain` (untracked included).
+# All reads are GIT_OPTIONAL_LOCKS=0 — the fingerprint must not be the writer.
+# $1 live repo dir, $2 submodule path
+live_fingerprint() {
+  local r="$1" s="$1/$2" idx
+  export GIT_OPTIONAL_LOCKS=0
+  printf 'HEAD %s\n' "$(git -C "$r" rev-parse HEAD 2>/dev/null || echo none)"
+  idx="$(git -C "$r" rev-parse --path-format=absolute --git-path index 2>/dev/null || true)"
+  printf 'INDEX %s\n' "$( [ -f "$idx" ] && git hash-object --no-filters -- "$idx" || echo none)"
+  printf 'STATUS %s\n' "$(git -C "$r" status --porcelain 2>/dev/null | git hash-object --stdin)"
+  if [ -e "$s/.git" ]; then
+    printf 'SUBHEAD %s\n' "$(git -C "$s" rev-parse HEAD 2>/dev/null || echo none)"
+    idx="$(git -C "$s" rev-parse --path-format=absolute --git-path index 2>/dev/null || true)"
+    printf 'SUBINDEX %s\n' "$( [ -f "$idx" ] && git hash-object --no-filters -- "$idx" || echo none)"
+  else
+    printf 'SUBHEAD none\n'
+  fi
+  unset GIT_OPTIONAL_LOCKS
+}
+
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+# lszd `error` record — for what is NOT a consumer verdict (the gate's own faults):
+# $1 code, $2 consumer, $3 message
+error_envelope() {
+  printf '{"type":"error","ts":"%s","code":"%s","consumer":"%s","message":"%s"}\n' \
+    "$(ts)" "$1" "$2" "$(json_escape "$3")"
+}
 # emit a JSONL envelope: type, ts, consumer, suite, result
 # Minimal JSON string escaping for a reason carried into the envelope.
 json_escape() {
@@ -233,8 +270,8 @@ pass=0 fail=0 skip=0 stale=0
 probe_ok=0 probe_bad=0 probe_none=0
 declare -a probe_fails=()
 fails=()
-scratch_n=0
-declare -a untested_live=()
+scratch_n=0 live_same=0 breach=0 envfault=0
+declare -a breaches=() envfaults=()
 
 while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localDir; do
   [ -n "$name" ] || continue
@@ -297,16 +334,16 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   fi
 
   # ── SCRATCH MODE: judge the COMMITTED state; read the live tree, never write it ──
-  # What survives of the in-place checks when what runs is the HEAD commit:
-  #   * "submodule missing in working copy" -> is a gitlink DECLARED at HEAD?
-  #   * "dirty submodule pointer -> FAIL"   -> the live checkout no longer decides
-  #     what runs (the candidate replaces it), so a mispinned live tree is REPORTED,
-  #     loudly, but it cannot make this result describe an undeclared base. What
-  #     stays meaningful is the committed entry itself: it must be a gitlink. A
+  # The clone tests the HEAD COMMIT, so the result is only about the live tree
+  # when the two agree. How the in-place checks carry over:
+  #   * "submodule missing in working copy" -> is a gitlink DECLARED at HEAD? A
   #     path committed as a plain directory declares no pin at all -> FAIL.
-  #   * "dirty tree -> SKIP"                -> committed state cannot be dirty; the
-  #     uncommitted changes are counted and named as NOT tested instead.
-  live_head="" tested_note="" live_dirty=0
+  #   * "dirty submodule pointer -> FAIL"   -> unchanged, and still BEFORE the
+  #     dirty-tree skip: the live tree runs a base it does not declare.
+  #   * "dirty tree -> SKIP"                -> TRACKED changes only. With them the
+  #     committed HEAD would be tested, not what runs (what an unattended timer
+  #     executes). Untracked files are not part of either, so they do not count.
+  live_head="" tested_note=""
   if [ "$SCRATCH" = "1" ]; then
     live_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$repo_dir" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null || true)"
     if [ -z "$live_head" ]; then
@@ -329,21 +366,6 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
         echo "        A sibling cloning this commit gets no declared pin; the gate has nothing to swap."
       } >&2
       fail=$((fail + 1)); fails+=("$name"); continue
-    fi
-    live_dirty="$(GIT_OPTIONAL_LOCKS=0 git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-    live_ptr="$(GIT_OPTIONAL_LOCKS=0 git -C "$repo_dir" submodule status 2>/dev/null | grep -E '^[+U]' || true)"
-    if [ "${live_dirty:-0}" -gt 0 ]; then
-      tested_note="tested ${live_head:0:7} (live tree has $live_dirty uncommitted change(s) — NOT tested)"
-    else
-      tested_note="tested ${live_head:0:7} (live tree clean)"
-    fi
-    if [ -n "$live_ptr" ]; then
-      {
-        echo "NOTE  $name — the LIVE tree's submodule pointer is DIRTY (checkout != index):"
-        echo "        raw: $live_ptr"
-        echo "        Not what this run tests (the committed gitlink is), but whatever runs FROM"
-        echo "        that live tree runs an undeclared base. Fix: git -C $repo_dir submodule update --init --recursive"
-      } >&2
     fi
   fi
 
@@ -380,8 +402,8 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # handled above. Pattern positive-controlled against synthetic `+`/`U` lines
   # before being trusted, because a zero from a broken pattern is
   # indistinguishable from a zero from a clean tree.
-  dirty_ptr=""
-  [ "$SCRATCH" = "0" ] && dirty_ptr="$(git -C "$repo_dir" submodule status 2>/dev/null | grep -E '^[+U]' || true)"
+  # (scratch mode: GIT_OPTIONAL_LOCKS=0, so the read cannot refresh the index)
+  dirty_ptr="$(GIT_OPTIONAL_LOCKS="$LIVE_OPTIONAL_LOCKS" git -C "$repo_dir" submodule status 2>/dev/null | grep -E '^[+U]' || true)"
   if [ -n "$dirty_ptr" ]; then
     # Is this OUR OWN arm mid-swap? A live pid in the marker says a swap is in
     # progress; a dead one says it was abandoned, which is the actual incident.
@@ -416,6 +438,15 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # count, so the owning lane can see why it vanished from the gate rather than
   # discovering it as an absence. (This also subsumes the --against-head-only
   # refusal to move someone's submodule while they edit.)
+  if [ "$SCRATCH" = "1" ]; then
+    tracked="$(GIT_OPTIONAL_LOCKS=0 git -C "$repo_dir" status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "${tracked:-0}" -gt 0 ]; then
+      envelope "$name" "$tier" "skip" "live tree has $tracked uncommitted tracked change(s) — the committed HEAD would be tested, not what runs; commit or stash first"
+      echo "SKIP  $name ($tier) — live tree has $tracked uncommitted tracked change(s) — the committed HEAD would be tested, not what runs; commit or stash first ($repo_dir)" >&2
+      skip=$((skip + 1)); continue
+    fi
+    tested_note="tested ${live_head:0:7} (= the live HEAD; no uncommitted tracked changes)"
+  fi
   dirty_files=0
   [ "$SCRATCH" = "0" ] && dirty_files="$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
   if [ "${dirty_files:-0}" -gt 0 ]; then
@@ -437,6 +468,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   run_dir="$repo_dir"
   run_home=""
   if [ "$SCRATCH" = "1" ]; then
+    fp_before="$(live_fingerprint "$repo_dir" "$submodulePath")"
     if ! scratch_begin "$repo_dir" "$live_head" "$submodulePath"; then
       # ⇒ FAIL, not SKIP: a wired consumer the gate could not build is a consumer
       # it did not validate, and a skip never blocks.
@@ -584,14 +616,48 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   # layer handled the swap correctly; the unit suite had no way to know. ⇒ A test
   # should not have to re-derive "am I under a swap?" from the very comparison it is
   # testing; the gate knows, so the gate says. Same reason gate-probe needed it.
-  ( cd "$run_dir" \
-      && { [ -z "$run_home" ] || export HOME="$run_home"; } \
-      && WEBCTL_BASE_DIR="$run_base_dir" \
-         WEBCTL_DECLARED_PIN="${declared_pin:-}" \
-         WEBCTL_GATE_SWAPPED="${swapped_now:-0}" \
-         eval "$testCmd" ) 2>&1 | tee "$run_log" >&2
-  rc=${PIPESTATUS[0]}
+  if [ "$SCRATCH" = "1" ]; then
+    # ⛔ NETWORK-ISOLATED. Twice on 2026-10-03 a consumer's tests reached a live,
+    # signed-in browser on the host's loopback. The scratch run therefore goes
+    # through the harness's `isolated` verb: a private user+network namespace
+    # whose only interface is its own lo. argv-safe — testCmd travels as "$1" to
+    # a fixed wrapper, never spliced into a shell string.
+    #
+    # ⭐ HOW "NOT RUN" IS TOLD FROM "RAN AND FAILED". `isolated` exits 1 when it
+    # refuses AND propagates the contract's own exit code, so an exit status
+    # cannot separate them. The wrapper INSIDE the namespace writes a marker
+    # before it evals testCmd; no marker ⇒ the contract never started ⇒ a
+    # GATE-ENVIRONMENT fault, never a lane FAIL. There is no host-network
+    # fallback: refused isolation means the consumer is not run, full stop.
+    started_file="$SCRATCH_TMP/contract-started"
+    rm -f "$started_file"
+    # shellcheck disable=SC2016  # $1/$2 belong to the inner bash
+    ( cd "$run_dir" \
+        && export HOME="$run_home" \
+        && WEBCTL_BASE_DIR="$run_base_dir" \
+           WEBCTL_DECLARED_PIN="${declared_pin:-}" \
+           WEBCTL_GATE_SWAPPED="${swapped_now:-0}" \
+           node "$BASE_ROOT/scripts/contract-harness.mjs" isolated -- \
+             bash -c 'm="$2"; c="$1"; set --; : > "$m" || exit 97; eval "$c"' \
+             webctl-gate-contract "$testCmd" "$started_file" ) 2>&1 | tee "$run_log" >&2
+    rc=${PIPESTATUS[0]}
+  else
+    ( cd "$run_dir" \
+        && WEBCTL_BASE_DIR="$run_base_dir" \
+           WEBCTL_DECLARED_PIN="${declared_pin:-}" \
+           WEBCTL_GATE_SWAPPED="${swapped_now:-0}" \
+           eval "$testCmd" ) 2>&1 | tee "$run_log" >&2
+    rc=${PIPESTATUS[0]}
+  fi
   set -e
+  isolation_refused=""
+  if [ "$SCRATCH" = "1" ] && [ ! -f "$started_file" ]; then
+    # quote the verb's own reason (its human line), as the gate quotes consumers
+    isolation_refused="$(grep -E '^(FAIL|NO VERDICT) +isolated: ' "$run_log" | tail -n 1 \
+                           | sed -E 's/^(FAIL|NO VERDICT) +isolated: //' | cut -c1-400 || true)"
+    [ -n "$isolation_refused" ] \
+      || isolation_refused="the isolated wrapper exited $rc without starting the contract and stated no reason"
+  fi
 
   # The consumer's last word, used as the reason it declined a verdict.
   #
@@ -641,7 +707,36 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
   if [ "$SCRATCH" = "1" ]; then
     scratch_end
     scratch_n=$((scratch_n + 1))
-    if [ "${live_dirty:-0}" -gt 0 ]; then untested_live+=("$name ($live_dirty)"); fi
+    fp_after="$(live_fingerprint "$repo_dir" "$submodulePath")"
+    if [ "$fp_before" = "$fp_after" ]; then
+      live_same=$((live_same + 1))
+    else
+      # ⛔ The promise this mode exists to keep is broken, or a concurrent
+      # writer changed the tree during the window. The gate cannot tell those
+      # apart, so it does not guess: it BLOCKS and shows exactly what moved.
+      breach=$((breach + 1)); breaches+=("$name")
+      # ⚠ diff EXITS 1 when it finds a difference — under pipefail + set -e that
+      # killed the gate halfway through this very report. Hence `|| true`.
+      moved="$(diff <(printf '%s\n' "$fp_before") <(printf '%s\n' "$fp_after") | grep -E '^[<>]' || true)"
+      error_envelope "ELIVETREE" "$name" "live tree CHANGED during its scratch run: $(printf '%s' "$moved" | tr '\n' ';')"
+      {
+        echo "⛔ LIVE TREE CHANGED  $name — $repo_dir differs after its scratch run:"
+        printf '%s\n' "$moved" | sed 's/^/        /'
+        echo "        Scratch mode must never write a live tree. If another process changed it"
+        echo "        in the window this is a false alarm — but the gate cannot tell, so it BLOCKS."
+      } >&2
+    fi
+    if [ -n "$isolation_refused" ]; then
+      # Neither PASS, FAIL nor SKIP: the lane was not judged at all.
+      error_envelope "EGATEENV" "$name" "GATE-ENVIRONMENT: network isolation unavailable — contract NOT run: $isolation_refused"
+      {
+        echo "GATE-ENVIRONMENT  $name — NOT RUN: network isolation is unavailable on this gate host."
+        echo "        isolated said: $isolation_refused"
+        echo "        This is the GATE HOST's fault, not $name's. The gate never falls back to the host network."
+      } >&2
+      envfault=$((envfault + 1)); envfaults+=("$name")
+      continue
+    fi
   elif [ "$AGAINST_HEAD" = "1" ] && [ -n "$orig_sha" ]; then
     restore_submodule "$sub_abs" "$orig_sha" "$name"
   fi
@@ -668,11 +763,7 @@ done < <(node "$HERE/read-consumers.mjs" ${WEBCTL_CONSUMERS_FILE:+"$WEBCTL_CONSU
 
 echo "----- gate summary: pass=$pass skip=$skip fail=$fail -----" >&2
 if [ "$SCRATCH" = "1" ]; then
-  echo "----- scratch: $scratch_n consumer(s) run from a clone of their committed HEAD; no live tree was written -----" >&2
-  if [ "${#untested_live[@]}" -gt 0 ]; then
-    # Named, because "tested" is about a commit and these lanes have work past it.
-    echo "⚠ uncommitted live changes NOT tested: ${untested_live[*]}" >&2
-  fi
+  echo "----- scratch: $scratch_n consumer(s) cloned; live trees verified byte-identical=$live_same CHANGED=$breach; gate-environment faults=$envfault -----" >&2
 fi
 if [ "$stale" -gt 0 ]; then
   # Counted SEPARATELY. Folded into `skip` it is invisible, which is the whole
@@ -701,9 +792,22 @@ if [ "$probe_bad" -gt 0 ]; then
   echo "  This is not a consumer failure. Fix the harness before tagging." >&2
   exit 1
 fi
+blocked=0
+if [ "$breach" -gt 0 ]; then
+  echo "BLOCKED: the scratch run CHANGED the live tree of ${breaches[*]} — the one thing it promises not to do." >&2
+  blocked=1
+fi
+if [ "$envfault" -gt 0 ]; then
+  # ⇒ Blocks: a lane the gate could not run is a lane it did not validate. But it
+  # is named as the HOST's fault so nobody goes looking for a defect in the lane.
+  echo "BLOCKED: GATE-ENVIRONMENT — ${envfaults[*]} NOT RUN (network isolation unavailable on this host)." >&2
+  echo "  Not a lane failure. Fix the gate host (unshare / user namespaces) and re-run." >&2
+  blocked=1
+fi
 if [ "$fail" -gt 0 ]; then
   echo "BLOCKED: ${fails[*]} failed against this base." >&2
-  exit 1
+  blocked=1
 fi
+[ "$blocked" = "0" ] || exit 1
 echo "OK: no consumer FAILed (skips do not block)." >&2
 exit 0

@@ -24,6 +24,21 @@
     could not build is one it did not validate, and a skip never blocks.
   * In-place mode is deliberately untouched (no behaviour change without the
     flag); the scratch-only branches are guarded by `$SCRATCH`.
+  * ⛔ `testCmd` runs under `contract-harness.mjs isolated` (network namespace;
+    two incidents on 2026-10-03 of consumer tests reaching a live signed-in
+    browser). `isolated` exits 1 on refusal AND propagates the command's exit, so
+    the exit code cannot say "not run". The gate's fixed wrapper inside the
+    namespace writes `<scratch>/contract-started` before it evals `testCmd`; no
+    marker ⇒ never started ⇒ GATE-ENVIRONMENT fault (lszd `error`, `EGATEENV`),
+    counted apart from pass/skip/fail and blocking. No host fallback exists.
+  * The gate fingerprints each live tree before/after (HEAD, submodule HEAD, both
+    indexes, porcelain) and blocks on any change (`ELIVETREE`). It cannot tell its
+    own write from a concurrent writer's, so it blocks rather than guess.
+  * Tracked changes → SKIP (the committed HEAD would be tested, not what an
+    unattended timer runs). A dirty pointer stays FAIL and is checked FIRST, or
+    the SKIP would swallow it — same ordering rule as in place.
+  * `diff` exits 1 on a difference: under `pipefail` + `set -e` the breach report
+    once killed the gate mid-message — keep the `|| true`.
   * Nested submodules other than base are NOT initialised in the clone (that may
     need network). A contract depending on them fails in scratch — reported, and
     arguably correct; revisit if a consumer genuinely needs one.
