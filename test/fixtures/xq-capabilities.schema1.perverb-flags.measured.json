@@ -1,0 +1,331 @@
+{
+  "schema": 1,
+  "verbs": [
+    {
+      "verb": "zone create",
+      "json_schema": 1,
+      "schemas": [],
+      "flags": [
+        "--exist-ok",
+        "--json",
+        "--label",
+        "--netvm",
+        "--template"
+      ]
+    },
+    {
+      "verb": "zone start",
+      "json_schema": null,
+      "schemas": [],
+      "flags": []
+    },
+    {
+      "verb": "zone stop",
+      "json_schema": null,
+      "schemas": [],
+      "flags": []
+    },
+    {
+      "verb": "zone rm",
+      "json_schema": null,
+      "schemas": [],
+      "flags": [
+        "--purge"
+      ]
+    },
+    {
+      "verb": "zone ls",
+      "json_schema": null,
+      "schemas": [
+        1
+      ],
+      "flags": [
+        "--all-users",
+        "--json",
+        "--schema"
+      ]
+    },
+    {
+      "verb": "zone attach",
+      "json_schema": null,
+      "schemas": [],
+      "flags": [
+        "--detached",
+        "--readonly"
+      ]
+    },
+    {
+      "verb": "machine ls",
+      "json_schema": 1,
+      "schemas": [],
+      "flags": [
+        "--check",
+        "--json"
+      ]
+    },
+    {
+      "verb": "build template",
+      "json_schema": null,
+      "schemas": [],
+      "flags": [
+        "--no-cache",
+        "--private",
+        "--pull",
+        "--shared",
+        "--tag"
+      ]
+    },
+    {
+      "verb": "build app",
+      "json_schema": null,
+      "schemas": [],
+      "flags": [
+        "--no-cache",
+        "--private",
+        "--pull",
+        "--shared",
+        "--tag",
+        "--template-tag",
+        "--with-template"
+      ]
+    },
+    {
+      "verb": "app run",
+      "json_schema": 1,
+      "schemas": [],
+      "flags": [
+        "--control",
+        "--distro",
+        "--json",
+        "--mount-home",
+        "--profile-dir"
+      ]
+    },
+    {
+      "verb": "app stop",
+      "json_schema": null,
+      "schemas": [],
+      "flags": []
+    },
+    {
+      "verb": "app ls",
+      "json_schema": null,
+      "schemas": [],
+      "flags": [
+        "--all",
+        "--all-users",
+        "--available",
+        "--running"
+      ]
+    },
+    {
+      "verb": "app version",
+      "json_schema": 1,
+      "schemas": [],
+      "flags": [
+        "--candidate",
+        "--distro",
+        "--json"
+      ]
+    },
+    {
+      "verb": "app inspect",
+      "json_schema": 1,
+      "schemas": [],
+      "flags": [
+        "--argv",
+        "--json",
+        "--listeners"
+      ]
+    },
+    {
+      "verb": "app restart",
+      "json_schema": 1,
+      "schemas": [],
+      "flags": [
+        "--control",
+        "--json"
+      ]
+    },
+    {
+      "verb": "up",
+      "json_schema": 1,
+      "schemas": [],
+      "flags": [
+        "--control",
+        "--json",
+        "--mount-home",
+        "--no-attach",
+        "--profile-dir"
+      ]
+    },
+    {
+      "verb": "down",
+      "json_schema": null,
+      "schemas": [],
+      "flags": []
+    },
+    {
+      "verb": "view",
+      "json_schema": null,
+      "schemas": [],
+      "flags": []
+    },
+    {
+      "verb": "status",
+      "json_schema": null,
+      "schemas": [],
+      "flags": []
+    },
+    {
+      "verb": "wait-ready",
+      "json_schema": 1,
+      "schemas": [],
+      "flags": [
+        "--control",
+        "--json",
+        "--timeout"
+      ]
+    },
+    {
+      "verb": "forward",
+      "json_schema": 1,
+      "schemas": [],
+      "flags": [
+        "--control",
+        "--detach",
+        "--json",
+        "--list",
+        "--local-port",
+        "--stop"
+      ]
+    },
+    {
+      "verb": "capabilities",
+      "json_schema": 1,
+      "schemas": [],
+      "flags": [
+        "--json",
+        "--machine"
+      ]
+    }
+  ],
+  "docker": true,
+  "apps": [
+    {
+      "app": "chromium",
+      "images": [
+        {
+          "distro": "alpine",
+          "scope": "shared",
+          "image": "xq-app-chromium-alpine",
+          "built": false,
+          "control": null
+        },
+        {
+          "distro": "arch",
+          "scope": "shared",
+          "image": "xq-app-chromium-arch",
+          "built": false,
+          "control": null
+        },
+        {
+          "distro": "debian",
+          "scope": "shared",
+          "image": "xq-app-chromium-debian",
+          "built": true,
+          "control": [
+            {
+              "name": "cdp",
+              "kind": "tcp",
+              "adapter": "cdp"
+            }
+          ]
+        },
+        {
+          "distro": "ubuntu",
+          "scope": "shared",
+          "image": "xq-app-chromium-ubuntu",
+          "built": false,
+          "control": null
+        }
+      ]
+    },
+    {
+      "app": "firefox",
+      "images": [
+        {
+          "distro": "ubuntu",
+          "scope": "shared",
+          "image": "xq-app-firefox-ubuntu",
+          "built": true,
+          "control": [
+            {
+              "name": "bidi",
+              "kind": "tcp",
+              "adapter": "bidi"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "app": "opera",
+      "images": [
+        {
+          "distro": "debian",
+          "scope": "shared",
+          "image": "xq-app-opera-debian",
+          "built": true,
+          "control": [
+            {
+              "name": "cdp",
+              "kind": "tcp",
+              "adapter": "cdp"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "app": "prusaslicer",
+      "images": [
+        {
+          "distro": "debian",
+          "scope": "shared",
+          "image": "xq-app-prusaslicer-debian",
+          "built": true,
+          "control": []
+        }
+      ]
+    },
+    {
+      "app": "xcalc",
+      "images": [
+        {
+          "distro": "debian",
+          "scope": "shared",
+          "image": "xq-app-xcalc-debian",
+          "built": true,
+          "control": []
+        }
+      ]
+    },
+    {
+      "app": "xtest",
+      "images": [
+        {
+          "distro": "arch",
+          "scope": "shared",
+          "image": "xq-app-xtest-arch",
+          "built": true,
+          "control": []
+        }
+      ]
+    }
+  ],
+  "source": {
+    "commit": "8e7ea17",
+    "dirty": false
+  }
+}
