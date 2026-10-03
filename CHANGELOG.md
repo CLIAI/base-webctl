@@ -275,7 +275,9 @@ each other's signed-in browser. Inherited from the early xq the driver was adapt
   * The only network interface is its own `lo`, which is brought up.
   * There is a fresh tmpfs over `/run` and `/tmp`. The cwd, a `$HOME` under /tmp and
     `--keep <dir>` are bound back WRITABLE. Base's repo, node and the command are visible
-    READ-ONLY, so a mutant cannot change the base that the next consumer is judged against.
+    READ-ONLY when they live under /tmp or the home (as in the gate), so a mutant cannot
+    change the base that the next consumer is judged against. Elsewhere they keep their
+    normal permissions, and base's repo is writable when it is the cwd.
   * Host path sockets that are still reachable are masked.
   * The user's home directory is READ-ONLY, except the kept paths.
   * The command runs with NO capabilities (`setpriv`, no-new-privs; the drop is READ BACK from
@@ -355,6 +357,8 @@ while the live pair has the old ones) — `inspect().legacy` comes in the next r
     are absent from the host's `/proc/net/unix`;
   * sockets bound by a RELATIVE path, whose location cannot be known;
   * a masked socket the host unlinks and re-creates while the arm runs.
+  * sockets under an explicit `--keep` path: those paths are exempt from the check, by
+    design (the gate keeps only its own throwaway HOME).
 
   Paths under `/run` and `/tmp` are covered whatever their kind, because those trees are
   replaced, not checked. ⚠ Outside the home dir, `/run` and `/tmp`, the rest of the
@@ -362,7 +366,8 @@ while the live pair has the old ones) — `inspect().legacy` comes in the next r
 * The read-only "home" is the passwd home of the caller's uid. Under an outer `unshare -r`
   that is root's home, so the real one stays writable (measured), and with no passwd entry
   nothing is made read-only. Browser profiles kept outside the home dir are not covered,
-  unless reached through a dot-dir (`~/.cache`, `~/.config`, …) that symlinks out of it.
+  unless reached through a dot-dir (`~/.cache`, `~/.config`, …) that is ITSELF a symlink out
+  of it. A deeper symlink (`~/.cache/<tool>` pointing elsewhere) is not covered.
 * Without capabilities, a command under `isolated` cannot bind ports below 1024.
 * The gate's default and plain `--against-head` modes are NOT isolated and still swap in
   place; only `--scratch` gives both guarantees.
