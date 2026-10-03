@@ -546,14 +546,63 @@ const SCRUBBED_ENV = Object.freeze(['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK
  */
 const SENSITIVE_DOTDIRS = Object.freeze(['.ssh', '.gnupg', '.config', '.cache', '.local', '.mozilla', '.pki']);
 
+/** The termination signals the harness forwards. */
+const FORWARDED_SIGNALS = /** @type {NodeJS.Signals[]} */ (Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP']));
+
+/**
+ * @typedef {{last: () => NodeJS.Signals | null, remove: () => void}} Forwarder
+ * `last`: the most recent signal forwarded (null: none); `remove`: uninstall the handlers.
+ */
+
+/**
+ * Install `send` as the handler of every FORWARDED_SIGNALS entry, remembering the last one.
+ * @param {(s: NodeJS.Signals) => void} send @returns {Forwarder}
+ */
+function installForwarder(send) {
+  /** @type {NodeJS.Signals | null} */
+  let last = null;
+  /** @type {[NodeJS.Signals, () => void][]} */
+  const handlers = FORWARDED_SIGNALS.map((s) => [s, () => { last = s; send(s); }]);
+  for (const [s, h] of handlers) process.on(s, h);
+  return { last: () => last, remove: () => { for (const [s, h] of handlers) process.off(s, h); } };
+}
+
 /**
  * Forward termination signals to a child, so killing the harness kills the arm
  * rather than orphaning it. @param {import('node:child_process').ChildProcess} child
+ * @returns {Forwarder}
  */
 function forwardSignals(child) {
-  for (const s of /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM', 'SIGHUP'])) {
-    process.on(s, () => { try { child.kill(s); } catch { /* already gone */ } });
+  return installForwarder((s) => { try { child.kill(s); } catch { /* already gone */ } });
+}
+
+/**
+ * The exit code for a child that ended with (code, signal) — or, when it ended BY the signal
+ * we forwarded to it, DIE BY THAT SIGNAL OURSELVES.
+ *
+ * ⛔ Ctrl-C became a lane FAIL (measured by the final review): `isolated` caught SIGINT,
+ * forwarded it, then EXITED NORMALLY with 130. bash's wait-and-cooperative-exit rule reads a
+ * normal exit as "the child handled the INT", so the gate's INT trap never ran: it reported
+ * "FAIL … failed against this base" and went on to the next consumer.
+ * ⇒ When a signal was forwarded and the child ended by it — killed by it, or exit 128+n,
+ * which is how it arrives through unshare and the namespace's pid 1 — remove our handlers
+ * and re-raise it on ourselves. A command that HANDLED the signal and chose its own exit
+ * code (a trap's `exit 7`) still returns that code; an exit 130 with no signal forwarded
+ * stays an ordinary exit 130.
+ * ⚠ As pid 1 of the PID namespace (the inner half) a self-sent signal with no handler is
+ * IGNORED by the kernel; we then return 128+n, which unshare passes on as an exit code —
+ * and the outer half, which forwarded the same signal, re-raises it on the host.
+ * @param {Forwarder} fwd @param {number|null} code @param {NodeJS.Signals|null} signal
+ * @returns {number}
+ */
+function exitOrDieBy(fwd, code, signal) {
+  const rc = exitCodeOf(code, signal);
+  const sig = fwd.last();
+  fwd.remove();
+  if (sig && rc === 128 + (os.constants.signals[sig] || -999)) {
+    try { process.kill(process.pid, sig); } catch { /* fall through to the exit code */ }
   }
+  return rc;
 }
 
 /**
@@ -583,16 +632,14 @@ function childrenOf(pid) {
  * end. So the signal goes to unshare's CHILD, the inner half (pid 1 of the new namespace;
  * it installs handlers, which a namespace init needs to receive anything). No child yet ⇒
  * SIGKILL unshare, and `--kill-child` takes the namespace with it — nothing has started.
- * @param {import('node:child_process').ChildProcess} unshare
+ * @param {import('node:child_process').ChildProcess} unshare @returns {Forwarder}
  */
 function forwardSignalsPastUnshare(unshare) {
-  for (const s of /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM', 'SIGHUP'])) {
-    process.on(s, () => {
-      const kids = unshare.pid ? childrenOf(unshare.pid) : [];
-      if (kids.length === 0) { try { unshare.kill('SIGKILL'); } catch { /* gone */ } return; }
-      for (const k of kids) { try { process.kill(k, s); } catch { /* gone */ } }
-    });
-  }
+  return installForwarder((s) => {
+    const kids = unshare.pid ? childrenOf(unshare.pid) : [];
+    if (kids.length === 0) { try { unshare.kill('SIGKILL'); } catch { /* gone */ } return; }
+    for (const k of kids) { try { process.kill(k, s); } catch { /* gone */ } }
+  });
 }
 
 /** @param {number|null} code @param {NodeJS.Signals|null} signal */
@@ -768,7 +815,7 @@ function runIsolated(a) {
       resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
       return;
     }
-    forwardSignalsPastUnshare(child);
+    const fwd = forwardSignalsPastUnshare(child);
     const planPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[4]);
     planPipe?.on('error', () => { /* the inner side refused or never started */ });
     planPipe?.end(payload);
@@ -780,7 +827,11 @@ function runIsolated(a) {
     child.on('close', (code, signal) => {
       const started = /^started$/m.test(status);
       const fail = status.match(/^fail (.*)$/m);
-      if (started) { resolve(exitCodeOf(code, signal)); return; }
+      if (started) { resolve(exitOrDieBy(fwd, code, signal)); return; }
+      // signalled before the command started: die by it too (nothing ran, so no verdict)
+      const sig = fwd.last();
+      fwd.remove();
+      if (sig) { try { process.kill(process.pid, sig); } catch { /* report below */ } }
       const why = fail ? fail[1]
         : spawnErr ? `unshare could not be started (${spawnErr}) — is util-linux installed`
           : `unshare exited ${code ?? signal} before the isolated side reported in — unprivileged `
@@ -1596,11 +1647,11 @@ function runCommand(command, prefix = []) {
   const argv = [...prefix, ...command];
   return new Promise((resolve) => {
     const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', env });
-    forwardSignals(child);
+    const fwd = forwardSignals(child);
     child.on('error', (e) => {
       resolve(report('isolated', 127, `NOT RUN: cannot start '${argv[0]}': ${errMsg(e)}`));
     });
-    child.on('close', (code, signal) => resolve(exitCodeOf(code, signal)));
+    child.on('close', (code, signal) => resolve(exitOrDieBy(fwd, code, signal)));
   });
 }
 

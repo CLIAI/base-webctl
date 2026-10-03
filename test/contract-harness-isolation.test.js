@@ -1350,6 +1350,66 @@ test('isolated: a command killed by a signal → 128+signal (143 for SIGTERM)', 
   assert.equal(r.status, 143, r.stdout + r.stderr);
 });
 
+/**
+ * A parent BASH runs `shape` (which starts `isolated` in the foreground); once READY shows,
+ * INT goes to the whole process group (Ctrl-C). Resolves with how bash ended + stdout.
+ * @param {string} shape bash source; `H …` runs the harness, `$N`/`$T` are node and the harness path @param {boolean} sendInt
+ */
+function bashParent(shape, sendInt) {
+  return /** @type {Promise<{status: number|null, signal: string|null, stdout: string}>} */ (new Promise((resolve) => {
+    const c = spawn('bash', ['-c', `N="$0"; T="$1"; H() { "$N" "$T" "$@"; }; ${shape}`, process.execPath, TOOL],
+      { env: cleanEnv(), cwd: ROOT, detached: true });
+    let stdout = ''; let sent = false;
+    c.stdout.on('data', (d) => {
+      stdout += d;
+      if (sendInt && !sent && /READY/.test(stdout)) {
+        sent = true;
+        setTimeout(() => { try { process.kill(-(c.pid ?? 0), 'SIGINT'); } catch { /* gone */ } }, 300);
+      }
+    });
+    c.on('close', (status, signal) => resolve({ status, signal, stdout }));
+  }));
+}
+const SLEEPER = `sh -c 'echo READY; exec sleep 20'`;
+
+// ⛔ Ctrl-C: `isolated` forwarded SIGINT and then EXITED NORMALLY with 130. bash's
+// wait-and-cooperative-exit rule reads that as "the child HANDLED the INT", so a parent
+// script WITHOUT an INT trap carried on to its next command (measured: `AFTER rc=130`).
+// ⚠ A parent WITH an INT trap runs it either way on bash 5.3 (measured) — that arm is not
+// the discriminating one. And a gate started as an async job (`setsid bash … &` from a
+// script) has INT IGNORED from entry: its trap cannot even be installed.
+
+test('⭐ Ctrl-C: INT to the group → `isolated` DIES BY SIGINT, so a parent bash without a trap stops too (no next command)', needsIsolation, async () => {
+  const r = await bashParent(`H isolated -- ${SLEEPER}; echo "AFTER rc=$?"`, true);
+  assert.doesNotMatch(r.stdout, /AFTER rc=/, `the parent carried on as if the command had merely exited:\n${r.stdout}`);
+  assert.equal(r.signal, 'SIGINT', `the parent did not die by SIGINT (status ${r.status})`);
+});
+
+test('⭐ Ctrl-C, the GATE\'s shape `( isolated … ) 2>&1 | tee` → the parent stops by SIGINT', needsIsolation, async () => {
+  const r = await bashParent(`( H isolated -- ${SLEEPER} ) 2>&1 | cat; echo "AFTER rc=\${PIPESTATUS[0]}"`, true);
+  assert.doesNotMatch(r.stdout, /AFTER rc=/, r.stdout);
+  assert.equal(r.signal, 'SIGINT');
+});
+
+test('⭐ Ctrl-C on the NESTED path (runCommand) → the parent stops by SIGINT', needsIsolation, async () => {
+  const r = await bashParent(`H isolated -- "$N" "$T" isolated -- ${SLEEPER}; echo "AFTER rc=$?"`, true);
+  assert.doesNotMatch(r.stdout, /AFTER rc=/, r.stdout);
+  assert.equal(r.signal, 'SIGINT');
+});
+
+test('Ctrl-C, the gate\'s shape WITH its INT trap → the trap runs (true with or without the fix on bash 5.3)', needsIsolation, async () => {
+  const r = await bashParent(`trap 'echo TRAPPED-INT; exit 42' INT; ( H isolated -- ${SLEEPER} ) 2>&1 | cat; `
+    + 'echo "AFTER rc=${PIPESTATUS[0]}"', true);
+  assert.match(r.stdout, /^TRAPPED-INT$/m, r.stdout);
+  assert.equal(r.status, 42);
+});
+
+test('⭐ CONTROL: a command that EXITS 130 with no signal → `isolated` returns 130 and the parent carries on', needsIsolation, async () => {
+  const r = await bashParent(`H isolated -- sh -c 'exit 130'; echo "AFTER rc=$?"`, false);
+  assert.match(r.stdout, /^AFTER rc=130$/m, r.stdout);
+  assert.equal(r.status, 0);
+});
+
 // ── no host PROCESSES: a private PID namespace ───────────────────────────────
 //
 // ⛔ Measured by the final review: `kill -0 <host pid>` SUCCEEDED from inside (same kuid,
