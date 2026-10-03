@@ -57,13 +57,50 @@ test('CONTAINER_UPLOAD_DIR is base-owned and fixed', () => {
 
 test('names: artifact names carry C.ARTIFACT_PREFIX; images from C', () => {
   const m = createMounts(fakeC(), { dockerfilesDir: null });
-  const n = m.names(SLUG, 'debian');
-  assert.equal(n.xpraContainer, 'demo-webctl-xpra-testslug');
-  assert.equal(n.chromiumContainer, 'demo-webctl-chromium-testslug');
-  assert.equal(n.xpraSocketVolume, 'demo-webctl-x11-testslug');
-  assert.equal(n.network, 'demo-webctl-net-testslug');
+  const n = m.names(SLUG, 'debian', 1234);
+  assert.equal(n.xpraContainer, 'demo-webctl-u1234-xpra-testslug');
+  assert.equal(n.chromiumContainer, 'demo-webctl-u1234-chromium-testslug');
+  assert.equal(n.xpraSocketVolume, 'demo-webctl-u1234-x11-testslug');
+  assert.equal(n.network, 'demo-webctl-u1234-net-testslug');
+  assert.equal(n.owner, 'u1234');
   assert.equal(n.chromiumImage, 'demo-webctl/chromium-debian:latest');
   assert.equal(n.xpraImage, 'demo-webctl/xpra-ubuntu:latest');
+});
+
+test('⛔ names: the OWNER is in every per-instance name, so two accounts never collide', () => {
+  // A name without an owner collided on a shared docker daemon: two accounts
+  // with the same tool and slug asked for the identical name. (rx9q §5a)
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
+  const alice = m.names(SLUG, 'debian', 1000);
+  const bob = m.names(SLUG, 'debian', 1001);
+  for (const k of /** @type {const} */ (['xpraContainer', 'chromiumContainer', 'xpraSocketVolume', 'network'])) {
+    assert.notEqual(alice[k], bob[k], `${k} must differ between accounts`);
+  }
+  // images are shared, deliberately
+  assert.equal(alice.chromiumImage, bob.chromiumImage);
+});
+
+test('names: the owner uid defaults to process.getuid()', (t) => {
+  if (typeof process.getuid !== 'function') { t.skip('no getuid on this platform'); return; }
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
+  assert.equal(m.names(SLUG, 'debian').chromiumContainer,
+    `demo-webctl-u${process.getuid()}-chromium-testslug`);
+});
+
+test('names: a non-integer uid is refused (it becomes part of a docker name)', () => {
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
+  for (const bad of ['1000; rm', '-1', 'root', '']) {
+    assert.throws(() => m.names(SLUG, 'debian', bad), /owner uid must be a non-negative integer/, JSON.stringify(bad));
+  }
+});
+
+test('legacyNames: the PRE-OWNER names, exactly (read only to migrate)', () => {
+  const m = createMounts(fakeC(), { dockerfilesDir: null });
+  assert.deepEqual(m.legacyNames(SLUG), {
+    xpraContainer: 'demo-webctl-xpra-testslug',
+    chromiumContainer: 'demo-webctl-chromium-testslug',
+    xpraSocketVolume: 'demo-webctl-x11-testslug',
+  });
 });
 
 test('names: defaults slug + base', () => {

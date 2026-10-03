@@ -1,0 +1,1008 @@
+// container-ownership.test.js — owner in the NAME, proof by MOUNT, and the
+// migration off the pre-owner names.
+//
+// ⛔ THE DEFECT. Container names were computed from the slug alone —
+// `<prefix>chromium-<slug>`, default slug `default` — so on a SHARED docker
+// daemon two accounts running the same tool with the same slug asked for the
+// IDENTICAL name, and the driver's exact-name `rm -f` removed the OTHER
+// account's running, signed-in browser. (Inherited from an early xq; rx9q §5a.)
+//
+// The cure, in three parts, each tested here:
+//   B1  the owner is IN THE NAME (`<prefix>u<uid>-chromium-<slug>`), so honest
+//       accounts never collide — a label cannot stop `docker run --name` colliding;
+//   B2  PROOF of "ours" is what a container MOUNTS (our profile dir), never its
+//       name or label — both are copies anyone can set. The label is a FILTER;
+//   M   a pre-owner container PROVABLY ours is very likely a browser a human is
+//       signed in to, so it is RENAMED IN PLACE to the owner names — never
+//       stopped, removed or restarted (lg1n) — and its profile lock relabelled;
+//       one NOT provably ours is absent to us — never touched, never blocking.
+//
+// The fake docker is a small STATEFUL daemon (containers appear on run, vanish
+// on rm, stop running on stop, keep their ID and StartedAt across a rename),
+// wrapped by guardedDocker so nothing here can reach the real docker CLI. Every
+// mutation is RECORDED: "refused" is asserted as "rm was never called", and "not
+// restarted" as "same ID, same StartedAt, no stop/rm/run" — not merely as "no
+// error was thrown".
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+
+import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
+import { createMounts } from '../lib/browser-location/mounts.js';
+import { TEST_CACHE_ROOT } from './helpers/test-cache-root.mjs';
+import { createProcessMutex } from '../lib/process-mutex.js';
+import { createProfileLock } from '../lib/browser-location/profile-lock.js';
+import {
+  guardedDocker, assertHermetic, INSPECT_ABSENT, inspectPresent,
+} from './helpers/fake-docker-inspect.mjs';
+
+const UID = 4242;
+const OWNER = 'demo-webctl.owner.uid';
+// The owner-named pair (B1) — asserted as exact strings, never derived.
+const CHROMIUM = 'demo-webctl-u4242-chromium-test';
+const XPRA = 'demo-webctl-u4242-xpra-test';
+const VOLUME = 'demo-webctl-u4242-x11-test';
+// The pre-owner names, exactly as older base computed them.
+const L_CHROMIUM = 'demo-webctl-chromium-test';
+const L_XPRA = 'demo-webctl-xpra-test';
+const L_VOLUME = 'demo-webctl-x11-test';
+// Fictional paths: base is a public repo.
+const OUR_PROFILE = '/home/someone/.cache/demo/profiles/test/chromium';
+const FOREIGN_PROFILE = '/home/otheraccount/private-profile-dir';
+
+function fakeC() {
+  return {
+    PROJECT: 'demo-webctl', ARTIFACT_PREFIX: 'demo-webctl-',
+    IMAGE_CHROMIUM_REPO: 'demo/chromium', IMAGE_XPRA: 'demo/xpra:latest',
+    DEFAULT_CDP_PORT: 4999, CACHE_DIRNAME: 'demo-webctl',
+    ZOOM_DEFAULT_HOST: 'demo.example', CONFIG_FILE_PROJECT: 'demo.config.jsonc',
+    DOTENV_FILENAME: '.env.demo', DOTENV_TEMPLATE: '.env.demo.example',
+    ENV_PREFIX: 'DEMO_', ENV_PREFIX_LEGACY: null, ENV_LEGACY_SUFFIXES: [],
+  };
+}
+function hermeticMounts(/** @type {any} */ C) {
+  const m = createMounts(C, { dockerfilesDir: '/df' });
+  const fake = (/** @type {string} */ s, /** @type {string} */ u) => u || `/tmp/no-mkdir/${s}`;
+  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => TEST_CACHE_ROOT };
+}
+/** No Preferences writes: the profile path is fictional. */
+const noPrefs = {
+  DEFAULT_HOST: 'demo.example',
+  preferencesPath: (/** @type {string} */ p) => p,
+  applyHostZoomToPreferences: () => ({ action: 'noop' }),
+  applyStartupPolicyToPreferences: () => ({ action: 'noop' }),
+};
+/** A lock that is always free and always acquired. */
+function freeLock() {
+  return {
+    readLock: () => null,
+    isHolderAlive: async () => ({ alive: false, reason: 'test' }),
+    acquire: async () => ({ ok: true, lock: {}, tookOver: false }),
+    describeHolder: () => '(none)',
+    lockPath: (/** @type {string} */ p) => `${p}/.lock`,
+    release: () => {},
+  };
+}
+
+/**
+ * @typedef {{running?: boolean, labels?: Record<string,string>, binds?: string[], volumes?: string[], ports?: number[]}} Ctr
+ */
+
+/** Verbs that CHANGE daemon state — "no mutation" means none of these. */
+const MUTATION = /^(rename|stop|rm|run|volumeRm|volumeCreate):/;
+
+/**
+ * A stateful fake daemon. Each container has an ID and a StartedAt that a
+ * rename keeps — as docker's does (measured on throwaway containers).
+ * @param {Record<string, Ctr | 'fail' | 'garbage'>} initial  name → container
+ * @param {{rmIsNoop?: boolean, renameFails?: (from: string, to: string) => boolean,
+ *   onRename?: (from: string, to: string) => (void | Promise<void>)}} [o]
+ *   `onRename`: awaited BEFORE the rename takes effect — a hook to open a race window.
+ */
+function daemon(initial, o = {}) {
+  let seq = 0;
+  /** @type {Map<string, any>} */
+  const ctrs = new Map(Object.entries(initial).map(([k, v]) => [k,
+    typeof v === 'string' ? v : {
+      id: `id-${k}`, startedAt: '2026-09-01T08:00:00Z', running: v.running !== false,
+      labels: v.labels || {}, binds: v.binds || [], volumes: v.volumes || [], ports: v.ports || [],
+    }]));
+  /** @type {string[]} */
+  const verbs = [];
+  /** @type {string[]} two running chromiums on one profile, observed at a `docker run` */
+  const overlaps = [];
+  const live = (/** @type {string} */ n) => { const c = ctrs.get(n); return c && typeof c === 'object' ? c : null; };
+  const { docker, violations } = guardedDocker({
+    dockerAvailable: async () => true,
+    imageExists: async () => true,
+    containerExists: async (/** @type {string} */ n) => ctrs.has(n),
+    containerRunning: async (/** @type {string} */ n) => !!(live(n) && live(n).running),
+    rm: async (/** @type {string} */ n) => { verbs.push(`rm:${n}`); if (!o.rmIsNoop) ctrs.delete(n); },
+    rename: async (/** @type {string} */ from, /** @type {string} */ to) => {
+      verbs.push(`rename:${from}->${to}`);
+      if (o.onRename) await o.onRename(from, to);
+      if (o.renameFails && o.renameFails(from, to)) {
+        return { code: 1, stdout: '', stderr: `Error response from daemon: (fake) cannot rename ${from}\n` };
+      }
+      if (!ctrs.has(from)) return { code: 1, stdout: '', stderr: `Error response from daemon: No such container: ${from}\n` };
+      if (ctrs.has(to)) return { code: 1, stdout: '', stderr: `Error response from daemon: Conflict. The name "/${to}" is already in use\n` };
+      ctrs.set(to, ctrs.get(from)); // the SAME object: ID, StartedAt, running state
+      ctrs.delete(from);
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    stop: async (/** @type {string} */ n) => { verbs.push(`stop:${n}`); if (live(n)) live(n).running = false; },
+    volumeRm: async (/** @type {string} */ n) => { verbs.push(`volumeRm:${n}`); },
+    volumeCreate: async (/** @type {string} */ n) => { verbs.push(`volumeCreate:${n}`); },
+    exec: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
+    runDetached: async (/** @type {any} */ a) => {
+      verbs.push(`run:${a.name}`);
+      const srcs = (a.mounts || []).map((/** @type {any} */ m) => m[0]);
+      const binds = srcs.filter((/** @type {string} */ s) => s.startsWith('/'));
+      const volumes = srcs.filter((/** @type {string} */ s) => !s.startsWith('/'));
+      for (const [n, c] of ctrs) {
+        if (c && typeof c === 'object' && c.running && c.binds.some((/** @type {string} */ b) => binds.includes(b))) {
+          overlaps.push(`${a.name} started while ${n} runs on the same profile`);
+        }
+      }
+      if (ctrs.has(a.name)) return { code: 125, stderr: `Conflict. The container name "/${a.name}" is already in use` };
+      ctrs.set(a.name, {
+        id: `new-${++seq}`, startedAt: `2026-10-03T12:00:0${seq}Z`, running: true,
+        labels: a.labels || {}, binds, volumes,
+      });
+      return { code: 0, stderr: '', args: a };
+    },
+  }, { run: {
+    inspect: (a) => {
+      const n = a[a.length - 1];
+      verbs.push(`inspect:${n}`);
+      const c = ctrs.get(n);
+      if (c === undefined) return INSPECT_ABSENT;
+      if (c === 'fail') return { code: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon. Is the docker daemon running?\n' };
+      if (c === 'garbage') return { code: 0, stdout: 'not json at all', stderr: '' };
+      return inspectPresent(n, { labels: c.labels, binds: c.binds, volumes: c.volumes, ports: c.ports });
+    },
+    logs: () => ({ code: 0, stdout: 'container logs', stderr: '' }),
+  } });
+  /** @type {any[]} */
+  const runs = [];
+  const rd = docker.runDetached;
+  // keep the full run args for label/name assertions
+  /** @type {any} */ (docker).runDetached = async (/** @type {any} */ a) => { runs.push(a); return rd(a); };
+  return { docker, verbs, violations, overlaps, ctrs, runs };
+}
+
+/**
+ * @param {any} docker
+ * @param {{uid?: number|null, lock?: any, userDataDir?: string, logs?: string[], cdpPort?: number,
+ *   attachOnly?: boolean, bringupMutex?: any}} [o]
+ *   `cdpPort`: drive CDP at this port (a test server) instead of portless.
+ */
+function driver(docker, o = {}) {
+  const C = fakeC();
+  /** @type {string[]} */
+  const logs = o.logs || [];
+  return createChromiumDockerXpra(C, {
+    mounts: hermeticMounts(C), docker, profileLock: o.lock || freeLock(), chromiumPrefs: noPrefs,
+    ...(o.uid === null ? {} : { uid: o.uid ?? UID }),
+    ...(o.bringupMutex ? { bringupMutex: o.bringupMutex } : {}),
+  }).createDriver({
+    ...(o.attachOnly ? { attachOnly: true } : {}),
+    port: o.cdpPort || 45998, host: '127.0.0.1', slug: 'test', force: true,
+    userDataDir: o.userDataDir || OUR_PROFILE,
+    // portless unless a test CDP endpoint is supplied: no poll against a real port
+    ...(o.cdpPort ? {} : { containerEnv: { LWC_CDP_PORT: null } }),
+    logger: {
+      info: (/** @type {string} */ m) => logs.push(`info:${m}`),
+      warn: (/** @type {string} */ m) => logs.push(`warn:${m}`),
+      debug: (/** @type {string} */ m) => logs.push(`debug:${m}`),
+    },
+  });
+}
+
+/**
+ * Bring up against a daemon in the given state.
+ * @param {Record<string, Ctr | 'fail' | 'garbage'>} initial
+ * @param {{rmIsNoop?: boolean, renameFails?: (from: string, to: string) => boolean,
+ *   onRename?: (from: string, to: string) => (void | Promise<void>),
+ *   lock?: any, userDataDir?: string, cdpPort?: number, d?: ReturnType<typeof daemon>,
+ *   attachOnly?: boolean, bringupMutex?: any}} [o]
+ *   `d`: a daemon already built (when a test needs it before bring-up).
+ */
+async function up(initial, o = {}) {
+  const d = o.d || daemon(initial, o);
+  /** @type {string[]} */
+  const logs = [];
+  /** @type {any} */
+  let error, result;
+  try { result = await driver(d.docker, { ...o, logs }).ensureRunning(); } catch (e) { error = e; }
+  assertHermetic(d.violations);
+  const removed = d.verbs.filter((v) => v.startsWith('rm:'));
+  const stopped = d.verbs.filter((v) => v.startsWith('stop:'));
+  const started = d.verbs.filter((v) => v.startsWith('run:'));
+  const renamed = d.verbs.filter((v) => v.startsWith('rename:'));
+  return { ...d, error, result, removed, stopped, started, renamed, logs };
+}
+
+// Shapes. "ours" is defined by the MOUNT; the label alone proves nothing (B2).
+const ours = (/** @type {Ctr} */ x = {}) => ({ labels: { [OWNER]: String(UID) }, binds: [OUR_PROFILE], running: false, ...x });
+const labelOnly = () => ({ labels: { [OWNER]: String(UID) }, binds: [], running: false });
+const foreign = () => ({ labels: { [OWNER]: '1001' }, binds: [FOREIGN_PROFILE], running: false });
+const xpraOf = (/** @type {Ctr} */ x = {}) => ({ labels: { [OWNER]: String(UID) }, binds: [], running: false, ...x });
+
+/** The refusal shape every refusing arm shares. */
+function assertRefused(/** @type {any} */ r, /** @type {string} */ name) {
+  assert.ok(r.error, 'must refuse');
+  assert.equal(r.error.exitCode, 4, 'a refusal is a CONFIG_ERROR (exit 4), like the others');
+  assert.match(String(r.error.message), new RegExp(`REFUSING to (remove|stop) container ${name}\\b`));
+  assert.match(String(r.error.message), /different slug \/ --client/);
+  assert.match(String(r.error.message), new RegExp(`docker rm -f ${name}`));
+  assert.deepEqual(r.removed, [], `nothing may be removed; saw ${r.verbs.join(', ')}`);
+  assert.deepEqual(r.started, [], 'and nothing started over the top of it');
+  assert.ok(!String(r.error.message).includes(FOREIGN_PROFILE),
+    'a foreign container\'s host paths are never printed');
+}
+
+// ── B1: the owner is in the name ────────────────────────────────────────────
+
+test('⛔ BREAKING: bring-up creates the OWNER-NAMED pair and volume — exact strings', async () => {
+  const r = await up({});
+  assert.equal(r.error, undefined, r.error && r.error.message);
+  assert.deepEqual(r.started, [`run:${XPRA}`, `run:${CHROMIUM}`]);
+  assert.ok(r.verbs.includes(`volumeCreate:${VOLUME}`), r.verbs.join(', '));
+  const chromium = r.runs.find((a) => a.name === CHROMIUM);
+  assert.deepEqual(chromium.extra, ['--network', `container:${XPRA}`], 'chromium joins the owner-named xpra');
+  assert.ok(chromium.mounts.some((/** @type {any} */ m) => m[0] === VOLUME), 'and mounts the owner-named volume');
+  // the label is still stamped (a filter for listing), on both
+  for (const a of r.runs) assert.equal(a.labels[OWNER], String(UID), a.name);
+  assert.equal(r.runs[1].labels['demo-webctl.role'], 'chromium', 'existing labels are kept');
+});
+
+test('inspect() advertises the owner-named containers', () => {
+  const i = /** @type {any} */ (driver(daemon({}).docker)).inspect();
+  assert.equal(i.names.chromiumContainer, CHROMIUM);
+  assert.equal(i.names.xpraContainer, XPRA);
+  assert.equal(i.names.xpraSocketVolume, VOLUME);
+});
+
+test('the owner uid defaults to process.getuid() — in the name AND the label', async (t) => {
+  if (typeof process.getuid !== 'function') { t.skip('no getuid on this platform'); return; }
+  const d = daemon({});
+  try { await driver(d.docker, { uid: null }).ensureRunning(); } catch { /* irrelevant */ }
+  assertHermetic(d.violations);
+  assert.ok(d.runs.length > 0, 'premise: a container was started');
+  assert.equal(d.runs[0].name, `demo-webctl-u${process.getuid()}-xpra-test`);
+  assert.equal(d.runs[0].labels[OWNER], String(process.getuid()));
+});
+
+test('⭐ another account\'s same-slug pair no longer COLLIDES — it is simply not ours', async () => {
+  // The scenario that motivated B1: Alice (1001) runs slug `test`. Bob (4242)
+  // brings up the same slug. Different names: nothing to block on, nothing killed.
+  const r = await up({
+    'demo-webctl-u1001-chromium-test': { ...foreign(), running: true },
+    'demo-webctl-u1001-xpra-test': { labels: { [OWNER]: '1001' }, running: true },
+  });
+  assert.equal(r.error, undefined, r.error && r.error.message);
+  assert.ok(!r.verbs.some((v) => /u1001/.test(v) && !v.startsWith('inspect:')), r.verbs.join(', '));
+  assert.ok(r.ctrs.get('demo-webctl-u1001-chromium-test').running, 'Alice\'s browser still runs');
+});
+
+// ── B2: proof is the profile MOUNT; the label is a filter ───────────────────
+
+test('CONTROL: an owner-named pair whose chromium mounts OUR profile → removal proceeds', async () => {
+  const r = await up({ [CHROMIUM]: ours(), [XPRA]: xpraOf() });
+  assert.deepEqual(r.removed, [`rm:${CHROMIUM}`, `rm:${XPRA}`]);
+  assert.ok(r.verbs.indexOf(`inspect:${CHROMIUM}`) < r.verbs.indexOf(`rm:${CHROMIUM}`), 'inspect licensed it');
+});
+
+test('⛔ B2: OUR owner label WITHOUT the profile mount is NOT proof — refused', async () => {
+  // A label is a copy: anyone can `docker run --label demo-webctl.owner.uid=4242`.
+  const r = await up({ [CHROMIUM]: labelOnly(), [XPRA]: xpraOf() });
+  assertRefused(r, CHROMIUM);
+  assert.match(String(r.error.message), /cannot\s+be proven ours \(a name or an owner label is not proof\)/);
+});
+
+test('CONTROL: an unlabelled chromium mounting OUR profile → proven ours by the mount', async () => {
+  const r = await up({ [CHROMIUM]: { binds: [OUR_PROFILE], running: false } });
+  assert.deepEqual(r.removed, [`rm:${CHROMIUM}`, `rm:${XPRA}`]);
+});
+
+test('⛔ the label is a FILTER: another uid\'s label rules a container out even if it mounts our profile', async () => {
+  const r = await up({ [CHROMIUM]: { labels: { [OWNER]: '1001' }, binds: [OUR_PROFILE], running: false } });
+  assertRefused(r, CHROMIUM);
+  assert.match(String(r.error.message), /another account \(owner uid 1001; ours is 4242\)/);
+});
+
+test('⛔ a chromium mounting a DIFFERENT profile is refused — and its path is not printed', async () => {
+  const r = await up({ [CHROMIUM]: { binds: [FOREIGN_PROFILE], running: false } });
+  assertRefused(r, CHROMIUM);
+});
+
+test('⛔ a FOREIGN xpra is refused even when chromium is ours — no partial removal', async () => {
+  const r = await up({ [CHROMIUM]: ours(), [XPRA]: { labels: { [OWNER]: '1001' }, running: false } });
+  assertRefused(r, XPRA);
+  assert.match(String(r.error.message), /another account/);
+});
+
+test('⛔ an xpra ALONE (no chromium to vouch for it) is refused', async () => {
+  const r = await up({ [XPRA]: xpraOf() });
+  assertRefused(r, XPRA);
+  // the one-time orphan: the refusal names the exact one-time remedy
+  assert.match(String(r.error.message), /chromium partner \(demo-webctl-u4242-chromium-test\) does not exist/);
+  assert.match(String(r.error.message), /ONE-TIME orphan/);
+  assert.match(String(r.error.message), /remove it once:  docker rm -f demo-webctl-u4242-xpra-test/);
+});
+
+test('⛔ an xpra whose chromium EXISTS but is not ours is refused — and is not called an orphan', async () => {
+  const r = await up({ [CHROMIUM]: { binds: [FOREIGN_PROFILE], running: false }, [XPRA]: xpraOf() });
+  assertRefused(r, CHROMIUM);
+  assert.doesNotMatch(String(r.error.message), /orphan/);
+});
+
+test('⛔ a FAILED inspect is refused, never read as "absent"', async () => {
+  const r = await up({ [CHROMIUM]: 'fail' });
+  assertRefused(r, CHROMIUM);
+  assert.match(String(r.error.message), /could not be read \(docker inspect exited 1: Cannot connect/);
+});
+
+test('⛔ an UNPARSEABLE inspect is refused', async () => {
+  const r = await up({ [XPRA]: 'garbage' });
+  assertRefused(r, XPRA);
+  assert.match(String(r.error.message), /not JSON/);
+});
+
+test('⛔ an inspect that THROWS is refused', async () => {
+  const d = daemon({});
+  /** @type {any} */ (d.docker).run = async () => { throw new Error('spawn docker ENOENT'); };
+  /** @type {any} */
+  let error;
+  try { await driver(d.docker).ensureRunning(); } catch (e) { error = e; }
+  assert.ok(error);
+  assert.match(String(error.message), /docker inspect threw: spawn docker ENOENT/);
+  assert.ok(!d.verbs.some((v) => v.startsWith('rm:') || v.startsWith('run:')));
+});
+
+// ── shutdown (stop) obeys the same rule ─────────────────────────────────────
+
+test('CONTROL: shutdown() of a pair proven ours stops both, removes nothing', async () => {
+  const d = daemon({ [CHROMIUM]: ours({ running: true }), [XPRA]: xpraOf({ running: true }) });
+  await driver(d.docker).shutdown();
+  assertHermetic(d.violations);
+  assert.deepEqual(d.verbs.filter((v) => /^(stop|rm):/.test(v)), [`stop:${CHROMIUM}`, `stop:${XPRA}`]);
+});
+
+test('⛔ shutdown() of a pair NOT proven ours stops NOTHING (foreign label / label only)', async () => {
+  for (const chromium of [foreign(), labelOnly()]) {
+    const d = daemon({ [CHROMIUM]: { ...chromium, running: true }, [XPRA]: xpraOf({ running: true }) });
+    /** @type {any} */
+    let error;
+    try { await driver(d.docker).shutdown(); } catch (e) { error = e; }
+    assertHermetic(d.violations);
+    assert.ok(error, 'must refuse');
+    assert.equal(error.exitCode, 4);
+    assert.match(String(error.message), /REFUSING to stop container demo-webctl-u4242-chromium-test/);
+    assert.deepEqual(d.verbs.filter((v) => v.startsWith('stop:')), []);
+  }
+});
+
+// ── the lock-failure teardown ───────────────────────────────────────────────
+
+test('⛔ the lock-failure teardown removes NOTHING it cannot prove ours — and says so', async () => {
+  // Normally this passes: the containers this call started mount our profile
+  // (docker-up-lock-fails-closed.test.js). Here they are swapped for foreign
+  // ones before the teardown — the name a call started is not proof.
+  const d = daemon({});
+  const lock = {
+    ...freeLock(),
+    acquire: async () => {
+      d.ctrs.set(CHROMIUM, { running: true, labels: { [OWNER]: '1001' }, binds: [FOREIGN_PROFILE] });
+      return { ok: false, previous: null };
+    },
+  };
+  /** @type {any} */
+  let error;
+  try { await driver(d.docker, { lock }).ensureRunning(); } catch (e) { error = e; }
+  assertHermetic(d.violations);
+  assert.ok(error, 'must refuse');
+  assert.match(String(error.message), /profile lock NOT acquired/);
+  assert.match(String(error.message), /containers were NOT removed/);
+  assert.match(String(error.message), /another account/);
+  assert.ok(!String(error.message).includes(FOREIGN_PROFILE));
+  // only what happened AFTER the start is the teardown (the pre-start cleanup
+  // of absent names is a no-op rm, and not what this arm is about)
+  const afterStart = d.verbs.slice(d.verbs.findIndex((v) => v.startsWith('run:')));
+  assert.ok(afterStart.length > 0, 'premise: containers were started');
+  assert.deepEqual(afterStart.filter((v) => v.startsWith('rm:')), [], afterStart.join(', '));
+});
+
+// ── MIGRATION off the pre-owner names: RENAME IN PLACE, never restart ───────
+
+/** A REAL profile lock (the driver's own module), used in a throwaway dir. */
+const realLock = () => createProfileLock(fakeC(), { assert: false });
+
+/**
+ * A throwaway profile dir holding a lock written by OUR pre-owner container —
+ * what every lane signed in under an older base has on disk right now.
+ * @param {(dir: string, lock: any) => Promise<void>} fn
+ */
+async function withLegacyLock(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'owner-mig-'));
+  try {
+    const lock = realLock();
+    await lock.acquire(dir, {
+      mode: 'chromium-docker-xpra-ubuntu-latest', pid: 1, containerName: L_CHROMIUM,
+      extra: { xpraContainer: L_XPRA, volume: L_VOLUME },
+    }, { force: true });
+    assert.equal(lock.readLock(dir).containerName, L_CHROMIUM, 'premise: the lock names the legacy container');
+    await fn(dir, lock);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** The legacy pair an older base left: unlabelled, the pre-owner x11 volume. */
+const legacyPair = (/** @type {string} */ profile, running = true) => ({
+  [L_CHROMIUM]: { binds: [profile], volumes: [L_VOLUME], running },
+  [L_XPRA]: { volumes: [L_VOLUME], running },
+});
+
+test('⛔ MIGRATION: a RUNNING signed-in pre-owner pair is RENAMED in place — same containers, NOT restarted, CDP still answering', async () => {
+  await withLegacyLock(async (dir, lock) => {
+    const d = daemon(legacyPair(dir));
+    const before = { c: { ...d.ctrs.get(L_CHROMIUM) }, x: { ...d.ctrs.get(L_XPRA) } };
+    // CDP answers only while THAT chromium (by ID) runs — a restart would show.
+    const cdp = await cdpEndpoint(() => [...d.ctrs.values()].some((c) => c.id === before.c.id && c.running));
+    try {
+      const r = await up({}, { d, lock, userDataDir: dir, cdpPort: cdp.port });
+      assert.equal(r.error, undefined, r.error && r.error.message);
+      assert.equal(r.result.ok, true);
+      assert.equal(r.result.cdpHttpUrl, `http://127.0.0.1:${cdp.port}`, 'the caller gets the SAME browser');
+      // renamed — both, chromium first
+      assert.deepEqual(r.renamed, [`rename:${L_CHROMIUM}->${CHROMIUM}`, `rename:${L_XPRA}->${XPRA}`]);
+      assert.deepEqual([...r.ctrs.keys()].sort(), [CHROMIUM, XPRA]);
+      // ⛔ not restarted: same containers, same StartedAt, still running
+      for (const [name, was] of [[CHROMIUM, before.c], [XPRA, before.x]]) {
+        const now = r.ctrs.get(name);
+        assert.equal(now.id, was.id, `${name} is the same container`);
+        assert.equal(now.startedAt, was.startedAt, `${name} was not restarted`);
+        assert.equal(now.running, true, `${name} still runs`);
+      }
+      // ZERO stop / rm / run — and no volume churn (the pair keeps its volume)
+      assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v) && !v.startsWith('rename:')), [], r.verbs.join(', '));
+      assert.equal(await /** @type {any} */ (driver(d.docker, { cdpPort: cdp.port })).healthCheck(), true,
+        'CDP still answers after the migration');
+      // the lock is relabelled to the new name, and reads as OURS and ALIVE —
+      // so no other runner can take over our live browser's profile
+      const l = lock.readLock(dir);
+      assert.equal(l.containerName, CHROMIUM);
+      assert.equal(l.extra.xpraContainer, XPRA);
+      assert.equal(l.extra.volume, L_VOLUME, 'the volume really is still the pre-owner one');
+      const live = await lock.isHolderAlive(l, {
+        dockerInspect: async (/** @type {string} */ n) => ({ exists: d.ctrs.has(n), running: !!(d.ctrs.get(n) || {}).running }),
+      });
+      assert.deepEqual(live, { alive: true, reason: 'container' });
+      assert.ok(r.logs.some((m) => /^info:.*renamed pre-owner container\(s\) in place — not restarted/.test(m)), r.logs.join('\n'));
+      // and a SECOND command is a plain reuse — nothing renamed, nothing touched
+      const mark = d.verbs.length; // r.verbs IS d.verbs (one daemon): slice from here
+      const again = await up({}, { d, lock, userDataDir: dir, cdpPort: cdp.port });
+      assert.equal(again.error, undefined, again.error && again.error.message);
+      const second = d.verbs.slice(mark);
+      assert.ok(second.some((v) => v === `inspect:${CHROMIUM}`), `premise: the second command ran: ${second.join(', ')}`);
+      assert.deepEqual(second.filter((v) => MUTATION.test(v)), [], second.join(', '));
+      assert.equal(again.ctrs.get(CHROMIUM).id, before.c.id);
+    } finally { await cdp.close(); }
+  });
+});
+
+test('⛔ MIGRATION (portless): a running pre-owner pair is renamed, not restarted; its lock is not a refusal', async () => {
+  await withLegacyLock(async (dir, lock) => {
+    const r = await up(legacyPair(dir), { lock, userDataDir: dir });
+    assert.equal(r.error, undefined, r.error && r.error.message);
+    assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)),
+      [`rename:${L_CHROMIUM}->${CHROMIUM}`, `rename:${L_XPRA}->${XPRA}`]);
+    assert.equal(r.ctrs.get(CHROMIUM).id, `id-${L_CHROMIUM}`);
+    assert.equal(lock.readLock(dir).containerName, CHROMIUM);
+    assert.deepEqual(r.overlaps, []);
+  });
+});
+
+test('MIGRATION: a STOPPED pre-owner pair is renamed, then the normal start — and the pre-owner volume is dropped', async () => {
+  const r = await up(legacyPair(OUR_PROFILE, false));
+  assert.equal(r.error, undefined, r.error && r.error.message);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), [
+    `rename:${L_CHROMIUM}->${CHROMIUM}`, `rename:${L_XPRA}->${XPRA}`,
+    // the normal flow for a stopped pair of ours: clean recreate under the new names
+    `rm:${CHROMIUM}`, `rm:${XPRA}`,
+    `volumeRm:${L_VOLUME}`, // its pre-owner volume, now unused (best effort)
+    `volumeRm:${VOLUME}`, `volumeCreate:${VOLUME}`,
+    `run:${XPRA}`, `run:${CHROMIUM}`,
+  ]);
+  assert.ok(!r.verbs.some((v) => /^(stop|rm):demo-webctl-(chromium|xpra)-test$/.test(v)), 'nothing done under the old names');
+  assert.deepEqual(r.overlaps, []);
+  assert.deepEqual([...r.ctrs.keys()].sort(), [CHROMIUM, XPRA]);
+  const chromium = r.runs.find((a) => a.name === CHROMIUM);
+  assert.ok(chromium.mounts.some((/** @type {any} */ m) => m[0] === VOLUME), 'the new chromium uses the owner-named volume');
+});
+
+test('CONTROL: a recreate of a pair NOT renamed from pre-owner names does not touch the pre-owner volume', async () => {
+  const r = await up({ [CHROMIUM]: ours({ volumes: [VOLUME] }), [XPRA]: xpraOf({ volumes: [VOLUME] }) });
+  assert.equal(r.error, undefined, r.error && r.error.message);
+  assert.ok(!r.verbs.includes(`volumeRm:${L_VOLUME}`), r.verbs.join(', '));
+});
+
+test('⛔ MIGRATION: xpra rename FAILS after chromium succeeded → chromium renamed BACK, refused, nothing restarted', async () => {
+  await withLegacyLock(async (dir, lock) => {
+    const r = await up(legacyPair(dir), { lock, userDataDir: dir, renameFails: (from) => from === L_XPRA });
+    assert.ok(r.error, 'must refuse');
+    assert.equal(r.error.exitCode, 4);
+    assert.deepEqual(r.renamed, [
+      `rename:${L_CHROMIUM}->${CHROMIUM}`, `rename:${L_XPRA}->${XPRA}`, `rename:${CHROMIUM}->${L_CHROMIUM}`,
+    ]);
+    assert.match(String(r.error.message), /renaming demo-webctl-xpra-test → demo-webctl-u4242-xpra-test failed/);
+    assert.match(String(r.error.message), /Every rename was rolled back: the pair is exactly as it was/);
+    assert.match(String(r.error.message), /the browser was not restarted/);
+    assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v) && !v.startsWith('rename:')), [], r.verbs.join(', '));
+    // never a half-renamed pair
+    assert.deepEqual([...r.ctrs.keys()].sort(), [L_CHROMIUM, L_XPRA]);
+    assert.equal(r.ctrs.get(L_CHROMIUM).id, `id-${L_CHROMIUM}`);
+    assert.ok(r.ctrs.get(L_CHROMIUM).running && r.ctrs.get(L_XPRA).running);
+    assert.equal(lock.readLock(dir).containerName, L_CHROMIUM, 'the lock still matches the pair');
+  });
+});
+
+test('⛔ MIGRATION: chromium rename fails → refused, nothing else attempted', async () => {
+  const r = await up(legacyPair(OUR_PROFILE), { renameFails: (from) => from === L_CHROMIUM });
+  assert.ok(r.error, 'must refuse');
+  assert.match(String(r.error.message), /Nothing was renamed/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), [`rename:${L_CHROMIUM}->${CHROMIUM}`]);
+  assert.deepEqual([...r.ctrs.keys()].sort(), [L_CHROMIUM, L_XPRA]);
+});
+
+test('⛔ MIGRATION: if the ROLLBACK also fails, the refusal says HALF-RENAMED and gives the exact command', async () => {
+  const r = await up(legacyPair(OUR_PROFILE), { renameFails: (from) => from === L_XPRA || from === CHROMIUM });
+  assert.ok(r.error, 'must refuse');
+  assert.match(String(r.error.message), /HALF-RENAMED and the automatic rollback failed/);
+  assert.match(String(r.error.message), /docker rename demo-webctl-u4242-chromium-test demo-webctl-chromium-test/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v) && !v.startsWith('rename:')), []);
+});
+
+test('⛔ MIGRATION: if the lock cannot be relabelled, the renames are rolled back and we refuse', async () => {
+  await withLegacyLock(async (dir, real) => {
+    const lock = { ...real, acquire: async () => { throw new Error('EROFS: read-only file system'); } };
+    const r = await up(legacyPair(dir), { lock, userDataDir: dir });
+    assert.ok(r.error, 'must refuse');
+    assert.match(String(r.error.message), /profile lock could not be rewritten to the new name \(EROFS/);
+    assert.match(String(r.error.message), /Every rename was rolled back/);
+    assert.deepEqual([...r.ctrs.keys()].sort(), [L_CHROMIUM, L_XPRA]);
+    assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v) && !v.startsWith('rename:')), []);
+    assert.equal(real.readLock(dir).containerName, L_CHROMIUM);
+  });
+});
+
+test('⛔ MIGRATION: a pre-owner chromium that cannot be INSPECTED blocks bring-up (it might be ours)', async () => {
+  const r = await up({ [L_CHROMIUM]: 'fail' });
+  assert.ok(r.error, 'must refuse');
+  assert.equal(r.error.exitCode, 4);
+  assert.match(String(r.error.message), /cannot tell whether a pre-owner container demo-webctl-chromium-test/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), []);
+});
+
+test('⛔ MIGRATION: our pre-owner chromium with an UNINSPECTABLE xpra is not half-renamed — refused', async () => {
+  const r = await up({ [L_CHROMIUM]: { binds: [OUR_PROFILE] }, [L_XPRA]: 'fail' });
+  assert.ok(r.error, 'must refuse');
+  assert.equal(r.error.exitCode, 4);
+  assert.match(String(r.error.message), /partner demo-webctl-xpra-test its ownership could not be read/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), []);
+});
+
+test('⛔ MIGRATION: an owner-named container ALREADY beside our pre-owner pair → refused, NOTHING changed', async () => {
+  // Only reachable by downgrading base and back. Renaming would collide, and
+  // which of two browsers on one profile to keep is a human's call.
+  const r = await up({ ...legacyPair(OUR_PROFILE), [CHROMIUM]: ours(), [XPRA]: xpraOf() });
+  assert.ok(r.error, 'must refuse');
+  assert.equal(r.error.exitCode, 4);
+  assert.match(String(r.error.message), /owner-named container demo-webctl-u4242-chromium-test \(stopped\)/);
+  assert.match(String(r.error.message), /nothing was changed/);
+  // ⚠ the advice names the pair that is NOT running — never the live browser (final review, L1)
+  assert.match(String(r.error.message), /docker rm -f demo-webctl-u4242-chromium-test demo-webctl-u4242-xpra-test/);
+  assert.doesNotMatch(String(r.error.message), /docker rm -f demo-webctl-chromium-test/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), []);
+  assert.ok(r.ctrs.get(L_CHROMIUM).running);
+});
+
+test('⚠ L1: when the OWNER-named pair is the running one, the advice removes the stopped PRE-OWNER pair', async () => {
+  const r = await up({ ...legacyPair(OUR_PROFILE, false), [CHROMIUM]: ours({ running: true }), [XPRA]: xpraOf({ running: true }) });
+  assert.ok(r.error, 'must refuse');
+  assert.match(String(r.error.message), /docker rm -f demo-webctl-chromium-test demo-webctl-xpra-test/);
+  assert.doesNotMatch(String(r.error.message), /docker rm -f demo-webctl-u4242-chromium-test/, 'never advise killing the live browser');
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), []);
+});
+
+test('⛔ M1: a pair migrated EARLIER whose xpra later died is NOT repaired by restarting its running browser', async () => {
+  // Owner-named chromium RUNS and still mounts the PRE-OWNER x11 volume (it was renamed in place
+  // by an earlier command); its xpra is stopped. Repairing the pair would RESTART the browser.
+  const r = await up({ [CHROMIUM]: ours({ running: true, volumes: [L_VOLUME] }), [XPRA]: xpraOf({ running: false, volumes: [L_VOLUME] }) });
+  assert.ok(r.error, 'must refuse');
+  assert.equal(r.error.exitCode, 4);
+  assert.match(String(r.error.message), /renamed in place from its pre-owner name, is RUNNING/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), [], 'nothing stopped, removed or started');
+  assert.ok(r.ctrs.get(CHROMIUM).running, 'the browser still runs');
+});
+
+test('M1 CONTROL: a NON-migrated partial pair (owner-named volume) is still recreated, as before', async () => {
+  const r = await up({ [CHROMIUM]: ours({ running: true, volumes: [VOLUME] }), [XPRA]: xpraOf({ running: false, volumes: [VOLUME] }) });
+  assert.equal(r.error, undefined, r.error && r.error.message);
+  assert.ok(r.removed.length > 0, 'pre-existing behaviour for a non-migrated pair: torn down and recreated');
+});
+
+test('⭐ MIGRATION: a pre-owner pair NOT provably ours is ABSENT to us — untouched, not blocking', async () => {
+  const r = await up({
+    [L_CHROMIUM]: { binds: [FOREIGN_PROFILE] }, // another account's, on the old shared name
+    [L_XPRA]: {},
+  });
+  assert.equal(r.error, undefined, r.error && r.error.message);
+  assert.ok(!r.verbs.some((v) => MUTATION.test(v) && /demo-webctl-(chromium|xpra|x11)-test/.test(v)), r.verbs.join(', '));
+  assert.ok(r.ctrs.get(L_CHROMIUM).running, 'their browser still runs');
+  assert.deepEqual(r.started, [`run:${XPRA}`, `run:${CHROMIUM}`], 'bring-up proceeds under the new names');
+  // mentioned in a DEBUG log only — by name, never by path
+  const debug = r.logs.filter((l) => l.startsWith('debug:') && l.includes(L_CHROMIUM));
+  assert.equal(debug.length, 1, r.logs.join('\n'));
+  assert.ok(!r.logs.some((l) => l.includes(FOREIGN_PROFILE)), 'a foreign path is never logged');
+  assert.ok(!r.logs.some((l) => l.startsWith('info:') && l.includes(L_CHROMIUM)), 'not above debug');
+});
+
+test('MIGRATION: a lone pre-owner xpra (no chromium to vouch for it) is ignored', async () => {
+  const r = await up({ [L_XPRA]: {} });
+  assert.equal(r.error, undefined, r.error && r.error.message);
+  assert.ok(!r.verbs.some((v) => MUTATION.test(v) && v.includes(L_XPRA)), r.verbs.join(', '));
+});
+
+test('CONTROL: the same lock held by a live container NOT provably ours IS a refusal', async () => {
+  // Shows the lock check is live, not bypassed: here the legacy chromium runs
+  // on a different profile, so migration leaves it — and its lock is NOT
+  // relabelled — and the lock (naming it, alive) refuses the start.
+  await withLegacyLock(async (dir, lock) => {
+    const r = await up({ [L_CHROMIUM]: { binds: [FOREIGN_PROFILE] } }, { lock, userDataDir: dir });
+    assert.ok(r.error, 'must refuse');
+    assert.match(String(r.error.message), /Profile directory is already in use/);
+    assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), []);
+    assert.equal(lock.readLock(dir).containerName, L_CHROMIUM, 'a lock not ours is never rewritten');
+  });
+});
+
+// ── attach-only: reading a legacy pair's health never mutates it ────────────
+
+test('⛔ ATTACH-ONLY: healthCheck / inspect / describe on a running pre-owner pair perform ZERO docker mutations', async () => {
+  const cdp = await cdpEndpoint();
+  try {
+    for (const cdpPort of [cdp.port, undefined]) { // CDP mode, then portless
+      const d = daemon(legacyPair(OUR_PROFILE));
+      const drv = /** @type {any} */ (driver(d.docker, { cdpPort }));
+      await drv.healthCheck();
+      drv.inspect();
+      drv.describe();
+      assertHermetic(d.violations);
+      assert.deepEqual(d.verbs.filter((v) => MUTATION.test(v)), [], `${cdpPort ? 'CDP' : 'portless'}: ${d.verbs.join(', ')}`);
+      assert.deepEqual([...d.ctrs.keys()].sort(), [L_CHROMIUM, L_XPRA]);
+    }
+    assert.equal(await /** @type {any} */ (driver(daemon(legacyPair(OUR_PROFILE)).docker, { cdpPort: cdp.port })).healthCheck(),
+      true, 'premise: in CDP mode the probe really ran and answered');
+  } finally { await cdp.close(); }
+});
+
+// ── shutdown with a pre-owner pair present ──────────────────────────────────
+
+test('MIGRATION: shutdown() renames a pre-owner pair of ours in place, then STOPS it under the new names — never removes', async () => {
+  // Otherwise `down` after the upgrade would silently leave it running.
+  await withLegacyLock(async (dir, lock) => {
+    const d = daemon(legacyPair(dir));
+    await driver(d.docker, { lock, userDataDir: dir }).shutdown();
+    assertHermetic(d.violations);
+    assert.deepEqual(d.verbs.filter((v) => MUTATION.test(v)), [
+      `rename:${L_CHROMIUM}->${CHROMIUM}`, `rename:${L_XPRA}->${XPRA}`,
+      `stop:${CHROMIUM}`, `stop:${XPRA}`,
+    ]);
+    assert.deepEqual([...d.ctrs.keys()].sort(), [CHROMIUM, XPRA], 'kept (TEARDOWN_CONTRACT: stopped, not removed)');
+    assert.equal(d.ctrs.get(CHROMIUM).id, `id-${L_CHROMIUM}`);
+    assert.equal(d.ctrs.get(CHROMIUM).running, false);
+    assert.equal(lock.readLock(dir), null, 'its relabelled lock was released as ours');
+  });
+});
+
+test('MIGRATION: shutdown() with an owner-named pair ALSO present stops the pre-owner pair under its OLD names — never removes', async () => {
+  const d = daemon({ ...legacyPair(OUR_PROFILE), [CHROMIUM]: ours({ running: true }), [XPRA]: xpraOf({ running: true }) });
+  await driver(d.docker).shutdown();
+  assertHermetic(d.violations);
+  assert.deepEqual(d.verbs.filter((v) => MUTATION.test(v)), [
+    `stop:${L_CHROMIUM}`, `stop:${L_XPRA}`, `stop:${CHROMIUM}`, `stop:${XPRA}`,
+  ]);
+  assert.equal(d.ctrs.size, 4);
+});
+
+test('MIGRATION: shutdown() leaves a pre-owner browser NOT provably ours alone', async () => {
+  const d = daemon({ [L_CHROMIUM]: { binds: [FOREIGN_PROFILE] }, [L_XPRA]: {} });
+  await driver(d.docker).shutdown();
+  assertHermetic(d.violations);
+  assert.ok(!d.verbs.some((v) => MUTATION.test(v) && /demo-webctl-(chromium|xpra)-test/.test(v)), d.verbs.join(', '));
+  assert.ok(d.ctrs.get(L_CHROMIUM).running, 'their browser still runs');
+});
+
+// ── the REUSE path: a healthy running pair is driven only if proven ours ────
+
+/**
+ * A local endpoint that answers CDP's /json/version — so "CDP answers" is real.
+ * @param {() => boolean} [isUp]  answer only while this holds (e.g. while one
+ *   container, by ID, is running) — so a restart is observable over CDP too
+ */
+async function cdpEndpoint(isUp = () => true) {
+  const srv = http.createServer((req, res) => {
+    if (req.url === '/json/version' && isUp()) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ Browser: 'FakeChrome/1.0' }));
+    } else { res.writeHead(404); res.end(); }
+  });
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const port = /** @type {any} */ (srv.address()).port;
+  return { port, close: () => new Promise((resolve) => srv.close(() => resolve(undefined))) };
+}
+
+test('CONTROL: a running, CDP-answering pair PROVEN ours is reused — nothing removed or started', async () => {
+  const cdp = await cdpEndpoint();
+  try {
+    const r = await up({ [CHROMIUM]: ours({ running: true }), [XPRA]: xpraOf({ running: true }) }, { cdpPort: cdp.port });
+    assert.equal(r.error, undefined, r.error && r.error.message);
+    assert.equal(r.result.ok, true);
+    assert.equal(r.result.cdpHttpUrl, `http://127.0.0.1:${cdp.port}`);
+    assert.deepEqual(r.removed, []);
+    assert.deepEqual(r.started, []);
+  } finally { await cdp.close(); }
+});
+
+test('⛔ a running, CDP-answering pair NOT provably ours is never DRIVEN — and never removed', async () => {
+  // Same uid, same names, our label — but its chromium runs a DIFFERENT profile
+  // (e.g. the slug's userDataDir was changed). Handing back its CDP URL would
+  // have the caller drive a session that is not this profile's.
+  const cdp = await cdpEndpoint();
+  try {
+    const r = await up({
+      [CHROMIUM]: { labels: { [OWNER]: String(UID) }, binds: [FOREIGN_PROFILE], running: true },
+      [XPRA]: xpraOf({ running: true }),
+    }, { cdpPort: cdp.port });
+    assert.equal(r.result, undefined, 'no CDP URL may be handed back');
+    assert.ok(r.error, 'must refuse');
+    assert.equal(r.error.exitCode, 4);
+    assert.match(String(r.error.message), /REFUSING to reuse container demo-webctl-u4242-chromium-test/);
+    assert.ok(!String(r.error.message).includes(FOREIGN_PROFILE));
+    assert.deepEqual(r.removed, []);
+    assert.deepEqual(r.stopped, []);
+    assert.deepEqual(r.started, []);
+    assert.ok(r.ctrs.get(CHROMIUM).running, 'it still runs');
+  } finally { await cdp.close(); }
+});
+
+test('⛔ portless too: a running pair NOT provably ours is not reused', async () => {
+  const r = await up({
+    [CHROMIUM]: { labels: { [OWNER]: '1001' }, binds: [FOREIGN_PROFILE], running: true },
+    [XPRA]: { labels: { [OWNER]: '1001' }, running: true },
+  });
+  assert.equal(r.result, undefined);
+  assert.match(String(r.error && r.error.message), /REFUSING to reuse container .*another account/s);
+  assert.deepEqual(r.removed, []);
+  assert.deepEqual(r.started, []);
+});
+
+// ── review round: never RESTART a running browser of ours ───────────────────
+
+test('⛔ A1: a RUNNING pre-owner browser whose xpra is ABSENT is refused with ZERO mutations — not even a rename', async () => {
+  const r = await up({ [L_CHROMIUM]: { binds: [OUR_PROFILE], running: true } });
+  assert.ok(r.error, 'must refuse');
+  assert.equal(r.error.exitCode, 4);
+  assert.match(String(r.error.message), /pre-owner browser demo-webctl-chromium-test is RUNNING/);
+  assert.match(String(r.error.message), /xpra partner demo-webctl-xpra-test does not exist/);
+  assert.match(String(r.error.message), /PARTIAL/);
+  assert.match(String(r.error.message), /docker stop demo-webctl-chromium-test/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), [], r.verbs.join(', '));
+  assert.deepEqual([...r.ctrs.keys()], [L_CHROMIUM]);
+  assert.equal(r.ctrs.get(L_CHROMIUM).id, `id-${L_CHROMIUM}`);
+  assert.ok(r.ctrs.get(L_CHROMIUM).running, 'still running');
+});
+
+test('⛔ A1: a RUNNING pre-owner browser whose xpra is NOT provably ours is refused with ZERO mutations', async () => {
+  const r = await up({
+    [L_CHROMIUM]: { binds: [OUR_PROFILE], running: true },
+    [L_XPRA]: { labels: { [OWNER]: '1001' }, running: true },
+  });
+  assert.ok(r.error, 'must refuse');
+  assert.equal(r.error.exitCode, 4);
+  assert.match(String(r.error.message), /xpra partner demo-webctl-xpra-test it belongs to another account/);
+  assert.match(String(r.error.message), /PARTIAL/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), [], r.verbs.join(', '));
+  assert.ok(r.ctrs.get(L_CHROMIUM).running && r.ctrs.get(L_XPRA).running);
+});
+
+test('CONTROL (A1): a STOPPED pre-owner browser with no xpra is still renamed and brought up — no browser runs to restart', async () => {
+  const r = await up({ [L_CHROMIUM]: { binds: [OUR_PROFILE], running: false } });
+  assert.equal(r.error, undefined, r.error && r.error.message);
+  assert.equal(r.verbs.filter((v) => MUTATION.test(v))[0], `rename:${L_CHROMIUM}->${CHROMIUM}`);
+  assert.deepEqual(r.started, [`run:${XPRA}`, `run:${CHROMIUM}`]);
+  assert.deepEqual(r.overlaps, []);
+});
+
+test('A1 (shutdown): a running partial pre-owner browser is STOPPED under its old name — not renamed, not removed', async () => {
+  const d = daemon({ [L_CHROMIUM]: { binds: [OUR_PROFILE], running: true } });
+  await driver(d.docker).shutdown();
+  assertHermetic(d.violations);
+  const muts = d.verbs.filter((v) => MUTATION.test(v));
+  assert.equal(muts[0], `stop:${L_CHROMIUM}`, muts.join(', '));
+  assert.ok(!muts.some((v) => /^(rename|rm|run):/.test(v)), muts.join(', '));
+  assert.equal(d.ctrs.get(L_CHROMIUM).running, false);
+});
+
+test('⛔ A2: a running pair renamed in THIS call whose CDP does not answer is REFUSED (both ports named) — never recreated, nor on the next command', async () => {
+  await withLegacyLock(async (dir, lock) => {
+    const pair = legacyPair(dir);
+    // the pre-owner xpra was started on DIFFERENT ports than this driver's cfg
+    /** @type {any} */ (pair[L_XPRA]).ports = [4327, 14327];
+    const d = daemon(pair);
+    const cdp = await cdpEndpoint(() => false); // nothing answers at the cfg port
+    try {
+      const r = await up({}, { d, lock, userDataDir: dir, cdpPort: cdp.port });
+      assert.ok(r.error, 'must refuse');
+      assert.equal(r.error.exitCode, 4);
+      const msg = String(r.error.message);
+      assert.match(msg, new RegExp(`RUNNING, but CDP did not answer at http://127\\.0\\.0\\.1:${cdp.port}`));
+      assert.match(msg, /never destroyed merely because CDP was slow/);
+      assert.match(msg, /still starting/);
+      assert.match(msg, new RegExp(`PORT MISMATCH: this driver's CDP port is ${cdp.port}; the running pair publishes host\\s+port\\(s\\) 4327, 14327`));
+      assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v) && !v.startsWith('rename:')), [], r.verbs.join(', '));
+      assert.deepEqual(r.renamed, [`rename:${L_CHROMIUM}->${CHROMIUM}`, `rename:${L_XPRA}->${XPRA}`], 'the migration itself stands');
+      assert.equal(r.ctrs.get(CHROMIUM).id, `id-${L_CHROMIUM}`);
+      assert.ok(r.ctrs.get(CHROMIUM).running, 'the browser still runs');
+      assert.equal(lock.readLock(dir).containerName, CHROMIUM);
+      // the NEXT command — no rename this time — still never recreates it: the
+      // pair still mounts the pre-owner volume, which marks it as migrated
+      const mark = d.verbs.length;
+      const again = await up({}, { d, lock, userDataDir: dir, cdpPort: cdp.port });
+      assert.ok(again.error, 'the next command must refuse too');
+      assert.match(String(again.error.message), /RUNNING, but CDP did not answer/);
+      assert.match(String(again.error.message), /publishes host\s+port\(s\) 4327, 14327/);
+      assert.deepEqual(d.verbs.slice(mark).filter((v) => MUTATION.test(v)), [], d.verbs.slice(mark).join(', '));
+      assert.equal(d.ctrs.get(CHROMIUM).id, `id-${L_CHROMIUM}`);
+    } finally { await cdp.close(); }
+  });
+});
+
+test('⛔ A3: two CONCURRENT bring-ups on one profile with a legacy pair → ONE migration, nothing removed, the second reuses', async () => {
+  await withLegacyLock(async (dir, lock) => {
+    const lockBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bringup-mutex-'));
+    try {
+      const bringupMutex = createProcessMutex(fakeC(), { assert: false, lockBaseDir, signalCleanup: false, retryMs: 5 });
+      /** @type {Promise<any>|null} */
+      let second = null;
+      /** @type {any} */
+      let d = null;
+      d = daemon(legacyPair(dir), {
+        // Runner B arrives in THE window: A's chromium already renamed, its xpra
+        // not yet, its lock not yet relabelled. A then pauses so B gets as far
+        // as it can before A continues.
+        onRename: async (from) => {
+          if (from === L_XPRA && !second) {
+            second = up({}, { d, lock, userDataDir: dir, bringupMutex });
+            await new Promise((res) => setTimeout(res, 60));
+          }
+        },
+      });
+      const first = await up({}, { d, lock, userDataDir: dir, bringupMutex });
+      assert.ok(second, 'premise: the second runner was started inside the window');
+      const b = await second;
+      assert.equal(first.error, undefined, first.error && first.error.message);
+      assert.equal(b.error, undefined, b.error && b.error.message);
+      assert.deepEqual(d.verbs.filter((/** @type {string} */ v) => v.startsWith('rename:')),
+        [`rename:${L_CHROMIUM}->${CHROMIUM}`, `rename:${L_XPRA}->${XPRA}`], 'exactly one migration');
+      assert.deepEqual(d.verbs.filter((/** @type {string} */ v) => /^(rm|stop|run):/.test(v)), [], d.verbs.join(', '));
+      assert.equal(d.ctrs.get(CHROMIUM).id, `id-${L_CHROMIUM}`);
+      assert.ok(d.ctrs.get(CHROMIUM).running && d.ctrs.get(XPRA).running);
+      assert.deepEqual(d.overlaps, []);
+      assert.ok(b.logs.some((/** @type {string} */ m) => /another bring-up of this profile is in progress — waiting/.test(m)), b.logs.join('\n'));
+      assert.equal(lock.readLock(dir).containerName, CHROMIUM);
+      assert.deepEqual(fs.readdirSync(lockBaseDir), [], 'the bring-up lock was released by both');
+    } finally {
+      fs.rmSync(lockBaseDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('⛔ A4: a pre-owner lock written on ANOTHER host → BOTH renames rolled back, refused, lock untouched', async () => {
+  await withLegacyLock(async (dir, lock) => {
+    const lp = lock.lockPath(dir);
+    const j = JSON.parse(fs.readFileSync(lp, 'utf8'));
+    j.hostname = 'another-host.example';
+    fs.writeFileSync(lp, JSON.stringify(j));
+    const r = await up(legacyPair(dir), { lock, userDataDir: dir });
+    assert.ok(r.error, 'must refuse');
+    assert.equal(r.error.exitCode, 4);
+    assert.match(String(r.error.message), /written on another host/);
+    assert.match(String(r.error.message), /Every rename was rolled back: the pair is exactly as it was/);
+    assert.deepEqual(r.renamed, [
+      `rename:${L_CHROMIUM}->${CHROMIUM}`, `rename:${L_XPRA}->${XPRA}`,
+      `rename:${XPRA}->${L_XPRA}`, `rename:${CHROMIUM}->${L_CHROMIUM}`,
+    ]);
+    assert.deepEqual([...r.ctrs.keys()].sort(), [L_CHROMIUM, L_XPRA]);
+    assert.ok(r.ctrs.get(L_CHROMIUM).running && r.ctrs.get(L_XPRA).running);
+    assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v) && !v.startsWith('rename:')), []);
+    const after = lock.readLock(dir);
+    assert.equal(after.containerName, L_CHROMIUM);
+    assert.equal(after.hostname, 'another-host.example');
+  });
+});
+
+test('⛔ A5: attachOnly — ensureRunning() and shutdown() REFUSE before ANY docker call; healthCheck/inspect/describe still work', async () => {
+  const cdp = await cdpEndpoint();
+  try {
+    /** @param {any} docker @param {string[]} calls */
+    const spy = (docker, calls) => new Proxy(docker, {
+      get(t, p) { if (typeof p === 'string' && p !== 'then') calls.push(p); return t[p]; },
+    });
+    /** @type {string[]} */
+    const mutexCalls = [];
+    const bringupMutex = {
+      acquireLock: async () => { mutexCalls.push('acquire'); return {}; },
+      releaseLock: () => { mutexCalls.push('release'); },
+    };
+    const d = daemon(legacyPair(OUR_PROFILE));
+    /** @type {string[]} */
+    const calls = [];
+    const drv = /** @type {any} */ (driver(spy(d.docker, calls), { cdpPort: cdp.port, attachOnly: true, bringupMutex }));
+    for (const verb of ['ensureRunning', 'shutdown']) {
+      /** @type {any} */
+      let error;
+      try { await drv[verb](); } catch (e) { error = e; }
+      assert.ok(error, `${verb} must refuse`);
+      assert.equal(error.exitCode, 4);
+      assert.match(String(error.message), /attach-only target: base will not start, build or restart anything for it/);
+    }
+    assert.deepEqual(calls, [], 'ZERO docker calls — not even a read');
+    assert.deepEqual(mutexCalls, [], 'not even the bring-up lock');
+    assert.equal(await drv.healthCheck(), true, 'healthCheck still works');
+    assert.equal(drv.inspect().attachOnly, true);
+    assert.match(drv.describe(), /CDP at/);
+    assertHermetic(d.violations);
+    assert.deepEqual(d.verbs, []);
+    assert.deepEqual([...d.ctrs.keys()].sort(), [L_CHROMIUM, L_XPRA]);
+    // CONTROL: the same spy DOES see the calls a managing driver makes
+    /** @type {string[]} */
+    const calls2 = [];
+    const d2 = daemon(legacyPair(OUR_PROFILE));
+    try { await driver(spy(d2.docker, calls2), { bringupMutex }).ensureRunning(); } catch { /* irrelevant */ }
+    assert.ok(calls2.length > 0 && mutexCalls.length > 0, 'premise: the spy and the mutex stub observe a managing driver');
+    assert.equal(/** @type {any} */ (driver(d2.docker)).inspect().attachOnly, false);
+  } finally { await cdp.close(); }
+});
+
+test('a bad opts.uid is a CONFIG error at createDriver — BrowserLocationError, exit 4', () => {
+  /** @type {any} */
+  let error;
+  try { driver(daemon({}).docker, { uid: /** @type {any} */ ('not-a-uid') }); } catch (e) { error = e; }
+  assert.ok(error, 'must refuse');
+  assert.equal(error.constructor.name, 'BrowserLocationError');
+  assert.equal(error.exitCode, 4);
+  assert.match(String(error.message), /owner uid must be a non-negative integer, got "not-a-uid"/);
+});
+
+test('DECIDED: shutdown() that cannot READ ownership (daemon down) refuses and does NOT release the lock', async () => {
+  const d = daemon({ [CHROMIUM]: 'fail' });
+  let released = 0;
+  const lock = { ...freeLock(), release: () => { released++; } };
+  /** @type {any} */
+  let error;
+  try { await driver(d.docker, { lock }).shutdown(); } catch (e) { error = e; }
+  assertHermetic(d.violations);
+  assert.ok(error, 'must refuse');
+  assert.equal(error.exitCode, 4);
+  assert.match(String(error.message), /REFUSING to stop container demo-webctl-u4242-chromium-test/);
+  assert.equal(released, 0, 'our lock is not released without proof the browser is stopped');
+  assert.deepEqual(d.verbs.filter((v) => MUTATION.test(v)), []);
+});

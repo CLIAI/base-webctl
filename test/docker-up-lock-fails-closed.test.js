@@ -13,7 +13,8 @@ import assert from 'node:assert/strict';
 
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
-import * as realDocker from '../lib/browser-location/docker-ctl.js';
+import { TEST_CACHE_ROOT } from './helpers/test-cache-root.mjs';
+import { guardedDocker, assertHermetic, INSPECT_ABSENT, inspectFromRun } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC() {
   return {
@@ -28,7 +29,7 @@ function fakeC() {
 function hermeticMounts(C) {
   const m = createMounts(C, { dockerfilesDir: '/df' });
   const fake = (/** @type {string} */ s, /** @type {string} */ u) => u || `/tmp/no-mkdir/${s}`;
-  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => '/tmp/cache' };
+  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => TEST_CACHE_ROOT };
 }
 
 /**
@@ -57,29 +58,45 @@ async function bringUp(/** @type {any} */ lock) {
   const C = fakeC();
   /** @type {string[]} */
   const removed = [];
+  /** @type {string[]} */
+  const removedAfterStart = [];
   let started = 0;
-  const docker = {
-    ...realDocker,
+  // The teardown proves the pair ours before removing it. Inspect reports what
+  // THIS bring-up actually started, with the labels and mounts it actually
+  // passed — so the teardown passes only because the driver's own chromium
+  // mounts the driver's own profile.
+  /** @type {Map<string, any>} */
+  const live = new Map();
+  const { docker, violations } = guardedDocker({
     dockerAvailable: async () => true,
     containerExists: async () => false,
     containerRunning: async (/** @type {string} */ n) => started > 0 && n.includes('chromium'),
     imageExists: async () => true,
-    rm: async (/** @type {string} */ n) => { removed.push(n); return { code: 0 }; },
+    rm: async (/** @type {string} */ n) => {
+      removed.push(n); if (started > 0) removedAfterStart.push(n); return { code: 0 };
+    },
     volumeRm: async () => ({ code: 0 }),
     volumeCreate: async () => ({ code: 0 }),
     exec: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
-    run: async () => ({ code: 0, stdout: '', stderr: '' }),
-    runDetached: async () => { started++; return { code: 0, stderr: '' }; },
-  };
-  const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C), docker, profileLock: lock })
+    runDetached: async (/** @type {any} */ o) => {
+      started++; live.set(o.name, o); return { code: 0, stderr: '' };
+    },
+  }, { run: {
+    inspect: (a) => {
+      const n = a[a.length - 1];
+      return live.has(n) ? inspectFromRun(live.get(n)) : INSPECT_ABSENT;
+    },
+  } });
+  const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C), docker, profileLock: lock, uid: 4242 })
     // Portless: no CDP poll. force: skip the port pre-flight (a different `force`).
     .createDriver({ port: 45999, host: '127.0.0.1', slug: 'test', force: true,
       containerEnv: { LWC_CDP_PORT: null } });
   /** @type {any} */
   let result, error;
   try { result = await drv.ensureRunning(); } catch (e) { error = e; }
+  assertHermetic(violations);
   // only removals AFTER containers were started count as teardown
-  return { result, error, removed, started };
+  return { result, error, removed, removedAfterStart, started };
 }
 
 test('CONTROL: a free lock is acquired WITHOUT force and the start succeeds', async () => {
@@ -96,15 +113,17 @@ test('⛔ a live holder that appeared during bring-up STOPS the start — and ou
     current: { containerName: 'someone-else' },
     acquire: () => ({ ok: false, conflict: true, previous: { containerName: 'someone-else' } }),
   });
-  const { error, removed, started } = await bringUp(lock);
+  const { error, removedAfterStart, started } = await bringUp(lock);
   assert.ok(started > 0, 'premise: containers were started before the lock step');
   assert.ok(error, 'must refuse');
   assert.match(String(error.message), /profile lock NOT acquired/);
   assert.match(String(error.message), /container=someone-else/);
   assert.equal(lock.acquires[0].force, false, 'a foreign lock is never forced');
-  const tail = removed.slice(-2).join(' ');
-  assert.match(tail, /chromium/);
-  assert.match(tail, /xpra/);
+  // ⚠ Counted AFTER the start. This used to read the last two removals of ANY
+  // time, which the pre-start cleanup satisfied on its own — so a teardown that
+  // removed nothing still passed. (Found when the ownership check made it so.)
+  assert.deepEqual(removedAfterStart,
+    ['demo-webctl-u4242-chromium-test', 'demo-webctl-u4242-xpra-test']);
 });
 
 test('⛔ a lock that cannot be WRITTEN stops the start (it used to be a WARN and continue)', async () => {
@@ -116,7 +135,7 @@ test('⛔ a lock that cannot be WRITTEN stops the start (it used to be a WARN an
 
 test('force is used ONLY when the existing lock names THIS container (idempotent up)', async () => {
   const lock = recordingLock({
-    current: { containerName: 'demo-webctl-chromium-test' },
+    current: { containerName: 'demo-webctl-u4242-chromium-test' },
     acquire: () => ({ ok: true, lock: {}, tookOver: true, forced: true, previous: { containerName: 'x' } }),
   });
   const { error } = await bringUp(lock);

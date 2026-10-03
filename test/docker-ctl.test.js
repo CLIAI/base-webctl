@@ -177,6 +177,22 @@ test('stop(): no-op when container does not exist', async () => {
   });
 });
 
+test('rename(): exactly `docker rename <old> <new>`, and the result is returned, not thrown', async () => {
+  /** @type {string[][]} */
+  const seen = [];
+  const ok = mockSpawnReturning({ code: 0 });
+  await withMockSpawn((/** @type {string} */ c, /** @type {string[]} */ a) => { seen.push(a); return ok(c, a); }, async () => {
+    const r = await dockerCtl.rename('proj-chromium-default', 'proj-u1000-chromium-default');
+    assert.equal(r.code, 0);
+  });
+  assert.deepEqual(seen, [['rename', 'proj-chromium-default', 'proj-u1000-chromium-default']]);
+  await withMockSpawn(mockSpawnReturning({ code: 1, stderr: 'Error response from daemon: Conflict.' }), async () => {
+    const r = await dockerCtl.rename('a', 'b');
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /Conflict/);
+  });
+});
+
 test('runDetached() builds env/-v/-p/--label/cmd in order', async () => {
   /** @type {string[] | undefined} */
   let seenArgs;

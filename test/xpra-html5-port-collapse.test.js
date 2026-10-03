@@ -21,7 +21,8 @@ import assert from 'node:assert/strict';
 
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
-import * as realDocker from '../lib/browser-location/docker-ctl.js';
+import { TEST_CACHE_ROOT } from './helpers/test-cache-root.mjs';
+import { guardedDocker, assertHermetic, INSPECT_ABSENT } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC(overrides = {}) {
   return {
@@ -47,7 +48,7 @@ function hermeticMounts(C) {
   return {
     ...m,
     resolveChromiumProfile: (slug, udd) => udd || `/tmp/no-mkdir/${slug}`,
-    cacheRoot: () => '/tmp/cache',
+    cacheRoot: () => TEST_CACHE_ROOT,
   };
 }
 
@@ -63,8 +64,7 @@ async function captureDockerRun(cfg) {
   // Stub every daemon-touching call ensureRunning() makes before the xpra run.
   // Names verified against the real call sites, not guessed — a stub method
   // that nothing calls would let bring-up reach the real docker CLI.
-  const docker = {
-    ...realDocker,
+  const { docker, violations } = guardedDocker({
     dockerAvailable: async () => true,
     containerExists: async () => false,
     containerRunning: async () => false,
@@ -77,12 +77,14 @@ async function captureDockerRun(cfg) {
       calls.push(a);
       return { code: 1, stderr: 'halted by test after capture' };
     },
-  };
+  }, { run: { inspect: () => INSPECT_ABSENT } }); // the ownership inspect: no container exists
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C), docker })
     .createDriver({ port: 4327, host: '127.0.0.1', slug: 'test', force: true, ...cfg });
   try {
     await drv.ensureRunning();
+    assertHermetic(violations);
   } catch (err) {
+    assertHermetic(violations);
     // Expected: we halt bring-up on purpose once the args are captured. But if
     // it unwound BEFORE the capture, the tests below would fail with a confusing
     // "undefined" — so surface the real reason instead.

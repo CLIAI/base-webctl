@@ -17,7 +17,8 @@ import net from 'node:net';
 
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
-import * as realDocker from '../lib/browser-location/docker-ctl.js';
+import { TEST_CACHE_ROOT } from './helpers/test-cache-root.mjs';
+import { guardedDocker, assertHermetic, INSPECT_ABSENT } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC() {
   return {
@@ -32,7 +33,7 @@ function fakeC() {
 function hermeticMounts(C) {
   const m = createMounts(C, { dockerfilesDir: '/df' });
   const fake = (/** @type {string} */ s, /** @type {string} */ u) => u || `/tmp/no-mkdir/${s}`;
-  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => '/tmp/cache' };
+  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => TEST_CACHE_ROOT };
 }
 
 /** Hold a listener on an OS-assigned loopback port; the test owns it. */
@@ -48,8 +49,7 @@ async function bringUp(cfg) {
   const C = fakeC();
   /** @type {any[]} */
   const runs = [];
-  const docker = {
-    ...realDocker,
+  const { docker, violations } = guardedDocker({
     dockerAvailable: async () => true,
     containerExists: async () => false,
     containerRunning: async () => false,
@@ -58,13 +58,13 @@ async function bringUp(cfg) {
     volumeRm: async () => ({ code: 0 }),
     volumeCreate: async () => ({ code: 0 }),
     exec: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
-    run: async () => ({ code: 0, stdout: '', stderr: '' }),
     runDetached: async (/** @type {any} */ a) => { runs.push(a); return { code: 0, stderr: '' }; },
-  };
+  }, { run: { inspect: () => INSPECT_ABSENT } }); // the ownership inspect: no container exists
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C), docker })
     .createDriver({ host: '127.0.0.1', slug: 'test', force: false, ...cfg });
   let error;
   try { await drv.ensureRunning(); } catch (e) { error = e; }
+  assertHermetic(violations);
   return { error, runs };
 }
 

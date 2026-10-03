@@ -13,7 +13,8 @@ import assert from 'node:assert/strict';
 
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
-import * as realDocker from '../lib/browser-location/docker-ctl.js';
+import { TEST_CACHE_ROOT } from './helpers/test-cache-root.mjs';
+import { guardedDocker, assertHermetic, INSPECT_ABSENT } from './helpers/fake-docker-inspect.mjs';
 
 function fakeC() {
   return {
@@ -32,7 +33,7 @@ function hermeticMounts(C) {
   // resolveChromiumProfile leaves profilePathFor returning the REAL cache path,
   // and the profile LOCK then creates it under ~/.cache during a unit run.
   const fake = (/** @type {string} */ s, /** @type {string} */ u) => u || `/tmp/no-mkdir/${s}`;
-  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => '/tmp/cache' };
+  return { ...m, resolveChromiumProfile: fake, profilePathFor: fake, cacheRoot: () => TEST_CACHE_ROOT };
 }
 
 /** Capture the CHROMIUM container's docker-run args (the second runDetached). */
@@ -40,8 +41,7 @@ async function captureChromiumEnv(cfg) {
   const C = fakeC();
   /** @type {any[]} */
   const calls = [];
-  const docker = {
-    ...realDocker,
+  const { docker, violations } = guardedDocker({
     dockerAvailable: async () => true,
     containerExists: async () => false,
     containerRunning: async () => false,
@@ -60,10 +60,11 @@ async function captureChromiumEnv(cfg) {
       // chromium one so it unwinds right after we have its args.
       return a.name.includes('chromium') ? { code: 1, stderr: 'halted by test' } : { code: 0, stderr: '' };
     },
-  };
+  }, { run: { inspect: () => INSPECT_ABSENT } }); // the ownership inspect: no container exists
   const drv = createChromiumDockerXpra(C, { mounts: hermeticMounts(C), docker })
     .createDriver({ port: 4327, host: '127.0.0.1', slug: 'test', force: true, ...cfg });
   try { await drv.ensureRunning(); } catch { /* expected */ }
+  assertHermetic(violations);
   const chromium = calls.find((c) => String(c.name).includes('chromium'));
   if (!chromium) {
     throw new Error(
