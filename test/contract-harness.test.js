@@ -293,37 +293,41 @@ test('the harness owns the exit codes, and publishes its generation', () => {
 
 test('gate-probe: NO VERDICT outside the gate — never a vacuous pass', () => {
   const { dir, g } = fixture();
-  g(['add', 'vendor/base-webctl']);
-  g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
+  try {
+    g(['add', 'vendor/base-webctl']);
+    g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
 
-  const r = run(['gate-probe', '--repo', dir]);
-  assert.equal(r.status, 2,
-    `must decline, not pass, when no swap window exists; got ${r.status}\n${r.stderr}`);
-  assert.match(r.stdout, /"result":"no-verdict"/);
-  assert.match(r.stderr, /vacuous/i, 'the reason must say WHY it declined');
+    const r = run(['gate-probe', '--repo', dir]);
+    assert.equal(r.status, 2,
+      `must decline, not pass, when no swap window exists; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stdout, /"result":"no-verdict"/);
+    assert.match(r.stderr, /vacuous/i, 'the reason must say WHY it declined');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('⭐ gate-probe: PASSES in a real swap window, and names both sides', () => {
   const { dir, sub, g } = fixture();
-  g(['add', 'vendor/base-webctl']);
-  g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
-  const declared = execFileSync('git', ['-C', sub, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  try {
+    g(['add', 'vendor/base-webctl']);
+    g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
+    const declared = execFileSync('git', ['-C', sub, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 
-  // The swap the gate performs: check the submodule out at an untagged candidate
-  // WITHOUT touching the parent's committed gitlink.
-  fs.writeFileSync(path.join(sub, 'lib', 'candidate.js'), 'export const c = 3;\n');
-  g(['-C', sub, 'add', '.']);
-  g(['-C', sub, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'candidate']);
-  const worktree = execFileSync('git', ['-C', sub, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-  assert.notEqual(declared, worktree, 'the fixture must actually produce a disagreement');
+    // The swap the gate performs: check the submodule out at an untagged candidate
+    // WITHOUT touching the parent's committed gitlink.
+    fs.writeFileSync(path.join(sub, 'lib', 'candidate.js'), 'export const c = 3;\n');
+    g(['-C', sub, 'add', '.']);
+    g(['-C', sub, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'candidate']);
+    const worktree = execFileSync('git', ['-C', sub, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    assert.notEqual(declared, worktree, 'the fixture must actually produce a disagreement');
 
-  const r = run(['gate-probe', '--repo', dir],
-    { WEBCTL_GATE_SWAPPED: '1', WEBCTL_DECLARED_PIN: declared });
-  assert.equal(r.status, 0, `must pass in a real swap window; got ${r.status}\n${r.stderr}`);
-  // ⚠ Assert the SHAs are named, not just that it passed: the reason is the only
-  // thing that travels to a human (xrl4).
-  assert.match(r.stderr, new RegExp(declared.slice(0, 7)));
-  assert.match(r.stderr, new RegExp(worktree.slice(0, 7)));
+    const r = run(['gate-probe', '--repo', dir],
+      { WEBCTL_GATE_SWAPPED: '1', WEBCTL_DECLARED_PIN: declared });
+    assert.equal(r.status, 0, `must pass in a real swap window; got ${r.status}\n${r.stderr}`);
+    // ⚠ Assert the SHAs are named, not just that it passed: the reason is the only
+    // thing that travels to a human (xrl4).
+    assert.match(r.stderr, new RegExp(declared.slice(0, 7)));
+    assert.match(r.stderr, new RegExp(worktree.slice(0, 7)));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('⛔ MUTATION: gate-probe FAILS when pin returns a verdict under a gate-reported swap', () => {
@@ -332,27 +336,31 @@ test('⛔ MUTATION: gate-probe FAILS when pin returns a verdict under a gate-rep
   // returns a real verdict (here: pass, since the gitlink is a tag). A probe
   // whose precondition were the same comparison would silently decline instead.
   const { dir, sub, g } = fixture();
-  g(['add', 'vendor/base-webctl']);
-  g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
-  const same = execFileSync('git', ['-C', sub, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  try {
+    g(['add', 'vendor/base-webctl']);
+    g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
+    const same = execFileSync('git', ['-C', sub, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 
-  const r = run(['gate-probe', '--repo', dir],
-    { WEBCTL_GATE_SWAPPED: '1', WEBCTL_DECLARED_PIN: same });
-  assert.equal(r.status, 1,
-    `a verdict under a reported swap must FAIL the probe; got ${r.status}\n${r.stderr}`);
-  assert.match(r.stderr, /returned PASS/, 'the probe must say WHAT pin returned');
+    const r = run(['gate-probe', '--repo', dir],
+      { WEBCTL_GATE_SWAPPED: '1', WEBCTL_DECLARED_PIN: same });
+    assert.equal(r.status, 1,
+      `a verdict under a reported swap must FAIL the probe; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /returned PASS/, 'the probe must say WHAT pin returned');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('⛔ gate-probe FAILS when the gate reports a swap but hands over no declared pin', () => {
   // The state WEBCTL_DECLARED_PIN exists to prevent. Declining here would leave
   // the gate's own omission unreported.
   const { dir, g } = fixture();
-  g(['add', 'vendor/base-webctl']);
-  g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
+  try {
+    g(['add', 'vendor/base-webctl']);
+    g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'mount']);
 
-  const r = run(['gate-probe', '--repo', dir], { WEBCTL_GATE_SWAPPED: '1' });
-  assert.equal(r.status, 1, `must FAIL, not decline; got ${r.status}\n${r.stderr}`);
-  assert.match(r.stderr, /did not hand over WEBCTL_DECLARED_PIN/);
+    const r = run(['gate-probe', '--repo', dir], { WEBCTL_GATE_SWAPPED: '1' });
+    assert.equal(r.status, 1, `must FAIL, not decline; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /did not hand over WEBCTL_DECLARED_PIN/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 // ── no-revendor: recursion and content ───────────────────────────────────────
@@ -383,69 +391,81 @@ function revendorFixture() {
 
 test('⛔ MUTATION: a NESTED base module copied to the local top level is caught', () => {
   const { dir, vlib } = revendorFixture();
-  // The case generation 1 was structurally blind to: the name is not in the
-  // top-level listing of base's lib at all.
-  fs.copyFileSync(path.join(vlib, 'browser-location', 'profile-lock.js'),
-    path.join(dir, 'lib', 'profile-lock.js'));
+  try {
+    // The case generation 1 was structurally blind to: the name is not in the
+    // top-level listing of base's lib at all.
+    fs.copyFileSync(path.join(vlib, 'browser-location', 'profile-lock.js'),
+      path.join(dir, 'lib', 'profile-lock.js'));
 
-  const r = run(['no-revendor', '--repo', dir]);
-  assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
-  assert.match(r.stderr, /profile-lock\.js/);
-  assert.match(r.stderr, /browser-location/, 'it must name WHICH base module was copied');
+    const r = run(['no-revendor', '--repo', dir]);
+    assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /profile-lock\.js/);
+    assert.match(r.stderr, /browser-location/, 'it must name WHICH base module was copied');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('⛔ MUTATION: a copy into a SUBDIRECTORY under a NEW NAME is caught by content', () => {
   const { dir, vlib } = revendorFixture();
-  fs.copyFileSync(path.join(vlib, 'client-config.js'), path.join(dir, 'lib', 'cdp', 'client.mjs'));
+  try {
+    fs.copyFileSync(path.join(vlib, 'client-config.js'), path.join(dir, 'lib', 'cdp', 'client.mjs'));
 
-  const r = run(['no-revendor', '--repo', dir]);
-  assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
-  assert.match(r.stderr, /client\.mjs/, 'the local path must be named');
-  assert.match(r.stderr, /identical after normalisation/, 'and HOW it was detected');
+    const r = run(['no-revendor', '--repo', dir]);
+    assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /client\.mjs/, 'the local path must be named');
+    assert.match(r.stderr, /identical after normalisation/, 'and HOW it was detected');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('⭐ a copy that was REFORMATTED and RE-COMMENTED is still caught', () => {
   // ⇒ What a re-vendor looks like after someone has "adapted" it. Normalisation
   // strips comments and collapses whitespace, so cosmetic edits do not hide it.
   const { dir, vlib } = revendorFixture();
-  const src = fs.readFileSync(path.join(vlib, 'client-config.js'), 'utf8');
-  fs.writeFileSync(path.join(dir, 'lib', 'adapted.js'),
-    `// OUR adapted copy, reformatted\n\n${src.replace('// base\n', '').replace(/ /g, '  ')}\n`);
+  try {
+    const src = fs.readFileSync(path.join(vlib, 'client-config.js'), 'utf8');
+    fs.writeFileSync(path.join(dir, 'lib', 'adapted.js'),
+      `// OUR adapted copy, reformatted\n\n${src.replace('// base\n', '').replace(/ /g, '  ')}\n`);
 
-  const r = run(['no-revendor', '--repo', dir]);
-  assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
-  assert.match(r.stderr, /adapted\.js/);
+    const r = run(['no-revendor', '--repo', dir]);
+    assert.equal(r.status, 1, `must FAIL; got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /adapted\.js/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('⭐ CONTROL: a legitimate RE-EXPORT shim is not flagged', () => {
   // The pattern consumers are SUPPOSED to use. A check that flagged this would be
   // overridden within a day, which is worse than one that misses a copy.
   const { dir } = revendorFixture();
-  fs.writeFileSync(path.join(dir, 'lib', 'profile-lock.js'),
-    "export { createProfileLock } from '../vendor/base-webctl/lib/browser-location/profile-lock.js';\n");
-  fs.writeFileSync(path.join(dir, 'lib', 'own.js'), 'export const mine = 1;\n');
+  try {
+    fs.writeFileSync(path.join(dir, 'lib', 'profile-lock.js'),
+      "export { createProfileLock } from '../vendor/base-webctl/lib/browser-location/profile-lock.js';\n");
+    fs.writeFileSync(path.join(dir, 'lib', 'own.js'), 'export const mine = 1;\n');
 
-  const r = run(['no-revendor', '--repo', dir]);
-  assert.equal(r.status, 0, `a shim must pass; got ${r.status}\n${r.stderr}`);
+    const r = run(['no-revendor', '--repo', dir]);
+    assert.equal(r.status, 0, `a shim must pass; got ${r.status}\n${r.stderr}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('⛔ a base lib with ZERO modules FAILS rather than finding nothing to report', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'revendor-empty-'));
-  fs.mkdirSync(path.join(dir, 'vendor', 'base-webctl', 'lib'), { recursive: true });
-  fs.mkdirSync(path.join(dir, 'lib'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'lib', 'own.js'), 'export const mine = 1;\n');
+  try {
+    fs.mkdirSync(path.join(dir, 'vendor', 'base-webctl', 'lib'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'lib', 'own.js'), 'export const mine = 1;\n');
 
-  const r = run(['no-revendor', '--repo', dir]);
-  assert.equal(r.status, 1, 'losing the comparison set is a FAIL, not a clean bill');
-  assert.match(r.stderr, /lost its comparison set|ZERO modules/);
+    const r = run(['no-revendor', '--repo', dir]);
+    assert.equal(r.status, 1, 'losing the comparison set is a FAIL, not a clean bill');
+    assert.match(r.stderr, /lost its comparison set|ZERO modules/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('the reason states what this check does NOT cover', () => {
   // ⇒ An edited copy under a different name still escapes. Saying so in the PASS
   // reason is the difference between a limit and a false impression of coverage.
   const { dir } = revendorFixture();
-  fs.writeFileSync(path.join(dir, 'lib', 'own.js'), 'export const mine = 1;\n');
-  const r = run(['no-revendor', '--repo', dir]);
-  assert.equal(r.status, 0);
-  assert.match(r.stderr, /EDITED copy under a DIFFERENT name is\s+not detected/);
+  try {
+    fs.writeFileSync(path.join(dir, 'lib', 'own.js'), 'export const mine = 1;\n');
+    const r = run(['no-revendor', '--repo', dir]);
+    assert.equal(r.status, 0);
+    assert.match(r.stderr, /EDITED copy under a DIFFERENT name is\s+not detected/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
