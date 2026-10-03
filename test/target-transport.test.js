@@ -168,22 +168,38 @@ test('TIMEOUT: a child that IGNORES SIGTERM is SIGKILLed after killGraceMs, and 
   assert.ok(ms >= 400 && ms < 400 + 2000, `resolved in ${ms} ms`);
 });
 
+/**
+ * The pid a process recorded for ITSELF, or null until the line is complete.
+ * @param {string} pidFile
+ */
+function recordedPid(pidFile) {
+  try {
+    const m = /^(\d+)\n$/.exec(fs.readFileSync(pidFile, 'utf8'));
+    return m ? Number(m[1]) : null;
+  } catch { return null; }
+}
 /** @param {string} pidFile */
 function killPidFile(pidFile) {
-  try { process.kill(Number(fs.readFileSync(pidFile, 'utf8').trim()), 'SIGKILL'); } catch {}
+  const pid = recordedPid(pidFile);
+  if (pid) try { process.kill(pid, 'SIGKILL'); } catch {}
 }
 /** @param {string} pidFile */
 function alive(pidFile) {
-  try { process.kill(Number(fs.readFileSync(pidFile, 'utf8').trim()), 0); return true; } catch { return false; }
+  const pid = recordedPid(pidFile);
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 test('TIMEOUT: a grandchild holding the pipes neither delays the result nor keeps writing into it', async () => {
   const holderPid = path.join(dir, 'holder.pid');
   const tickerPid = path.join(dir, 'ticker.pid');
   // The holder sleeps with our stdout/stderr open; the ticker keeps WRITING to stdout.
+  // Each records its OWN pid ($$ of its own sh) before doing anything else: our SIGTERM
+  // goes to the stub only, so once a grandchild exists its pid gets recorded even if the
+  // stub dies first — no untracked `sleep 30` can be left behind.
   const leaky = stub('fake-ssh-leaky', [
-    `sleep 30 & echo $! > ${shQuote(holderPid)}`,
-    `( while :; do echo tick || exit 0; sleep 0.1; done ) & echo $! > ${shQuote(tickerPid)}`,
+    `sh -c ${shQuote(`echo $$ > ${shQuote(holderPid)}; exec sleep 30`)} &`,
+    `sh -c ${shQuote(`echo $$ > ${shQuote(tickerPid)}; while :; do echo tick || exit 0; sleep 0.1; done`)} &`,
     'exec sleep 30',
   ].join('\n'));
   /** @type {any} */
@@ -196,10 +212,18 @@ test('TIMEOUT: a grandchild holding the pipes neither delays the result nor keep
   try {
     const t = createSshTransport({ ssh: ALIAS, sshBin: leaky });
     const t0 = Date.now();
-    const r = await t.run(['true'], { timeoutMs: 200 });
+    const pending = t.run(['true'], { timeoutMs: 500 });
+    // Bounded wait until BOTH grandchildren have recorded themselves.
+    const ready = Date.now() + 2000;
+    while ((!recordedPid(holderPid) || !recordedPid(tickerPid)) && Date.now() < ready) {
+      await new Promise((res) => setTimeout(res, 20));
+    }
+    assert.ok(recordedPid(holderPid) && recordedPid(tickerPid), 'both grandchildren recorded their pids');
+    const r = await pending;
     const ms = Date.now() - t0;
     assert.equal(r.code, TIMEOUT_CODE);
-    assert.ok(ms < 1500, `resolved in ${ms} ms despite a grandchild holding the pipes`);
+    assert.ok(ms < 2000, `resolved in ${ms} ms despite a grandchild holding the pipes`);
+    assert.match(r.stdout, /tick/, 'control: the ticker really was writing into our pipe');
     assert.ok(alive(holderPid), 'control: the holder really is still running with the pipes');
     for (const s of ['stdout', 'stderr', 'stdin']) {
       assert.equal(spawned[s].destroyed, true, `child ${s} destroyed`);
