@@ -101,8 +101,9 @@ live on:
     `arch-target-resolution-no-implicit-location-nl0c` (never assume where the browser
     runs: flag > env > config, else refused before any contact; `--target` is the
     location flag), `arch-remote-bring-up-over-ssh-rb7s` (the driver's work happens ON
-    the target: docker over `DOCKER_HOST=ssh://`, an argv ssh transport, target facts,
-    an owned tunnel).
+    the target — phases 2–3 superseded by rx9q), `arch-runtime-layer-xq-boundary-rx9q`
+    (xq runs the app up to a declared control port; base speaks CDP/BiDi above it;
+    capability-pinned, never version-pinned).
   * **test** — `test-cross-repo-consumer-loop-xrl4` (the `test-against-base.sh`
     contract + `consumers.jsonc` + the release gate),
     `test-checks-that-cannot-fail-k3wn` (verification discipline, led by base's

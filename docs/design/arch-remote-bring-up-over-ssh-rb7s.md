@@ -19,6 +19,13 @@ similar_to: []
 
 # Remote bring-up over ssh — the driver's work happens ON the target
 
+> ⚠ **SUPERSEDED IN PART by `arch-runtime-layer-xq-boundary-rx9q` (2026-10-03).** Greg
+> asked for no duplication with xq, which already runs GUI apps in containers locally and
+> remotely. **Phases 2–3 below (base's driver on a remote target; base's own tunnel) are not
+> to be built** — they are xq's side of the boundary. §1's survey of the driver's local
+> assumptions stays valid: it is the list of what the legacy driver gets wrong remotely,
+> and why lanes move to xq rather than base patching ten sites.
+
 ## 0. Why now
 
 Greg, 2026-10-03: browsers run on a declared remote host by default, in chromium-in-
