@@ -602,8 +602,9 @@ kernel SIGKILLs everything left in it — an arm's stray background processes in
   `forwardSignalsPastUnshare`: signal unshare's CHILD (from
   `/proc/<pid>/task/<pid>/children`, else a `/proc` scan); none yet ⇒ SIGKILL unshare, and
   `--kill-child` takes the namespace down — nothing had started.
-* **pid 1 ignores a signal it has no handler for.** So the inner half installs exit-on-signal
-  handlers from its first line and swaps them for runCommand's forwarders only when the
+* **pid 1 ignores a signal it has no handler for.** *(Since v0.33.0 pid 1 is the reaping
+  bash, which traps and forwards — see "pid 1 did not reap" below; the inner half is pid 2.)*
+  So the inner half installs exit-on-signal handlers from its first line and swaps them for runCommand's forwarders only when the
   command starts. ⚠ That pre-command window has no test: it needs a signal inside a ~100 ms
   masking window, which is a race, not an arm.
 * **Nesting fact 7:** `/proc/self/ns/pid` ≠ `WEBCTL_HOST_PIDNS`. Recorded, so fabricable —
@@ -676,6 +677,91 @@ every caller WITHOUT a trap (lane scripts). A command that HANDLES the signal ke
 code (the rc-7 trapper arm); `exit 130` without a signal stays 130 (CONTROL). Sabotage: no
 re-raise → the three no-trap arms red.
 
+### ⛔ The home's SECRETS were readable — read-only is not hidden (`perplexity`, v0.33.0)
+
+*Measured by a consumer lane:* under the read-only home a mutated test could still READ and
+print `~/.ssh` keys, live ControlMaster socket paths, an install salt and target configs
+naming remote hosts — into a log that may land in a public repo. Read-only stops a mutant
+WRITING the profile; it does nothing about it READING the operator's secrets.
+
+⇒ `HIDDEN_DIRS` (`.ssh`, `.gnupg`, `.cache/CLIAI`, `.config/CLIAI`, `.local/state/CLIAI`,
+`.config/webctl`): each that exists is realpath'd on the HOST side (protectedRoots — inside
+we are uid 0 and the passwd lookup answers root's) and gets an EMPTY tmpfs (`mode=0555`,
+source `webctl-isolated-hidden`), remounted `ro`.
+
+* **Order.** After the ro-home step and after the new `/tmp`, in ONE sequence with the keeps
+  moving back, sorted by path length (a hide before a keep at the same path). ⇒ a keep
+  CONTAINING a hidden dir is moved first and the hide lands on top of it (does not unhide);
+  a keep AT one lands on top of the hide (the caller's exception); a keep BENEATH one gets its
+  mount point created in the fresh tmpfs before it is remounted ro, then lands on top.
+* **Paths beneath a hidden dir must be bound** (planKeeps rule (c)): before, a read-only item
+  under a protected root needed no bind — the root's own ro mount covered it. Under a hide it
+  would vanish: base's root, node or an absolute command living under `~/.cache/CLIAI` would
+  be unreachable. And the dedupe that drops a keep beneath a writable outer keep must NOT drop
+  it when a hidden dir lies between them.
+* **errnos, measured inside:** each hidden dir lists 0 entries; a read of the planted file is
+  `ENOENT`; an exclusive create is `EROFS` (the per-mount ro flag wins over the 0555 mode).
+* **Post-check from mountinfo** (`hiddenGaps`): the TOP mount at each hidden dir must be OUR
+  ro tmpfs, unless a keep is exactly there. Tested with a fake `mount` that silently skips
+  one hide — refused, nothing run.
+* **Nesting fact 8:** each dir recorded in `WEBCTL_HIDDEN_DIRS` has the hide tmpfs somewhere
+  in its mount stack (not necessarily on top: a keep at exactly it sits above).
+* **Tests never plant in the real `~/.ssh`.** A FAKE passwd home (a throwaway dir) is given to
+  the real uid by binding a fake `/etc/passwd` in a throwaway `unshare -rm` — the same device
+  as the passwd-home refusals. The helper also asserts `getent` answers the fake home, so a
+  host where NSS answers from elsewhere SKIPS by name rather than testing the real home.
+* **BREAKING** for a test that reads one of these dirs; `--keep <path>` re-exposes that path.
+* **Sabotage:** no hide → every hide arm red; no ro remount → refused by the post-check (and
+  the arm's `EROFS` would read `EACCES`); no mount-point skeleton → the keep-beneath arm red
+  (masking fails, EROFS); no bind for paths beneath a hidden dir → the command/cwd arm red;
+  no hidden-between guard in the dedupe → keep-beneath red; hide sorted after a keep at the
+  same path → keep-exception red; no post-check → the fake-`mount` arm red; nesting fact 8
+  off → its nesting arm red.
+
+### ⛔ pid 1 did not reap (`perplexity`, v0.33.0)
+
+*Measured:* node as pid 1 leaves an orphaned, exited grandchild as a ZOMBIE — state `Z`,
+`kill -0` succeeds. A test that daemonises a helper and asserts "it is gone" fails only under
+`isolated`. libuv `waitpid()`s only the pids it spawned and node exposes no `waitpid(-1)`.
+`PR_SET_CHILD_SUBREAPER` is no help: it is not reachable from node either, and a pid 1 is
+already the reaper — the question is only whether it calls `wait`. bash does: its SIGCHLD
+handler reaps ANY child, re-parented orphans included (measured: the orphan's
+`/proc/<pid>` disappears).
+
+⇒ unshare's forked child, on both paths, is `bash -c PID1_REAPER <node half> …`:
+
+* the node half (inner half on the fresh path, the `__isolated-pid1` helper on the nested
+  one) runs in the BACKGROUND, `<&0`: **a non-interactive bash gives a background job
+  `/dev/null` as stdin** unless redirected explicitly (measured — `echo x | bash -c 'cat &
+  wait'` prints nothing);
+* fds 3/4 (status, plan) are inherited by the background child, which needs them; bash then
+  closes its own copies (`exec 3>&- 4<&-` — measured: none left open in pid 1);
+* INT/TERM/HUP trapped and forwarded. A trapped signal interrupts `wait` (returns >128), so it
+  waits AGAIN until the child itself ended; **bash keeps a reaped child's status for a second
+  `wait`** (measured: `wait` → 138 by a USR1 trap, `wait` again → 5, the child's). It then
+  exits with the child's status. A signal before the child exists: `exit 128+n` — pid 1 goes,
+  the namespace with it, nothing starts;
+* ⚠ **a background job ignores SIGINT** (`SigIgn 0x6` on a `sleep &`), so the command is never
+  bash's direct child: node resets its dispositions at start (measured: its SigIgn has no
+  INT), and node spawns the command with defaults — which is why the nested path keeps the
+  node helper under bash.
+* Fail closed: `bashOnPath()` finds no bash → FAIL naming it (both paths). The restricted-PATH
+  arms for unshare/ip/mount/setpriv now include bash, so they still fail on what they name.
+* **Sabotage:** drop `<&0` → stdin arm red; `exec "$@"` instead of reaping → both orphan arms
+  red; a single `wait` → the SIGTERM-trapper arm red (pid 1 exits 143 while the command's trap
+  is still running, and the namespace dies with it); a trap that does not forward → the
+  SIGTERM arms red; each bash check removed → the no-bash arm red. The Ctrl-C arms stay green
+  under a non-forwarding trap: Ctrl-C signals the whole group, so the command gets INT anyway.
+* Not tested: the pre-child `exit 128+n` branch (a race, as for the inner half's early handlers).
+
+### More env scrubbed (`perplexity`, v0.33.0)
+
+`TMUX`, `TMUX_PANE` (send-keys into the human's panes), `XAUTHORITY`, `SSH_AGENT_PID`,
+`DOCKER_CONTEXT` (a possibly remote daemon), and `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_TTY` —
+the last three carry the operator's ADDRESSES, which a mutated test can print into a public
+log. The arm and its control iterate the same list; the hostile values use the documentation
+address range. Sabotage: dropping `SSH_CLIENT` from the list → the arm red.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
@@ -690,9 +776,13 @@ deliberately not re-indented, to keep the guard a two-line diff against concurre
 * **The home is passwd's for the REAL uid** (realIdentity, below) — one level up at most: a
   stack of `unshare -r` is refused, not resolved. No passwd entry ⇒ refused. A profile
   directory configured OUTSIDE home (and not via a symlinked dot-dir) is not covered.
-* **`WEBCTL_RO_ROOTS` is recorded input.** `[]` would satisfy the nested home fact; the
-  other five facts still require being inside a real masked namespace, so it does not let
-  the host pass as "inside".
+* **`WEBCTL_RO_ROOTS` and `WEBCTL_HIDDEN_DIRS` are recorded input.** `[]` would satisfy the
+  nested home / hidden fact; the other facts still require being inside a real masked
+  namespace, so it does not let the host pass as "inside".
+* **Hidden dirs are a fixed list** (`HIDDEN_DIRS`). A secret kept elsewhere in home is only
+  read-only, not hidden. Absent at start → not hidden (nothing to hide; it cannot appear later,
+  the home is read-only).
+* **`bash` is required** (pid 1, the reaper). Absent → FAIL.
 
 * **The real uid, no capabilities.** The command runs as the caller's own uid/gid in a
   child user namespace (above); it can make namespaces of its own, but cannot bind a port

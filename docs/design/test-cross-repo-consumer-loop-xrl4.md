@@ -470,7 +470,14 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
   `unshare --pid --fork --mount-proc --kill-child`: inside, a host pid is `ESRCH` and absent
   from `/proc`; the arm's own leftovers die with the namespace's pid 1. ⚠ `unshare --fork`
   **blocks SIGTERM** in its own process until the child exits (measured), so the harness
-  forwards termination signals to unshare's CHILD — the inner half — not to unshare.
+  forwards termination signals to unshare's CHILD — pid 1 — not to unshare.
+* **pid 1 REAPS** (v0.33.0, measured by `perplexity`). node as pid 1 left a re-parented,
+  exited grandchild as a **zombie** (state `Z`, `kill -0` succeeds): libuv waits only for its
+  own children and node has no `waitpid(-1)`. ⇒ pid 1, on the fresh and the nested path, is a
+  small bash that runs the node half in the background (`<&0` — a background job otherwise
+  reads `/dev/null`), traps and forwards INT/TERM/HUP, re-waits after a trapped signal and
+  exits with the child's status. Its SIGCHLD handler reaps ANY child: the orphan's
+  `/proc/<pid>` disappears (measured). No `bash` ⇒ refused.
 * **No capabilities.** *Measured by the final review:* the command was namespace root with
   **every** capability, so `umount -l /tmp` or unmounting a `/dev/null` cover re-exposed host
   sockets (ENOENT/ECONNREFUSED → CONNECTED). ⇒ It runs in a **child user namespace as the
@@ -502,13 +509,16 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
 * **Env scrub** on the fresh and the nested path: `DISPLAY`, `WAYLAND_DISPLAY`,
   `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `XDG_RUNTIME_DIR` unset, and the
   state roots `XDG_{CACHE,CONFIG,STATE,DATA}_HOME` too (they beat `$HOME` in `v59v`, so a
-  temp HOME was silently bypassed);
+  temp HOME was silently bypassed); and (v0.33.0, `perplexity`) `TMUX`, `TMUX_PANE`,
+  `XAUTHORITY`, `SSH_AGENT_PID`, `DOCKER_CONTEXT`, `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_TTY` —
+  the last three carry the operator's addresses, which a mutated test can print into a log;
   `TMPDIR=/tmp`, so an inherited value cannot name a directory the mask hid.
 * **A nested call still gets its own PID namespace.** Network and masks are inherited (the
   mounts stay locked), but the process table is not: a lane that runs its suite through
   `isolated`, under the gate's own `isolated`, must not let the suite signal the contract
   that called it. Two lanes' arms failed only under the gate until this held (measured on
-  the v0.32.0 gate run). A small node pid 1 forwards signals; exit 128+n is re-raised.
+  the v0.32.0 gate run). Its pid 1 is the same reaping bash, over a small node helper that
+  gives the command default signal dispositions; exit 128+n is re-raised.
 * **Nesting.** "Already inside" now also needs `/proc/self/ns/mnt` ≠ `WEBCTL_HOST_MNTNS`
   and our tmpfs **on top of** `/run` and `/tmp` in `/proc/self/mountinfo` — "a tmpfs at
   /run" alone is a proxy, the host's already is one. The old net-only namespace is refused.
@@ -564,6 +574,20 @@ runs with cwd = its root, which re-opens it through the cwd.
   `access(W_OK)` with `EROFS` — so the previous `isolated` (every other fact satisfied, home
   writable) is refused. The roots are recorded, not re-derived: inside the user namespace
   we are uid 0, and the passwd lookup answers root's home.
+* **⛔ Read-only is not HIDDEN** (v0.33.0, measured by `perplexity`). A mutated test could
+  still READ and print `~/.ssh` keys, live ControlMaster socket paths, an install salt and
+  target configs naming remote hosts. ⇒ `~/.ssh`, `~/.gnupg`, `~/.cache/CLIAI`,
+  `~/.config/CLIAI`, `~/.local/state/CLIAI` and `~/.config/webctl` — each that exists, at its
+  real path — get an **empty, read-only** tmpfs (source `webctl-isolated-hidden`) after the
+  read-only step, in one outer-before-inner sequence with the keeps moving back. Inside, each
+  lists nothing, a read is `ENOENT`, a create `EROFS` (measured). An explicit `--keep` at or
+  beneath one re-exposes **that path only** (named on stderr); a keep that merely **contains**
+  one does not unhide it; the cwd, base's root, node and an absolute command beneath one are
+  bound back. Read back from mountinfo: each hidden dir's top mount must be ours (unless a
+  keep sits exactly there), else refused. Nesting fact: each dir recorded in
+  `WEBCTL_HIDDEN_DIRS` carries the mask. **BREAKING** for a test that reads these dirs.
+  *Tested* with a fake passwd home (a fake `/etc/passwd` bound in a throwaway `unshare -rm`),
+  never by planting in the real `~/.ssh`.
 * **Callers' caches.** *Measured with npm 12:* `npm test` under a read-only home behaves
   exactly as on the host (rc 0 / rc 1); npm only skips its debug logfile (`EROFS` on
   `~/.npm/_logs`), printing *"Log files were not written …"* on error. No harness change

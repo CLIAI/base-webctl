@@ -1164,6 +1164,10 @@ function walkJs(dir) {
 //     path corrupts a live profile with no network at all. ⇒ the PASSWD home is rbound
 //     onto itself and remounted ro — with EVERY submount (a remount hits only the top) —
 //     and only the cwd and each `--keep` are re-opened writable on top of it.
+//   * ⛔ AND ITS SECRETS ARE HIDDEN. Read-only still let a mutant READ and print the ssh
+//     keys, ControlMaster sockets, an install salt and remote target configs. ⇒ ~/.ssh,
+//     ~/.gnupg and the family's state roots each get an EMPTY read-only tmpfs on top.
+//   * PID 1 REAPS: a bash, not node — node leaves re-parented orphans as zombies.
 //
 // It FAILS CLOSED: there is no path on which the command runs on the host.
 
@@ -1435,6 +1439,12 @@ function usageRefusal(why, command) {
  * ~/.cache … is allowed but NAMED on stderr (`isolated: note: …`). Every path is realpath'd
  * first, so a symlink cannot smuggle the home in. Any mount that fails → refused; and the
  * result is READ BACK from /proc/self/mountinfo before the command starts.
+ *
+ * ⛔ AND THE SECRETS IN IT ARE HIDDEN (HIDDEN_DIRS): ~/.ssh, ~/.gnupg, ~/.cache/CLIAI,
+ * ~/.config/CLIAI, ~/.local/state/CLIAI and ~/.config/webctl — those that exist, at their real
+ * paths — each get an EMPTY read-only tmpfs on top, after the ro step, so nested calls inherit
+ * them locked. An explicit `--keep` at or beneath one re-exposes THAT path (named on stderr);
+ * one CONTAINING it does not unhide it. Read back from mountinfo too (hiddenGaps).
  *
  * ⛔ NEVER FALLS BACK TO THE HOST. No unshare, userns disabled, no `ip`/`ifconfig`, no
  * `mount`, a loopback that will not come up, a namespace that still sees a non-loopback

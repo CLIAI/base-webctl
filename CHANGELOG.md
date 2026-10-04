@@ -207,6 +207,56 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.33.0 — (unreleased)
+
+**Headline: `isolated` HIDES the home's secrets, its pid 1 REAPS orphans, and eight more
+env vars are scrubbed** — three gaps measured by `perplexity` (xrl4 §"Mutation arms run with
+no host network, no host unix sockets and a read-only home"). Harness only; no `lib/` change.
+
+### ⛔ BREAKING — `~/.ssh`, `~/.gnupg` and the state roots are HIDDEN inside `isolated`
+
+The read-only home still let a mutated test READ and print the operator's ssh keys, live
+ControlMaster socket paths, an install salt and target configs naming remote hosts.
+
+* `~/.ssh`, `~/.gnupg`, `~/.cache/CLIAI`, `~/.config/CLIAI`, `~/.local/state/CLIAI` and
+  `~/.config/webctl` — each that exists, at its real path — get an **empty, read-only**
+  tmpfs on top, after the read-only step (so nested calls inherit them, locked). Inside, each
+  lists nothing, a read is `ENOENT`, a create `EROFS` (measured).
+* **A test that reads one of these dirs now fails.** Give it a fixture under a throwaway
+  `HOME` instead, or keep the path: `--keep <path>` at or beneath a hidden dir re-exposes
+  **that path only** (writable, named on stderr as before). A keep that merely CONTAINS one
+  (`--keep ~/.config`) does **not** unhide it.
+* The cwd, base's repo root, node and an absolute command beneath a hidden dir are bound
+  back, as before. Read back from mountinfo before the command starts (else FAIL, nothing
+  run); a nested call additionally needs each dir recorded in `WEBCTL_HIDDEN_DIRS` to carry
+  the mask (nesting fact 8).
+
+### pid 1 reaps orphans (fresh and nested paths)
+
+* node as pid 1 left a re-parented, exited grandchild as a **zombie** (state `Z`, `kill -0`
+  succeeds), so "my daemonised helper is gone" failed only under `isolated`. pid 1 is now a
+  small **bash** that runs the node half in the background, forwards INT/TERM/HUP and exits
+  with its status; the orphan disappears (measured, on both paths).
+* **`bash` must be on PATH**, else FAIL, nothing run (fail closed). Exit codes, SIGTERM and
+  Ctrl-C behave as before; stdin still reaches the command.
+
+### More env scrubbed
+
+* `TMUX`, `TMUX_PANE`, `XAUTHORITY`, `SSH_AGENT_PID`, `DOCKER_CONTEXT`, and
+  `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_TTY` (these three carry the operator's addresses) no
+  longer reach the command, on the fresh and the nested path. A test that relied on one of
+  them inside `isolated` must set it itself.
+
+### ⛔ What this does NOT cover
+
+* The hidden list is **fixed**. Another secret elsewhere in the home is only read-only, and
+  readable. A profile or config outside the home (and not via a symlinked dot-dir) is not
+  covered at all.
+* `WEBCTL_HIDDEN_DIRS`, like `WEBCTL_RO_ROOTS`, is recorded input: `[]` satisfies the new
+  nesting fact. The other facts still require a real masked namespace.
+* The reaper's "signal before the child exists" branch has no test (a race, as for the inner
+  half's early handlers).
+
 ## v0.32.0 — 2026-10-03
 
 **Headline: base drives only a tab base opened — `openPage()` / `navigate()` MINT a
