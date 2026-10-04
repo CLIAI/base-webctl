@@ -1199,6 +1199,17 @@ const SCRUBBED_ENV = Object.freeze(['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK
  * One that is a SYMLINK out of home is read-only-protected at its real path too.
  */
 const SENSITIVE_DOTDIRS = Object.freeze(['.ssh', '.gnupg', '.config', '.cache', '.local', '.mozilla', '.pki']);
+/**
+ * Home directories that are not merely read-only but HIDDEN: each gets an EMPTY, READ-ONLY tmpfs
+ * on top (source HIDE_SOURCE). ⛔ Measured (`perplexity`): with the home only read-only, a
+ * mutated test could READ and print the operator's ssh keys, live ControlMaster socket paths,
+ * an install salt, and target configs naming remote hosts — into a log that may be public.
+ * Only those that exist are hidden, each at its REAL path. An explicit `--keep` at or beneath
+ * one re-exposes THAT path only (named on stderr); a keep CONTAINING one does not unhide it.
+ */
+const HIDDEN_DIRS = Object.freeze(['.ssh', '.gnupg', '.cache/CLIAI', '.config/CLIAI', '.local/state/CLIAI', '.config/webctl']);
+/** The tmpfs source tag of a HIDDEN_DIRS mask; the post-check and the nesting proof look for it. */
+const HIDE_SOURCE = 'webctl-isolated-hidden';
 
 /**
  * pid 1 of every PID namespace `isolated` makes (fresh AND nested): a bash that REAPS.
@@ -1468,7 +1479,7 @@ function runIsolated(a) {
           + `namespace, but the kernel says otherwise — ${proof.why}. Unset it on the host; only `
           + '`isolated` sets it.', { command, namespace: proof.facts }));
     }
-    const nestedPlan = planKeeps(keeps, [], { home: '', roots: recordedRoRoots() || [], sensitive: [] });
+    const nestedPlan = planKeeps(keeps, [], { home: '', roots: recordedRoRoots() || [], sensitive: [], hidden: [] });
     if (nestedPlan.usage) return Promise.resolve(usageRefusal(nestedPlan.usage, command));
     // ⛔ and still capless: a nested call must not be the way back to capabilities — its
     // command, too, enters a uid-mapped child user namespace (read back as on the fresh path)
@@ -1537,7 +1548,7 @@ function runIsolated(a) {
   for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
-  const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots,
+  const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
     exempt: plan.exempt, sockets, ids });
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
@@ -1552,7 +1563,8 @@ function runIsolated(a) {
           process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'],
           env: { ...process.env, [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt, [HOST_PIDNS_ENV]: hostPid,
-            [RO_ROOTS_ENV]: JSON.stringify(prot.roots), [HOST_IDS_ENV]: JSON.stringify(ids) } });
+            [RO_ROOTS_ENV]: JSON.stringify(prot.roots), [HIDDEN_ENV]: JSON.stringify(prot.hidden),
+            [HOST_IDS_ENV]: JSON.stringify(ids) } });
     } catch (e) {
       resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
       return;
@@ -1660,7 +1672,7 @@ async function runIsolatedInner(a) {
 
   // ⇩ only now, provably off the host network, read the plan. (On the host the
   // proofs above refuse first, so an unrelated fd 4 is never read.)
-  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], exempt: string[], sockets: string[], ids: unknown}} */
+  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], exempt: string[], sockets: string[], ids: unknown}} */
   let plan;
   try {
     // node's stdio 'pipe' is a socketpair, not a FIFO; anything else is not ours
@@ -1672,7 +1684,7 @@ async function runIsolatedInner(a) {
     const binds = (/** @type {unknown} */ x) => Array.isArray(x)
       && x.every((b) => b && typeof b.p === 'string' && typeof b.rw === 'boolean');
     if (typeof plan.hostMnt !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
-      || !strs(plan.roots) || !strs(plan.exempt) || !strs(plan.sockets) || !hostIdsOf(plan.ids)) throw new Error('malformed');
+      || !strs(plan.roots) || !strs(plan.hidden) || !strs(plan.exempt) || !strs(plan.sockets) || !hostIdsOf(plan.ids)) throw new Error('malformed');
   } catch (e) {
     return refuse(`internal: no masking plan on fd 4 (${errMsg(e)}) — run via \`isolated\``);
   }
@@ -1691,7 +1703,7 @@ async function runIsolatedInner(a) {
     return refuse(`the namespace loopback does not work after bringing it up (${errMsg(e)})`);
   }
 
-  const masked = maskSocketDirs(plan.binds, plan.roots);
+  const masked = maskSocketDirs(plan.binds, plan.roots, plan.hidden);
   if (masked) return refuse(masked);
   const unmasked = unmaskedDirs();
   if (unmasked.length) {
@@ -1706,6 +1718,12 @@ async function runIsolatedInner(a) {
   if (gaps.length) {
     return refuse(`after the read-only step, ${gaps.length} mount(s) under the home directory or a read-only `
       + 'keep are still WRITABLE (or not mounted at all)');
+  }
+  // ⭐ …and every hidden dir's TOP mount is our empty read-only tmpfs, unless a keep is exactly it
+  const shown = hiddenGaps(mounts, plan.hidden, plan.binds.map((b) => b.p));
+  if (shown.length) {
+    return refuse(`after hiding, ${shown.length} of ${plan.hidden.length} hidden home dir(s) (~/.ssh, ~/.gnupg, the `
+      + `state roots) lack the read-only '${HIDE_SOURCE}' tmpfs on top`);
   }
   const res = await closeResidualSockets(plan.sockets, plan.exempt);
   if (res.still > 0) {
@@ -1883,10 +1901,14 @@ function realIdentity() {
  * bigger disk still holds the profiles). Roots under a masked dir are dropped — the mask
  * already hides them; nested roots collapse to the outer one.
  *
+ * `hidden`: the real path of every HIDDEN_DIRS entry that exists, outer ones only, minus any
+ * already hidden by the /run or /tmp mask. One that CONTAINS /run, /tmp or the home is refused:
+ * an empty tmpfs there would hide the arm itself.
+ *
  * ⚠ Computed on the HOST side only, from realIdentity()'s home: inside the user namespace
  * we are uid 0, and os.userInfo() there answers root's home, not the caller's.
  * @param {string} home the real user's passwd home, realpath'd (realIdentity)
- * @returns {{home: string, roots: string[], sensitive: {name: string, real: string}[], refuse?: string}}
+ * @returns {{home: string, roots: string[], sensitive: {name: string, real: string}[], hidden: string[], refuse?: string}}
  */
 function protectedRoots(home) {
   /** @type {{name: string, real: string}[]} */
@@ -1896,26 +1918,37 @@ function protectedRoots(home) {
   }
   const { all } = maskedDirs();
   /** @type {string[]} */
+  const hidden = [];
+  const hideCands = HIDDEN_DIRS.map((d) => { try { return fs.realpathSync(path.join(home, d)); } catch { return ''; } })
+    .filter((r) => r && !all.some((m) => isWithin(r, m))).sort((x, y) => x.length - y.length);
+  for (const r of hideCands) {
+    if (isWithin(home, r) || all.some((m) => isWithin(m, r))) {
+      return { home, roots: [], sensitive, hidden: [], refuse: 'the real path of a home directory isolation HIDES '
+        + '(~/.ssh, ~/.gnupg, a state root) CONTAINS the home, /run or /tmp, so hiding it would hide the arm too' };
+    }
+    if (!hidden.some((o) => isWithin(r, o))) hidden.push(r);
+  }
+  /** @type {string[]} */
   const roots = [];
   const cands = [home, ...sensitive.map((s) => s.real).filter((r) => !isWithin(r, home))]
     .sort((x, y) => x.length - y.length);
   for (const r of cands) {
     if (all.some((m) => isWithin(m, r))) {
-      return { home, roots: [], sensitive, refuse: `${r === home ? 'the home directory' : 'a sensitive home directory\'s real path'} `
+      return { home, roots: [], sensitive, hidden, refuse: `${r === home ? 'the home directory' : 'a sensitive home directory\'s real path'} `
         + 'CONTAINS /run or /tmp, so it cannot be made read-only without undoing the socket masking' };
     }
     if (all.some((m) => isWithin(r, m))) {
       // ⛔ A HOME under /run or /tmp would protect NOTHING: the mask hides it, and the real
       // files are elsewhere. That is the signature of a wrong passwd answer, so refuse.
       if (r === home) {
-        return { home, roots: [], sensitive, refuse: 'the resolved home directory lies under /run or /tmp, so '
+        return { home, roots: [], sensitive, hidden, refuse: 'the resolved home directory lies under /run or /tmp, so '
           + 'making it read-only would protect nothing — refusing rather than leaving the real home writable' };
       }
       continue; // a sensitive dir's real path hidden by the mask already
     }
     if (!roots.some((o) => isWithin(r, o))) roots.push(r);
   }
-  return { home, roots, sensitive };
+  return { home, roots, sensitive, hidden };
 }
 
 /**
@@ -1998,6 +2031,21 @@ export function readOnlyGaps(mounts, roots, rwKeeps) {
   return gaps;
 }
 
+/**
+ * Hidden dirs whose TOP mount is not our read-only HIDE_SOURCE tmpfs — except one a keep is
+ * mounted at exactly (the caller's explicit exception; it was hidden underneath first).
+ * @param {MountRow[]} mounts @param {string[]} hidden @param {string[]} keeps every bind's path
+ * @returns {string[]}
+ */
+export function hiddenGaps(mounts, hidden, keeps) {
+  return hidden.filter((h) => {
+    if (keeps.includes(h)) return false;
+    const here = mounts.filter((m) => m.at === h);
+    const top = here.find((m) => !here.some((o) => o.parent === m.id));
+    return !(top && top.fstype === 'tmpfs' && top.source === HIDE_SOURCE && top.opts.includes('ro'));
+  });
+}
+
 /** @returns {MountRow[]|null} null when /proc/self/mountinfo is unreadable */
 function readMountinfo() {
   try { return parseMountinfo(fs.readFileSync('/proc/self/mountinfo', 'utf8')); } catch { return null; }
@@ -2037,12 +2085,13 @@ function makeTreeReadOnly(root, rbindFirst) {
  * and the masked directory, never by its path.
  *
  * A bind is needed for (a) any keep strictly under /tmp — the mask hides it otherwise —
- * and (b) a WRITABLE keep under a protected root; a read-only one there is covered by the
- * root's own ro mount. Writable: the cwd, $HOME under /tmp, every `--keep`. Read-only:
+ * (b) a WRITABLE keep under a protected root; a read-only one there is covered by the
+ * root's own ro mount — and (c) ANY keep at or beneath a HIDDEN dir, which its empty tmpfs
+ * would hide. Writable: the cwd, $HOME under /tmp, every `--keep`. Read-only:
  * base's repo root, node, an absolute command.
  * @param {string[]} explicit `--keep` paths
  * @param {{p: string, label: string, rw: boolean}[]} implicit
- * @param {{home: string, roots: string[], sensitive: {name: string, real: string}[]}} prot
+ * @param {{home: string, roots: string[], sensitive: {name: string, real: string}[], hidden: string[]}} prot
  * @returns {{binds: Bind[], exempt: string[], notes: string[], usage?: string, refuse?: string}}
  */
 function planKeeps(explicit, implicit, prot) {
@@ -2101,14 +2150,17 @@ function planKeeps(explicit, implicit, prot) {
       }
     }
     const underRoot = prot.roots.some((r) => isWithin(real, r));
-    if ((isWithin(real, tmp) && real !== tmp) || (underRoot && k.rw)) binds.push({ p: real, rw: k.rw });
+    const underHidden = prot.hidden.some((h) => isWithin(real, h));
+    if ((isWithin(real, tmp) && real !== tmp) || (underRoot && k.rw) || underHidden) binds.push({ p: real, rw: k.rw });
     if (k.explicit) exempt.push(real);
   }
   // A path beneath another kept path is already re-exposed by it — unless the outer one is
-  // read-only and the inner writable: then the inner gets its own (later) mount on top.
+  // read-only and the inner writable: then the inner gets its own (later) mount on top. ⚠ Or
+  // unless a HIDDEN dir lies between them: its empty tmpfs goes on top of the outer one.
   const sorted = [...binds].sort((x, y) => x.p.length - y.p.length || Number(y.rw) - Number(x.rw));
   /** @type {Bind[]} */ const outer = [];
-  for (const b of sorted) if (!outer.some((o) => isWithin(b.p, o.p) && (o.rw || !b.rw))) outer.push(b);
+  const hiddenBetween = (/** @type {Bind} */ o, /** @type {Bind} */ b) => prot.hidden.some((h) => h !== o.p && isWithin(h, o.p) && isWithin(b.p, h));
+  for (const b of sorted) if (!outer.some((o) => isWithin(b.p, o.p) && (o.rw || !b.rw) && !hiddenBetween(o, b))) outer.push(b);
   return { binds: outer, exempt, notes };
 }
 
@@ -2164,15 +2216,21 @@ function mountOrWhy(argv, what, redact = []) {
  * of the ro root; the ro remount never touches it. (Re-binding a keep AFTER the ro step
  * would copy the ro submounts beneath it, and remounting those rw can fail on a mount
  * that was ro on the host.)
- * @param {Bind[]} binds @param {string[]} roots @returns {string} '' on success, else the reason
+ *
+ * ⛔ THE HIDDEN DIRS go in the SAME outer-before-inner sequence as the keeps moving back (a
+ * hide before a keep at the same path): an empty tmpfs (mode 0555), the mount points of the
+ * keeps beneath it created in it, then remounted READ-ONLY. ⇒ a keep CONTAINING a hidden dir
+ * is covered there again; a keep AT or BENEATH one lands on top of it and shows only itself.
+ * @param {Bind[]} binds @param {string[]} roots @param {string[]} [hidden]
+ * @returns {string} '' on success, else the reason
  */
-function maskSocketDirs(binds, roots) {
+function maskSocketDirs(binds, roots, hidden = []) {
   const { run, tmp, all } = maskedDirs();
   const opts = (/** @type {string} */ d) => (d === tmp ? 'mode=1777' : 'mode=0755') + ',nosuid,nodev';
   const cover = (/** @type {string} */ d) => mountOrWhy(['-t', 'tmpfs', '-o', opts(d), MASK_SOURCE, d],
     `cover ${d} with a fresh tmpfs`);
   const stage = path.join(run, '.webctl-keep');
-  const secret = [...binds.map((b) => b.p), ...roots].sort((x, y) => y.length - x.length);
+  const secret = [...binds.map((b) => b.p), ...roots, ...hidden].sort((x, y) => y.length - x.length);
   try {
     for (const d of all.filter((x) => x !== tmp)) { const e = cover(d); if (e) return e; }
     fs.mkdirSync(stage);
@@ -2189,7 +2247,26 @@ function maskSocketDirs(binds, roots) {
     }
     const e = cover(tmp);
     if (e) return e;
-    for (const [i, b] of binds.entries()) {
+    // outer before inner; at one path the hide first, so a keep exactly there lands on top
+    const ops = [...binds.map((b, i) => ({ p: b.p, i })), ...hidden.map((h) => ({ p: h, i: -1 }))]
+      .sort((x, y) => x.p.length - y.p.length || Number(y.i < 0) - Number(x.i < 0));
+    let nHide = 0;
+    for (const { p: at, i } of ops) {
+      if (i < 0) {
+        nHide++;
+        const what = `hide sensitive home dir ${nHide} of ${hidden.length}`;
+        const h = mountOrWhy(['-t', 'tmpfs', '-o', 'mode=0555,nosuid,nodev,noexec,size=1m', HIDE_SOURCE, at], what, secret);
+        if (h) return h;
+        for (const [j, b] of binds.entries()) {
+          if (b.p === at || !isWithin(b.p, at)) continue;
+          if (isDir[j]) fs.mkdirSync(b.p, { recursive: true });
+          else { fs.mkdirSync(path.dirname(b.p), { recursive: true }); fs.writeFileSync(b.p, ''); }
+        }
+        const ro = mountOrWhy(['-o', 'remount,bind,ro', at], `${what} read-only`, secret);
+        if (ro) return ro;
+        continue;
+      }
+      const b = binds[i];
       const s = path.join(stage, String(i));
       // ⚠ Create the mount point only when MISSING (the fresh /tmp). Under a ro root it
       // exists — and writing '' to an existing FILE keep would truncate the real file.
@@ -2457,6 +2534,9 @@ function runCommand(command, prefix = [], { pastUnshare = false } = {}) {
 //   6. each root in WEBCTL_RO_ROOTS (recorded at entry) answers access(W_OK) with EROFS
 //      (or is absent — masked);
 //   7. /proc/self/ns/pid DIFFERS from WEBCTL_HOST_PIDNS — no host process is signalable.
+//   8. each dir in WEBCTL_HIDDEN_DIRS (recorded at entry) has OUR read-only tmpfs (source
+//      'webctl-isolated-hidden') in its mount stack — ~/.ssh and the state roots are HIDDEN.
+//      In the stack, not necessarily on top: a `--keep` at exactly that dir sits above it.
 //
 // ⚠ The roots are RECORDED, not re-derived: inside the user namespace we are uid 0 and
 // the passwd lookup answers root's home. access(2) rather than mountinfo because it asks
@@ -2468,16 +2548,21 @@ const HOST_NETNS_ENV = 'WEBCTL_HOST_NETNS';
 const HOST_MNTNS_ENV = 'WEBCTL_HOST_MNTNS';
 const HOST_PIDNS_ENV = 'WEBCTL_HOST_PIDNS';
 const RO_ROOTS_ENV = 'WEBCTL_RO_ROOTS';
+/** The HIDDEN_DIRS real paths `isolated` masked (JSON array), recorded at entry for the nesting proof. */
+const HIDDEN_ENV = 'WEBCTL_HIDDEN_DIRS';
 /** The REAL uid/gid ({uid, gid} JSON), recorded at entry for the nested path's privilegeDrop. */
 const HOST_IDS_ENV = 'WEBCTL_HOST_IDS';
 
-/** The protected roots `isolated` recorded at entry, or null when absent/malformed. */
-function recordedRoRoots() {
+/** The absolute paths recorded in env var `name` (a JSON array), or null when absent/malformed. @param {string} name */
+function recordedPaths(name) {
   try {
-    const v = JSON.parse(process.env[RO_ROOTS_ENV] ?? 'null');
+    const v = JSON.parse(process.env[name] ?? 'null');
     return Array.isArray(v) && v.every((r) => typeof r === 'string' && path.isAbsolute(r)) ? v : null;
   } catch { return null; }
 }
+
+/** The protected roots `isolated` recorded at entry, or null when absent/malformed. */
+function recordedRoRoots() { return recordedPaths(RO_ROOTS_ENV); }
 
 /**
  * Is `p` NOT writable through its mount — 'EROFS', or 'ENOENT' (masked away)? Anything
@@ -2513,7 +2598,8 @@ function extraInterfaces() {
 
 /**
  * Is this process provably inside the namespaces `isolated` made — no host network,
- * no host unix sockets, a read-only home, no host processes? All seven facts must hold; every one that fails
+ * no host unix sockets, a read-only home with its secrets hidden, no host processes? All eight
+ * facts must hold; every one that fails
  * is named.
  * @returns {{inside: boolean, why: string, facts: Record<string, any>}}
  */
@@ -2532,6 +2618,9 @@ function kernelInsideProof() {
   const unmasked = unmaskedDirs();
   const roRoots = recordedRoRoots();
   const writable = (roRoots || []).filter((r) => !['EROFS', 'ENOENT'].includes(writeOutcome(r))).length;
+  const hidden = recordedPaths(HIDDEN_ENV);
+  const mounts = readMountinfo() || [];
+  const shown = (hidden || []).filter((h) => !mounts.some((m) => m.at === h && m.source === HIDE_SOURCE && m.opts.includes('ro'))).length;
   /** @type {string[]} */
   const fails = [];
   if (!netns) fails.push('/proc/self/ns/net is unreadable');
@@ -2553,11 +2642,14 @@ function kernelInsideProof() {
   else if (pidns === recordedPid) fails.push(`the current PID namespace ${pidns} EQUALS the recorded host one (host processes can be signalled)`);
   if (!roRoots) fails.push(`${RO_ROOTS_ENV} is not set (or malformed), so there is no recorded home directory to find read-only`);
   else if (writable) fails.push(`${writable} of ${roRoots.length} protected root(s) — the home directory — are WRITABLE here`);
+  if (!hidden) fails.push(`${HIDDEN_ENV} is not set (or malformed), so there is no record of which home dirs must be hidden`);
+  else if (shown) fails.push(`${shown} of ${hidden.length} hidden home dir(s) — ~/.ssh, the state roots — lack the '${HIDE_SOURCE}' mask here`);
   // ⚠ counts, never the roots: they are home paths, and refusals get pasted
   return { inside: fails.length === 0, why: fails.join('; '),
     facts: { netns, recorded: recorded ?? null, uidMap, extraInterfaces: extra,
       mntns, recordedMnt: recordedMnt ?? null, pidns, recordedPid: recordedPid ?? null, unmasked,
-      roRoots: roRoots ? roRoots.length : null, writableRoRoots: writable } };
+      roRoots: roRoots ? roRoots.length : null, writableRoRoots: writable,
+      hidden: hidden ? hidden.length : null, shownHidden: shown } };
 }
 
 /**

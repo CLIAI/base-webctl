@@ -970,6 +970,157 @@ test('a `--keep` inside ~/.cache is ALLOWED but NAMED on stderr (the caller\'s c
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+// ── the secret dot-dirs are HIDDEN, not just read-only ──────────────────────
+//
+// ⛔ Measured (`perplexity`): the read-only home still let a mutated test READ and print the
+// operator's ssh keys, live ControlMaster socket paths, an install salt and target configs
+// naming remote hosts. ⇒ ~/.ssh, ~/.gnupg, ~/.cache/CLIAI, ~/.config/CLIAI,
+// ~/.local/state/CLIAI and ~/.config/webctl each get an EMPTY, READ-ONLY tmpfs on top.
+// ⚠ These arms never plant anything in the real home's dot-dirs: a FAKE passwd home (a
+// throwaway dir) is given to the real uid by binding a fake /etc/passwd in a throwaway
+// `unshare -rm`, exactly as the passwd-home refusals above do.
+
+/** The planted secrets: [hidden dir, file inside it], relative to the (fake) home. */
+const SECRETS = /** @type {[string, string][]} */ ([['.ssh', 'id_test'], ['.gnupg', 'pubring.kbx'],
+  ['.cache/CLIAI', 'salt'], ['.config/CLIAI', 'targets.toml'], ['.local/state/CLIAI', 'ledger.json'],
+  ['.config/webctl', 'x.toml']]);
+/** argv[1] = home: prints `READ <dir> <ok|errno>`; with argv[2] = 'probe' also `DIR <dir> <entries|errno> <create ok|errno>`. */
+const READ_SECRETS = `const fs = require('fs'); const p = require('path'); const h = process.argv[1];
+for (const [d, f] of ${JSON.stringify(SECRETS)}) {
+  let r; try { fs.readFileSync(p.join(h, d, f)); r = 'ok'; } catch (e) { r = e.code; }
+  console.log('READ ' + d + ' ' + r);
+  if (process.argv[2] !== 'probe') continue;
+  let n; try { n = String(fs.readdirSync(p.join(h, d)).length); } catch (e) { n = e.code; }
+  let w; try { fs.writeFileSync(p.join(h, d, '.webctl-probe'), 'x', { flag: 'wx' }); w = 'ok'; } catch (e) { w = e.code; }
+  console.log('DIR ' + d + ' ' + n + ' ' + w);
+}`;
+/** @param {string} out @returns {Record<string, string>} dir → READ outcome */
+const readsOf = (out) => Object.fromEntries([...out.matchAll(/^READ (\S+) (\S+)$/gm)].map((m) => [m[1], m[2]]));
+/** @param {string} out @returns {Record<string, string>} dir → `<entries> <create>` */
+const dirsOf = (out) => Object.fromEntries([...out.matchAll(/^DIR (\S+) (\S+ \S+)$/gm)].map((m) => [m[1], m[2]]));
+
+/** A throwaway FAKE passwd home holding every SECRETS file. @returns {string} */
+function fakeSecretHome() {
+  const home = homeTmpdir();
+  for (const [d, f] of SECRETS) {
+    fs.mkdirSync(path.join(home, d), { recursive: true });
+    fs.writeFileSync(path.join(home, d, f), 'planted-by-test\n');
+  }
+  return home;
+}
+
+/**
+ * Run `argv` with the real uid's passwd home pointed at `home` (a fake /etc/passwd bound in a
+ * throwaway `unshare -rm`). Resolves null when the host cannot bind over /etc/passwd or NSS
+ * answers for the uid from elsewhere (the caller skips, by name).
+ * @param {string} home @param {string[]} argv
+ */
+async function underFakeHome(home, argv) {
+  const dir = tmpdir();
+  const pw = path.join(dir, 'passwd');
+  fs.writeFileSync(pw, `x:x:${process.getuid?.()}:${process.getgid?.()}::${home}:/bin/sh\n`);
+  try {
+    const r = await runRaw(['unshare', '-rm', '--propagation=private', 'sh', '-c',
+      'mount --bind "$0" /etc/passwd || exit 9; [ "$(getent passwd "$1" | cut -d: -f6)" = "$2" ] || exit 8; shift 2; exec "$@"',
+      pw, String(process.getuid?.()), home, ...argv], { cwd: ROOT });
+    return r.status === 9 || r.status === 8 ? null : r;
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+const NO_FAKE_HOME = 'SKIP (host): cannot point the passwd home at a fake one here (bind over /etc/passwd, or NSS answers elsewhere)';
+
+test('⭐ ARM: ~/.ssh, ~/.gnupg and the state roots are EMPTY and READ-ONLY inside — fresh AND nested — nothing reaches the fake home', needsIsolation, async (t) => {
+  const home = fakeSecretHome();
+  try {
+    const r = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--', 'sh', '-c',
+      '"$0" -e "$2" "$3" probe; echo NESTED; "$0" "$1" isolated -- "$0" -e "$2" "$3"', process.execPath, TOOL, READ_SECRETS, home]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const [fresh, nested] = r.stdout.split(/^NESTED$/m);
+    const reads = readsOf(fresh);
+    const dirs = dirsOf(fresh);
+    for (const [d] of SECRETS) {
+      assert.equal(reads[d], 'ENOENT', `${d}: the planted secret is READABLE inside:\n${r.stdout}${r.stderr}`);
+      assert.equal(dirs[d], '0 EROFS', `${d}: the mask is not an empty read-only dir:\n${r.stdout}`);
+      assert.equal(readsOf(nested || '')[d], 'ENOENT', `${d}: readable under a NESTED call:\n${r.stdout}`);
+      assert.equal(fs.existsSync(path.join(home, d, '.webctl-probe')), false, `${d}: a write reached the fake home`);
+    }
+    assert.doesNotMatch(r.stderr, /note:/, 'no keep was given, so nothing should be named');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('⭐ CONTROL: the same reads WITHOUT `isolated` (same fake home) succeed — the arm can fail', needsIsolation, async (t) => {
+  const home = fakeSecretHome();
+  try {
+    const r = await underFakeHome(home, [process.execPath, '-e', READ_SECRETS, home]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    const reads = readsOf(r.stdout);
+    for (const [d] of SECRETS) assert.equal(reads[d], 'ok', `CONTROL: ${d} unreadable without isolation:\n${r.stdout}${r.stderr}`);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('⭐ KEEP EXCEPTION: `--keep <home>/.cache/CLIAI` re-exposes THAT dir (named on stderr); the others stay hidden', needsIsolation, async (t) => {
+  const home = fakeSecretHome();
+  try {
+    const r = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--keep', path.join(home, '.cache/CLIAI'), '--',
+      process.execPath, '-e', READ_SECRETS, home]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const reads = readsOf(r.stdout);
+    assert.equal(reads['.cache/CLIAI'], 'ok', `the explicit keep was not re-exposed:\n${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /isolated: note: --keep #1 is in ~\/\.cache — re-exposed WRITABLE/);
+    for (const [d] of SECRETS.filter(([x]) => x !== '.cache/CLIAI')) assert.equal(reads[d], 'ENOENT', `${d} leaked through another dir's keep`);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('⛔ a keep BENEATH a hidden dir shows only itself; a keep CONTAINING one does not unhide it; a command and cwd beneath one still work', needsIsolation, async (t) => {
+  const home = fakeSecretHome();
+  const sub = path.join(home, '.config/webctl/fixture');
+  const work = path.join(home, '.local/state/CLIAI/work');
+  const tool = path.join(home, '.cache/CLIAI/bin/tool.sh');
+  fs.mkdirSync(sub); fs.writeFileSync(path.join(sub, 'f'), 'fixture\n');
+  fs.mkdirSync(work);
+  fs.mkdirSync(path.dirname(tool)); fs.writeFileSync(tool, '#!/bin/sh\necho "TOOL ran in $(pwd)"\n', { mode: 0o755 });
+  try {
+    const r = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--keep', sub, '--keep', path.join(home, '.config'), '--',
+      'sh', '-c', 'cat "$0/f"; "$1" -e "$2" "$3"', sub, process.execPath, READ_SECRETS, home]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^fixture$/m, `a keep beneath ~/.config/webctl was hidden by its mask:\n${r.stderr}`);
+    const reads = readsOf(r.stdout);
+    assert.equal(reads['.config/webctl'], 'ENOENT', 'a keep BENEATH ~/.config/webctl re-exposed its siblings');
+    assert.equal(reads['.config/CLIAI'], 'ENOENT', 'a keep CONTAINING ~/.config/CLIAI unhid it');
+    // an absolute command and a cwd beneath a hidden dir are re-exposed (read-only / writable), not hidden
+    const c = await underFakeHome(home, ['sh', '-c', 'cd "$0" && exec "$@"', work, process.execPath, TOOL, 'isolated', '--', tool]);
+    assert.ok(c);
+    assert.equal(c.status, 0, c.stdout + c.stderr);
+    assert.equal(c.stdout.trim(), `TOOL ran in ${work}`);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: a `mount` that silently SKIPS one hide → refused by the post-check (read back from mountinfo), nothing run', needsIsolation, async (t) => {
+  const home = fakeSecretHome();
+  const binHome = homeTmpdir(); // not under /tmp: the fake must outlive the /tmp mask
+  const bin = path.join(binHome, 'bin');
+  fs.mkdirSync(bin);
+  const skip = path.join(home, '.ssh');
+  // pretends to hide ~/.ssh (exit 0, nothing mounted) and to make that non-mask read-only
+  fs.writeFileSync(path.join(bin, 'mount'), `#!/bin/sh
+for a in "$@"; do last="$a"; done
+[ "$last" = ${JSON.stringify(skip)} ] && exit 0
+exec ${JSON.stringify(spawnSync('sh', ['-c', 'command -v mount'], { encoding: 'utf8' }).stdout.trim())} "$@"
+`, { mode: 0o755 });
+  const marker = path.join(binHome, 'RAN');
+  try {
+    const r = await underFakeHome(home, ['env', `PATH=${bin}:${process.env.PATH}`, process.execPath, TOOL, 'isolated', '--keep', binHome, '--',
+      process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: after hiding, 1 of 6 hidden home dir\(s\) \(~\/\.ssh, ~\/\.gnupg, the state roots\) lack the read-only 'webctl-isolated-hidden' tmpfs on top/);
+    assert.equal(fs.existsSync(marker), false, 'the command ran with ~/.ssh visible');
+    assert.ok(!r.stderr.includes(home), 'the refusal printed a home path');
+  } finally { for (const d of [home, binHome]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
 // ── submounts: a ro remount hits only the TOP mount ──────────────────────────
 
 /**
@@ -1013,7 +1164,7 @@ test('⭐ ARM: that submount under home is EROFS inside `isolated` — every sub
 
 // ── the submount LOGIC, from an explicit mountinfo (no host dependency) ──────
 
-const { parseMountinfo, reachableMountsUnder, readOnlyGaps } = await import(pathToFileURL(TOOL).href);
+const { parseMountinfo, reachableMountsUnder, readOnlyGaps, hiddenGaps } = await import(pathToFileURL(TOOL).href);
 
 /** One mountinfo line. @param {number} id @param {number} parent @param {string} at @param {string} [o] */
 const mi = (id, parent, at, o = 'rw,relatime') => `${id} ${parent} 0:${id} / ${at} ${o} shared:1 - tmpfs src rw`;
@@ -1055,6 +1206,23 @@ test('⭐ logic: readOnlyGaps names every writable reachable mount, exempts writ
   assert.deepEqual(readOnlyGaps(ro, ['/home/v'], []), [{ root: '/home/v', at: '' }], 'an unmounted root is a gap');
 });
 
+test('⭐ logic: hiddenGaps — a hidden dir passes only with OUR read-only tmpfs on TOP (or a keep exactly there)', () => {
+  /** @param {number} id @param {number} parent @param {string} at @param {string} o @param {string} src */
+  const row = (id, parent, at, o, src) => `${id} ${parent} 0:${id} / ${at} ${o},relatime shared:1 - tmpfs ${src} rw`;
+  const base = [mi(1, 0, '/'), mi(100, 1, '/home/u')];
+  const m = (/** @type {string[]} */ extra) => parseMountinfo([...base, ...extra].join('\n'));
+  const H = '/home/u/.ssh';
+  assert.deepEqual(hiddenGaps(m([row(200, 100, H, 'ro', 'webctl-isolated-hidden')]), [H], []), []);
+  assert.deepEqual(hiddenGaps(m([row(200, 100, H, 'rw', 'webctl-isolated-hidden')]), [H], []), [H], 'a WRITABLE mask is a gap');
+  assert.deepEqual(hiddenGaps(m([row(200, 100, H, 'ro', 'other')]), [H], []), [H], 'someone else\'s tmpfs is a gap');
+  assert.deepEqual(hiddenGaps(m([]), [H], []), [H], 'no mask at all is a gap');
+  assert.deepEqual(hiddenGaps(m([row(200, 100, H, 'ro', 'webctl-isolated-hidden'), row(201, 200, H, 'rw', 'x')]), [H], []), [H],
+    'a mount stacked ON TOP of the mask re-exposes something — a gap unless it is a keep');
+  assert.deepEqual(hiddenGaps(m([row(200, 100, H, 'ro', 'webctl-isolated-hidden'), row(201, 200, H, 'rw', 'x')]), [H], [H]), [],
+    'a keep exactly at the hidden dir is the caller\'s exception');
+  assert.deepEqual(hiddenGaps(m([row(200, 100, '/home/u/.sshx', 'ro', 'webctl-isolated-hidden')]), [H], []), [H], 'a PREFIX is not the dir');
+});
+
 // ── nesting: the previous `isolated` (writable home) is not "inside" ─────────
 
 test('⛔ nesting: every OLD fact satisfied (netns, mntns, our tmpfs on /run+/tmp) but home WRITABLE → refused by the home fact alone', needsIsolation, async () => {
@@ -1063,7 +1231,7 @@ test('⛔ nesting: every OLD fact satisfied (netns, mntns, our tmpfs on /run+/tm
     + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
     + ' && mount -t tmpfs webctl-isolated /tmp && mkdir -p "$0" && mount --move /run/k "$0" && exec "$@"';
   const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage, ROOT],
-    'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]' });
+    'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: '[]' });
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(r.stderr, /1 of 1 protected root\(s\) — the home directory — are WRITABLE here/);
   assert.doesNotMatch(r.stderr, /EQUALS|uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|PID namespace/, 'only the home fact should refuse');
@@ -1554,12 +1722,32 @@ test('⛔ nesting: every other fact satisfied (full mask, ro home) but the HOST 
     + ' && mount -t tmpfs webctl-isolated /tmp && mkdir -p "$0" && mount --move /run/k "$0"'
     + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift && exec "$@"';
   const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage, ROOT, PW_HOME],
-    'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: fs.readlinkSync('/proc/self/ns/pid') });
+    'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: fs.readlinkSync('/proc/self/ns/pid'),
+      WEBCTL_HIDDEN_DIRS: '[]' });
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(r.stderr, /the current PID namespace .* EQUALS the recorded host one/);
   assert.doesNotMatch(r.stderr, /uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|WRITABLE here|mount namespace .* EQUALS/,
     'only the pid fact should refuse');
   assert.equal(r.ran, false, 'a namespace sharing the host PIDs was accepted as `isolated`');
+});
+
+test('⛔ nesting: every other fact satisfied (full mask, ro home, own PIDs) but a recorded hidden dir NOT masked → refused by the hidden fact alone — CONTROL: masked, that fact passes', needsIsolation, async () => {
+  const dir = homeTmpdir(); // stands in for ~/.ssh: only its PATH is recorded and mounted on, in a throwaway mount ns
+  const stage = (/** @type {boolean} */ hide) => 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
+    + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
+    + ' && mount -t tmpfs webctl-isolated /tmp && mkdir -p "$0" && mount --move /run/k "$0"'
+    + (hide ? ' && mount -t tmpfs -o ro webctl-isolated-hidden "$2"' : '')
+    + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift 2 && exec "$@"';
+  const env = { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: JSON.stringify([dir]) };
+  try {
+    const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage(false), ROOT, PW_HOME, dir], 'mnt:[1]', env);
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stderr, /1 of 1 hidden home dir\(s\) — ~\/\.ssh, the state roots — lack the 'webctl-isolated-hidden' mask here/);
+    assert.doesNotMatch(r.stderr, /EQUALS|uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|WRITABLE here/, 'only the hidden fact should refuse');
+    assert.equal(r.ran, false, 'a namespace with the secret dirs visible was accepted as `isolated`');
+    const c = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage(true), ROOT, PW_HOME, dir], 'mnt:[1]', env);
+    assert.doesNotMatch(c.stderr, /hidden home dir|REFUSED/, `CONTROL: with the mask in place the hidden fact should pass:\n${c.stderr}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 // ── pid 1 REAPS orphans ──────────────────────────────────────────────────────
