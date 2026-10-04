@@ -1182,10 +1182,16 @@ const MASK_SOURCE = 'webctl-isolated';
  * redirected to the REAL dirs (`perplexity`; a sibling lane's suite wrote and deleted the
  * human's real tab ledger and captcha lock through the same class of mistake). Unset, they
  * fall back to $HOME — the gate's throwaway one, or the read-only real one.
+ * The last eight (`perplexity`, measured): TMUX/TMUX_PANE name the human's tmux server and
+ * pane, XAUTHORITY an X cookie file, SSH_AGENT_PID and DOCKER_CONTEXT a live agent and a
+ * (possibly remote) daemon — and SSH_CONNECTION, SSH_CLIENT, SSH_TTY carry the operator's
+ * ADDRESSES, which a mutated test can print into a public log.
  */
 const SCRUBBED_ENV = Object.freeze(['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK',
   'DBUS_SESSION_BUS_ADDRESS', 'DOCKER_HOST', 'XDG_RUNTIME_DIR',
-  'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_DATA_HOME']);
+  'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_DATA_HOME',
+  'TMUX', 'TMUX_PANE', 'XAUTHORITY', 'SSH_AGENT_PID', 'DOCKER_CONTEXT',
+  'SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY']);
 /**
  * Home dot-directories that hold LIVE state: signed-in browser profiles (~/.cache/<tool>),
  * the family's config (~/.config/webctl), keys and ControlMaster sockets (~/.ssh). A keep
@@ -1377,8 +1383,9 @@ function usageRefusal(why, command) {
  * setpriv capability drop broke (measured).
  *
  * The command's env drops DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK,
- * DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST, XDG_RUNTIME_DIR and XDG_{CACHE,CONFIG,STATE,DATA}_HOME
- * and gets TMPDIR=/tmp —
+ * DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST, XDG_RUNTIME_DIR, XDG_{CACHE,CONFIG,STATE,DATA}_HOME,
+ * TMUX, TMUX_PANE, XAUTHORITY, SSH_AGENT_PID, DOCKER_CONTEXT and SSH_{CONNECTION,CLIENT,TTY}
+ * (SCRUBBED_ENV) and gets TMPDIR=/tmp —
  * on the nested path too. argv goes through as an ARRAY: no shell sees the command.
  * @param {string[]} a
  * @returns {Promise<number>}

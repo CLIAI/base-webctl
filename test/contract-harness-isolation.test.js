@@ -690,13 +690,19 @@ hostSocketArm('the ssh-agent ($SSH_AUTH_SOCK)', () => process.env.SSH_AUTH_SOCK 
 
 const SCRUBBED = ['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK', 'DBUS_SESSION_BUS_ADDRESS', 'DOCKER_HOST', 'XDG_RUNTIME_DIR',
   // state roots: base's storage paths prefer these over $HOME (a temp HOME was silently bypassed)
-  'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_DATA_HOME'];
+  'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_DATA_HOME',
+  // a live tmux server (send-keys into the human's panes), an X cookie, the agent's pid, a
+  // docker context naming a remote daemon — and three that carry the operator's ADDRESSES
+  'TMUX', 'TMUX_PANE', 'XAUTHORITY', 'SSH_AGENT_PID', 'DOCKER_CONTEXT', 'SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY'];
 const PRINT_ENV = `console.log('ENV ' + JSON.stringify(Object.fromEntries(${JSON.stringify([...SCRUBBED, 'TMPDIR'])}.map((k) => [k, process.env[k] ?? null]))))`;
 const HOSTILE_ENV = { DISPLAY: ':99', WAYLAND_DISPLAY: 'wayland-9', SSH_AUTH_SOCK: '/nonexistent/agent',
   DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent/bus', DOCKER_HOST: 'unix:///nonexistent/docker.sock',
   XDG_RUNTIME_DIR: '/nonexistent/xdg', TMPDIR: '/nonexistent/tmp',
   XDG_CACHE_HOME: '/nonexistent/real-cache', XDG_CONFIG_HOME: '/nonexistent/real-config',
-  XDG_STATE_HOME: '/nonexistent/real-state', XDG_DATA_HOME: '/nonexistent/real-data' };
+  XDG_STATE_HOME: '/nonexistent/real-state', XDG_DATA_HOME: '/nonexistent/real-data',
+  TMUX: '/nonexistent/tmux-sock,1,0', TMUX_PANE: '%99', XAUTHORITY: '/nonexistent/Xauthority',
+  SSH_AGENT_PID: '99999', DOCKER_CONTEXT: 'nonexistent-context',
+  SSH_CONNECTION: '192.0.2.1 50000 192.0.2.2 22', SSH_CLIENT: '192.0.2.1 50000 22', SSH_TTY: '/nonexistent/pts' };
 
 /** @param {string} out @returns {Record<string, string|null>[]} every ENV line */
 const envLines = (out) => [...out.matchAll(/^ENV (.*)$/gm)].map((m) => JSON.parse(m[1]));
@@ -723,6 +729,7 @@ test('env scrub CONTROL: the same vars DO reach a command run without `isolated`
   assert.equal(/** @type {any} */ (c).DISPLAY, ':99', 'the printer cannot see env at all — the scrub arm proves nothing');
   assert.equal(/** @type {any} */ (c).TMPDIR, '/nonexistent/tmp');
   assert.equal(/** @type {any} */ (c).XDG_CACHE_HOME, '/nonexistent/real-cache', 'CONTROL: an XDG state root is inherited without `isolated`');
+  for (const k of SCRUBBED) assert.equal(/** @type {any} */ (c)[k], HOSTILE_ENV[/** @type {keyof typeof HOSTILE_ENV} */ (k)], `CONTROL: ${k} is inherited without \`isolated\``);
 });
 
 test('⛔ a planted XDG_CACHE_HOME cannot redirect base\'s storage paths out of a temp HOME under `isolated`', needsIsolation, async () => {
