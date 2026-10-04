@@ -186,6 +186,8 @@ test('⛔ fail closed: no `unshare` on PATH → FAIL, reason printed, the comman
   const marker = path.join(dir, 'RAN');
   const emptyBin = path.join(dir, 'bin');
   fs.mkdirSync(emptyBin);
+  // bash only (pid 1's reaper is looked up first): the missing piece is unshare
+  fs.symlinkSync(spawnSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim(), path.join(emptyBin, 'bash'));
   try {
     const r = await run(['isolated', '--', process.execPath, '-e',
       `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: emptyBin });
@@ -220,6 +222,7 @@ test('⛔ fail closed: neither `ip` nor `ifconfig` → FAIL naming it, command N
   fs.mkdirSync(bin);
   const realUnshare = spawnSync('sh', ['-c', 'command -v unshare'], { encoding: 'utf8' }).stdout.trim();
   fs.symlinkSync(realUnshare, path.join(bin, 'unshare'));
+  fs.symlinkSync(spawnSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim(), path.join(bin, 'bash')); // pid 1
   try {
     const r = await run(['isolated', '--', process.execPath, '-e',
       `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: bin });
@@ -237,6 +240,7 @@ test('⛔ fail closed: no `mount` → FAIL naming it, command NOT run (no socket
   const which = (/** @type {string} */ b) => spawnSync('sh', ['-c', `command -v ${b}`], { encoding: 'utf8' }).stdout.trim();
   fs.symlinkSync(which('unshare'), path.join(bin, 'unshare'));
   fs.symlinkSync(which('ip') || which('ifconfig'), path.join(bin, which('ip') ? 'ip' : 'ifconfig'));
+  fs.symlinkSync(which('bash'), path.join(bin, 'bash')); // pid 1
   try {
     const r = await run(['isolated', '--', process.execPath, '-e',
       `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: bin });
@@ -1243,7 +1247,7 @@ test('⛔ fail closed: no `setpriv` → FAIL naming it, command NOT run (never w
   const binHome = homeTmpdir();
   const bin = path.join(binHome, 'bin');
   fs.mkdirSync(bin);
-  for (const b of ['unshare', 'mount', which('ip') ? 'ip' : 'ifconfig']) fs.symlinkSync(which(b), path.join(bin, b));
+  for (const b of ['unshare', 'mount', 'bash', which('ip') ? 'ip' : 'ifconfig']) fs.symlinkSync(which(b), path.join(bin, b));
   try {
     const r = await markerRun(dir, bin);
     assert.equal(r.status, 1, r.stdout + r.stderr);
@@ -1556,6 +1560,117 @@ test('⛔ nesting: every other fact satisfied (full mask, ro home) but the HOST 
   assert.doesNotMatch(r.stderr, /uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|WRITABLE here|mount namespace .* EQUALS/,
     'only the pid fact should refuse');
   assert.equal(r.ran, false, 'a namespace sharing the host PIDs was accepted as `isolated`');
+});
+
+// ── pid 1 REAPS orphans ──────────────────────────────────────────────────────
+//
+// ⛔ Measured (`perplexity`, then by the lead): node as pid 1 of the PID namespace leaves an
+// orphaned, exited grandchild as a ZOMBIE — libuv waits only for the pids IT spawned, and
+// node exposes no waitpid(-1). A test that daemonises a helper and checks "it is gone"
+// (`kill -0`) then sees a zombie as ALIVE. ⇒ pid 1 is a small bash that runs the real work
+// in the background and `wait`s on it: bash's SIGCHLD handler reaps ANY child, re-parented
+// orphans included.
+
+/**
+ * $1 = arm|control. Daemonises `sleep 30` through an intermediate sh that exits at once (so
+ * the sleep is re-parented to the namespace's pid 1), checks it EXISTS, kills it, then polls
+ * /proc/<pid> for ≤ 10 s: `gone` = reaped. control: stops once it has been a zombie for 1 s.
+ */
+const ORPHAN_PROBE = `gp=$(sh -c 'sleep 30 >/dev/null 2>&1 & echo $!')
+first=$(awk '{print $3}' "/proc/$gp/stat" 2>/dev/null) || first=gone
+kill "$gp"
+i=0; z=0; st=$first
+while [ $i -lt 100 ]; do
+  st=$(awk '{print $3}' "/proc/$gp/stat" 2>/dev/null) || st=gone
+  [ -n "$st" ] || st=gone
+  [ "$st" = gone ] && break
+  if [ "$st" = Z ]; then z=$((z+1)); [ "$1" = control ] && [ $z -ge 10 ] && break; fi
+  sleep 0.1; i=$((i+1))
+done
+echo "ORPHAN first=$first final=$st"`;
+/** @param {string} out @returns {{first: string, final: string}} */
+const orphanOf = (out) => {
+  const m = out.match(/^ORPHAN first=(\S+) final=(\S+)$/m);
+  return { first: m ? m[1] : `none in: ${out}`, final: m ? m[2] : `none in: ${out}` };
+};
+
+test('⭐ ARM: an orphaned, exited grandchild is REAPED by pid 1 (it disappears) — fresh path', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'sh', '-c', ORPHAN_PROBE, 'probe', 'arm']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const o = orphanOf(r.stdout);
+  assert.match(o.first, /^[RSD]$/, `the probe never saw its orphan alive — the arm proves nothing:\n${r.stdout}`);
+  assert.equal(o.final, 'gone', `the orphan was left as ${o.final} (a zombie is not reaped)`);
+});
+
+test('⭐ ARM: … and by the NESTED call\'s pid 1', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'sh', '-c', '"$0" "$1" isolated -- sh -c "$2" probe arm',
+    process.execPath, TOOL, ORPHAN_PROBE]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const o = orphanOf(r.stdout);
+  assert.match(o.first, /^[RSD]$/, r.stdout);
+  assert.equal(o.final, 'gone', `the nested orphan was left as ${o.final}`);
+});
+
+test('⭐ CONTROL: under a raw `unshare -rf --pid --mount-proc` with NODE as pid 1 the same orphan stays a ZOMBIE', needsIsolation, async () => {
+  // node as pid 1 running the command exactly as the previous nested path did (__isolated-pid1)
+  const r = await runRaw(['unshare', '-rf', '--pid', '--mount-proc', process.execPath, TOOL, '__isolated-pid1', '--',
+    'sh', '-c', ORPHAN_PROBE, 'probe', 'control']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const o = orphanOf(r.stdout);
+  assert.match(o.first, /^[RSD]$/, r.stdout);
+  assert.equal(o.final, 'Z', `CONTROL: node as pid 1 did not leave a zombie (${o.final}) — the arm cannot fail`);
+});
+
+/** Run the harness with `input` on stdin. @param {string[]} args @param {string} input */
+function runWithStdin(args, input) {
+  return /** @type {Promise<{status:number, stdout:string, stderr:string}>} */ (new Promise((resolve) => {
+    const c = spawn(process.execPath, [TOOL, ...args], { cwd: ROOT, env: cleanEnv() });
+    let stdout = ''; let stderr = '';
+    c.stdout.on('data', (d) => { stdout += d; });
+    c.stderr.on('data', (d) => { stderr += d; });
+    c.on('close', (code) => resolve({ status: code ?? -1, stdout, stderr }));
+    c.stdin.end(input);
+  }));
+}
+
+test('⭐ stdin reaches the command through the reaping pid 1 — fresh AND nested paths', needsIsolation, async () => {
+  // ⚠ bash gives a background job /dev/null as stdin unless it is redirected explicitly
+  // (measured): a reaper that forgot `<&0` would starve every command reading stdin.
+  const r = await runWithStdin(['isolated', '--', 'sh', '-c', 'read a; echo "FRESH $a"; "$0" "$1" isolated -- sh -c \'read b; echo "NESTED $b"\'',
+    process.execPath, TOOL], 'line-one\nline-two\n');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^FRESH line-one$/m, r.stdout);
+  assert.match(r.stdout, /^NESTED line-two$/m, r.stdout);
+});
+
+test('⛔ fail closed: no `bash` on PATH (pid 1 must reap) → FAIL naming it, command NOT run — fresh AND nested', needsIsolation, async () => {
+  // ⚠ the PATH dir lives in a throwaway HOME dir, as for the setpriv arm: everything ELSE the
+  // fresh path needs is there, so the only missing piece is bash
+  const dir = tmpdir();
+  const binHome = homeTmpdir();
+  const bin = path.join(binHome, 'bin');
+  fs.mkdirSync(bin);
+  for (const b of ['unshare', 'mount', 'setpriv', which('ip') ? 'ip' : 'ifconfig']) fs.symlinkSync(which(b), path.join(bin, b));
+  try {
+    const r = await markerRun(dir, bin);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: 'bash' not found on PATH/);
+    assert.equal(r.ran, false, 'the command ran without a reaping pid 1');
+    // nested: the outer call is ordinary; the inner one gets a PATH without bash
+    const marker = path.join(dir, 'RAN-NESTED');
+    const n = await run(['isolated', '--keep', dir, '--', 'sh', '-c',
+      'PATH="$2" "$0" "$1" isolated -- "$0" -e "require(\'fs\').writeFileSync(process.argv[1], \'x\')" "$3"; echo "NESTED-RC $?"',
+      process.execPath, TOOL, bin, marker]);
+    assert.equal(n.status, 0, n.stdout + n.stderr);
+    assert.match(n.stdout, /^NESTED-RC 1$/m, n.stdout + n.stderr);
+    assert.match(n.stderr, /FAIL {2}isolated: NOT RUN: 'bash' not found on PATH/);
+    assert.equal(fs.existsSync(marker), false, 'the nested command ran without a reaping pid 1');
+    // CONTROL: the same bin WITH bash runs the command (the arm's refusal is the missing bash)
+    fs.symlinkSync(which('bash'), path.join(bin, 'bash'));
+    const c = await markerRun(dir, bin);
+    assert.equal(c.status, 0, c.stdout + c.stderr);
+    assert.equal(c.ran, true, 'CONTROL: with bash added the command should run');
+  } finally { for (const d of [dir, binHome]) fs.rmSync(d, { recursive: true, force: true }); }
 });
 
 // ── every refusal is a tagged report line (what the gate greps for) ──────────

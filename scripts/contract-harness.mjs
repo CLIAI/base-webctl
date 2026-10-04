@@ -1171,7 +1171,7 @@ const SELF = fileURLToPath(import.meta.url);
 /** base's repo root (SELF is <root>/scripts/…) — kept visible under the /tmp mask. */
 const SELF_ROOT = path.resolve(path.dirname(SELF), '..');
 const ISOLATED_INNER = '__isolated-inner';
-/** pid 1 of a NESTED call's PID namespace: runs the command, forwards signals. */
+/** The node helper under a NESTED call's reaping pid 1: runs the command, forwards signals. */
 const PID1_INNER = '__isolated-pid1';
 /** The tmpfs source tag `isolated` mounts with; the nesting proof looks for it. */
 const MASK_SOURCE = 'webctl-isolated';
@@ -1199,6 +1199,59 @@ const SCRUBBED_ENV = Object.freeze(['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK
  * One that is a SYMLINK out of home is read-only-protected at its real path too.
  */
 const SENSITIVE_DOTDIRS = Object.freeze(['.ssh', '.gnupg', '.config', '.cache', '.local', '.mozilla', '.pki']);
+
+/**
+ * pid 1 of every PID namespace `isolated` makes (fresh AND nested): a bash that REAPS.
+ *
+ * ⛔ node as pid 1 leaves an orphaned, exited grandchild as a ZOMBIE — measured (`perplexity`):
+ * `kill -0` on it succeeds and /proc shows state Z, so a test that daemonises a helper and
+ * asserts "it is gone" fails only under `isolated`. libuv waits for the pids IT spawned and
+ * node has no waitpid(-1); prctl(PR_SET_CHILD_SUBREAPER) is not reachable from node either, and
+ * would not help — a pid 1 already IS the reaper, the question is only whether it calls wait.
+ * ⇒ unshare's forked child is `bash -c PID1_REAPER`: it runs the real work ($@ — the node inner
+ * half, or the nested path's node pid-1 helper) in the BACKGROUND and `wait`s on it. bash's
+ * SIGCHLD handler reaps ANY child, re-parented orphans included (measured: state gone).
+ *
+ *   * `<&0`: a background job of a non-interactive bash gets /dev/null as stdin unless it is
+ *     redirected explicitly (measured) — without it every command reading stdin starves.
+ *   * fds 3/4 (the fresh path's status and plan pipes) pass to the background child, which
+ *     needs them; bash then closes its OWN copies.
+ *   * INT/TERM/HUP are trapped (pid 1 receives nothing it has no handler for) and forwarded to
+ *     the child; a trapped signal interrupts `wait` (>128), so it waits AGAIN until the child
+ *     itself ended — bash keeps a reaped child's status for a second `wait` (measured) — and
+ *     exits with the CHILD's status. A signal before the child exists ends pid 1 at once
+ *     (128+n), and the namespace with it: nothing starts after the caller gave up.
+ *   * ⚠ A background job ignores SIGINT; node resets its signal dispositions at start (measured),
+ *     which is why the node helper stays between this pid 1 and the command on BOTH paths.
+ * Fail closed: no bash on PATH → refused (bashOnPath), never a non-reaping pid 1.
+ */
+const PID1_REAPER = [
+  'c=; t=',
+  'f() { t=1; if [ -n "$c" ]; then kill -s "$1" "$c" 2>/dev/null; else exit "$2"; fi; }',
+  "trap 'f INT 130' INT; trap 'f TERM 143' TERM; trap 'f HUP 129' HUP",
+  '"$@" <&0 &',
+  'c=$!',
+  'exec 3>&- 4<&-',
+  'while :; do t=; wait "$c"; rc=$?; [ -n "$t" ] || break; done',
+  'exit "$rc"',
+].join('\n');
+
+/**
+ * The absolute path of `bash` on PATH, or '' — pid 1 must be the reaping bash (PID1_REAPER).
+ * @returns {string}
+ */
+function bashOnPath() {
+  for (const d of String(process.env.PATH || '').split(':')) {
+    if (!path.isAbsolute(d)) continue;
+    const p = path.join(d, 'bash');
+    try { fs.accessSync(p, fs.constants.X_OK); if (fs.statSync(p).isFile()) return p; } catch { /* next */ }
+  }
+  return '';
+}
+
+/** The refusal when bashOnPath() finds none. */
+const NO_BASH = "'bash' not found on PATH — pid 1 of the isolated PID namespace is a bash that REAPS "
+  + 'orphans (node as pid 1 leaves them as zombies), and isolation does not run without it';
 
 /** The termination signals the harness forwards. */
 const FORWARDED_SIGNALS = /** @type {NodeJS.Signals[]} */ (Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP']));
@@ -1243,9 +1296,9 @@ function forwardSignals(child) {
  * and re-raise it on ourselves. A command that HANDLED the signal and chose its own exit
  * code (a trap's `exit 7`) still returns that code; an exit 130 with no signal forwarded
  * stays an ordinary exit 130.
- * ⚠ As pid 1 of the PID namespace (the inner half) a self-sent signal with no handler is
- * IGNORED by the kernel; we then return 128+n, which unshare passes on as an exit code —
- * and the outer half, which forwarded the same signal, re-raises it on the host.
+ * Inside, the inner half (pid 2, under the reaping bash pid 1) dies by it; pid 1 exits with
+ * 128+n — pid 1 cannot die by a self-sent signal — and unshare passes that on as an exit code,
+ * so the outer half, which forwarded the same signal, re-raises it on the host.
  * @param {Forwarder} fwd @param {number|null} code @param {NodeJS.Signals|null} signal
  * @returns {number}
  */
@@ -1283,8 +1336,9 @@ function childrenOf(pid) {
  *
  * ⛔ `unshare --fork` BLOCKS SIGTERM (and ignores SIGINT/SIGQUIT) in its own process until
  * its child exits — measured: a SIGTERM to it never reached the child, which ran to the
- * end. So the signal goes to unshare's CHILD, the inner half (pid 1 of the new namespace;
- * it installs handlers, which a namespace init needs to receive anything). No child yet ⇒
+ * end. So the signal goes to unshare's CHILD, the reaping bash (pid 1 of the new namespace;
+ * it traps them, which a namespace init needs to receive anything) and on to the node half
+ * (PID1_REAPER). No child yet ⇒
  * SIGKILL unshare, and `--kill-child` takes the namespace with it — nothing has started.
  * @param {import('node:child_process').ChildProcess} unshare @returns {Forwarder}
  */
@@ -1297,9 +1351,9 @@ function forwardSignalsPastUnshare(unshare) {
 }
 
 /**
- * pid 1 of a nested call's PID namespace (`__isolated-pid1 -- <cmd…>`): spawn the command with
- * the env it was given (already scrubbed), forward termination signals to it, and return its
- * exit code (128+n when killed — a pid 1 cannot die by its own signal, so the caller re-raises).
+ * The node helper under a nested call's reaping pid 1 (`__isolated-pid1 -- <cmd…>`): spawn the
+ * command with the env it was given (already scrubbed) and default signal dispositions, forward
+ * termination signals to it, and return its exit code (128+n when killed; the caller re-raises).
  * ⚠ Internal: reached only through the nested path's prefix, never documented as a verb.
  * @param {string[]} a @returns {Promise<number>}
  */
@@ -1341,8 +1395,9 @@ function usageRefusal(why, command) {
  * NO host unix sockets.
  *
  * The outer half spawns
- * `unshare -rnm --pid --fork --mount-proc --kill-child --propagation=private <node> <this file> __isolated-inner <netns> -- <cmd…>`
- * with two extra pipes: fd 3 is the STATUS channel, fd 4 carries the masking PLAN
+ * `unshare -rnm --pid --fork --mount-proc --kill-child --propagation=private <bash> -c PID1_REAPER … <node> <this file> __isolated-inner <netns> -- <cmd…>`
+ * — pid 1 is a bash that REAPS orphans (PID1_REAPER), the inner half runs under it — with
+ * two extra pipes: fd 3 is the STATUS channel, fd 4 carries the masking PLAN
  * (host mount-ns id, cwd, paths to re-expose, the host's path sockets — a list that
  * can be long, so never argv). The inner half proves the isolation and masks (below),
  * then writes `started` on fd 3 and runs the command; any refusal is written as
@@ -1426,8 +1481,12 @@ function runIsolated(a) {
     if (priv.why) {
       return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${priv.why}. The command was NOT started.`, { command }));
     }
-    // a small node pid 1: a bare command as pid 1 would IGNORE signals it has no handler for
-    return runCommand([process.execPath, SELF, PID1_INNER, '--', ...command], priv.prefix, { pastUnshare: true });
+    // pid 1 is the reaping bash (PID1_REAPER); the node helper under it gives the command default
+    // signal dispositions (a bash background job would IGNORE SIGINT)
+    const bash = bashOnPath();
+    if (!bash) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${NO_BASH}. The command was NOT started.`, { command }));
+    return runCommand([bash, '-c', PID1_REAPER, 'webctl-isolated-pid1', process.execPath, SELF, PID1_INNER, '--', ...command],
+      priv.prefix, { pastUnshare: true });
   }
   let hostNs = '';
   let hostMnt = '';
@@ -1473,6 +1532,8 @@ function runIsolated(a) {
       'NOT RUN: /proc/self/net/unix is unreadable, so the host\'s unix sockets cannot be listed and '
       + 'their masking cannot be PROVEN. The command was NOT started.', { command }));
   }
+  const bash = bashOnPath();
+  if (!bash) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${NO_BASH}. The command was NOT started.`, { command }));
   for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
@@ -1485,8 +1546,9 @@ function runIsolated(a) {
       child = spawn('unshare',
         // --pid --fork --mount-proc: a private PID namespace with its own /proc, so no host
         // process can be signalled or even seen. --kill-child: if unshare dies, so does
-        // everything inside (the inner half is the namespace's pid 1).
+        // everything inside (pid 1 is the reaping bash, PID1_REAPER; the inner half runs under it).
         ['-rnm', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
+          bash, '-c', PID1_REAPER, 'webctl-isolated-pid1',
           process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'],
           env: { ...process.env, [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt, [HOST_PIDNS_ENV]: hostPid,
@@ -1561,7 +1623,7 @@ async function runIsolatedInner(a) {
   };
   const [hostNs, sep, ...command] = a;
   if (!hostNs || sep !== '--' || command.length === 0) return refuse('internal: malformed inner invocation');
-  // ⚠ We are pid 1 of the new PID namespace: a signal with no handler is IGNORED. Until the
+  // ⚠ We run under the reaping bash pid 1, which forwards INT/TERM/HUP to us. Until the
   // command runs (runCommand forwards from then on), a termination signal ends us — and the
   // namespace with us — rather than letting the command start after the caller gave up.
   const SIGS = /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM', 'SIGHUP']);
