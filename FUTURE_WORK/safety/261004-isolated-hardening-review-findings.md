@@ -48,3 +48,22 @@ metacharacters literal); hidden dirs come from the PASSWD home. Suite 739/740 (1
 Integrate (isolated-hardening → a release branch), bump 0.33.0, `--against-head --scratch`
 over the public AND the private registry (~/.config/webctl/gate-consumers.private.jsonc),
 tag only on green. Tell perplexity and webctl:mgr.
+
+## Rulings (webctl:mgr, 2026-10-07) — v0.33.0 scope
+
+* (a) HIDE the whole passwd home (tmpfs over it). Re-bind READ-ONLY: base's repo root, node,
+  the absolute command, every PATH entry under the home. WRITABLE: cwd + each --keep.
+  1. A PATH entry is NEVER re-bound if it is the home itself, or contains / lies inside a
+     hidden dir (~/.ssh, ~/.gnupg, CLIAI roots, ~/.config/webctl): refuse with a message.
+  2. Generic `--keep-ro <path>` (e.g. uv's managed python under ~/.local/share/uv/python).
+  3. The verdict lists the re-bound paths.
+* (b) `bash -p` reaping pid 1 — agreed.
+* (c) ENV ALLOWLIST (CLIAI_* NOT passed by default), `--pass-env NAME|PREFIX_*`; BREAKING:
+  the CHANGELOG lists every default-passed name and the syntax. mgr's pre-check: chatgpt
+  (CGWC_*, CLIAI_CHATGPT_WEBCTL_TESTS_HOST_NETWORK), substack (SUBSTACK_WEBCTL_TESTS_HOST_PID),
+  perplexity (FIXTURE_PARENT_NETNS), aliexpress (ALIEXPRESS_WEBCTL_ARM_REAL_HARNESS) must
+  declare theirs.
+* Host policy (bp17, Ubuntu 24.04): kernel.apparmor_restrict_unprivileged_userns=1 ⇒ uid_map
+  EPERM. (1) A refusal that NAMES the sysctl and the fix (a host-policy fault, not a lane
+  fault). (2) WEBCTL_UNSHARE_BIN (absolute path to an executable) so a host can grant userns
+  to one dedicated binary via an AppArmor profile.
