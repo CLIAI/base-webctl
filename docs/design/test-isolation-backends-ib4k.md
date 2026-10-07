@@ -81,6 +81,32 @@ specific one); a pinned backend that is unavailable is a refusal, never a silent
 * ⚠ The docker daemon is root-equivalent on the host; the sandbox is only as strong as the
   flags above, which is why §1 is asserted per backend rather than assumed.
 
+### 3a. Review conditions (`webctl:mgr`, 2026-10-07) — each with an arm
+
+1. ⛔ **The LOCAL daemon only.** `docker` obeys `DOCKER_HOST` / `DOCKER_CONTEXT`; a remote
+   context would run a lane's tests on ANOTHER machine with the cwd shipped there. Unset both,
+   address the local unix socket explicitly, and refuse when the effective endpoint is not the
+   local unix socket. *Arm:* `DOCKER_HOST=ssh://x` planted → refused before any `docker run`.
+2. **Docker's default seccomp and AppArmor profiles stay ON.** Never `--privileged`, never
+   `seccomp=unconfined`. *Arm:* `docker inspect` of the running container → no `Privileged`,
+   no unconfined `SecurityOpt`.
+3. **Nested under the docker backend.** Lanes call `isolated` inside their suite; inside the
+   container there is no docker, and the default seccomp blocks user namespaces, so a nested
+   call would refuse. ⇒ The docker backend gives the container a proof of where it is that a
+   process inside cannot forge (e.g. a read-only bind of a base-owned marker file, verified in
+   `/proc/self/mountinfo`, together with the lo-only network and an empty capability bounding
+   set). A nested `isolated` that PROVES it is inside runs the command in place. *Arm:* a nested
+   call under the docker backend passes the §1 arm set and never escapes; a forged marker
+   (no such mount) is refused.
+4. **Reaping, signals, no leftovers.** `--init` for pid 1 (orphans reaped, as v0.33.0 does
+   for the namespace backend); SIGTERM forwarded to the container; `--rm` plus a parent-death
+   cleanup. *Arm:* kill the outer harness mid-run → no container is left.
+5. **Container names carry the owner** (the v0.31.0 `u<uid>` rule), and a container is
+   removed only by its exact name or id, never by a pattern (multi-account hosts).
+6. **Host-built `node_modules`.** Native addons (`*.node`) built on the host may not load in
+   the image (libc). The docker backend REFUSES with a clear message when the cwd's
+   `node_modules` holds any, rather than flaking. Most lanes have no native dependencies.
+
 ## 4. Verdict and gate
 
 * The verdict line and JSONL record name the backend used and, for each skipped one, the
