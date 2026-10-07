@@ -109,7 +109,8 @@ live on:
   * **test** — `test-cross-repo-consumer-loop-xrl4` (the `test-against-base.sh`
     contract + `consumers.jsonc` + the release gate),
     `test-checks-that-cannot-fail-k3wn` (verification discipline, led by base's
-    OWN shipped defects).
+    OWN shipped defects), `test-isolation-backends-ib4k` (`isolated` on any host:
+    unshare → bwrap → docker → refuse, one contract and one arm set per backend).
   * **infra** — `infra-directory-structure-f868`, `infra-browser-configuration-v7m2`,
     `infra-cdp-websocket-client-v7x3`, `infra-webdriver-bidi-client-bd1x` (firefox over
     WebDriver BiDi; four constraints measured on Firefox 156: Host header through a tunnel,
