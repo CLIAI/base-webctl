@@ -101,8 +101,14 @@ specific one); a pinned backend that is unavailable is a refusal, never a silent
 4. **Reaping, signals, no leftovers.** `--init` for pid 1 (orphans reaped, as v0.33.0 does
    for the namespace backend); SIGTERM forwarded to the container; `--rm` plus a parent-death
    cleanup. *Arm:* kill the outer harness mid-run → no container is left.
-5. **Container names carry the owner** (the v0.31.0 `u<uid>` rule), and a container is
-   removed only by its exact name or id, never by a pattern (multi-account hosts).
+5. **A shared daemon (one host's daemon serves five accounts): recognisable, owned, bounded,
+   never sweeping.** Container names are `webctl-iso-u<uid>-<lane>-<pid>` (the v0.31.0 `u<uid>`
+   owner rule); `--rm` always, and a stop on signal; `--cpus` and `--memory` caps with
+   defaults, overridable; the image built or pulled under a PREFIXED name
+   (`webctl-iso/…@<digest>`). ⛔ **Never prune** — no `docker system/image/container prune`,
+   ever; removal only by exact id or exact name. *Arm:* a run against a FAKE docker CLI records
+   every invocation: the name matches the pattern, `--cpus`/`--memory` are present, and no
+   `prune` verb (or name pattern) appears anywhere.
 6. **Host-built `node_modules`.** Native addons (`*.node`) built on the host may not load in
    the image (libc). The docker backend REFUSES with a clear message when the cwd's
    `node_modules` holds any, rather than flaking. Most lanes have no native dependencies.
