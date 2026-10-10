@@ -41,7 +41,7 @@ Recording `CONTRACT_HARNESS_GENERATION` in a comment is not enforcing it. Put th
 first in your contract, and treat **any** non-zero as FAIL:
 
 ```bash
-node "$H" require-generation 5 || { echo "FAIL: base harness below generation 5 (downgraded submodule?)"; exit 1; }
+node "$H" require-generation 6 || { echo "FAIL: base harness below generation 6 (downgraded submodule?)"; exit 1; }
 ```
 
 * ⭐ **Why a VERB, not `generation --min N`.** Measured: every harness before
@@ -172,7 +172,7 @@ shape that let the original grep pass.
 
 ### `generation`
 
-⚠ **Now 5.** History, each a change in what a verdict MEANS:
+⚠ **Now 6.** History, each a change in what a verdict MEANS:
 
 * **2** — `no-revendor` sees copies in subdirectories and under new names.
 * **3** — `pin` FAILS on drift and on an undeclared submodule; only a mode-160000
@@ -182,8 +182,12 @@ shape that let the original grep pass.
 * **5** — `no-revendor`: a file named like a base module is a shim only if it imports
   **that** module; importing a sibling no longer excuses an edited copy (`substack`).
   ⚠ Lanes that were green on 4 with a same-named copy go **red** — that is the fix.
+* **6** (v0.33.0) — `isolated` changed behaviour: the env is an **allowlist** (`--pass-env`,
+  which generation 5 refuses as an unknown option), the passwd home is **hidden**, privileged
+  tools come from the system dirs only. Key `--pass-env` on `require-generation 6` to stay green
+  on both pins (CHANGELOG v0.33.0).
 
-A sweep asks *"who is below 5?"* — and, since generation 4, *"whose contract does not
+A sweep asks *"who is below 6?"* — and, since generation 4, *"whose contract does not
 call `require-generation`?"*, because a recorded number nobody checks protects nothing.
 
 ### `require-generation <N>`
@@ -282,7 +286,8 @@ contract's output when it is used.
   unshare / user namespaces.)*
 * ⛔ **`isolated` fails CLOSED.** No `unshare`, unprivileged user namespaces disabled (or refused
   by AppArmor — named as **HOST POLICY**, below), a bad `WEBCTL_UNSHARE_BIN`, no
-  `ip`/`ifconfig`, no `mount`, no `setpriv`, no `bash` (pid 1), an `unshare` without `--map-user` (or a child
+  `ip`/`ifconfig`, no `mount`, no `setpriv`, no `bash` (pid 1) — each looked up in
+  `/usr/sbin:/usr/bin:/sbin:/bin` ONLY, never on your PATH (below) — an `unshare` without `--map-user` (or a child
   namespace that leaves a capability), a loopback that will not come up, a mask that fails, a home
   that cannot be hidden, a re-bind (or any submount of it) that cannot be made read-only, a hidden
   dir that does not resolve to its mask, a PATH entry that would expose a hidden dir, a host
@@ -344,10 +349,15 @@ contract's output when it is used.
   *npm:* `npm test` behaves as on the host; it only skips its debug logfile under
   `~/.npm/_logs` (set `npm_config_cache` under `/tmp` if you want it).
   *xq:* a check that asks xq for machine names (e.g. a no-host-literals scan) ran INSIDE
-  under v0.32 (measured by `fetlife`, with `UV_NO_CACHE=1`). With the home hidden it needs
-  xq's own dirs under the home re-bound — `--keep-ro` them, and pass `UV_NO_CACHE` with
-  `--pass-env` *(reasoned, not yet re-measured)*. Without them it silently falls back to fewer
-  names, so a lane should treat "xq did not answer" as a FAIL, not a warning, when xq is installed.
+  under v0.32 (measured by `fetlife`, with `UV_NO_CACHE=1`). ⛔ With the home hidden it broke
+  (measured under the gate: PASS → NO VERDICT / FAIL in two consumers): `~/.local/bin/xq` is a
+  symlink into a git checkout elsewhere under the home, and xq imports that checkout's `lib/`.
+  ⇒ If `xq` on your PATH really lives under the home, **its git root is re-bound READ-ONLY**
+  (named `xq's root` in the verdict, never by path). For `xq` ONLY — following every PATH
+  symlink would re-expose dozens of repos on an operator host. A root that is the home, or is,
+  contains or lies inside a hidden dir is NOT re-bound (a note says so). Pass `UV_NO_CACHE` with
+  `--pass-env` if your check sets it. A lane should still treat "xq did not answer" as a FAIL,
+  not a warning, when xq is installed — it falls back to fewer names silently.
 * ⛔ **BREAKING (v0.33.0): the env is an ALLOWLIST.** Measured by the review: 37 vars matching
   `*_API_KEY`, `*_TOKEN`, `*SECRET` reached the arm on an operator host — and the gate passes its
   full env. Default-passed: `PATH HOME USER LOGNAME SHELL LANG LC_* TERM TZ NODE_OPTIONS
@@ -358,17 +368,25 @@ contract's output when it is used.
   name is refused, and a prefix pass cannot bring one back). A nested call honours only its
   OWN `--pass-env`. ⛔ **The privileged halves get LESS** — `unshare`, pid 1's bash, the inner
   node (namespace root, full caps, before any mask), `mount`/`ip`, `setpriv`/`unshare -U`: only
-  `PATH HOME USER LOGNAME LANG LC_* TERM TZ TMPDIR WEBCTL_*`. Measured by the review of 5773fb8:
+  `HOME USER LOGNAME LANG LC_* TERM TZ TMPDIR WEBCTL_*`, and **not your PATH**:
+  `PATH=/usr/sbin:/usr/bin:/sbin:/bin`. Measured by the review of 5773fb8:
   a `NODE_OPTIONS=--require` preload ran in the inner node with a full CapEff, and a passed
   `LD_*` reached every C binary of the chain. The command's env travels in a pipe and is
   applied by the helper that spawns it, after the drop — the command still gets it all.
+  ⛔ **And PATH never picks a privileged tool** (re-review): `ip`, `mount`, `setpriv`, `unshare`
+  and pid 1's `bash` were found on the caller's PATH — empty and relative entries (the cwd)
+  included, and npm prepends an absolute `node_modules/.bin`. A fake `ip` planted in the cwd
+  ran as namespace root, full caps, before the masks. Now each is resolved on the host from
+  `/usr/sbin:/usr/bin:/sbin:/bin` only and passed on by absolute path; missing → FAIL naming it.
+  `WEBCTL_UNSHARE_BIN` remains the explicit override for `unshare`. The COMMAND keeps your PATH.
   ⚠ Under the release gate the OUTER call passes no extras: a nested `--pass-env X` finds only
   an `X` your contract sets; a toggle exported on the host is absent there.
 * ⭐ **pid 1 reaps orphans.** pid 1 of the namespace (fresh and nested) is a small bash that
   runs the real work in the background and `wait`s on it, forwarding INT/TERM/HUP and exiting
   with its status. ⛔ node as pid 1 left a re-parented, exited grandchild as a **zombie** —
   `kill -0` succeeded and `/proc` showed state `Z` (measured by `perplexity`), so "my
-  daemonised helper is gone" failed only under `isolated`. `bash` must be on PATH (else FAIL).
+  daemonised helper is gone" failed only under `isolated`. `bash` must be in
+  `/usr/sbin:/usr/bin:/sbin:/bin` (else FAIL) — never taken from PATH.
   stdin reaches the command as before.
   ⛔ It is **`bash --norc -p`**: as `bash -c` it honoured the caller's shell config — as pid 1,
   with every namespace capability, before any mask (measured by the review): a `BASH_ENV`
@@ -404,6 +422,11 @@ contract's output when it is used.
   * **Stripped markers** (`env -u …`, `env -i`): the call takes the FRESH path, inside, and
     isolates **again, fully** — its own netns and pidns, the home hidden again (measured); the
     verdict adds `ALREADY INSIDE an isolated namespace whose markers were stripped`.
+    ⛔ It **keeps what the outer call re-bound** under the home and `/tmp`, each with the SAME
+    mode (counted: `N outer re-binds`) — hiding them again broke a consumer suite under the gate
+    (`Cannot find module '<repo under ~/.cache>/…'`). Only with the kernel's proof of the outer
+    sandbox (our masks, our hide AT the home, lo only, a mapped uid_map); never a parent, never a
+    hidden dir (one kept exactly AT a hidden dir is not carried — keep it again).
   *(A lane's
   own `…_IN_NETNS=1` marker, set on the host, skipped isolation for a whole suite. The id
   alone can be fabricated; uid_map alone proves only a USER namespace — `unshare -r`

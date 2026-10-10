@@ -215,7 +215,8 @@ privileged halves), its pid 1 is `bash --norc -p` and REAPS orphans, and a signa
 slip in before it is heard.** Measured gaps
 from `perplexity` and from the review of this branch; scope ruled by `webctl:mgr` (2026-10-07).
 xrl4 §"Mutation arms run with no host network, no host unix sockets and a hidden home".
-Harness only; no `lib/` change.
+Harness only; no `lib/` change. **`HARNESS_GENERATION` is 6** — `isolated`'s behaviour changed
+(below: how to pass `--pass-env` and stay green on a generation-5 pin too).
 
 ### ⛔ BREAKING — the env is an ALLOWLIST
 
@@ -233,14 +234,20 @@ by default:**
   a prefix ends in `_*`; a bare `*` is refused). The socket/display/address names isolation
   removes (`DISPLAY`, `SSH_AUTH_SOCK`, `XDG_RUNTIME_DIR`, …) are refused by name and stripped
   even from a prefix pass. A nested call honours only its OWN `--pass-env`.
-* ⛔ **Loader vars never reach a PRIVILEGED half.** Everything that runs before the command's
-  capability drop — `unshare`, pid 1's bash, the inner node (namespace root, full caps, before
-  any mask), the `mount`/`ip` it runs, `setpriv`/`unshare -U` — gets only `PATH HOME USER LOGNAME
-  LANG LC_* TERM TZ TMPDIR WEBCTL_*`. Measured by the review of 5773fb8: `NODE_OPTIONS=--require
+* ⛔ **Loader vars — and the caller's PATH — never reach a PRIVILEGED half.** Everything that runs
+  before the command's capability drop — `unshare`, pid 1's bash, the inner node (namespace root,
+  full caps, before any mask), the `mount`/`ip` it runs, `setpriv`/`unshare -U` — gets only `HOME
+  USER LOGNAME LANG LC_* TERM TZ TMPDIR WEBCTL_*` and `PATH=/usr/sbin:/usr/bin:/sbin:/bin` (next
+  section). Measured by the review of 5773fb8: `NODE_OPTIONS=--require
   <preload>` ran the preload in the inner node with a FULL CapEff, the real home readable; a
   `--pass-env 'LD_*'` reached every C binary of the chain. The command's env travels in a pipe
   and is applied by the small node helper that spawns it, after the drop — so the command still
   gets `NODE_OPTIONS` and whatever you `--pass-env`, and nothing before it does.
+* ⚠ **One more process: on the FRESH path the command's parent is now that node helper**
+  (`node …/contract-harness.mjs __isolated-pid1 …`; it used to be the inner half, through an
+  exec'ing `setpriv`/`unshare -U`). A test that inspects its own process tree — `getppid()`,
+  `/proc/<ppid>/cmdline`, `ps` from pid 1 down — sees the helper between pid 1's bash and the
+  command, as the nested path already did. Exit codes and signals are unchanged (128+n, re-raised).
 * **Declare yours** — ready to copy into each lane's `isolated` call (`webctl:mgr`'s pre-check):
 
   ```bash
@@ -257,6 +264,28 @@ by default:**
   ⚠ **Under the release gate**, the gate's own (outer) `isolated` call passes no extra env, so
   your nested `--pass-env X` only finds an `X` your contract sets itself: a toggle exported on
   the host (`…_TESTS_HOST_NETWORK=1` in your shell) is ABSENT under the gate.
+
+* ⛔ **Stay green on BOTH your current pin and v0.33.0.** A v0.32 harness (generation 5)
+  REFUSES `--pass-env` as an unknown option (usage, exit 3) — so pass it only when the vendored
+  harness is **generation ≥ 6** (`HARNESS_GENERATION`, bumped by this release). Ask the harness
+  with `require-generation 6` (exit 0 = yes; ANY non-zero = no — a harness older than
+  generation 4 does not know the verb and exits 3):
+
+  ```bash
+  PASS_ENV=()
+  if node "$H" require-generation 6 >/dev/null 2>&1; then PASS_ENV=(--pass-env 'CGWC_*'); fi
+  node "$H" isolated "${PASS_ENV[@]}" -- …          # bash ≥ 4.4 for an empty array under set -u
+  ```
+
+  ```js
+  const { spawnSync } = require('node:child_process'); // ESM: the same names from 'node:child_process'
+  const gen6 = spawnSync(process.execPath, [H, 'require-generation', '6'], { stdio: 'ignore' }).status === 0;
+  const passEnv = gen6 ? ['--pass-env', 'CGWC_*'] : [];
+  spawnSync(process.execPath, [H, 'isolated', ...passEnv, '--', ...cmd], { stdio: 'inherit' });
+  ```
+
+  ⚠ Ask the VERB; do not load the harness as a module to read the constant: a harness older
+  than v0.31.0 has no import guard and would run a verb from YOUR argv.
 
 * The release gate's own `isolated` call passes **no** extras: a contract gets the default
   list (its `WEBCTL_*` included). base's gate tests now name their fake-contract knobs
@@ -292,11 +321,28 @@ unhide `~/.config/webctl`); `--keep` at or beneath one re-exposes that path only
   an explicit `--keep` re-exposes a hidden dir; the read-back now exempts only those.
 * A NESTED `--keep`/`--keep-ro` under the OUTER call's hidden home now says the outer call hides
   it (keep it there), not "does not exist" (still exit 3).
+* ⛔ **A write CHECK on the hidden home answers `EROFS`, as a read-only home did** (gate
+  regression, measured: 8 of a consumer lane's 10 gate failures). The hide tmpfs was mode 0555,
+  so `access(home, W_OK)` answered `EACCES`, and a ≤ v0.32 harness nested with its markers
+  stripped refused: `1 of 1 protected root(s) — the home directory — are WRITABLE here`. The
+  hides are mode 0755 now, read-only by their mount; the home is recorded in `WEBCTL_RO_ROOTS`
+  again. Measured: a v0.31.0 harness's stripped-markers `isolation-check` inside → PASS.
+* The note for a writable re-bind inside `~/.ssh`, `~/.config`, `~/.cache`, … reads right for a
+  cwd: `the working directory is in ~/.cache — re-exposed WRITABLE because the command runs
+  there` (it said "at the caller's request", which only a `--keep` is).
 * ⛔ **What now breaks: anything that reads the home INDIRECTLY** — git's `~/.gitconfig` (and
   commit signing with `gpg.format=ssh`, which reads the key under `~/.ssh`), ssh or git-over-ssh
   reading `~/.ssh/config` / `known_hosts`, gpg's keyring and config, shell rc files, a tool's
   own cache or config under `~/.cache` / `~/.config` / `~/.local`. Give the arm a throwaway
   `HOME` holding what it needs, or `--keep-ro` the one dir it must read.
+* ⛔ **`xq`'s checkout is re-bound READ-ONLY** (gate regression, measured: two consumers'
+  no-host-literals check `xq machine ls --json` went PASS → NO VERDICT / FAIL, unfixable from a
+  lane under the gate). `~/.local/bin/xq` is a symlink into a git checkout elsewhere under the
+  home and xq imports its `lib/` (`No module named 'lib'` with only the script). If `xq` on the
+  caller's PATH really lives under the home, its git root (walk up for `.git`; none → its dir)
+  is re-bound read-only, named `xq's root`. **For `xq` only** — a generic "follow PATH
+  symlinks" would re-expose dozens of repos on an operator host. A root that is the home, or
+  is, contains or lies inside a hidden dir is not re-bound (noted, no path).
 * A PATH entry that reaches the home through a symlink OUTSIDE it is re-bound at its real path
   only. Cost measured on the operator host (~100 PATH entries under the home): `isolated --
   true` 1.29 s → 1.46 s.
@@ -304,13 +350,31 @@ unhide `~/.config/webctl`); `--keep` at or beneath one re-exposes that path only
   an ancestor that shadows a hide is caught (review finding 7). A nested `unshare -rm` cannot
   peel the hide (tested).
 
+### ⛔ PATH never picks the binary a PRIVILEGED half runs
+
+Measured by the re-review: a fake `ip` in the cwd + `PATH=":$PATH" isolated -- true` → the fake
+ran as namespace root, CapEff full, **before the masks**, listing the real home. `ip`, `mount` and
+`setpriv` were run by name (the caller's PATH, empty and relative entries included); `unshare` and
+pid 1's `bash` by PATH too. The cwd is writable inside, so a mutated test plants `./ip` — or
+`node_modules/.bin/ip`, a dir npm PREPENDS as an absolute path — and the NEXT run executes it
+privileged. Here, before the fix, a planted fake ran on every path tried: fresh (`unshare`, `bash`,
+`ip`, `mount`, `setpriv`) and nested (`setpriv`, `unshare`, `bash`).
+
+* ⇒ **Every tool a privileged half runs comes from `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin` only**
+  — `unshare`, `bash` (pid 1), `mount`, `ip`/`ifconfig`, `setpriv` — resolved ON THE HOST before
+  `unshare` and passed on as absolute paths; the privileged halves' own `PATH` is that list.
+  `WEBCTL_UNSHARE_BIN` stays the one explicit override. A tool in none of them → FAIL naming the
+  tool (and the dirs), nothing run. **The command still gets your PATH, unchanged.**
+* ⚠ A host whose util-linux, bash or iproute2 live ONLY elsewhere (e.g. under `/usr/local`, or
+  a Nix profile) now fails closed; `WEBCTL_UNSHARE_BIN` covers `unshare` alone.
+
 ### pid 1 is `bash --norc -p`, and reaps orphans (fresh and nested paths)
 
 * node as pid 1 left a re-parented, exited grandchild as a **zombie** (state `Z`, `kill -0`
   succeeds), so "my daemonised helper is gone" failed only under `isolated`. pid 1 is now a
   small **bash** that runs the node half in the background, forwards INT/TERM/HUP and exits
-  with its status; the orphan disappears (measured, on both paths). **`bash` must be on PATH**,
-  else FAIL, nothing run.
+  with its status; the orphan disappears (measured, on both paths). **`bash` must be in the system
+  dirs** (above), else FAIL, nothing run.
 * ⛔ As `bash -c` it honoured the CALLER's shell config as pid 1 — with every namespace
   capability, before any mask (review): a `BASH_ENV` script ran; `SHELLOPTS=xtrace` traced it;
   an exported `wait()` replaced it; `SHELLOPTS=errexit` + TERM killed the namespace before the
@@ -349,7 +413,21 @@ per path with pid 1 held trapless for 300 ms; 0 lost.
   outer**, rather than looking like a forged marker.
 * **Stripped markers** (`env -u WEBCTL_…`, `env -i`) inside `isolated`: measured to isolate
   AGAIN, fully (fresh path: its own netns and pidns, the home hidden again), never "only
-  inherited"; the verdict line says `ALREADY INSIDE … isolated AGAIN, fully`.
+  inherited"; the verdict line says `ALREADY INSIDE … isolated AGAIN, fully, keeping what the
+  outer call re-bound (same modes)`.
+* ⛔ **…and it KEEPS what the outer call re-bound** (gate regression, measured by the lead on the
+  release gate): hiding the home again made the paths the OUTER call had re-exposed — the
+  consumer repo and run home the gate keeps, the outer's cwd — vanish; a consumer suite failed 8
+  tests `Cannot find module '<repo under ~/.cache/…>/tools/isolated-run.mjs'` (v0.32 hid nothing,
+  so it did not break). When the KERNEL proves the outer sandbox — our tmpfs on `/run` and
+  `/tmp`, our read-only hide AT the home, a lo-only netns, a mapped uid_map — every mount a path
+  lookup reaches under the home or `/tmp` is re-bound with its SAME mode (rw stays rw, ro stays
+  ro); counted in the verdict as `N outer re-binds`. Never wider: only what is visible inside,
+  never a parent, the hidden dirs hidden again; an outer re-bind exactly AT a hidden dir is not
+  carried (noted; `--keep` it again). Without the proof nothing is carried.
+* A read-only re-bind at a path where the outer call already had a mount (base's root, when the
+  outer's cwd was base's root) was FALSELY reported "still WRITABLE" — the outer's stack, shadowed
+  by the re-masked `/tmp`, was checked too. Only the stack path resolution reaches is checked now.
 
 ### ⛔ What this does NOT cover
 
@@ -368,6 +446,12 @@ per path with pid 1 held trapless for 300 ms; 0 lost.
   nothing runs, but one that already started runs unsupervised.
 * The signal-forwarder ORDERING (finding 5 above) is reasoned and logic-tested, not hit end to
   end.
+* `runCommand` fails cleanly (FAIL, 127) when spawn throws synchronously (an argv node refuses,
+  E2BIG): it rejected with a stack trace and left its signal forwarder installed.
+* Fixed (pre-existing): TERM ×3 in quick succession after the command's trap came back **143**
+  instead of the trap's code (measured: 9–10/25 with the TERMs 60 ms apart). A late TERM killed a
+  node half during its own exit, after it had dropped its forwarder. Now 150/150 return the
+  trap's code.
 * `WEBCTL_RO_ROOTS` and `WEBCTL_HIDDEN_DIRS` are recorded input; the other nesting facts still
   require a real masked namespace.
 * The AppArmor message is tested by its logic (the sysctl path is a parameter), not end to end.

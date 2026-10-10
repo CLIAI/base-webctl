@@ -541,13 +541,19 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
   finds only an `X` its contract sets (a host-exported toggle is absent under the gate).
 * **The PRIVILEGED halves get less than the command** (review of 5773fb8). Everything before
   the capability drop — `unshare`, pid 1's bash, the inner node (namespace root, full caps,
-  before any mask), its `mount`/`ip`, `setpriv`/`unshare -U` — gets only `PATH HOME USER LOGNAME
-  LANG LC_* TERM TZ TMPDIR WEBCTL_*`. *Measured:* a `NODE_OPTIONS=--require` preload (default-
+  before any mask), its `mount`/`ip`, `setpriv`/`unshare -U` — gets only `HOME USER LOGNAME
+  LANG LC_* TERM TZ TMPDIR WEBCTL_*`, with `PATH=/usr/sbin:/usr/bin:/sbin:/bin`. *Measured:* a `NODE_OPTIONS=--require` preload (default-
   passed to the command) ran in the inner node with a full CapEff; a passed `LD_*` was loaded by
   every C binary of the chain. A loader denylist cannot be complete, so this one is an allowlist
   too. The command's env (markers included) is computed once, travels in the plan pipe, and is
   applied only by the `__isolated-pid1` helper that spawns the command, after the drop — on the
   fresh path as well as the nested one.
+* **No privileged tool comes from PATH** (re-review of v0.33.0). `unshare`, pid 1's `bash`,
+  `mount`, `ip`/`ifconfig` and `setpriv` are resolved on the host from the fixed system dirs
+  `/usr/sbin:/usr/bin:/sbin:/bin` and passed by absolute path. *Measured:* a fake `ip` in the cwd
+  with `PATH=":$PATH"` ran as namespace root, full caps, before the masks — and the cwd is
+  writable to the very command a later run's privileged halves serve. The command keeps its
+  PATH; `WEBCTL_UNSHARE_BIN` is the only override.
 * **A nested call still gets its own PID namespace.** Network and masks are inherited (the
   mounts stay locked), but the process table is not: a lane that runs its suite through
   `isolated`, under the gate's own `isolated`, must not let the suite signal the contract
@@ -673,9 +679,11 @@ suite runs with cwd = its root, which re-opens it through the cwd.
   `access(W_OK)` with `EROFS` — so the previous `isolated` (every other fact satisfied, home
   writable) is refused — and each dir in `WEBCTL_HIDDEN_DIRS` (the home first) to have our
   read-only hide AT it or at an ANCESTOR. The roots are recorded, not re-derived: inside the
-  user namespace we are uid 0, and the passwd lookup answers root's home. ⚠ The home is in
-  `WEBCTL_HIDDEN_DIRS`, not `WEBCTL_RO_ROOTS`: under its 0555 tmpfs `access(W_OK)` answers
-  `EACCES` (mode bits are checked before the read-only mount), measured.
+  user namespace we are uid 0, and the passwd lookup answers root's home. The home is in BOTH
+  `WEBCTL_HIDDEN_DIRS` (first) and `WEBCTL_RO_ROOTS` (first), as ≤ v0.32 recorded it. ⛔ Its hide
+  is mode **0755** and read-only by its MOUNT: with mode 0555 `access(W_OK)` answered `EACCES`
+  (DAC runs before the read-only check), so a ≤ v0.32 harness nested with its markers stripped
+  judged the home "WRITABLE" and refused — 8 of a consumer lane's 10 gate failures (measured).
 * **⛔ Read-only is not HIDDEN** (the first v0.33.0 step, measured by `perplexity`; since
   superseded by hiding the whole home, above). A mutated test could
   still READ and print `~/.ssh` keys, live ControlMaster socket paths, an install salt and

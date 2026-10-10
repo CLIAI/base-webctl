@@ -789,8 +789,9 @@ entry under the home, each new `--keep-ro`; WRITABLE the cwd and each `--keep`.
   the home and each hidden dir must land on our ro tmpfs. Logic-tested from explicit mountinfo,
   with a CONTROL showing the old per-path check passes the shadowed case.
 * **Fact 6 vs the home.** Recording the home in `WEBCTL_RO_ROOTS` failed every nested call:
-  under the 0555 tmpfs `access(W_OK)` is `EACCES` (mode bits first), not `EROFS`. The home is
-  recorded only in `WEBCTL_HIDDEN_DIRS` (first); fact 8 accepts the hide at the dir or an ancestor.
+  under the 0555 tmpfs `access(W_OK)` is `EACCES` (mode bits first), not `EROFS`. The home was
+  then recorded only in `WEBCTL_HIDDEN_DIRS`. ⚠ **Superseded** (gate regression, below): the
+  hides are mode 0755 now and the home is in both lists again.
 * **The rule** (planKeeps `rule`): a PATH entry or `--keep-ro` that IS the home, contains it,
   or contains / lies inside a hidden dir (nominal AND real paths, existing or not) is refused —
   a PATH entry as FAIL (the caller's env), `--keep-ro` as usage. Messages carry the label and
@@ -984,6 +985,204 @@ the outer spawn, the privilege drop and its probe, and every nested call; re-bou
 * **Skew:** a ≤ v0.32.0 outer records no `WEBCTL_HIDDEN_DIRS`. Still refused (rc 2); when that
   is the ONLY failing fact the reason says "upgrade the outer". On the host (other facts fail
   too) it does not. Sabotage: message off, or shown whenever the var is absent → the arm red.
+
+### ⛔ PATH picked the binary a PRIVILEGED half ran (re-review of v0.33.0)
+
+The loader-var fix cut the privileged env to an allowlist — but kept PATH, and the tools were
+still FOUND on it: `ip` (`execFileSync('ip')`), every `mount`, `setpriv` and the default
+`unshare` by name, through the caller's PATH, empty and relative entries included; pid 1's `bash`
+by an absolute-entries-only scan, which npm's prepended `<pkg>/node_modules/.bin` defeats. The
+re-review measured a fake `ip` in the cwd + `PATH=":$PATH"` running as namespace root, CapEff
+full, before any mask, listing the real home. The cwd is writable INSIDE, so run N plants it and
+run N+1 executes it.
+* **Arm, before the fix** (fakes that log `HIT <name>` and exec the real tool; 3 PATH shapes ×
+  fresh/nested): empty entry → fresh `unshare, ip, mount, setpriv`, nested `setpriv, unshare`;
+  relative `bin` → the same; absolute dir first → fresh `unshare, bash, ip, mount, setpriv`,
+  nested `setpriv, unshare, bash`. After: none, in all six. CONTROL in the same runs: the
+  command's PATH is byte-identical to the caller's and it runs the caller's `caller-tool` by it.
+* ⇒ `SYSTEM_TOOL_DIRS` = `/usr/sbin /usr/bin /sbin /bin`; `systemTool(name)` returns the first
+  executable regular file there, as that path — not realpath'd, a busybox `ip` dispatches on its
+  name. `privilegedTools()` resolves unshare (unless `WEBCTL_UNSHARE_BIN`), bash, setpriv, and on
+  the fresh path mount + ip/ifconfig, ON THE HOST before unshare; missing → FAIL naming the tool
+  and the dirs. The fresh plan carries them (`tools`, validated by `isTools`); the inner half
+  sets `MOUNT.bin` from it and passes `lo` to bringLoUp; privilegeDrop takes `tools`. And
+  `privilegedEnv` sets `PATH=SYSTEM_PATH` — the second layer.
+* **The `mount` pin is gone.** It bound PATH's `mount` read-only under the new /run because a
+  PATH dir under the home vanished mid-masking — and it was itself a PATH lookup run as
+  namespace root. A system dir never vanishes.
+* ⚠ **The fail-closed arms had to move.** Twelve of them faked a tool by putting a dir FIRST on
+  PATH (no setpriv, a flag-ignoring setpriv, a too-old unshare, no bash, the slow-bash early-TERM
+  shim, …) — the very mechanism this closes. They now bind the fake OVER the system copy in a
+  throwaway `unshare -rm` (`withBinds`, `overTool`; a non-executable file = "missing"; the real
+  tool stays reachable at a bound copy where the fake must exec it). The slow bash's interpreter
+  is that copy, since `/bin/sh` may be bash; EARLY_CMD is node for the same reason; the probe
+  matches `…/unshare` (argv[0] is now absolute).
+* ⚠ **Cost.** A host whose util-linux/bash/iproute2 live only under `/usr/local` or a Nix profile
+  now FAILs; `WEBCTL_UNSHARE_BIN` covers unshare alone. Not widened: every extra dir is one more
+  place a privileged binary can be planted.
+* **Sabotage:** `systemTool` scanning `process.env.PATH` → arm red (the absolute-dir case runs a
+  planted `mount` that vanishes with /tmp: the run FAILs); `bringLoUp` by name + the caller's PATH
+  in `privilegedEnv` → arm red (`HIT ip` ×3); the caller's PATH in `privilegedEnv` ALONE →
+  SURVIVES, by construction: no privileged half resolves a name any more — it is the second layer.
+
+### A shadowed stack at a re-bound path read as "still WRITABLE" (found fixing the carry below)
+
+A call nested in `isolated` masks /tmp AGAIN. A read-only re-bind at a path where the OUTER call
+already had a mount (base's root, which the outer re-bound writable as its cwd) then leaves TWO
+stacks at that path in mountinfo: the outer's, whose parent is the old /tmp mask — unreachable
+now — and ours, under the new /tmp. `reachableMountsUnder` walked every bottom ("over-covering
+is safe"), and `readOnlyGaps` reported the outer's rw mount as a gap: the stripped-markers call
+FAILed "1 mount(s) … still WRITABLE" whenever its cwd was not base's root (measured: the carry
+arm below, before the carry existed). ⇒ keep the stack `resolveMount` lands on; over-cover with
+all bottoms only when none matches.
+* **Logic arm** (explicit mountinfo): the re-masked case selects only ours (and flags our rw
+  submount); CONTROL: without our re-mask, the outer stack is the live one. Red before.
+* **Sabotage:** the filter off → the logic arm red.
+
+### ⛔ Stripped markers hid what the OUTER call had re-bound (gate regression, v0.33.0)
+
+Measured by the lead on the release gate: a nested call whose WEBCTL_* markers were stripped
+takes the FRESH path and hid the home again, so the consumer repo (under `~/.cache/…`) and run
+home the gate keeps, and the outer's cwd, vanished — a consumer suite failed 8 tests `Cannot find
+module '<repo>/tools/isolated-run.mjs'`; the verdict read `… writable: nothing`. v0.32 hid
+nothing, so it did not break.
+* **Arm, before the fix** (fake home; outer `--keep ~/keep-rw --keep-ro ~/keep-ro --keep
+  <scratch>`; inner stripped, cwd = scratch): `RW-READ ENOENT, RW-WRITE ENOENT, RO-READ ENOENT,
+  RO-WRITE ENOENT`. ⚠ It first FAILED outright on the shadowed-stack false gap (previous
+  section) — the carry's arm found that one. After: `ok, ok, ok, EROFS`, `~/.ssh` ENOENT; the
+  verdict counts `1 outer re-bind` on each side, no path.
+* ⇒ `outerRebinds(mounts, home, masked, tmp)` (pure, exported): null unless the mount table
+  PROVES an outer call — our MASK_SOURCE tmpfs on top of every masked dir AND our read-only
+  HIDE_SOURCE tmpfs on top AT the home; runIsolated adds lo-only and a mapped uid_map. Then every
+  mount strictly under the home or /tmp that `resolveMount` lands on (visible, not shadowed or
+  stacked over), minus our hides and masks, with `rw = !ro`. runIsolated drops one exactly AT a
+  hideRule path (it would trip the post-check; noted) and non-dir/non-file ones (a /dev/null
+  cover), and passes the rest to planKeeps as implicit, `quiet` (the outer call already noted
+  them) items labelled `outer re-bind #n` — COUNTED by verdictLine (`COUNTED_BINDS`).
+* **Why /tmp too:** the fresh call re-masks /tmp exactly as it re-hides the home; an outer
+  `--keep /tmp/x` or a /tmp cwd vanished the same way.
+* ⚠ **Counts can shift between the lines:** a PATH entry that reaches a re-bound dir through a
+  symlink in the hidden home is skipped inside (the symlink is gone) and its real path arrives
+  as an outer re-bind instead — measured on the operator host: `91 PATH entries` outside,
+  `89 PATH entries, 2 outer re-binds` inside, the same 91 paths (verbose diff).
+* **CONTROL arm:** not nested (a tmpfs under the fake home, visible to the caller) → `SUB ENOENT`
+  inside, no `outer re-bind`. **Logic arm:** the carry with modes; null for each missing proof
+  (home not hidden by us, /tmp not ours, a rw hide, something on top of the hide, no home).
+* **Sabotage (all caught):** the hide-at-home proof dropped → logic; every carry `rw: true` →
+  logic + the integration arm; the resolveMount (visible) filter off → logic; hides not excluded
+  → logic; the carry not passed to planKeeps → the integration arm.
+
+### ⛔ xq could not run inside (gate regression, v0.33.0)
+
+Measured by the lead on the release gate: two private consumers' documented no-host-literals
+check (`xq machine ls --json`, `UV_NO_CACHE=1`) went PASS → NO VERDICT / FAIL. `~/.local/bin/xq`
+is a symlink into a git checkout elsewhere under the home; the PATH entry is re-bound, the
+symlink dangles. Re-binding only the script fails `No module named 'lib'` (xq imports its repo's
+`lib/`), and a nested `--keep-ro` of a path the outer hid is refused — a lane cannot fix it.
+* **Arm, before the fix** (fake home; `~/.local/bin/xq` → `~/src/xq-checkout/bin/xq`, a script
+  that cats `../lib/data.txt` through its real path; `~/.local/bin/other` → another checkout):
+  `XQ FAILED ENOENT`. After: `XQ XQ-LIB-READ`, a write into its lib `EROFS`, `OTHER FAILED`, the
+  other checkout `ENOENT`, `~/.ssh` `ENOENT`; the verdict says `xq's root`, never the name.
+  ⚠ The arm's PATH is the fake `~/.local/bin` + `/usr/bin:/bin` ONLY: with the caller's PATH, the
+  dangling fake fell through to the REAL `xq` further on PATH (it ran and printed its help).
+* ⇒ `xqRoot(home, hideRule)`: the first `xq` on the caller's PATH (absolute entries), realpath'd;
+  if under the home, walk up from its dir for `.git` (the home included); none → its dir.
+  Refused (a note, no path; xq then does not run inside) when the root IS the home or contains
+  it, or lies inside or contains a hideRule dir. Re-bound read-only as an implicit item, label
+  `xq's root`.
+* ⛔ **Deliberately NOT generic.** Following every PATH symlink to its git root would re-expose
+  dozens of repos on an operator host (~95 PATH entries there, many symlinked checkouts) — the
+  very exposure the verdict-count fix keeps out of logs would then be readable by the arm. One
+  named tool, base's own runtime layer, is the scope; another tool needs its `--keep-ro`.
+* **Sabotage (all caught):** a generic symlink-following rule → the main arm (`OTHER` ran); xq's
+  root writable → the main arm; the hidden/home check off → the refusal arm; the root marked
+  `named` (listed by path) → the main arm.
+
+### Generation 6 (v0.33.0)
+
+`isolated` CHANGED behaviour — the env allowlist (a lane's own vars now need `--pass-env`), the
+hidden home, system-dir tools — so the marker moves 5 → 6, per its own rule ("bump when a check's
+BEHAVIOUR changes"). The v0.30 note below ("Generation unchanged (4). These verbs are additive")
+was right for ADDING the verb; this changes what it does. Practical reason: a lane must know
+whether `--pass-env` exists before passing it — generation 5 refuses the unknown option (usage,
+exit 3) — and `require-generation 6` is the question that answers it on every pin (CHANGELOG:
+bash and node snippets). The test that pinned "stays at 5" now pins 6 and the snippet's exits.
+* **Measured, the bash snippet on both pins:** v0.32.0's harness answers `require-generation 6`
+  with 1 and `isolated --pass-env X` with 3 (the refusal the snippet avoids); the snippet then
+  runs `isolated -- true` → 0. On this branch it passes `--pass-env 'CGWC_*'` and the command sees
+  `CGWC_X=1`. **Sabotage:** the constant back to 5 → the generation arm red.
+
+### runCommand: a synchronous spawn throw (re-review, LOW)
+
+`spawn()` THROWS — rather than emitting `'error'` — for an argv node refuses (a NUL byte) and for
+an exec failure outside node's "run-time" list (E2BIG: the chain adds pid 1's reaper and the
+helper's argv to the command's, so a command just under the limit can tip over it here). The
+forwarder is installed first (finding 5), so the throw rejected runCommand's Promise — a stack
+trace, no `FAIL  isolated:` line — and left the forwarder's three listeners on the process.
+⇒ try/catch around the spawn: `fwd.remove()`, then `NOT RUN: cannot start '<argv[0]>': …`, 127
+(the code the async `'error'` path already used). The fresh path's own unshare spawn already
+had this.
+* **Arm:** `runCommand(['/bin/true', 'nul\0inside'])` in a child process (report() writes to
+  stdout/stderr), exported for it: resolves 127, does not reject, listener counts unchanged,
+  the FAIL line printed. Red before (`REJECTED`). E2BIG is not driven end to end: sizing an argv
+  that fits node's exec but not the chain's is host-dependent.
+* **Sabotage:** `fwd.remove()` dropped from the catch → the arm red (forwarder left installed).
+
+### TERM ×3 → 143 instead of the trap's code (re-review, LOW; pre-existing)
+
+The re-review saw 4/25 runs (6/25 on the old tree) where TERM ×3 sent quickly after the
+command's trap was set came back 143, not the trap's 7. **Reproduced here** with the TERMs 60 ms
+apart: 9/25 fresh and 10/25 nested ended by SIGTERM (0, 3, 15, 30, 100 ms gaps: ≤ 1/25). The rate
+depends on where the later TERMs land relative to the command's exit (a `sleep 0.1` loop defers
+the trap by up to 100 ms).
+* **Traced** (`strace -f`, one failing run): the command trapped TERM #1 and exited 7; the pid-1
+  helper and then the inner half (pid 2) reaped their children and REMOVED their forwarders —
+  restoring node's DEFAULT disposition — and TERM #3, forwarded by pid 1's bash, reached the
+  inner half during `process.exit`'s teardown: `killed by SIGTERM`. pid 1 exited 143, unshare
+  passed it on, and the harness (which had forwarded TERM) re-raised it.
+* ⇒ **`quietLateSignals`**: in the CLI only (`LATE.cli`, set by the dispatcher — never on import,
+  an importer's own Ctrl-C must work), removing a forwarder leaves a no-op listener until the
+  process exits; `loudAgain()` restores the default right before a deliberate re-raise
+  (exitOrDieBy, dieByForwarded). Deterministic: there is no longer an instant with neither a
+  forwarder nor a listener. After: 150/150 runs → 7 (gaps 45/60/80 ms, fresh and nested).
+* ⚠ A second, narrower path fixed on the way (found by reading, while the trace was pending):
+  forwardSignalsPastUnshare treated "unshare has no child" as EARLY even after `started` — i.e.
+  pid 1 had already EXITED — and SIGKILLed unshare, so the harness died by the signal. It now
+  records the signal and forwards nothing. Alone it did NOT move the 60 ms rate (10/25, 7/25
+  measured with only it applied): the trace's cause was the one above.
+* **Arms:** TERM ×3 at 60 ms, 6 runs per path, every outcome 7 (statistical: before, ~40% per
+  run ⇒ a false pass ≈ 0.6^12); a logic arm drives forwardSignalsPastUnshare (exported) with a
+  real, childless stand-in for unshare: after `started` nothing is killed and it is not early;
+  CONTROL before `started`: SIGKILL, early.
+* **Sabotage (all caught):** `LATE.cli` off → the TERM ×3 arm (`7 SIGTERM 7 7 SIGTERM SIGTERM`);
+  the old "no child ⇒ early" → the logic arm; no `loudAgain()` before a re-raise → the
+  early-TERM and Ctrl-C arms (5 red: the harness no longer dies by the signal).
+
+### ⛔ The 0555 hide answered a write CHECK with EACCES (gate regression, v0.33.0)
+
+Measured by the lead on the release gate — 8 of a consumer lane's 10 failures (earlier blamed
+on the stripped-markers carry; only 1 was). A ≤ v0.32 harness nested inside v0.33 with its
+markers stripped takes ITS fresh path, records the home as a read-only ROOT, and its
+isolation-check judges each root by `access(W_OK)`: anything but `EROFS`/`ENOENT` is
+"WRITABLE". Our hide tmpfs was mode 0555: DAC runs before the read-only check, so `EACCES` →
+`1 of 1 protected root(s) — the home directory — are WRITABLE here`. A ≤ v0.32 read-only home
+answered `EROFS`. (A real create was always `EROFS`: open(O_CREAT) takes the mount write lock
+first.)
+* ⇒ **`HIDE_MODE = '0755'`** for every hide (home and hidden dirs): owner-writable by MODE —
+  the owner is the namespace root, i.e. the real uid — read-only by MOUNT. And the home is
+  recorded in `WEBCTL_RO_ROOTS` again (first), as ≤ v0.32 did, so our own fact 6 checks it too.
+* **Arm** (fake home; `--keep ~/.config` so `~/.config/webctl` has its own hide; fresh AND
+  nested): `access(W_OK)` and an exclusive create on the home and on that hidden dir are all
+  `EROFS`. Before: `HOME-ACCESS EACCES`, `HIDE-ACCESS EACCES` (creates `EROFS`).
+* **Measured manually, not a repo test** (it needs git history): a throwaway worktree of
+  v0.31.0 under scratch, `--keep`'d by a v0.33 outer; its `isolated -- isolation-check 4927 4937`
+  with the six markers stripped → **PASS** (mode 0755); with 0555 → `FAIL … 1 of 1 protected
+  root(s) — the home directory — are WRITABLE here`, as the lead measured. With the markers
+  KEPT: PASS at 0755; at 0555 *with the home back in RO_ROOTS* → NO VERDICT (the same EACCES
+  through the recorded root) — the two changes only work together.
+* **Sabotage:** `HIDE_MODE` 0555 → the arm red, and 25 more — every arm with a nested call
+  (the nested proof now reads the recorded home root as `WRITABLE`). Restored: the 77 nesting /
+  home / hidden arms pass.
 
 ### The import guard
 
