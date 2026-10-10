@@ -44,7 +44,7 @@ const tryWrite = (dir) => errOf(() => {
   fs.unlinkSync(f);
 });
 /** @param {string[]} a */
-const run = (a) => spawnSync(a[0], a.slice(1), { encoding: 'utf8' });
+const run = (a, o = {}) => spawnSync(a[0], a.slice(1), { encoding: 'utf8', ...o });
 
 /**
  * Try to change what `target` (a file BIND) reads WITHOUT writing through it: find its backing file
@@ -219,6 +219,29 @@ const tamper = (target) => {
   out.snd = errOf(() => fs.statSync('/dev/snd'));
   try { out.ptsNumbered = fs.readdirSync('/dev/pts').filter((n) => /^\d+$/.test(n)).length; } catch (e) { out.ptsNumbered = `<${e.code}>`; }
   try { out.ptsDev = String(fs.statSync('/dev/pts').dev); } catch (e) { out.ptsDev = `<${e.code}>`; }
+  // 12 (CONTROL) — what lanes use from /dev, read the SAME way outside, so inside must MATCH outside:
+  // fd/N and the stdio links resolve; null/zero/full/random/urandom read; a write to /dev/full is ENOSPC;
+  // /dev/tty with NO controlling tty (a `setsid` child — so no terminal is ever opened) answers as outside.
+  /** @param {string} p @param {number} n */
+  const readN = (p, n) => {
+    const fd = fs.openSync(p, 'r');
+    try { const b = Buffer.alloc(n); const got = fs.readSync(fd, b); return got === 0 ? 'eof' : `${got}${b.every((x) => x === 0) ? 'z' : ''}`; } finally { fs.closeSync(fd); }
+  };
+  /** @param {() => unknown} f */
+  const val = (f) => { try { return f(); } catch (e) { return `<${e.code || e.message}>`; } };
+  const tty = run(['setsid', '-w', process.execPath, '-e',
+    'try { require("fs").closeSync(require("fs").openSync("/dev/tty", "r+")); console.log("ok"); } catch (e) { console.log(e.code); }'],
+  // ⚠ without NODE_OPTIONS: row 11 counts every preload hit outside the command (this child is not it)
+  { env: { ...process.env, NODE_OPTIONS: '' } });
+  out.devUse = {
+    ...Object.fromEntries(['/dev/fd/0', '/dev/fd/1', '/dev/fd/2', '/dev/stdin', '/dev/stdout', '/dev/stderr']
+      .map((p) => [p, errOf(() => fs.statSync(p))])),
+    '/dev/fd': errOf(() => fs.readdirSync('/dev/fd')),
+    readNull: val(() => readN('/dev/null', 16)), readZero: val(() => readN('/dev/zero', 16)), readFull: val(() => readN('/dev/full', 16)),
+    readRandom: val(() => readN('/dev/random', 16).replace(/z$/, '')), readUrandom: val(() => readN('/dev/urandom', 16).replace(/z$/, '')),
+    writeNull: errOf(() => fs.writeFileSync('/dev/null', 'x')), writeFull: errOf(() => fs.writeFileSync('/dev/full', 'x')),
+    ttyNoCtty: tty.error ? `<${tty.error.code}>` : String(tty.stdout).trim(),
+  };
   if (inside) {
     // what a lane plausibly needs from /dev, read AFTER the listing above (a pty made here is ours)
     out.ptmxOpen = errOf(() => fs.closeSync(fs.openSync('/dev/ptmx', fs.constants.O_RDWR | fs.constants.O_NOCTTY)));

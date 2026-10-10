@@ -1620,6 +1620,16 @@ except beneath a scratch dir there.
   `unshare -Ur --pid --fork --mount-proc` exits 0. Deeper: `--keep /dev/null` and `--keep-ro /dev/pts`
   → usage 3 (RED on 5e0a59a: they ran).
 
+**What lanes use from `/dev` (coordinator's addition C).** A read-only grep of every consumer checkout in
+both registries (tests, harness wrappers, scripts; vendor/ excluded): `/dev/null` everywhere,
+`/dev/shm` (Chromium, via docker's `--shm-size`), `/dev/stdin` (a prompt reader), `/dev/urandom`;
+`/dev/dri` only in a deferred design note, `/dev/tcp` only as bash's pseudo-path. No `/dev/pts`,
+`/dev/tty`, `/dev/fuse` or `/dev/net/tun`. Nothing outside the minimal set ⇒ not widened. The row 12
+CONTROL reads the same set OUTSIDE and INSIDE and requires them equal (`devUse`): fd/N and the stdio
+links, reads of null/zero/full/random/urandom, `/dev/full` → ENOSPC, `/dev/tty` from a `setsid` child
+(no controlling tty — no terminal is ever opened) → ENXIO. The pty is checked inside only: outside it
+would allocate a pty on the host's devpts.
+
 | # | sabotage (on a copy) | caught by |
 |---|---|---|
 | D1a | no fresh `/dev` (read-back kept) | every run refused: `229 entries in /dev beyond the minimal set, /dev (not the fresh read-only tmpfs), /dev/pts (not a fresh devpts), …` |
@@ -1627,6 +1637,8 @@ except beneath a scratch dir there.
 | D1c | the HOST's `/dev/pts` rbound instead of a fresh devpts (read-back kept) | every run refused: `/dev/pts (not a fresh devpts)` |
 | D1d | the same, no read-back | row 12 arm `fresh: /dev/pts is the HOST's devpts instance`; control `/dev/ptmx cannot be opened (EACCES)` |
 | D1e | the host's `/dev/uinput` bound into the fresh `/dev`, no read-back | row 12 arm: `fresh: /dev holds 1 entr(y/ies) beyond the minimal set` |
+| D1f | `/dev/null` bound in as `full`, no read-back | row 12 control: `readFull: 'eof'` vs `'16z'`, `writeFull: 'ok'` vs `'ENOSPC'` (with the read-back kept: refused, `/dev/full (not the 1:7 device)`) |
+| D1g | no `stdin` link | row 12 control: `'/dev/stdin': 'ENOENT'` vs `'ok'` |
 
 **Item 2 — the caller's cgroups (a hole in every released `isolated`).** Measured by the re-review:
 no cgroup namespace and the cgroup2 tree moved back read-write under the fresh sysfs — the command

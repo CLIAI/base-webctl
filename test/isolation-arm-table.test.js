@@ -360,6 +360,14 @@ const ROWS = [
     },
     control: (w) => {
       assert.ok(w.outside.outside.devExtra > 0, 'control: the host /dev holds nothing beyond the minimal set — the arm cannot fail');
+      // what the lanes use from /dev (a read-only grep of every consumer: null, shm, stdin, urandom) and
+      // the rest of the minimal set behave INSIDE exactly as OUTSIDE — fd/N and stdio links, the reads,
+      // /dev/full's ENOSPC, /dev/tty without a controlling tty
+      const o = w.outside.outside.devUse;
+      assert.equal(o.writeFull, 'ENOSPC', 'control: a write to /dev/full is not ENOSPC even outside');
+      assert.deepEqual([o.readNull, o.readZero, o.readFull, o.readRandom, o.readUrandom, o.writeNull, o.ttyNoCtty],
+        ['eof', '16z', '16z', '16', '16', 'ok', 'ENXIO'], 'control: /dev does not behave as expected even outside — the comparison would be vacuous');
+      for (const p of PATHS) assert.deepEqual(w.arm[p].devUse, o, `${p}: /dev behaves differently inside than outside`);
       for (const p of PATHS) {
         const r = w.arm[p];
         // what a lane plausibly needs from /dev still works (a pty, /dev/null, /dev/urandom, /dev/tty, /dev/fd)
