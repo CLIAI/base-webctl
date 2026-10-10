@@ -1699,7 +1699,7 @@ function statusChannel(child) {
  * ⚠ Internal: reached only through the nested path's prefix, never documented as a verb.
  * @param {string[]} a @returns {Promise<number>}
  */
-function runPid1(a) {
+export function runPid1(a) {
   // `--status`: fd 3 is the nested path's status pipe — write `started` on it, then close it
   const status = a[0] === '--status';
   let rest = status ? a.slice(1) : a;
@@ -1729,7 +1729,19 @@ function runPid1(a) {
     }
   }
   return new Promise((resolve) => {
-    const child = spawn(command[0], command.slice(1), { stdio: 'inherit', env });
+    /** @type {import('node:child_process').ChildProcess} */
+    let child;
+    try {
+      child = spawn(command[0], command.slice(1), { stdio: 'inherit', env });
+    } catch (e) {
+      // ⛔ spawn THROWS (not 'error') for exec failures outside node's "run-time" list — E2BIG: an
+      // env var over MAX_ARG_STRLEN arrives fine on the env PIPE (review F3). Without this the
+      // Promise rejected: a stack, no FAIL line, and our forwarder left installed.
+      fwd.remove();
+      resolve(report('isolated', EXIT.fail, `NOT RUN: cannot start '${command[0]}': ${errMsg(e)} — the harness could `
+        + 'not hand the command to the kernel (too large an argv/env?). The command was NOT started.'));
+      return;
+    }
     fwd.attach(child);
     child.on('error', (e) => { fwd.remove(); resolve(report('isolated', 127, `NOT RUN: cannot start '${command[0]}': ${errMsg(e)}`)); });
     child.on('close', (code, signal) => { fwd.remove(); resolve(exitCodeOf(code, signal)); });
@@ -3256,8 +3268,8 @@ function privilegeDrop(ids, tools, { pidns = false } = {}) {
 
 /**
  * Run `prefix` + `command` (a chain ending in the `__isolated-pid1` helper, pid1HelperArgv) with
- * the caller's cwd/stdio; resolve with its exit code (128+signal when killed, 127 when it cannot
- * be started). `prefix` is the privilege drop (privilegeDrop); `env` the COMMAND's env — the
+ * the caller's cwd/stdio; resolve with its exit code (128+signal when killed; EXIT.fail when the
+ * CHAIN cannot be started — not 127, which reads "command not found"). `prefix` is the privilege drop (privilegeDrop); `env` the COMMAND's env — the
  * ALLOWLIST (isolatedEnv: the fresh path's plan.env, or the nested call's own `--pass-env`).
  *
  * ⛔ `env` is NOT the chain's env: setpriv, unshare -U, pid 1's bash and the helper get
@@ -3284,8 +3296,11 @@ export function runCommand(command, prefix = [], { pastUnshare = false, env = /*
     } catch (e) {
       // ⛔ spawn THROWS for an argv node refuses (a NUL) or an exec error outside its "run-time" list
       // (E2BIG): without this the Promise rejected (a stack, no FAIL line) with our forwarder left on
+      // ⚠ EXIT.fail, not 127 (review F3): argv[0] is the privilege-drop chain, not the command — 127
+      // reads "command not found"; the fresh path's equivalent (unshare cannot start) is EXIT.fail
       fwd.remove();
-      resolve(report('isolated', 127, `NOT RUN: cannot start '${argv[0]}': ${errMsg(e)}. The command was NOT started.`));
+      resolve(report('isolated', EXIT.fail, `NOT RUN: cannot start '${argv[0]}' (the isolation chain): ${errMsg(e)}. `
+        + 'The command was NOT started.'));
       return;
     }
     const envPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[pastUnshare ? 4 : 3]);
@@ -3295,7 +3310,8 @@ export function runCommand(command, prefix = [], { pastUnshare = false, env = /*
     fwd.attach(child);
     child.on('error', (e) => {
       fwd.remove();
-      resolve(report('isolated', 127, `NOT RUN: cannot start '${argv[0]}': ${errMsg(e)}`));
+      resolve(report('isolated', EXIT.fail, `NOT RUN: cannot start '${argv[0]}' (the isolation chain): ${errMsg(e)}. `
+        + 'The command was NOT started.'));
     });
     child.on('close', (code, signal) => {
       if (fwd.early?.()) dieByForwarded(fwd); // killed before pid 1 could hear it: die by the signal

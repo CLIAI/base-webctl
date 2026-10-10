@@ -1136,6 +1136,20 @@ had this.
   the FAIL line printed. Red before (`REJECTED`). E2BIG is not driven end to end: sizing an argv
   that fits node's exec but not the chain's is host-dependent.
 * **Sabotage:** `fwd.remove()` dropped from the catch → the arm red (forwarder left installed).
+* ⛔ **127 → EXIT.fail (review F3).** The fresh path's unshare spawn fails 1; runCommand's catch
+  and its async `'error'` said 127 — "command not found" — about the isolation CHAIN (setpriv,
+  argv[0]), not the command. Both now `EXIT.fail`, the message naming `(the isolation chain)`.
+  The arm now expects 1, and calls `runCommand(['/nonexistent-webctl-chain'])` for the async
+  path (`ASYNC 1`). Before: 127 / 127.
+* ⛔ **runPid1 had no catch (review F3).** The helper that spawns the COMMAND: a synchronous throw
+  rejected its Promise. Driven end to end after all, here: an env var of 256 KiB (over
+  MAX_ARG_STRLEN, 128 KiB per string) passes the env PIPE untouched and makes the command's
+  execve fail E2BIG, which node THROWS. **Arm:** runPid1 (exported for it) in a child, the env
+  on fd 3: before, it REJECTED (`E2BIG`); after, resolves 1, listener counts unchanged,
+  `FAIL  isolated: NOT RUN: cannot start '/bin/true': spawn E2BIG — …`. Its async `'error'`
+  (the command absent inside) keeps 127: that one IS the command not found.
+* **Sabotage (all caught):** runPid1's `fwd.remove()` dropped → its arm; runPid1's code 127 →
+  its arm; runCommand's catch 127 → its arm; runCommand's `'error'` 127 → `ASYNC` red.
 
 ### TERM ×3 → 143 instead of the trap's code (re-review, LOW; pre-existing)
 

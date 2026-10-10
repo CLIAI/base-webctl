@@ -3242,21 +3242,59 @@ test('CONTROL: the gate\'s grep DOES miss the old untagged shape (so the arm abo
 // pid 1's reaper and the helper's argv to the command's). runCommand had installed its signal
 // forwarder first, so the throw rejected its Promise — a crash with a stack, not a FAIL line — and
 // left the forwarder's listeners on the process. Run in a child: report() writes to stdout/stderr.
-test('⛔ runCommand: a SYNCHRONOUS spawn throw → FAIL 127 "NOT RUN: cannot start", no rejection, and no signal forwarder left installed', async () => {
+// ⛔ Review F3: it resolved 127 — "command not found" — while the fresh path's equivalent (unshare
+// cannot be spawned) is EXIT.fail; argv[0] here is the privilege-drop chain, not the command.
+test('⛔ runCommand: a SYNCHRONOUS spawn throw → FAIL (exit 1, not 127) "NOT RUN: cannot start", no rejection, and no signal forwarder left installed', async () => {
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', `
 const m = await import(process.env.HARNESS_URL);
 const count = () => ['SIGINT', 'SIGTERM', 'SIGHUP'].map((s) => process.listenerCount(s));
 const before = count();
 let code = null; let threw = '';
 try { code = await m.runCommand(['/bin/true', 'nul\\u0000inside']); } catch (e) { threw = String((e && e.code) || e); }
-console.log('RESULT ' + JSON.stringify({ code, threw, before, after: count() }));`], { encoding: 'utf8', env: cleanEnv({ HARNESS_URL: pathToFileURL(TOOL).href }) });
+console.log('RESULT ' + JSON.stringify({ code, threw, before, after: count() }));
+console.log('ASYNC ' + await m.runCommand(['/nonexistent-webctl-chain'])); // ENOENT: 'error', not a throw`], { encoding: 'utf8', env: cleanEnv({ HARNESS_URL: pathToFileURL(TOOL).href }) });
   const line = (r.stdout.match(/^RESULT (.*)$/m) || [])[1];
   assert.ok(line, `no result:\n${r.stdout}${r.stderr}`);
   const res = JSON.parse(line);
   assert.equal(res.threw, '', `runCommand REJECTED instead of failing cleanly:\n${r.stderr}`);
-  assert.equal(res.code, 127, r.stdout + r.stderr);
+  assert.equal(res.code, 1, `not the harness's FAIL code:\n${r.stdout}${r.stderr}`);
   assert.deepEqual(res.after, res.before, 'the signal forwarder was left installed');
-  assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: cannot start '\/bin\/true': /m, r.stderr);
+  assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: cannot start '\/bin\/true' \(the isolation chain\): /m, r.stderr);
+  // the ASYNC 'error' (ENOENT) likewise: the harness's FAIL code, never 127
+  assert.match(r.stdout, /^ASYNC 1$/m, r.stdout + r.stderr);
+});
+
+// ⛔ Review F3: runPid1 (the helper that finally spawns the COMMAND) had no try/catch around its
+// spawn, so a synchronous throw — E2BIG from an env var over the kernel's per-string limit
+// (MAX_ARG_STRLEN, 128 KiB), which the env PIPE does not have — rejected its Promise: a stack,
+// no FAIL line, the forwarder left installed. In a child that imports it (report() writes to
+// stdout/stderr); the env arrives on fd 3, as the chain sends it.
+test('⛔ runPid1: a SYNCHRONOUS spawn throw (E2BIG: a 256 KiB env var) → FAIL (exit 1) "NOT RUN: cannot start", no rejection, no forwarder left installed', async () => {
+  const r = await new Promise((resolve) => {
+    const c = spawn(process.execPath, ['--input-type=module', '-e', `
+const m = await import(process.env.HARNESS_URL);
+const count = () => ['SIGINT', 'SIGTERM', 'SIGHUP'].map((s) => process.listenerCount(s));
+const before = count();
+let code = null; let threw = '';
+try { code = await m.runPid1(['--env', '3', '--', '/bin/true']); } catch (e) { threw = String((e && e.code) || e); }
+console.log('RESULT ' + JSON.stringify({ code, threw, before, after: count() }));`], {
+      env: cleanEnv({ HARNESS_URL: pathToFileURL(TOOL).href }), stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
+    let stdout = ''; let stderr = '';
+    c.stdout?.on('data', (d) => { stdout += d; });
+    c.stderr?.on('data', (d) => { stderr += d; });
+    const envPipe = /** @type {import('node:stream').Writable} */ (c.stdio[3]);
+    envPipe.on('error', () => {});
+    envPipe.end(JSON.stringify({ PATH: '/usr/bin:/bin', BIG: 'x'.repeat(256 * 1024) }));
+    c.on('close', (code) => resolve({ status: code, stdout, stderr }));
+  });
+  const res0 = /** @type {{status: number, stdout: string, stderr: string}} */ (r);
+  const line = (res0.stdout.match(/^RESULT (.*)$/m) || [])[1];
+  assert.ok(line, `no result:\n${res0.stdout}${res0.stderr}`);
+  const res = JSON.parse(line);
+  assert.equal(res.threw, '', `runPid1 REJECTED instead of failing cleanly:\n${res0.stderr}`);
+  assert.equal(res.code, 1, res0.stdout + res0.stderr);
+  assert.deepEqual(res.after, res.before, 'the signal forwarder was left installed');
+  assert.match(res0.stderr, /^FAIL {2}isolated: NOT RUN: cannot start '\/bin\/true': .*E2BIG/m, res0.stderr);
 });
 
 test('⛔ importing the harness runs NO verb, even when the importer\'s argv names one', async () => {

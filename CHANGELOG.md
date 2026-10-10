@@ -454,8 +454,12 @@ per path with pid 1 held trapless for 300 ms; 0 lost.
   nothing runs, but one that already started runs unsupervised.
 * The signal-forwarder ORDERING (finding 5 above) is reasoned and logic-tested, not hit end to
   end.
-* `runCommand` fails cleanly (FAIL, 127) when spawn throws synchronously (an argv node refuses,
-  E2BIG): it rejected with a stack trace and left its signal forwarder installed.
+* `runCommand` fails cleanly when spawn throws synchronously (an argv node refuses, E2BIG): it
+  rejected with a stack trace and left its signal forwarder installed. It — and its async
+  `'error'` — now exit **1** (the harness's FAIL), not 127: argv[0] there is the isolation
+  chain, and 127 reads "command not found" (review F3; the fresh path's unshare spawn already
+  failed 1). The pid-1 helper that spawns the COMMAND had no catch at all: an env var over
+  128 KiB (MAX_ARG_STRLEN; the env pipe has no such limit) → E2BIG rejected it — now FAIL, 1.
 * Fixed (pre-existing): TERM ×3 in quick succession after the command's trap came back **143**
   instead of the trap's code (measured: 9–10/25 with the TERMs 60 ms apart). A late TERM killed a
   node half during its own exit, after it had dropped its forwarder. Now 150/150 return the
