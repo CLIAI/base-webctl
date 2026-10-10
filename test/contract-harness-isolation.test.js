@@ -821,6 +821,76 @@ test('⛔ --pass-env is VALIDATED: not NAME or PREFIX_*, or a scrubbed socket/di
   }
 });
 
+// ── loader-injection vars never reach a PRIVILEGED half (review of 5773fb8, finding 1) ──
+//
+// ⛔ Measured by the review: NODE_OPTIONS=--require <preload> ran the preload in pid 2 — the
+// `__isolated-inner` node — as namespace root with a FULL CapEff, before any mask (the real
+// home readable, the host's X11 socket dir reachable). NODE_OPTIONS is default-passed to the
+// COMMAND; it reached the halves that run before the drop because they got the command's env.
+// ⇒ unshare, pid 1's bash, the inner node, setpriv/unshare of the drop and the pid-1 helper get
+// a fixed short env (PRIVILEGED_PASS_ENV); the command's env travels in a pipe and is applied
+// only when the command is spawned.
+
+/** A NODE_OPTIONS preload: appends {argv, CapEff} of every node that loads it to `hits` beside it. */
+const PRELOAD = `const fs = require('fs');
+const cap = (fs.readFileSync('/proc/self/status', 'utf8').match(/^CapEff:\\s*(\\S+)/m) || [])[1];
+try { fs.appendFileSync(require('path').join(__dirname, 'hits'), JSON.stringify({ argv: process.argv.slice(1), cap }) + '\\n'); } catch { /* not visible here */ }
+`;
+/** @param {string} dir @returns {{argv: string[], cap: string}[]} */
+const hitsIn = (dir) => {
+  try { return fs.readFileSync(path.join(dir, 'hits'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; }
+};
+const SEES_NODE_OPTIONS = 'console.log(process.env.NODE_OPTIONS ? "SEES-NODE-OPTIONS" : "NO-NODE-OPTIONS")';
+
+test('⛔ NODE_OPTIONS never reaches a PRIVILEGED half (the inner node, the pid-1 helper) — the COMMAND gets it and its preload runs — fresh AND nested', needsIsolation, async () => {
+  const dir = tmpdir();
+  try {
+    fs.writeFileSync(path.join(dir, 'preload.cjs'), PRELOAD);
+    const r = await run(['isolated', '--keep', dir, '--', 'sh', '-c',
+      '"$0" -e "$2" CMD-FRESH; "$0" "$1" isolated -- "$0" -e "$2" CMD-NESTED', process.execPath, TOOL, SEES_NODE_OPTIONS],
+    { NODE_OPTIONS: `--require ${path.join(dir, 'preload.cjs')}` });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const hits = hitsIn(dir);
+    const privileged = hits.filter((h) => h.argv.some((a) => /^__isolated-/.test(a)) || !/^0+$/.test(h.cap || 'x'));
+    assert.deepEqual(privileged, [], 'a NODE_OPTIONS preload ran in a privileged half (an `__isolated-*` node, or with capabilities)');
+    // CONTROL: the command itself still sees NODE_OPTIONS and its preload ran there — fresh AND nested
+    assert.equal((r.stdout.match(/^SEES-NODE-OPTIONS$/gm) || []).length, 2, r.stdout);
+    assert.ok(hits.some((h) => h.argv.includes('CMD-FRESH')), `the preload did not run in the fresh command:\n${JSON.stringify(hits)}`);
+    assert.ok(hits.some((h) => h.argv.includes('CMD-NESTED')), `the preload did not run in the nested command:\n${JSON.stringify(hits)}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+/** `transferring control: <prog>` from glibc's LD_DEBUG=files per-pid files under `dir` (basenames). */
+const ldPrograms = (/** @type {string} */ dir) => fs.readdirSync(dir).filter((f) => f.startsWith('ld.'))
+  .flatMap((f) => [...fs.readFileSync(path.join(dir, f), 'utf8').matchAll(/transferring control: (\S+)/g)].map((m) => path.basename(m[1])));
+// ⚠ not `command -v true`: in sh that answers the BUILTIN's name, not a dynamically linked binary
+const TRUE_BIN = ['/usr/bin/true', '/bin/true'].find((p) => fs.existsSync(p)) || '';
+const LD_DEBUG_UNAVAILABLE = (() => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-ld-probe-'));
+  try {
+    spawnSync(TRUE_BIN || '/bin/true', [], { env: { ...process.env, LD_DEBUG: 'files', LD_DEBUG_OUTPUT: path.join(d, 'ld') } });
+    return ldPrograms(d).length ? '' : 'glibc LD_DEBUG=files output not produced here (not glibc?)';
+  } catch (e) { return String(e); } finally { fs.rmSync(d, { recursive: true, force: true }); }
+})();
+
+test('⛔ `--pass-env LD_*` never reaches a privileged half (unshare, pid 1 bash, the inner node, mount, setpriv) — the COMMAND gets it', needsIsolation, async (t) => {
+  if (LD_DEBUG_UNAVAILABLE || !path.isAbsolute(TRUE_BIN)) { t.skip(`SKIP (host): ${LD_DEBUG_UNAVAILABLE || 'no absolute `true`'}`); return; }
+  const dir = tmpdir();
+  try {
+    const r = await run(['isolated', '--keep', dir, '--pass-env', 'LD_*', '--', TRUE_BIN],
+      { LD_DEBUG: 'files', LD_DEBUG_OUTPUT: path.join(dir, 'ld') });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const progs = ldPrograms(dir);
+    for (const p of ['unshare', 'bash', 'setpriv', 'mount', 'ip', 'ifconfig']) {
+      assert.ok(!progs.includes(p), `LD_* reached ${p} (a privileged half): ${[...new Set(progs)].join(' ')}`);
+    }
+    // the harness itself (the caller's own process) loads it; no OTHER node does
+    assert.equal(progs.filter((p) => p === 'node' || p === path.basename(process.execPath)).length, 1, `LD_* reached a node half: ${[...new Set(progs)].join(' ')}`);
+    // CONTROL: the command DOES get the passed LD_* (so the arm can fail)
+    assert.ok(progs.includes(path.basename(TRUE_BIN)), `the command did not get LD_*: ${[...new Set(progs)].join(' ')}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('⛔ a planted XDG_CACHE_HOME cannot redirect base\'s storage paths out of a temp HOME under `isolated`', needsIsolation, async () => {
   // base's storage paths PREFER XDG_*_HOME over $HOME: a test that set a temp HOME but
   // inherited an exported XDG_CACHE_HOME resolved to the REAL dirs (`perplexity`).
@@ -2311,8 +2381,9 @@ test('⭐ ARM: … and by the NESTED call\'s pid 1', needsIsolation, async () =>
 });
 
 test('⭐ CONTROL: under a raw `unshare -rf --pid --mount-proc` with NODE as pid 1 the same orphan stays a ZOMBIE', needsIsolation, async () => {
-  // node as pid 1 running the command exactly as the previous nested path did (__isolated-pid1)
-  const r = await runRaw(['unshare', '-rf', '--pid', '--mount-proc', process.execPath, TOOL, '__isolated-pid1', '--',
+  // node as pid 1 spawning the command as the previous nested path did (a spawn + wait for IT only)
+  const r = await runRaw(['unshare', '-rf', '--pid', '--mount-proc', process.execPath, '-e',
+    'require("child_process").spawn(process.argv[1], process.argv.slice(2), { stdio: "inherit" }).on("close", (c) => process.exit(c ?? 1))',
     'sh', '-c', ORPHAN_PROBE, 'probe', 'control']);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const o = orphanOf(r.stdout);

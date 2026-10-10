@@ -846,14 +846,46 @@ command), a signal SIGKILLs unshare (`--kill-child`) and the harness dies by it 
 37 vars matching `*_API_KEY`/`*_TOKEN`/`*SECRET` reached the arm; `SESSION_MANAGER` carries the
 hostname; `CLIAI_<TOOL>_BROWSER_{SSH_,}TARGET` name remote targets. ⇒ `DEFAULT_PASS_ENV` +
 `--pass-env NAME|PREFIX_*` (`PASS_ENV_RE`; a bare `*` refused; a SCRUBBED name refused), then
-SCRUBBED_ENV removed again. Applied at the unshare spawn too (pid 1 and the inner half never
-see more than the command), and in runCommand (nested: its own `--pass-env`). The plan carries
-`pass` to the inner half, validated again there.
+SCRUBBED_ENV removed again. The command gets it from the `__isolated-pid1` helper; every half
+before that gets LESS (`PRIVILEGED_PASS_ENV`, next section). Nested: its own `--pass-env`.
 * **The gate's tests** read `WEBCTL_TEST_FAKE_*` (world().env() renames `FAKE_*`): the gate's
   production call passes no `--pass-env`. Without the rename: 7 gate tests red.
 * **Sabotage:** the command env back to the full env → the nested arm red (the fresh path is
   still filtered at the spawn — two layers, by design); `--pass-env` ignored → 2 arms; scrub
   only before → the `XDG_*` prefix assertion; validation off → the validation arm (×2).
+
+### ⛔ Loader vars reached the PRIVILEGED halves (review of 5773fb8, v0.33.0)
+
+The allowlist was applied to the WHOLE chain, so the chain got exactly what the command got —
+including `NODE_OPTIONS` (default-passed) and anything `--pass-env`'d. **Measured by the
+review:** `NODE_OPTIONS=--require preload.cjs` ran in pid 2 (`__isolated-inner`) as namespace
+root, CapEff full, the real home readable, `/tmp/.X11-unix` reachable — before any mask. Here,
+before the fix: the preload ran in the inner node and the nested pid-1 helper; `--pass-env
+'LD_*'` with `LD_DEBUG=files` showed glibc loading the caller's LD_* into unshare, bash, ip,
+every mount, setpriv, unshare -U and the inner node (LD_PRELOAD into setpriv would run with
+the capabilities it is about to drop).
+* ⇒ **Deny by default for the privileged halves:** `PRIVILEGED_PASS_ENV` = PATH, HOME, USER,
+  LOGNAME, LANG, LC_*, TERM, TZ, TMPDIR, WEBCTL_*. A loader denylist (NODE_OPTIONS, NODE_PATH,
+  LD_*, GCONV_PATH, LOCPATH, BASH_ENV, ENV, PERL5OPT, PYTHONSTARTUP, …) cannot be complete.
+* The command's env (`isolatedEnv`, markers included) is computed ONCE on the host and travels
+  in the fd-4 plan (`env`, validated by `isEnvObject`); the nested path computes it from its own
+  `--pass-env`. **Only the `__isolated-pid1` helper applies it** (`--env <fd>`, a pipe from
+  runCommand), after setpriv/unshare -U. ⚠ So the FRESH path now has that helper too:
+  `setpriv … unshare -U … -- node SELF __isolated-pid1 --env 3 -- <cmd>` (it was `-- <cmd>`).
+  One more node start per call; exit codes and signals behave as on the nested path (the
+  helper returns 128+n; the inner half re-raises). The helper refuses — never runs the command
+  with the privileged env — when the env does not arrive.
+* **Arms:** a NODE_OPTIONS preload appends `{argv, CapEff}` per node: none may name
+  `__isolated-*` or hold a capability; CONTROL in the same run: the fresh AND nested commands
+  print SEES-NODE-OPTIONS and their preload ran. `--pass-env 'LD_*'` + `LD_DEBUG=files`
+  (`transferring control:` per process): none of unshare/bash/setpriv/mount/ip, one node (the
+  harness itself, the caller's own process); CONTROL: the command `true` got it. Skipped by
+  name where glibc's LD_DEBUG output is not produced.
+* The orphan CONTROL ("node as pid 1 leaves a zombie") ran `__isolated-pid1` directly; it now
+  needs `--env`, so the control is an inline `node -e` spawn-and-wait — the same shape.
+* **Sabotage (all caught, both arms each):** the unshare spawn given `cmdEnv`; runCommand's
+  chain given `env`; NODE_OPTIONS + LD_* added to PRIVILEGED_PASS_ENV; the helper spawning
+  without `env` (the CONTROL half: the command no longer sees NODE_OPTIONS).
 
 ### Host policy: AppArmor, and `WEBCTL_UNSHARE_BIN` (v0.33.0)
 
@@ -902,8 +934,8 @@ deliberately not re-indented, to keep the guard a two-line diff against concurre
   exposed. A secret OUTSIDE the home (and not via a symlinked dot-dir) is not covered at all.
 * **`/var/tmp` and `/dev/shm`** are writable and shared with the host, and `/sys/class/net`
   lists the host's interface names (review, minor 9 — not addressed).
-* **The env allowlist trusts `NODE_OPTIONS`** (default-passed): a caller's `--require` runs in
-  the inner half too, before masking, as v0.32 did. The caller is trusted; the command is not.
+* **`NODE_OPTIONS` is default-passed to the COMMAND** (and its `--require` runs there, capless,
+  after every mask). It no longer reaches any half that runs before the drop (above).
 * **`bash` is required** (pid 1, the reaper). Absent → FAIL.
 
 * **The real uid, no capabilities.** The command runs as the caller's own uid/gid in a

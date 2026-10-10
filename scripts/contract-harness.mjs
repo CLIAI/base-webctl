@@ -1215,6 +1215,37 @@ const DEFAULT_PASS_ENV = Object.freeze(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHEL
 /** A `--pass-env` value: an env NAME, or `<PREFIX>_*` (the prefix ends in `_`; `*` alone is refused). */
 const PASS_ENV_RE = /^(?:[A-Za-z_][A-Za-z0-9_]*|[A-Za-z][A-Za-z0-9_]*_\*)$/;
 
+/**
+ * The ONLY env names the PRIVILEGED halves get — deny by default (v0.33.0, review of 5773fb8).
+ * Privileged: everything `isolated` runs BEFORE the command's capability drop is complete —
+ * `unshare -rnm`, pid 1's bash, the `__isolated-inner` node (namespace root, FULL caps, before
+ * any mask), the mount/ip it runs, `setpriv`/`unshare -U` of the drop — and, for uniformity,
+ * the `__isolated-pid1` helper that finally spawns the command.
+ *
+ * ⛔ Measured by the review: NODE_OPTIONS=--require <preload> (default-passed to the COMMAND)
+ * ran the preload in the inner node as namespace root, CapEff full, the real home readable and
+ * the host's X11 socket dir reachable. `--pass-env 'LD_*'` did the same for every C binary of
+ * the chain (LD_PRELOAD into setpriv runs with the caps it is about to drop). A denylist of
+ * loader vars cannot be complete (NODE_OPTIONS, NODE_PATH, LD_*, GCONV_PATH, LOCPATH, BASH_ENV,
+ * ENV, PERL5OPT, PYTHONSTARTUP, …) — so the privileged env is this short allowlist instead, and
+ * the COMMAND's full env (isolatedEnv) travels in a pipe and is applied only by the helper that
+ * spawns it (runPid1 `--env <fd>`), after the drop.
+ * PATH stays: the halves find bash, mount, ip, setpriv by it (the caller's PATH is trusted the
+ * same way on the host). WEBCTL_* carries the markers and WEBCTL_UNSHARE_BIN.
+ */
+const PRIVILEGED_PASS_ENV = Object.freeze(['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_*', 'TERM', 'TZ', 'TMPDIR', 'WEBCTL_*']);
+
+/**
+ * The privileged halves' env: `env` (already the command's allowlisted env) cut to PRIVILEGED_PASS_ENV.
+ * @param {NodeJS.ProcessEnv} env @returns {NodeJS.ProcessEnv}
+ */
+function privilegedEnv(env) {
+  /** @type {NodeJS.ProcessEnv} */
+  const out = {};
+  for (const [k, v] of Object.entries(env)) if (v !== undefined && passEnvMatches(k, PRIVILEGED_PASS_ENV)) out[k] = v;
+  return out;
+}
+
 /** @param {string} name @param {readonly string[]} patterns */
 function passEnvMatches(name, patterns) {
   return patterns.some((p) => (p.endsWith('*') ? name.startsWith(p.slice(0, -1)) : name === p));
@@ -1533,9 +1564,17 @@ function statusChannel(child) {
 function runPid1(a) {
   // `--status`: fd 3 is the nested path's status pipe — write `started` on it, then close it
   const status = a[0] === '--status';
-  const rest = status ? a.slice(1) : a;
+  let rest = status ? a.slice(1) : a;
+  // `--env <fd>`: the COMMAND's env, JSON on that pipe (we run with the privileged env only)
+  const envFd = rest[0] === '--env' && /^[3-9]$/.test(rest[1] || '') ? Number(rest[1]) : -1;
+  if (envFd >= 0) rest = rest.slice(2);
   const command = rest[0] === '--' ? rest.slice(1) : [];
-  if (command.length === 0) return Promise.resolve(report('isolated', EXIT.fail, 'internal: malformed pid-1 invocation'));
+  if (command.length === 0 || envFd < 0) return Promise.resolve(report('isolated', EXIT.fail, 'internal: malformed pid-1 invocation'));
+  const env = commandEnvFrom(envFd);
+  if (!env) {
+    return Promise.resolve(report('isolated', EXIT.fail, 'NOT RUN: internal: the command\'s env did not arrive on its pipe — '
+      + 'it is never run with the privileged env instead. The command was NOT started.'));
+  }
   if (status) {
     // ⚠ only a pipe/socket is ours: an fd 3 node opened for itself must never be written to
     let ours = false;
@@ -1549,11 +1588,40 @@ function runPid1(a) {
     }
   }
   return new Promise((resolve) => {
-    const child = spawn(command[0], command.slice(1), { stdio: 'inherit' });
+    const child = spawn(command[0], command.slice(1), { stdio: 'inherit', env });
     const fwd = forwardSignals(child);
     child.on('error', (e) => { fwd.remove(); resolve(report('isolated', 127, `NOT RUN: cannot start '${command[0]}': ${errMsg(e)}`)); });
     child.on('close', (code, signal) => { fwd.remove(); resolve(exitCodeOf(code, signal)); });
   });
+}
+
+/**
+ * Read the command's env (JSON object of strings) from pipe `fd`, then close it so the command
+ * never inherits it. null when fd is not a pipe/socket or the JSON is not such an object.
+ * @param {number} fd @returns {NodeJS.ProcessEnv | null}
+ */
+function commandEnvFrom(fd) {
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isSocket() && !st.isFIFO()) return null;
+    const env = JSON.parse(fs.readFileSync(fd, 'utf8'));
+    try { fs.closeSync(fd); } catch { /* already gone */ }
+    return isEnvObject(env) ? env : null;
+  } catch { return null; }
+}
+
+/** @param {unknown} x @returns {x is Record<string, string>} */
+function isEnvObject(x) {
+  return !!x && typeof x === 'object' && !Array.isArray(x)
+    && Object.entries(x).every(([k, v]) => /^[^=\0]+$/.test(k) && typeof v === 'string' && !v.includes('\0'));
+}
+
+/**
+ * The argv of the `__isolated-pid1` helper that spawns `command` with the env on pipe `envFd`.
+ * @param {string[]} command @param {number} envFd @param {boolean} status @returns {string[]}
+ */
+function pid1HelperArgv(command, envFd, status) {
+  return [process.execPath, SELF, PID1_INNER, ...(status ? ['--status'] : []), '--env', String(envFd), '--', ...command];
 }
 
 /** @param {number|null} code @param {NodeJS.Signals|null} signal */
@@ -1707,8 +1775,9 @@ function runIsolated(a) {
     // signal dispositions (a bash background job would IGNORE SIGINT)
     const bash = bashOnPath();
     if (!bash) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${NO_BASH}. The command was NOT started.`, { command }));
-    return runCommand([bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', process.execPath, SELF, PID1_INNER, '--status', '--', ...command],
-      priv.prefix, { pastUnshare: true, pass });
+    // fd 3: the helper's `started`; fd 4: the command's env (the chain itself gets privilegedEnv)
+    return runCommand([bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', ...pid1HelperArgv(command, 4, true)],
+      priv.prefix, { pastUnshare: true, env: isolatedEnv(process.env, pass) });
   }
   let hostNs = '';
   let hostMnt = '';
@@ -1772,8 +1841,15 @@ function runIsolated(a) {
   process.stderr.write(`isolated: home HIDDEN; re-bound read-only: ${rebound(false)}; writable: ${rebound(true)}${inside}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
+  // the COMMAND's env: the allowlist + our markers. It travels in the plan (fd 4) and is applied
+  // only when the command is spawned; every half before that gets privilegedEnv() of it.
+  const cmdEnv = isolatedEnv(process.env, pass, { [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt, [HOST_PIDNS_ENV]: hostPid,
+    // the home is recorded as HIDDEN (fact 8: its read-only mask), not as a ro root — under its
+    // 0555 tmpfs access(W_OK) answers EACCES before EROFS (mode bits are checked first)
+    [RO_ROOTS_ENV]: JSON.stringify(prot.roots), [HIDDEN_ENV]: JSON.stringify([prot.home, ...prot.hidden]),
+    [HOST_IDS_ENV]: JSON.stringify(ids) });
   const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
-    home: prot.home, exempt: plan.exempt, sockets, ids, pass });
+    home: prot.home, exempt: plan.exempt, sockets, ids, env: cmdEnv });
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
     let child;
@@ -1785,13 +1861,9 @@ function runIsolated(a) {
         ['-rnm', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
           bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1',
           process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
-        // ⛔ the ALLOWLIST already here: pid 1 and the inner half never see what the command may not
-        { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'],
-          env: isolatedEnv(process.env, pass, { [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt, [HOST_PIDNS_ENV]: hostPid,
-            // the home is recorded as HIDDEN (fact 8: its read-only mask), not as a ro root — under its
-            // 0555 tmpfs access(W_OK) answers EACCES before EROFS (mode bits are checked first)
-            [RO_ROOTS_ENV]: JSON.stringify(prot.roots), [HIDDEN_ENV]: JSON.stringify([prot.home, ...prot.hidden]),
-            [HOST_IDS_ENV]: JSON.stringify(ids) }) });
+        // ⛔ the PRIVILEGED env: unshare, pid 1 and the inner half (namespace root, full caps, before
+        // any mask) never see NODE_OPTIONS, LD_*, or any --pass-env (PRIVILEGED_PASS_ENV)
+        { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'], env: privilegedEnv(cmdEnv) });
     } catch (e) {
       resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
       return;
@@ -1896,7 +1968,7 @@ async function runIsolatedInner(a) {
 
   // ⇩ only now, provably off the host network, read the plan. (On the host the
   // proofs above refuse first, so an unrelated fd 4 is never read.)
-  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, pass: string[]}} */
+  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, env: Record<string, string>}} */
   let plan;
   try {
     // node's stdio 'pipe' is a socketpair, not a FIFO; anything else is not ours
@@ -1910,7 +1982,7 @@ async function runIsolatedInner(a) {
     if (typeof plan.hostMnt !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
       || typeof plan.home !== 'string' || !path.isAbsolute(plan.home)
       || !strs(plan.roots) || !strs(plan.hidden) || !strs(plan.exempt) || !strs(plan.sockets) || !hostIdsOf(plan.ids)
-      || !strs(plan.pass) || !plan.pass.every((p) => PASS_ENV_RE.test(p))) throw new Error('malformed');
+      || !isEnvObject(plan.env)) throw new Error('malformed');
   } catch (e) {
     return refuse(`internal: no masking plan on fd 4 (${errMsg(e)}) — run via \`isolated\``);
   }
@@ -1974,7 +2046,9 @@ async function runIsolatedInner(a) {
   try { fs.closeSync(3); } catch { /* the command must not inherit it */ }
 
   for (const s of SIGS) process.off(s, early);
-  return runCommand(command, priv.prefix, { pass: plan.pass });
+  // the command's env (plan.env) goes to the helper on ITS fd 3 — setpriv/unshare of the drop run
+  // with OUR (privileged) env, so an LD_* the caller passed never runs with our capabilities
+  return runCommand(pid1HelperArgv(command, 3, false), priv.prefix, { env: plan.env });
 }
 
 /**
@@ -2836,21 +2910,27 @@ function privilegeDrop(ids, { pidns = false } = {}) {
 }
 
 /**
- * Run the user command with the caller's cwd/stdio and an ALLOWLISTED env (isolatedEnv);
- * resolve with its exit code (128+signal when killed, 127 when it cannot be started).
- * `prefix` is the privilege drop (privilegeDrop); `pass` the caller's `--pass-env` list.
+ * Run `prefix` + `command` (a chain ending in the `__isolated-pid1` helper, pid1HelperArgv) with
+ * the caller's cwd/stdio; resolve with its exit code (128+signal when killed, 127 when it cannot
+ * be started). `prefix` is the privilege drop (privilegeDrop); `env` the COMMAND's env — the
+ * ALLOWLIST (isolatedEnv: the fresh path's plan.env, or the nested call's own `--pass-env`).
  *
- * ⛔ The allowlist applies on BOTH paths (fresh and nested) — a nested call honours only its
- * OWN `--pass-env` — and SCRUBBED_ENV is removed even when a prefix would pass it.
+ * ⛔ `env` is NOT the chain's env: setpriv, unshare -U, pid 1's bash and the helper get
+ * privilegedEnv(env); `env` itself goes down a pipe and only the helper applies it, to the
+ * command. So an LD_* or NODE_OPTIONS reaches the command and nothing that runs before it.
  * @param {string[]} command @param {string[]} [prefix]
- * @param {{pastUnshare?: boolean, pass?: string[]}} [o] @returns {Promise<number>}
+ * @param {{pastUnshare?: boolean, env?: NodeJS.ProcessEnv}} [o] @returns {Promise<number>}
  */
-function runCommand(command, prefix = [], { pastUnshare = false, pass = /** @type {string[]} */ ([]) } = {}) {
-  const env = isolatedEnv(process.env, pass);
+function runCommand(command, prefix = [], { pastUnshare = false, env = /** @type {NodeJS.ProcessEnv} */ ({}) } = {}) {
   const argv = [...prefix, ...command];
   return new Promise((resolve) => {
-    // pastUnshare (the nested path): fd 3 is the pid-1 helper's status pipe (`started`)
-    const child = spawn(argv[0], argv.slice(1), { stdio: pastUnshare ? ['inherit', 'inherit', 'inherit', 'pipe'] : 'inherit', env });
+    // pastUnshare (the nested path): fd 3 is the pid-1 helper's status pipe (`started`), fd 4 the
+    // command's env; else fd 3 is the env. ⛔ The chain itself runs with privilegedEnv(env) only.
+    const child = spawn(argv[0], argv.slice(1), {
+      stdio: ['inherit', 'inherit', 'inherit', 'pipe', ...(pastUnshare ? /** @type {const} */ (['pipe']) : [])], env: privilegedEnv(env) });
+    const envPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[pastUnshare ? 4 : 3]);
+    envPipe?.on('error', () => { /* the helper refused or never started; it reports */ });
+    envPipe?.end(JSON.stringify(env));
     // through `unshare --fork` a signal must go to unshare's CHILD (see forwardSignalsPastUnshare)
     const fwd = pastUnshare ? forwardSignalsPastUnshare(child, statusChannel(child).started) : forwardSignals(child);
     child.on('error', (e) => {
