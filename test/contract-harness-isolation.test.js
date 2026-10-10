@@ -3030,6 +3030,30 @@ test('CONTROL: the gate\'s grep DOES miss the old untagged shape (so the arm abo
 
 // ── import guard ─────────────────────────────────────────────────────────────
 
+// ── runCommand: a SYNCHRONOUS spawn throw fails cleanly (re-review, LOW) ─────
+//
+// spawn() THROWS (rather than emitting 'error') for an argv node refuses (a NUL byte) and for exec
+// failures outside its "run-time" list (E2BIG: an argv over the kernel's limit — the chain adds
+// pid 1's reaper and the helper's argv to the command's). runCommand had installed its signal
+// forwarder first, so the throw rejected its Promise — a crash with a stack, not a FAIL line — and
+// left the forwarder's listeners on the process. Run in a child: report() writes to stdout/stderr.
+test('⛔ runCommand: a SYNCHRONOUS spawn throw → FAIL 127 "NOT RUN: cannot start", no rejection, and no signal forwarder left installed', async () => {
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', `
+const m = await import(process.env.HARNESS_URL);
+const count = () => ['SIGINT', 'SIGTERM', 'SIGHUP'].map((s) => process.listenerCount(s));
+const before = count();
+let code = null; let threw = '';
+try { code = await m.runCommand(['/bin/true', 'nul\\u0000inside']); } catch (e) { threw = String((e && e.code) || e); }
+console.log('RESULT ' + JSON.stringify({ code, threw, before, after: count() }));`], { encoding: 'utf8', env: cleanEnv({ HARNESS_URL: pathToFileURL(TOOL).href }) });
+  const line = (r.stdout.match(/^RESULT (.*)$/m) || [])[1];
+  assert.ok(line, `no result:\n${r.stdout}${r.stderr}`);
+  const res = JSON.parse(line);
+  assert.equal(res.threw, '', `runCommand REJECTED instead of failing cleanly:\n${r.stderr}`);
+  assert.equal(res.code, 127, r.stdout + r.stderr);
+  assert.deepEqual(res.after, res.before, 'the signal forwarder was left installed');
+  assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: cannot start '\/bin\/true': /m, r.stderr);
+});
+
 test('⛔ importing the harness runs NO verb, even when the importer\'s argv names one', async () => {
   const url = pathToFileURL(TOOL).href;
   const r = await new Promise((resolve) => {

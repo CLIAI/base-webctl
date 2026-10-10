@@ -3181,7 +3181,7 @@ function privilegeDrop(ids, tools, { pidns = false } = {}) {
  * @param {string[]} command @param {string[]} [prefix]
  * @param {{pastUnshare?: boolean, env?: NodeJS.ProcessEnv}} [o] @returns {Promise<number>}
  */
-function runCommand(command, prefix = [], { pastUnshare = false, env = /** @type {NodeJS.ProcessEnv} */ ({}) } = {}) {
+export function runCommand(command, prefix = [], { pastUnshare = false, env = /** @type {NodeJS.ProcessEnv} */ ({}) } = {}) {
   const argv = [...prefix, ...command];
   return new Promise((resolve) => {
     // ⛔ the forwarder BEFORE the spawn (review finding 5); through `unshare --fork` a signal must
@@ -3191,8 +3191,18 @@ function runCommand(command, prefix = [], { pastUnshare = false, env = /** @type
     const fwd = pastUnshare ? forwardSignalsPastUnshare(() => !!st && st.started()) : forwardSignals();
     // pastUnshare (the nested path): fd 3 is the pid-1 helper's status pipe (`started`), fd 4 the
     // command's env; else fd 3 is the env. ⛔ The chain itself runs with privilegedEnv(env) only.
-    const child = spawn(argv[0], argv.slice(1), {
-      stdio: ['inherit', 'inherit', 'inherit', 'pipe', ...(pastUnshare ? /** @type {const} */ (['pipe']) : [])], env: privilegedEnv(env) });
+    /** @type {import('node:child_process').ChildProcess} */
+    let child;
+    try {
+      child = spawn(argv[0], argv.slice(1), {
+        stdio: ['inherit', 'inherit', 'inherit', 'pipe', ...(pastUnshare ? /** @type {const} */ (['pipe']) : [])], env: privilegedEnv(env) });
+    } catch (e) {
+      // ⛔ spawn THROWS for an argv node refuses (a NUL) or an exec error outside its "run-time" list
+      // (E2BIG): without this the Promise rejected (a stack, no FAIL line) with our forwarder left on
+      fwd.remove();
+      resolve(report('isolated', 127, `NOT RUN: cannot start '${argv[0]}': ${errMsg(e)}. The command was NOT started.`));
+      return;
+    }
     const envPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[pastUnshare ? 4 : 3]);
     envPipe?.on('error', () => { /* the helper refused or never started; it reports */ });
     envPipe?.end(JSON.stringify(env));

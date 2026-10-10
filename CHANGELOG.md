@@ -440,6 +440,8 @@ per path with pid 1 held trapless for 300 ms; 0 lost.
   nothing runs, but one that already started runs unsupervised.
 * The signal-forwarder ORDERING (finding 5 above) is reasoned and logic-tested, not hit end to
   end.
+* `runCommand` fails cleanly (FAIL, 127) when spawn throws synchronously (an argv node refuses,
+  E2BIG): it rejected with a stack trace and left its signal forwarder installed.
 * `WEBCTL_RO_ROOTS` and `WEBCTL_HIDDEN_DIRS` are recorded input; the other nesting facts still
   require a real masked namespace.
 * The AppArmor message is tested by its logic (the sysctl path is a parameter), not end to end.

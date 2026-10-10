@@ -1111,6 +1111,22 @@ bash and node snippets). The test that pinned "stays at 5" now pins 6 and the sn
   runs `isolated -- true` → 0. On this branch it passes `--pass-env 'CGWC_*'` and the command sees
   `CGWC_X=1`. **Sabotage:** the constant back to 5 → the generation arm red.
 
+### runCommand: a synchronous spawn throw (re-review, LOW)
+
+`spawn()` THROWS — rather than emitting `'error'` — for an argv node refuses (a NUL byte) and for
+an exec failure outside node's "run-time" list (E2BIG: the chain adds pid 1's reaper and the
+helper's argv to the command's, so a command just under the limit can tip over it here). The
+forwarder is installed first (finding 5), so the throw rejected runCommand's Promise — a stack
+trace, no `FAIL  isolated:` line — and left the forwarder's three listeners on the process.
+⇒ try/catch around the spawn: `fwd.remove()`, then `NOT RUN: cannot start '<argv[0]>': …`, 127
+(the code the async `'error'` path already used). The fresh path's own unshare spawn already
+had this.
+* **Arm:** `runCommand(['/bin/true', 'nul\0inside'])` in a child process (report() writes to
+  stdout/stderr), exported for it: resolves 127, does not reject, listener counts unchanged,
+  the FAIL line printed. Red before (`REJECTED`). E2BIG is not driven end to end: sizing an argv
+  that fits node's exec but not the chain's is host-dependent.
+* **Sabotage:** `fwd.remove()` dropped from the catch → the arm red (forwarder left installed).
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
