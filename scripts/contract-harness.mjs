@@ -1758,6 +1758,14 @@ function runIsolated(a) {
           + `namespace, but the kernel says otherwise — ${proof.why}. Unset it on the host; only `
           + '`isolated` sets it.', { command, namespace: proof.facts }));
     }
+    // ⛔ A keep under the OUTER call's hidden home (or a hidden dir) is ENOENT here — "does not
+    // exist" sent people hunting a typo (review of 5773fb8, 8a). Only the OUTER call can re-bind it.
+    const outerHidden = recordedPaths(HIDDEN_ENV) || [];
+    for (const [label, p] of [...keeps.map((p, i) => [`--keep #${i + 1}`, p]), ...keepsRo.map((p, i) => [`--keep-ro #${i + 1}`, p])]) {
+      if (fs.existsSync(p) || !outerHidden.some((h) => isWithin(path.resolve(p), h))) continue;
+      return Promise.resolve(usageRefusal(`${label} lies under a dir the OUTER \`isolated\` call HIDES (its home, ~/.ssh, `
+        + 'a state root) — it is not visible here; keep it in the OUTER call instead (--keep / --keep-ro there)', command));
+    }
     const nestedPlan = planKeeps(keeps, [], { home: '', roots: recordedRoRoots() || [], sensitive: [], hidden: [], hideRule: [] }, keepsRo);
     if (nestedPlan.usage) return Promise.resolve(usageRefusal(nestedPlan.usage, command));
     // ⛔ and still capless: a nested call must not be the way back to capabilities — its

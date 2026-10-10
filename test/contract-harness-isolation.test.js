@@ -1442,6 +1442,31 @@ test('⛔ the verdict COUNTS implicit PATH re-binds — a distinctive PATH dir n
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
+// A NESTED `--keep <path under the outer's hidden home>` used to fail "--keep #1 does not exist"
+// (exit 3) — true, but it sent people looking for a typo. The path is HIDDEN by the outer call,
+// and only the outer call can re-bind it (review of 5773fb8, finding 8a).
+test('⛔ a NESTED --keep / --keep-ro under the OUTER call\'s hidden home → usage 3 saying the OUTER call hides it (no path) — CONTROL: kept by the outer, it works', needsIsolation, async (t) => {
+  const home = fakeWholeHome();
+  const work = path.join(home, 'work');
+  const nested = (/** @type {string} */ opt) => ['"$0" "$1" isolated', opt, '"$2" -- "$0" -e "console.log(\'NESTED-RAN\')"'].join(' ');
+  try {
+    for (const opt of ['--keep', '--keep-ro']) {
+      const r = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--', 'sh', '-c', nested(opt), process.execPath, TOOL, work]);
+      if (!r) { t.skip(NO_FAKE_HOME); return; }
+      assert.equal(r.status, 3, `${opt}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`^FAIL {2}isolated: NOT RUN \\(usage\\): ${opt} #1 lies under a dir the OUTER \`isolated\` call HIDES`, 'm'), `${opt}: ${r.stderr}`);
+      assert.doesNotMatch(r.stderr, /does not exist/, `${opt}: still the misleading reason`);
+      assert.ok(!r.stderr.includes(home), `${opt}: the refusal printed a path`);
+      assert.doesNotMatch(r.stdout, /^NESTED-RAN$/m);
+      // CONTROL: the same nested keep, with the OUTER call keeping it → runs
+      const c = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--keep', work, '--', 'sh', '-c', nested(opt), process.execPath, TOOL, work]);
+      assert.ok(c);
+      assert.equal(c.status, 0, `${opt} CONTROL: ${c.stdout}${c.stderr}`);
+      assert.match(c.stdout, /^NESTED-RAN$/m);
+    }
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
 test('⛔ base\'s root UNDER the hidden home is re-bound READ-ONLY (the harness runs from it; a write is EROFS)', needsIsolation, async (t) => {
   const home = fakeWholeHome();
   const base = path.join(home, 'base-copy');

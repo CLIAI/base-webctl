@@ -923,6 +923,17 @@ re-bind (base's root, a future one) can sit on a hide unnoticed.
   every bind again → the base-root arm. (⚠ The post-check narrowing was written before its arm;
   the arm was then confirmed red against the old exemption by that sabotage.)
 
+### A nested keep under the outer's hidden home (review of 5773fb8, finding 8a)
+
+A nested `--keep <a path under the outer call's hidden home>` failed `--keep #1 does not
+exist` (exit 3) — true inside, and it sent people looking for a typo. ⇒ On the nested path, a
+`--keep`/`--keep-ro` that does not exist here AND lies under a recorded `WEBCTL_HIDDEN_DIRS`
+entry is a usage refusal saying the OUTER call hides it and to keep it there; no path printed.
+* **Arm:** both options, refused with that reason (and not "does not exist"); CONTROL: the outer
+  call keeps the dir → the same nested keep runs.
+* **Sabotage:** the check off → arm red; the existence test dropped (an outer-kept path refused
+  too) → arm red (its CONTROL half).
+
 ### Host policy: AppArmor, and `WEBCTL_UNSHARE_BIN` (v0.33.0)
 
 `kernel.apparmor_restrict_unprivileged_userns=1` (reported from an Ubuntu 24.04 host) makes
