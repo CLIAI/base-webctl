@@ -351,7 +351,9 @@ except a contract that matches the new verdict field or a refusal's tail.
   be made read-only, or one still writable outside the declared set after it (R1); a cwd containing
   a masked dir (R1); a fresh `/dev` that cannot be built, or anything beyond the minimal set in it
   after (row 12); a `--keep` / `--keep-ro` / cwd under `/dev` other than beneath `/dev/shm` (row 12);
-  a cgroup mount still writable, or the cgroup namespace still the caller's (row 3).
+  a cgroup mount still writable, or the cgroup namespace still the caller's (row 3); an interface
+  dir or identity file that cannot be READ (anything but ENOENT) in the identity read-back — it was
+  read as "nothing shown" (re-review item 5).
 
 ### Generation 7 (ruling R4)
 

@@ -3282,6 +3282,32 @@ test('⛔ VERSION SKEW (v0.34): every v0.33 fact satisfied but /var/tmp, /dev/sh
   assert.doesNotMatch(i.stderr, /older than v0\.34\.0: [^\n]*(\/var\/tmp|\/dev\/shm)/);
 });
 
+test('⛔ identity read-back: an interface dir or identity file UNREADABLE (not absent) → refused, never read as "nothing shown" — CONTROL: readable, it runs', needsIsolation, async () => {
+  // a v0.34 outer, then the nested call as the real uid WITHOUT capabilities (`unshare -U --map-user`),
+  // so a mode-000 mount it owns answers EACCES (re-review item 5: a silent `catch {}` read it as absent)
+  const stage = (/** @type {string} */ extra) => 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
+    + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
+    + ` && mount -t tmpfs webctl-isolated /tmp${V034_MASKS}${extra} && mkdir -p "$0" && mount --move /run/k "$0"`
+    + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift && exec "$@"';
+  const env = { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: '[]',
+    WEBCTL_HOST_IDS: JSON.stringify({ uid: process.getuid?.(), gid: process.getgid?.() }) };
+  const capless = ['unshare', '-U', '--map-user', String(process.getuid?.()), '--map-group', String(process.getgid?.())];
+  const attempt = (/** @type {string} */ extra) => nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--pid', '--fork', '--mount-proc',
+    '--propagation=private', 'sh', '-c', stage(extra), ROOT, PW_HOME, ...capless], 'mnt:[1]', env);
+  const c = await attempt('');
+  assert.equal(c.ran, true, `CONTROL: with everything readable the nested call should RUN:\n${c.stdout}${c.stderr}`);
+  const dir = await attempt(' && mount -t tmpfs -o mode=000 webctl-test-unreadable /sys/devices/virtual/net');
+  assert.equal(dir.status, 2, dir.stdout + dir.stderr);
+  assert.match(dir.stderr, /\/sys\/devices\/virtual\/net \(unreadable: EACCES\)/);
+  assert.equal(dir.ran, false, 'an UNREADABLE interface dir was read as "no host interface"');
+  const file = fs.existsSync('/etc/machine-id') ? '/etc/machine-id' : fs.existsSync('/etc/hostname') ? '/etc/hostname' : '';
+  if (!file) return;
+  const f = await attempt(` && : > /run/.unreadable && chmod 000 /run/.unreadable && mount --bind /run/.unreadable "$(realpath ${file})"`);
+  assert.equal(f.status, 2, f.stdout + f.stderr);
+  assert.match(f.stderr, new RegExp(`${file.replace(/\//g, '\\/')} \\(unreadable: EACCES\\)`));
+  assert.equal(f.ran, false, `an UNREADABLE ${file} was read as "absent"`);
+});
+
 test('⛔ nesting: every other fact satisfied (full mask, ro home, own PIDs) but a recorded hidden dir NOT masked → refused by the hidden fact alone — CONTROL: masked, that fact passes', needsIsolation, async () => {
   const dir = homeTmpdir(); // stands in for ~/.ssh: only its PATH is recorded and mounted on, in a throwaway mount ns
   const stage = (/** @type {boolean} */ hide) => 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'

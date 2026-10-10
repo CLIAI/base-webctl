@@ -2785,15 +2785,24 @@ function identityGaps() {
   if (os.hostname() !== NEUTRAL_HOSTNAME) gaps.push('the hostname');
   // ⛔ both dirs (review F3): the class dir links to the devices; a virtual interface is listed in
   // /sys/devices/virtual/net even where /sys/class/net was masked
+  // ⛔ ONLY ENOENT is "absent" (re-review item 5): a silent catch read an UNREADABLE dir or file — EACCES, a
+  // user FUSE mount, EIO — as "nothing shown", and the proof passed without having looked
+  /** @param {unknown} e */
+  const why = (e) => /** @type {NodeJS.ErrnoException} */ (e).code || errMsg(e);
   for (const d of ['/sys/class/net', '/sys/devices/virtual/net']) {
     /** @type {string[]} */ let names = [];
-    try { names = fs.readdirSync(d); } catch { /* absent: none listed */ }
+    try { names = fs.readdirSync(d); } catch (e) {
+      if (why(e) !== 'ENOENT') { gaps.push(`${d} (unreadable: ${why(e)})`); continue; }
+    }
     const extra = names.filter((n) => n !== 'lo').length;
     if (extra) gaps.push(`${extra} interface name(s) in ${d}`);
   }
   for (const [f, text] of IDENTITY_FILES) {
-    let got = null;
-    try { got = fs.readFileSync(f, 'utf8'); } catch { continue; } // absent (or unreadable): nothing shown
+    let got = '';
+    try { got = fs.readFileSync(f, 'utf8'); } catch (e) {
+      if (why(e) !== 'ENOENT') gaps.push(`${f} (unreadable: ${why(e)})`);
+      continue; // ENOENT: absent, nothing shown
+    }
     if (got.trim() !== text.trim()) gaps.push(f);
   }
   return gaps;
