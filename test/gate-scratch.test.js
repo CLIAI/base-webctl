@@ -216,21 +216,6 @@ const reported = (out, key) => (out.match(new RegExp(`^${key}=(.*)$`, 'm')) || [
 /** @param {string} stdout */
 const envelopes = (stdout) => stdout.split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
-/** A PATH holding every executable of the current PATH EXCEPT the named ones. @param {string} dir @param {string[]} drop */
-function pathWithout(dir, drop) {
-  const bin = path.join(dir, 'bin-without');
-  fs.mkdirSync(bin);
-  for (const d of (process.env.PATH || '').split(':')) {
-    let names = [];
-    try { names = fs.readdirSync(d); } catch { continue; }
-    for (const n of names) {
-      if (drop.includes(n) || fs.existsSync(path.join(bin, n))) continue;
-      try { fs.symlinkSync(path.join(d, n), path.join(bin, n)); } catch { /* dup */ }
-    }
-  }
-  return bin;
-}
-
 test('--scratch without --against-head is refused (exit 2), naming why', () => {
   const w = world();
   try {
@@ -374,24 +359,24 @@ test('⛔ scratch is NETWORK-ISOLATED: a fake HOST listener sees ZERO connection
 });
 
 test('⛔ isolation UNAVAILABLE → GATE-ENVIRONMENT fault, consumer NOT run, never a lane FAIL/SKIP, never the host network', () => {
+  // ⚠ v0.33.0: `isolated` takes unshare from the SYSTEM dirs or WEBCTL_UNSHARE_BIN — never PATH (a
+  // fake first on PATH is exactly what it must ignore) — so the variants name it through the override
   const variants = /** @type {[string, (w: ReturnType<typeof world>) => string][]} */ ([
     // unshare present but refused (userns disabled shape)
     ['unshare refuses', (w) => {
-      const fake = path.join(w.dir, 'fake-bin');
-      fs.mkdirSync(fake);
-      fs.writeFileSync(path.join(fake, 'unshare'),
-        '#!/bin/sh\necho "unshare: write failed /proc/self/uid_map: Operation not permitted" >&2\nexit 1\n', { mode: 0o755 });
-      return `${fake}:${process.env.PATH}`;
+      const fake = path.join(w.dir, 'fake-unshare');
+      fs.writeFileSync(fake, '#!/bin/sh\necho "unshare: write failed /proc/self/uid_map: Operation not permitted" >&2\nexit 1\n', { mode: 0o755 });
+      return fake;
     }],
-    // no unshare on PATH at all
-    ['no unshare on PATH', (w) => pathWithout(w.dir, ['unshare'])],
+    // no usable unshare at all
+    ['no unshare', (w) => path.join(w.dir, 'no-such-unshare')],
   ]);
-  for (const [label, mkPath] of variants) {
+  for (const [label, mkBin] of variants) {
     const w = world();
     try {
       const ran = path.join(w.dir, 'ran');
       const before = snapshot(w.repo);
-      const r = w.gate(['--against-head', '--scratch'], { PATH: mkPath(w), FAKE_RAN: ran });
+      const r = w.gate(['--against-head', '--scratch'], { WEBCTL_UNSHARE_BIN: mkBin(w), FAKE_RAN: ran });
       assert.equal(r.status, 1, `${label}: ${r.out}`);
       assert.ok(!fs.existsSync(ran), `${label}: the consumer RAN although isolation was unavailable`);
       assert.match(r.out, /GATE-ENVIRONMENT {2}fake-webctl — NOT RUN: network isolation is unavailable/, label);
