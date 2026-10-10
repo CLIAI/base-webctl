@@ -143,7 +143,8 @@ const ZERO = /^0+$/;
 /**
  * THE TABLE (ib4k §1). `arm(r, w)`: r = the reading on ONE inside path; `control(w)`: the
  * reading(s) that prove the arm can fail. `deeper`: where the unshare depth lives.
- * @type {{n: number, property: string, arm: (r: any, w: any, p: string) => void, control: ((w: any, t: any) => void) | null, deeper: string}[]}
+ * `untested`: the arm ADDS a named reason for each half this host cannot test (the ARM is then a SKIP).
+ * @type {{n: number, property: string, arm: (r: any, w: any, p: string, untested: Set<string>) => void, control: ((w: any, t: any) => void) | null, deeper: string}[]}
  */
 const ROWS = [
   { n: 1, property: 'no host network',
@@ -230,17 +231,20 @@ const ROWS = [
     },
     deeper: '"⭐ ARM: creating a new file directly under the passwd home → EROFS", "⛔ base\'s repo root is READ-ONLY …", the submount arms' },
   { n: 8, property: 'no host-shared scratch (/dev/shm, /var/tmp, SysV IPC, POSIX mqueues)',
-    arm: (r, w, p) => {
+    arm: (r, w, p, untested) => {
       assert.equal(r.shmPlanted, 'ENOENT', ctx(w, `${p}: a file planted in the host's /dev/shm is visible inside`));
       assert.equal(r.vartmpPlanted, 'ENOENT', ctx(w, `${p}: a file planted in the host's /var/tmp is visible inside`));
       assert.deepEqual(w.post.shmLeft, [], ctx(w, `${p}: a write to /dev/shm inside is visible outside`));
       assert.deepEqual(w.post.vartmpLeft, [], ctx(w, `${p}: a write to /var/tmp inside is visible outside`));
-      if (!w.cfg.ipcmk) return; // no ipcmk: the IPC half is UNTESTED here (the control says so)
+      // ⛔ a half this host cannot test is NAMED (untested → the ARM is reported SKIP, never a green pass)
+      if (!w.cfg.ipcmk) { untested.add('no ipcmk in the system dirs: the SysV IPC and POSIX mqueue halves are UNTESTED'); return; }
       assert.equal(r.shmListed, false, ctx(w, `${p}: the host's SysV shm segment is listed by \`ipcs -m\` inside`));
       if (w.cfg.python) assert.match(String(r.shmAttach), /^failed /, ctx(w, `${p}: shmat of the host's segment by id succeeded (${r.shmAttach})`));
+      else untested.add('no python3 in the system dirs: the shmat attach-and-write half is UNTESTED');
       if (w.post.shmNow !== undefined) assert.equal(w.post.shmNow, 'outside', ctx(w, `${p}: a write through shmat inside reached the host's segment`));
-      if (r.mqPlanted !== undefined) assert.equal(r.mqPlanted, 'ENOENT', ctx(w, `${p}: the host's POSIX mqueue is visible in /dev/mqueue`));
-      if (w.post.mqLeft) assert.deepEqual(w.post.mqLeft, [], ctx(w, `${p}: a POSIX mqueue made inside is in the host's /dev/mqueue`));
+      if (r.mqPlanted === undefined || !w.post.mqLeft) { untested.add('no /dev/mqueue planted: the POSIX mqueue half is UNTESTED'); return; }
+      assert.equal(r.mqPlanted, 'ENOENT', ctx(w, `${p}: the host's POSIX mqueue is visible in /dev/mqueue`));
+      assert.deepEqual(w.post.mqLeft, [], ctx(w, `${p}: a POSIX mqueue made inside is in the host's /dev/mqueue`));
     },
     control: (w, t) => {
       assert.equal(w.outside.outside.shmPlanted, 'ok', 'control: the planted /dev/shm file is not readable outside');
@@ -344,10 +348,13 @@ for (const backend of IMPLEMENTED) {
       assert.ok(!w.broken, w.broken);
       assert.equal(w.armStatus, 0, ctx(w, `the arm run exited ${w.armStatus}`));
       assert.match(w.armErr, new RegExp(`^isolated: home HIDDEN; .*backend: ${backend}`, 'm'), ctx(w, 'the verdict does not name the backend'));
+      /** @type {Set<string>} what this host could not test — named, and the ARM is then a SKIP, never a pass */
+      const untested = new Set();
       for (const p of PATHS) {
         assert.ok(w.arm[p], ctx(w, `no reading from the ${p} path`));
-        row.arm(w.arm[p], w, p);
+        row.arm(w.arm[p], w, p, untested);
       }
+      if (untested.size) t.skip(`SKIP (host): ${[...untested].join('; ')} — the rest of the ARM passed`);
     });
     test(`[${backend}] row ${row.n} — ${row.property}: CONTROL (the arm can fail)`, async (t) => {
       if (row.n === 9 && !KEYCTL) { t.skip(NO_KEYCTL); return; }
