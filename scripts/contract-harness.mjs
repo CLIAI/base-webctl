@@ -2434,7 +2434,6 @@ async function runIsolatedInner(a) {
   // /etc/machine-id and /etc/hostname — then READ BACK (identityGaps), not trusted
   const idr = maskIdentity(plan.tools);
   if (idr.why) return refuse(idr.why);
-  for (const n of idr.notes) process.stderr.write(`isolated: note: ${n}\n`);
   const idGaps = identityGaps(!!plan.tools.hostname);
   if (idGaps.length) return refuse(`after masking the host's identity, ${idGaps.join(', ')} still show(s) the HOST's`);
   const res = await closeResidualSockets(plan.sockets, plan.exempt);
@@ -2530,17 +2529,16 @@ const IDENTITY_FILES = Object.freeze([['/etc/machine-id', `${NEUTRAL_MACHINE_ID}
  *   2. /sys: a FRESH sysfs, mounted from inside our network namespace, lists only that namespace's
  *      interfaces — `lo` — in /sys/class/net (and /sys/devices/virtual/net). It covers every host
  *      submount of /sys, so the cgroup tree (node reads its memory limit there) is staged first and
- *      moved back on top. ⚠ If the kernel refuses the sysfs mount, /sys/class/net gets an empty
- *      read-only tmpfs instead — no interface at all, said in a note.
+ *      moved back on top. ⛔ If the kernel refuses the sysfs mount: REFUSED (review F3) — a mask over
+ *      /sys/class/net alone left /sys/devices/virtual/net naming the host's interfaces.
  *   3. /etc/machine-id, /var/lib/dbus/machine-id, /etc/hostname: a neutral copy (made in OUR /run)
  *      bound over each real file, read-only. A symlink to one already covered is covered by it.
- * @param {Tools} tools @returns {{why: string, notes: string[]}}
+ * @param {Tools} tools @returns {{why: string}}
  */
 function maskIdentity(tools) {
-  /** @type {string[]} */ const notes = [];
   if (tools.hostname) {
     const r = spawnSync(tools.hostname, [NEUTRAL_HOSTNAME], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
-    if (r.status !== 0) return { why: `cannot set the neutral hostname: \`hostname\` exited ${r.status ?? r.signal ?? r.error?.message}`, notes };
+    if (r.status !== 0) return { why: `cannot set the neutral hostname: \`hostname\` exited ${r.status ?? r.signal ?? r.error?.message}` };
   }
   const mounts = readMountinfo() || [];
   const cg = '/sys/fs/cgroup';
@@ -2550,21 +2548,20 @@ function maskIdentity(tools) {
     if (hasCg) {
       fs.mkdirSync(stage);
       const e = mountOrWhy(['--rbind', cg, stage], 'stage the cgroup tree before the fresh sysfs');
-      if (e) return { why: e, notes };
+      if (e) return { why: e };
     }
+    // ⛔ FAIL CLOSED when refused (review F3): the phase-1 fallback masked /sys/class/net alone and ran,
+    // but /sys/devices/virtual/net (and /sys/devices/…/net) still named the host's interfaces
     const sys = mountOrWhy(['-t', 'sysfs', '-o', 'nosuid,nodev,noexec', SYSFS_SOURCE, '/sys'], 'mount a fresh sysfs');
     if (sys) {
-      // fall back: no interface names at all (an empty read-only tmpfs over the class dir)
-      const t = mountOrWhy(['-t', 'tmpfs', '-o', 'ro,nosuid,nodev,noexec,size=4k,mode=0755', SYSFS_SOURCE, '/sys/class/net'],
-        'mask /sys/class/net (a fresh sysfs was refused)');
-      if (t) return { why: `${sys}; ${t}`, notes };
-      // ⚠ the staged cgroup copy stays at the stage dir (the original is still at /sys/fs/cgroup, untouched)
-      notes.push('/sys: a fresh sysfs was refused here — /sys/class/net is MASKED (empty) instead');
-    } else if (hasCg) {
-      const e = mountOrWhy(['--move', stage, cg], 'move the cgroup tree back onto the fresh sysfs');
-      if (e) return { why: e, notes };
+      return { why: `${sys} — the host's network interfaces would stay visible under /sys (a fresh sysfs is required; `
+        + 'it is never replaced by a partial mask)' };
     }
-    if (hasCg) { try { fs.rmdirSync(stage); } catch { /* still a mount (fallback) or gone: harmless */ } }
+    if (hasCg) {
+      const e = mountOrWhy(['--move', stage, cg], 'move the cgroup tree back onto the fresh sysfs');
+      if (e) return { why: e };
+    }
+    if (hasCg) { try { fs.rmdirSync(stage); } catch { /* gone: harmless */ } }
     const dir = '/run/.webctl-identity';
     fs.mkdirSync(dir, { mode: 0o755 });
     /** @type {string[]} */ const done = [];
@@ -2575,17 +2572,17 @@ function maskIdentity(tools) {
       const copy = path.join(dir, String(done.length));
       fs.writeFileSync(copy, text, { mode: 0o444 });
       const b = mountOrWhy(['--bind', copy, real], `bind a neutral ${path.basename(f)}`);
-      if (b) return { why: b, notes };
+      if (b) return { why: b };
       const ro = mountOrWhy(['-o', 'remount,bind,ro', real], `make the neutral ${path.basename(f)} read-only`);
-      if (ro) return { why: ro, notes };
+      if (ro) return { why: ro };
       done.push(real);
     }
   } catch (e) {
-    return { why: `masking the host's identity failed (${errMsg(e)})`, notes };
+    return { why: `masking the host's identity failed (${errMsg(e)})` };
   }
-  return { why: '', notes };
+  return { why: '' };
 }
-/** The source tag of the fresh sysfs (or its fallback mask). */
+/** The source tag of the fresh sysfs. */
 const SYSFS_SOURCE = 'webctl-isolated-sysfs';
 
 /**
@@ -2598,10 +2595,14 @@ const SYSFS_SOURCE = 'webctl-isolated-sysfs';
 function identityGaps(hostnameTool) {
   /** @type {string[]} */ const gaps = [];
   if (hostnameTool && os.hostname() !== NEUTRAL_HOSTNAME) gaps.push('the hostname');
-  /** @type {string[]} */ let names = [];
-  try { names = fs.readdirSync('/sys/class/net'); } catch { /* absent: none listed */ }
-  const extra = names.filter((n) => n !== 'lo').length;
-  if (extra) gaps.push(`${extra} interface name(s) in /sys/class/net`);
+  // ⛔ both dirs (review F3): the class dir links to the devices; a virtual interface is listed in
+  // /sys/devices/virtual/net even where /sys/class/net was masked
+  for (const d of ['/sys/class/net', '/sys/devices/virtual/net']) {
+    /** @type {string[]} */ let names = [];
+    try { names = fs.readdirSync(d); } catch { /* absent: none listed */ }
+    const extra = names.filter((n) => n !== 'lo').length;
+    if (extra) gaps.push(`${extra} interface name(s) in ${d}`);
+  }
   for (const [f, text] of IDENTITY_FILES) {
     let got = null;
     try { got = fs.readFileSync(f, 'utf8'); } catch { continue; } // absent (or unreadable): nothing shown

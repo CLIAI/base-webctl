@@ -268,6 +268,7 @@ const ROWS = [
       assert.notEqual(r.hostname, w.outside.outside.hostname, ctx(w, `${p}: the hostname is the host's`));
       assert.deepEqual(r.netNames, ['lo'], ctx(w, `${p}: /sys/class/net does not list exactly lo`));
       assert.equal(r.netNonLo, 0, ctx(w, `${p}: /sys/class/net lists a host interface`));
+      assert.equal(r.virtNonLo, 0, ctx(w, `${p}: /sys/devices/virtual/net lists a host interface`));
       assert.ok(r.machineId === '<ENOENT>' || r.machineId === digest(harness.NEUTRAL_MACHINE_ID || '-unset-'),
         ctx(w, `${p}: /etc/machine-id is neither absent nor the neutral one`));
       assert.ok(r.etcHostname === '<ENOENT>' || r.etcHostnameIsNeutral, ctx(w, `${p}: /etc/hostname is the host's`));
@@ -277,6 +278,8 @@ const ROWS = [
       assert.equal(o.hostnameIsNeutral, false, 'control: the host is itself named webctl-isolated — the arm cannot tell');
       if (o.netNonLo === 0) t.diagnostic('control: this host has only lo — the /sys/class/net arm is UNTESTED here, not passed');
       else assert.ok(o.netNonLo > 0);
+      if (o.virtNonLo === 0) t.diagnostic('control: this host has no virtual interface besides lo — the /sys/devices/virtual/net arm is UNTESTED here');
+      else assert.ok(o.virtNonLo > 0);
       if (/^<.*>$/.test(o.machineId)) t.diagnostic('control: this host has no /etc/machine-id — that arm is UNTESTED here');
       else assert.notEqual(o.machineId, digest(harness.NEUTRAL_MACHINE_ID || '-unset-'), 'control: the host machine-id IS the neutral one');
     },

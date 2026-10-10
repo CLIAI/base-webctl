@@ -128,6 +128,9 @@ const run = (a) => spawnSync(a[0], a.slice(1), { encoding: 'utf8' });
   try { names = fs.readdirSync('/sys/class/net').sort(); } catch (e) { names = [`<${e.code}>`]; }
   out.netNames = names.filter((n) => n === 'lo' || /^<.*>$/.test(n));
   out.netNonLo = names.filter((n) => n !== 'lo' && !/^<.*>$/.test(n)).length;
+  let virt = [];
+  try { virt = fs.readdirSync('/sys/devices/virtual/net'); } catch { /* absent */ }
+  out.virtNonLo = virt.filter((n) => n !== 'lo').length;
   let mid = '';
   try { mid = fs.readFileSync('/etc/machine-id', 'utf8').trim(); } catch (e) { mid = `<${e.code}>`; }
   out.machineId = /^<.*>$/.test(mid) ? mid : digest(mid);

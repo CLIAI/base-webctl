@@ -2371,25 +2371,49 @@ test('⛔ fail closed: a `hostname` that exits 0 and sets NOTHING → refused by
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('⚠ a fresh sysfs REFUSED (a `mount` that fails `-t sysfs`) → /sys/class/net is MASKED (empty), said in a note, and the command runs', needsIsolation, async (t) => {
-  if (!NEUTRAL_MNT) { t.skip('SKIP (host): no /mnt, /srv or /media to hold the real mount'); return; }
+/**
+ * Run `isolated` (a marker-writing command) under a `mount` whose `-t sysfs` is replaced by `sysfsCase`
+ * (shell, `$R` = the real mount); everything else goes to the real one. ⚠ The real mount is reached
+ * through NEUTRAL_MNT, which no mask covers (/tmp is masked mid-way).
+ * @param {string} sysfsCase
+ */
+async function underSysfsMount(sysfsCase) {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, 'real-mount'), '');
   const fake = path.join(dir, 'mount-fake');
-  // ⚠ the real mount is reached through NEUTRAL_MNT, which no mask covers (/tmp is masked mid-way)
-  fs.writeFileSync(fake, `#!/bin/sh\ncase " $* " in *" sysfs "*) echo "mount: permission denied (fake)" >&2; exit 32;; esac\nexec ${NEUTRAL_MNT}/real-mount "$@"\n`, { mode: 0o755 });
+  fs.writeFileSync(fake, `#!/bin/sh\nR=${NEUTRAL_MNT}/real-mount\ncase " $* " in *" sysfs "*) ${sysfsCase};; esac\nexec "$R" "$@"\n`, { mode: 0o755 });
+  const marker = path.join(NEUTRAL_MNT, 'RAN');
   try {
     const r = await withBinds([[dir, NEUTRAL_MNT], [MOUNT_BIN, `${NEUTRAL_MNT}/real-mount`], [fake, `${NEUTRAL_MNT}/mount-fake`],
-      ...overTool(`${NEUTRAL_MNT}/mount-fake`, 'mount')], [process.execPath, TOOL, 'isolated', '--', 'sh', '-c', 'echo "NET [$(ls /sys/class/net | tr "\\n" " ")]"']);
-    if (!r) { t.skip(NO_BINDS); return; }
-    assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.match(r.stderr, /isolated: note: \/sys: a fresh sysfs was refused here — \/sys\/class\/net is MASKED \(empty\) instead/);
-    assert.match(r.stdout, /^NET \[\]$/m, 'the fallback mask left interface names visible');
-    // CONTROL: with sysfs permitted, only lo — and no note
-    const c = await run(['isolated', '--', 'sh', '-c', 'echo "NET [$(ls /sys/class/net | tr "\\n" " ")]"']);
-    assert.match(c.stdout, /^NET \[lo \]$/m, c.stdout + c.stderr);
-    assert.doesNotMatch(c.stderr, /sysfs was refused/);
+      ...overTool(`${NEUTRAL_MNT}/mount-fake`, 'mount')], [process.execPath, TOOL, 'isolated', '--keep', NEUTRAL_MNT, '--', process.execPath, '-e',
+      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
+    return r && { ...r, ran: fs.existsSync(path.join(dir, 'RAN')) };
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('⛔ fail closed (review F3): a fresh sysfs REFUSED (a `mount` that fails `-t sysfs`) → NOT RUN, named — never a run with only /sys/class/net masked — CONTROL: with sysfs permitted, only lo', needsIsolation, async (t) => {
+  if (!NEUTRAL_MNT) { t.skip('SKIP (host): no /mnt, /srv or /media to hold the real mount'); return; }
+  const r = await underSysfsMount('echo "mount: permission denied (fake)" >&2; exit 32');
+  if (!r) { t.skip(NO_BINDS); return; }
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot mount a fresh sysfs: mount: permission denied \(fake\) — the host's network interfaces would stay visible under \/sys/);
+  assert.doesNotMatch(r.stderr, /MASKED \(empty\)/, 'the v0.34-phase-1 fallback (a note, and the run going ahead) is back');
+  assert.equal(r.ran, false, 'the command ran with the host\'s sysfs');
+  // CONTROL: with sysfs permitted, only lo — in class/net AND devices/virtual/net
+  const c = await run(['isolated', '--', 'sh', '-c', 'echo "NET [$(ls /sys/class/net | tr "\\n" " ")] VIRT [$(ls /sys/devices/virtual/net | tr "\\n" " ")]"']);
+  assert.match(c.stdout, /^NET \[lo \] VIRT \[lo \]$/m, c.stdout + c.stderr);
+});
+
+test('⛔ the identity read-back covers /sys/devices/virtual/net (review F3): a `-t sysfs` that only masks /sys/class/net → NOT RUN — CONTROL: the host lists a virtual interface there', needsIsolation, async (t) => {
+  if (!NEUTRAL_MNT) { t.skip('SKIP (host): no /mnt, /srv or /media to hold the real mount'); return; }
+  let virt = [];
+  try { virt = fs.readdirSync('/sys/devices/virtual/net').filter((n) => n !== 'lo'); } catch { /* none */ }
+  if (virt.length === 0) { t.skip('SKIP (host): no virtual interface besides lo here — the arm cannot tell'); return; }
+  const r = await underSysfsMount('exec "$R" -t tmpfs -o ro,size=4k fake-sysfs /sys/class/net');
+  if (!r) { t.skip(NO_BINDS); return; }
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: after masking the host's identity, \d+ interface name\(s\) in \/sys\/devices\/virtual\/net still show\(s\) the HOST's/);
+  assert.equal(r.ran, false, 'the command ran with host interfaces in /sys/devices/virtual/net');
 });
 
 test('⭐ /etc/machine-id: what the NEUTRAL id does to the tools that read it — systemd-id128 and dbus-uuidgen answer it (they do not break) — CONTROL: outside they answer the host\'s', needsIsolation, async (t) => {

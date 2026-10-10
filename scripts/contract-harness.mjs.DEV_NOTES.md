@@ -1443,6 +1443,21 @@ turn the control red. The nested path makes no IPC ns of its own: it inherits it
 | F1a | no `--ipc` on the spawn, no `maskIpc` | table row 8 (`ipcs -m` lists the host's segment) |
 | F1b | `--ipc` kept, the fresh /dev/mqueue mount and its read-back dropped | table row 8 (the host's queue is visible) |
 
+**F3 — the sysfs fallback left host interfaces visible (row 10).** Phase 1 answered a refused fresh
+sysfs with an empty ro tmpfs over `/sys/class/net` and a note, and ran; the review measured
+`/sys/devices/virtual/net` still naming the host's virtual interfaces (and their MAC files readable).
+Now a refused sysfs is a REFUSAL (`cannot mount a fresh sysfs: … — the host's network interfaces would
+stay visible under /sys`), and `identityGaps()` reads `/sys/devices/virtual/net` as well as the class
+dir, so the read-back (and the nesting proof) refuse any non-lo entry there. The table's row 10 reads
+both dirs too (control: the host lists a virtual interface; a diagnostic where it lists none). Arms:
+a `mount` that fails `-t sysfs` → NOT RUN, command not run (was: ran with a note); a `-t sysfs` that
+only masks `/sys/class/net` → NOT RUN by the read-back (was: ran). Both RED before, GREEN after.
+
+| # | sabotage | caught by |
+|---|---|---|
+| F3a | the read-back reads `/sys/class/net` only | the class-net-only arm (the command ran) |
+| F3b | the phase-1 fallback restored (mask + note + run) | the refused-sysfs arm |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
