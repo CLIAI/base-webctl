@@ -41,7 +41,7 @@ Recording `CONTRACT_HARNESS_GENERATION` in a comment is not enforcing it. Put th
 first in your contract, and treat **any** non-zero as FAIL:
 
 ```bash
-node "$H" require-generation 6 || { echo "FAIL: base harness below generation 6 (downgraded submodule?)"; exit 1; }
+node "$H" require-generation 7 || { echo "FAIL: base harness below generation 7 (downgraded submodule?)"; exit 1; }
 ```
 
 * ⭐ **Why a VERB, not `generation --min N`.** Measured: every harness before
@@ -186,8 +186,13 @@ shape that let the original grep pass.
   which generation 5 refuses as an unknown option), the passwd home is **hidden**, privileged
   tools come from the system dirs only. Key `--pass-env` on `require-generation 6` to stay green
   on both pins (CHANGELOG v0.33.0).
+* **7** (v0.34.0) — `isolated` changed behaviour again: its verdict line gained
+  `; backend: <name>` (and `keyring: unverified`), refusals keep v0.33's leading text and append
+  the backends tried, new FAIL-CLOSED refusals (no `hostname` tool, a refused sysfs, a failed
+  keyring join), and private `/var/tmp`, `/dev/shm`, SysV IPC, keyring and identity. Key anything
+  that MATCHES `; backend:` on `require-generation 7` (CHANGELOG v0.34.0).
 
-A sweep asks *"who is below 6?"* — and, since generation 4, *"whose contract does not
+A sweep asks *"who is below 7?"* — and, since generation 4, *"whose contract does not
 call `require-generation`?"*, because a recorded number nobody checks protects nothing.
 
 ### `require-generation <N>`

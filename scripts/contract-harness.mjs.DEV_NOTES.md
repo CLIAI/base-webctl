@@ -1121,6 +1121,14 @@ bash and node snippets). The test that pinned "stays at 5" now pins 6 and the sn
   runs `isolated -- true` → 0. On this branch it passes `--pass-env 'CGWC_*'` and the command sees
   `CGWC_X=1`. **Sabotage:** the constant back to 5 → the generation arm red.
 
+### Generation 7 (v0.34.0, ruling R4)
+
+`isolated` changed behaviour again — the verdict's `; backend:` field (and `keyring: unverified`), the
+reworded refusals (v0.33's lead kept, the backends appended), the new fail-closed refusals, the rows
+7–10 masks — so the marker moves 6 → 7. A lane that matches the new verdict field must know it
+exists, and `require-generation 7` answers that on every pin (CHANGELOG v0.34.0 has the guard). The
+arm pins 7 and both floors: `require-generation 6` and `7` exit 0, `8` exits 1 (RED before the bump).
+
 ### runCommand: a synchronous spawn throw (re-review, LOW)
 
 `spawn()` THROWS — rather than emitting `'error'` — for an argv node refuses (a NUL byte) and for
