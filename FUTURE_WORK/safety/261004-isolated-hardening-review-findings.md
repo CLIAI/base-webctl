@@ -1,5 +1,13 @@
 # isolated-hardening @4285c61 — review findings to fix before v0.33.0
 
+> **STATUS 2026-10-10: fixes DONE on `isolated-hardening`** (62b830b env allowlist + `bash
+> --norc -p`; 56cbbb0 early-signal window; 65bb06c AppArmor / `WEBCTL_UNSHARE_BIN`; d10716b
+> whole home hidden + `--keep-ro`; f51aa66 stripped markers + version skew; ec0739c). Every
+> numbered finding 1–8 and every ruling is implemented, armed, mutation-checked and in the
+> CHANGELOG. **Still open:** finding 9 (`/var/tmp`, `/dev/shm`, `/sys/class/net` — listed under
+> "does NOT cover"), and the release steps under **Then** below (integrate, bump, gate both
+> registries, tag, tell `perplexity` and `webctl:mgr`). Delete this note when those are done.
+
 Review verdict: **Ship-with-fixes** (code reviewer subagent of the base lane, 2026-10-04).
 Paused for a token freeze; resume here. All MEASURED unless marked reasoned.
 
@@ -63,7 +71,7 @@ tag only on green. Tell perplexity and webctl:mgr.
   (CGWC_*, CLIAI_CHATGPT_WEBCTL_TESTS_HOST_NETWORK), substack (SUBSTACK_WEBCTL_TESTS_HOST_PID),
   perplexity (FIXTURE_PARENT_NETNS), aliexpress (ALIEXPRESS_WEBCTL_ARM_REAL_HARNESS) must
   declare theirs.
-* Host policy (bp17, Ubuntu 24.04): kernel.apparmor_restrict_unprivileged_userns=1 ⇒ uid_map
+* Host policy (an Ubuntu 24.04 host): kernel.apparmor_restrict_unprivileged_userns=1 ⇒ uid_map
   EPERM. (1) A refusal that NAMES the sysctl and the fix (a host-policy fault, not a lane
   fault). (2) WEBCTL_UNSHARE_BIN (absolute path to an executable) so a host can grant userns
   to one dedicated binary via an AppArmor profile.
