@@ -343,6 +343,13 @@ unhide `~/.config/webctl`); `--keep` at or beneath one re-exposes that path only
   is re-bound read-only, named `xq's root`. **For `xq` only** — a generic "follow PATH
   symlinks" would re-expose dozens of repos on an operator host. A root that is the home, or
   is, contains or lies inside a hidden dir is not re-bound (noted, no path).
+  ⛔ **And never an `xq` a run could have planted** (measured by review: npm puts the writable
+  `<cwd>/node_modules/.bin` on PATH; a planted `node_modules/.bin/xq -> <any repo under the
+  home>/<an executable>` made the NEXT run re-bind that repo — hidden → 11 entries visible).
+  The first `xq` on PATH is ignored (`xq ignored: found in a writable location` / `…: not named
+  xq`, by label) when its PATH entry, any link of its symlink chain or its real file lies in the
+  cwd, a `--keep` / `--keep-ro`, `/tmp`, `TMPDIR`, `/var/tmp` or `/dev/shm`, or its real file is
+  not named exactly `xq`.
 * A PATH entry that reaches the home through a symlink OUTSIDE it is re-bound at its real path
   only. Cost measured on the operator host (~100 PATH entries under the home): `isolated --
   true` 1.29 s → 1.46 s.

@@ -1961,11 +1961,12 @@ function runIsolated(a) {
   const mi = readMountinfo();
   const outer = mi && extraInterfaces() === 0 && uidMapKind() === 'mapped' ? outerRebinds(mi, prot.home, maskedAll, maskedTmp) : null;
   const atHidden = (outer || []).filter((b) => prot.hideRule.includes(b.p)).length;
-  // ⛔ xq's checkout (read-only; xq ONLY — xqRoot)
-  const xq = xqRoot(prot.home, prot.hideRule);
   const carried = (outer || []).filter((b) => !prot.hideRule.includes(b.p)).filter((b) => {
     try { const st = fs.statSync(b.p); return st.isDirectory() || st.isFile(); } catch { return false; } // not a /dev/null cover
   });
+  // ⛔ xq's checkout (read-only; xq ONLY — xqRoot), and never one found through a WRITABLE place
+  const xq = xqRoot(prot.home, prot.hideRule, [process.cwd(), ...keeps, ...keepsRo, maskedTmp, os.tmpdir(), '/var/tmp',
+    '/dev/shm', throwawayHome(ident.home), ...carried.filter((b) => b.rw).map((b) => b.p)]);
   const plan = planKeeps(keeps, [
     { p: process.cwd(), label: 'the working directory', rw: true, named: true, noHidden: true },
     // ⛔ READ-ONLY: under the release gate ONE base checkout serves every consumer in turn,
@@ -2000,6 +2001,8 @@ function runIsolated(a) {
   const { tools, why: noTool } = privilegedTools(ub, false);
   if (noTool) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${noTool}. The command was NOT started.`, { command }));
   for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
+  // ⚠ by LABEL: the planted link's location and target are exactly what must not be printed
+  if (xq.ignored) process.stderr.write(`isolated: note: xq ignored: ${xq.ignored} — its root is NOT re-bound\n`);
   if (xq.why) {
     process.stderr.write(`isolated: note: xq's root (the checkout \`xq\` on PATH lives in, under the home) ${xq.why} — NOT `
       + 're-bound, so xq will not run inside; install xq from a checkout outside the hidden dirs\n');
@@ -2343,17 +2346,56 @@ function pathEntriesUnder(home) {
  * ⛔ DELIBERATELY NARROW: `xq` only. Following every PATH symlink would re-expose dozens of repos
  * on an operator host (measured: ~95 PATH entries there). And never a root that IS the home or
  * IS, CONTAINS or lies INSIDE a hidden dir (`why`, no path) — then xq does not run inside.
+ * ⛔ AND NEVER ONE A RUN COULD HAVE PLANTED (measured by review, v0.33.0): npm puts the writable
+ * `<cwd>/node_modules/.bin` on PATH, so a mutated test wrote `node_modules/.bin/xq -> <any repo
+ * under the home>/<an executable>` and the NEXT run re-bound that repo's whole git root (a private
+ * repo: hidden → 11 entries visible; the verdict said only "xq's root"). ⇒ `ignored` (a LABEL, no
+ * path) when (a) the PATH entry, any link of the symlink chain (walked hop by hop) or the real
+ * file lies — lexically or really — within `writable` (the cwd, every --keep / --keep-ro, /tmp,
+ * TMPDIR, /var/tmp, /dev/shm, a throwaway HOME, the outer call's writable re-binds), or (b) the
+ * real file is not named exactly `xq`: a mutant cannot create files outside its writable dirs,
+ * so it can only point at an existing file — and one named `xq` is xq's checkout or nothing.
+ * The FIRST `xq` on PATH is judged, never skipped past: it is the one the command would run.
  * @param {string} home realpath'd @param {string[]} hideRule Prot.hideRule
- * @returns {{p: string, why: string}} p '' when there is nothing to re-bind (why says if refused)
+ * @param {string[]} writable the places a run (this one or an earlier one) can write
+ * @returns {{p: string, why: string, ignored: string}} p '' when there is nothing to re-bind
+ *   (why / ignored say if refused)
  */
-function xqRoot(home, hideRule) {
-  let real = '';
+function xqRoot(home, hideRule, writable) {
+  const none = { p: '', why: '', ignored: '' };
+  /** @type {string[]} */ const spots = [];
+  for (const w of writable) {
+    if (!w || !path.isAbsolute(w)) continue;
+    spots.push(path.resolve(w));
+    try { spots.push(fs.realpathSync(w)); } catch { /* absent: its lexical path is enough */ }
+  }
+  const writableAt = (/** @type {string} */ d) => {
+    let r = d;
+    try { r = fs.realpathSync(d); } catch { /* lexical only */ }
+    return spots.some((s) => isWithin(d, s) || isWithin(r, s));
+  };
+  let found = '';
   for (const d of String(process.env.PATH || '').split(':')) {
     if (!path.isAbsolute(d)) continue;
     const c = path.join(d, 'xq');
-    try { if (fs.statSync(c).isFile()) { fs.accessSync(c, fs.constants.X_OK); real = fs.realpathSync(c); break; } } catch { /* next */ }
+    try { if (fs.statSync(c).isFile()) { fs.accessSync(c, fs.constants.X_OK); found = c; break; } } catch { /* next */ }
   }
-  if (!home || !real || !isWithin(real, home)) return { p: '', why: '' };
+  if (!found) return none;
+  let real = '';
+  try { real = fs.realpathSync(found); } catch { return none; }
+  if (!home || !isWithin(real, home)) return none;
+  let ignored = '';
+  // (a) every hop: the PATH entry, each link's own dir, and the last hop — the real file's dir (realpath'd)
+  for (let cur = found, hop = 0; hop < 64; hop++) {
+    if (writableAt(path.dirname(cur))) { ignored = 'found in a writable location'; break; }
+    let st;
+    try { st = fs.lstatSync(cur); } catch { break; }
+    if (!st.isSymbolicLink()) break;
+    try { cur = path.resolve(path.dirname(cur), fs.readlinkSync(cur)); } catch { break; }
+  }
+  // (b)
+  if (!ignored && path.basename(real) !== 'xq') ignored = 'not named xq';
+  if (ignored) return { ...none, ignored };
   let root = '';
   for (let d = path.dirname(real); isWithin(d, home); d = path.dirname(d)) {
     if (fs.existsSync(path.join(d, '.git'))) { root = d; break; }
@@ -2364,7 +2406,7 @@ function xqRoot(home, hideRule) {
     : isWithin(home, root) ? 'contains the home directory'
       : hideRule.some((h) => isWithin(root, h)) ? 'lies inside a HIDDEN dir'
         : hideRule.some((h) => isWithin(h, root)) ? 'contains a HIDDEN dir' : '';
-  return why ? { p: '', why } : { p: root, why: '' };
+  return why ? { ...none, why } : { ...none, p: root };
 }
 
 /** Is `p` equal to `dir` or beneath it? @param {string} p @param {string} dir */

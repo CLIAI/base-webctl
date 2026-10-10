@@ -1662,6 +1662,95 @@ test('⛔ xq: a root that IS, CONTAINS or lies INSIDE a hidden dir (or is the ho
   }
 });
 
+// ⛔ MEASURED by review (v0.33.0, F1): xqRoot took the first `xq` on the CALLER's PATH — npm puts
+// the writable `<cwd>/node_modules/.bin` there. A mutated test wrote `node_modules/.bin/xq -> <any
+// repo under the home>/<some executable>`, and the NEXT run re-bound that repo's whole git root
+// read-only: a private repo went from hidden to 11 entries visible, the verdict saying only "xq's
+// root". ⇒ xq is accepted only if no hop of its path (the PATH entry, each symlink, the real file)
+// lies somewhere writable inside a run (the cwd, a --keep / --keep-ro, /tmp, TMPDIR, /var/tmp,
+// /dev/shm), AND the real file is named exactly `xq` (a mutant can only point at what exists).
+/** argv[1] = a repo's root: `SECRET-READ <ok|errno>` for its lib/data.txt. */
+const SECRET_PROBE = `const fs = require('fs'); const p = require('path');
+let r; try { fs.readFileSync(p.join(process.argv[1], 'lib', 'data.txt')); r = 'ok'; } catch (e) { r = e.code; }
+console.log('SECRET-READ ' + r);`;
+
+test('⛔ xq: a planted `xq` in a WRITABLE place (cwd node_modules/.bin, a --keep, /tmp, an intermediate link in /tmp) or not named xq → NOT re-bound, the repo it points into stays HIDDEN, a note by LABEL — CONTROL: the ~/.local/bin shape re-binds it', needsIsolation, async (t) => {
+  const scratch = tmpdir();
+  try {
+    /** @type {[string, (home: string, target: string) => {path: string, cwd?: string, keep?: string[]}, string][]} */
+    const cases = [
+      ['cwd node_modules/.bin', (home, target) => {
+        const bin = path.join(home, 'proj', 'node_modules', '.bin');
+        fs.mkdirSync(bin, { recursive: true });
+        fs.symlinkSync(target, path.join(bin, 'xq'));
+        return { path: `${bin}:/usr/bin:/bin`, cwd: path.join(home, 'proj') };
+      }, 'found in a writable location'],
+      ['a --keep dir', (home, target) => {
+        const bin = path.join(home, 'kept', 'bin');
+        fs.mkdirSync(bin, { recursive: true });
+        fs.symlinkSync(target, path.join(bin, 'xq'));
+        return { path: `${bin}:/usr/bin:/bin`, keep: ['--keep', path.join(home, 'kept')] };
+      }, 'found in a writable location'],
+      ['a --keep-ro dir', (home, target) => {
+        const bin = path.join(home, 'keptro', 'bin');
+        fs.mkdirSync(bin, { recursive: true });
+        fs.symlinkSync(target, path.join(bin, 'xq'));
+        return { path: `${bin}:/usr/bin:/bin`, keep: ['--keep-ro', path.join(home, 'keptro')] };
+      }, 'found in a writable location'],
+      ['/tmp', (home, target) => {
+        const bin = fs.mkdtempSync(path.join(scratch, 'bin-'));
+        fs.symlinkSync(target, path.join(bin, 'xq'));
+        return { path: `${bin}:/usr/bin:/bin` };
+      }, 'found in a writable location'],
+      ['an intermediate link in /tmp', (home, target) => {
+        const hop = fs.mkdtempSync(path.join(scratch, 'hop-'));
+        fs.symlinkSync(target, path.join(hop, 'xq'));
+        fs.mkdirSync(path.join(home, '.local', 'bin'), { recursive: true });
+        fs.symlinkSync(path.join(hop, 'xq'), path.join(home, '.local', 'bin', 'xq'));
+        return { path: xqPath(home) };
+      }, 'found in a writable location'],
+      ['a link named xq whose target is not', (home, target) => {
+        fs.mkdirSync(path.join(home, '.local', 'bin'), { recursive: true });
+        fs.symlinkSync(target, path.join(home, '.local', 'bin', 'xq'));
+        return { path: xqPath(home) };
+      }, 'not named xq'],
+    ];
+    for (const [what, plant, label] of cases) {
+      const home = fakeSecretHome();
+      try {
+        // the target: an EXISTING executable in a private git repo under the home
+        const repo = path.join(home, 'src', 'secret-checkout');
+        fs.mkdirSync(path.join(repo, 'lib'), { recursive: true });
+        fs.mkdirSync(path.join(repo, '.git'));
+        fs.mkdirSync(path.join(repo, 'bin'));
+        fs.writeFileSync(path.join(repo, 'lib', 'data.txt'), 'private\n');
+        const exe = path.join(repo, 'bin', label === 'not named xq' ? 'some-tool' : 'xq');
+        fs.writeFileSync(exe, '#!/bin/sh\necho hi\n', { mode: 0o755 });
+        const pl = plant(home, exe);
+        const r = await underFakeHome(home, ['sh', '-c', 'cd "$0" && exec "$@"', pl.cwd || ROOT, 'env', `PATH=${pl.path}`,
+          process.execPath, TOOL, 'isolated', ...(pl.keep || []), '--', process.execPath, '-e', SECRET_PROBE, repo]);
+        if (!r) { t.skip(NO_FAKE_HOME); return; }
+        assert.equal(r.status, 0, `${what}: ${r.stdout}${r.stderr}`);
+        assert.match(r.stdout, /^SECRET-READ ENOENT$/m, `${what}: the repo a planted xq points into was RE-BOUND:\n${r.stdout}${r.stderr}`);
+        assert.match(r.stderr, new RegExp(`^isolated: note: xq ignored: ${label}`, 'm'), `${what}: ${r.stderr}`);
+        assert.doesNotMatch(r.stderr, /xq's root/, `${what}: ${r.stderr}`);
+        assert.ok(!r.stderr.includes(home) && !r.stderr.includes('secret-checkout') && !r.stderr.includes(scratch), `${what}: a path was printed:\n${r.stderr}`);
+        // CONTROL: the same repo through the legitimate shape (a read-only ~/.local/bin/xq → <repo>/bin/xq) IS re-bound
+        if (label !== 'not named xq') {
+          fs.rmSync(path.join(home, '.local', 'bin', 'xq'), { force: true });
+          fs.mkdirSync(path.join(home, '.local', 'bin'), { recursive: true });
+          fs.symlinkSync(exe, path.join(home, '.local', 'bin', 'xq'));
+          const c = await underFakeHome(home, ['env', `PATH=${xqPath(home)}`,
+            process.execPath, TOOL, 'isolated', '--', process.execPath, '-e', SECRET_PROBE, repo]);
+          assert.ok(c);
+          assert.match(c.stdout, /^SECRET-READ ok$/m, `${what} CONTROL: the legitimate shape no longer re-binds:\n${c.stdout}${c.stderr}`);
+          assert.doesNotMatch(c.stderr, /xq ignored/, `${what} CONTROL: ${c.stderr}`);
+        }
+      } finally { fs.rmSync(home, { recursive: true, force: true }); }
+    }
+  } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+});
+
 test('⛔ a NESTED --keep / --keep-ro under the OUTER call\'s hidden home → usage 3 saying the OUTER call hides it (no path) — CONTROL: kept by the outer, it works', needsIsolation, async (t) => {
   const home = fakeWholeHome();
   const work = path.join(home, 'work');

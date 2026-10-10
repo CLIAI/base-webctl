@@ -1186,6 +1186,40 @@ first.)
   (the nested proof now reads the recorded home root as `WRITABLE`). Restored: the 77 nesting /
   home / hidden arms pass.
 
+### ⛔ xqRoot followed a PLANTED `xq` (review F1, HIGH, v0.33.0)
+
+Measured by the review: xqRoot took the first `xq` on the CALLER's PATH — and npm puts the
+writable `<cwd>/node_modules/.bin` there. A mutated test writes `node_modules/.bin/xq -> <any repo
+under the home>/<an executable>`; the NEXT run re-binds that repo's whole git root read-only
+(no `.git` → the executable's dir, e.g. a tool's config dir). A private repo went from hidden to
+11 entries visible; the verdict said only "xq's root" both times.
+* ⇒ **(a)** the first `xq` on PATH is IGNORED when any hop lies — lexically or really — in a place
+  a run can write: the PATH entry, each symlink of the chain (walked hop by hop with
+  readlink, not only realpath'd: a link in /tmp between two legitimate ones is the case
+  realpath hides), and the real file (the walk's last hop). The places: the cwd, every `--keep`
+  AND `--keep-ro` (the caller can write them), `/tmp` (realpath'd), `os.tmpdir()` (TMPDIR),
+  `/var/tmp`, `/dev/shm` (both shared with the host inside), a throwaway HOME, the outer call's
+  writable re-binds. **(b)** the real file's basename must be exactly `xq`: a mutant cannot create
+  files outside its writable dirs, so it can only point at an EXISTING file, and one named `xq`
+  is xq's checkout or nothing. **(c)** ignored → no re-bind, a note by LABEL
+  (`xq ignored: found in a writable location` / `…: not named xq`), never the path. The note
+  is printed only when the real file is under the home (otherwise nothing would be re-bound).
+* The FIRST `xq` is judged, never skipped past: it is the one the command's own PATH lookup
+  finds, and falling through to a later one would make the planted entry a way to choose
+  which `xq` is trusted. (A DANGLING first candidate still falls through, as before: statSync.)
+* **Arms (one test, 6 cases; fake home):** a link at `<cwd>/node_modules/.bin/xq`, in a `--keep`
+  dir, in a `--keep-ro` dir, in a dir under /tmp, an intermediate hop in /tmp
+  (`~/.local/bin/xq → /tmp/…/xq → <repo>/bin/xq`), and a `~/.local/bin/xq` → `<repo>/bin/some-tool`
+  — each into a private git repo under the home. **Before: all 6 `SECRET-READ ok`**, verdict
+  `re-bound read-only: xq's root`. After: `ENOENT`, the note, no path. **CONTROL** per case
+  (5 of 6): the same repo through the legitimate `~/.local/bin/xq → <repo>/bin/xq` → `ok`, no
+  note. The existing main xq arm stays the readable / `EROFS`-on-write control.
+* **Sabotage (all caught):** (a) off → cwd case; the hop walk off (PATH entry only) → the
+  intermediate-link case; (b) off → the not-named-xq case; `--keep-ro` dropped from the places →
+  its case; `--keep` dropped → its case; the cwd dropped → its case; /tmp and TMPDIR dropped →
+  the /tmp case. A separate final-file-dir check was REMOVED: its sabotage passed — the walk's
+  last hop realpaths that same dir.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

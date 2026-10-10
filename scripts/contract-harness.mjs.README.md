@@ -355,7 +355,12 @@ contract's output when it is used.
   ⇒ If `xq` on your PATH really lives under the home, **its git root is re-bound READ-ONLY**
   (named `xq's root` in the verdict, never by path). For `xq` ONLY — following every PATH
   symlink would re-expose dozens of repos on an operator host. A root that is the home, or is,
-  contains or lies inside a hidden dir is NOT re-bound (a note says so). Pass `UV_NO_CACHE` with
+  contains or lies inside a hidden dir is NOT re-bound (a note says so). ⛔ Nor is one a run
+  could have PLANTED: if the PATH entry `xq` is found in, any link on the way to it, or the
+  real file lies in the cwd (npm's `node_modules/.bin`!), a `--keep` / `--keep-ro`, `/tmp`,
+  `TMPDIR`, `/var/tmp` or `/dev/shm` — or the real file is not named exactly `xq` — it is
+  ignored (`isolated: note: xq ignored: …`, no path). Install xq as `~/.local/bin/xq` → its
+  checkout and keep both out of your keeps. Pass `UV_NO_CACHE` with
   `--pass-env` if your check sets it. A lane should still treat "xq did not answer" as a FAIL,
   not a warning, when xq is installed — it falls back to fewer names silently.
 * ⛔ **BREAKING (v0.33.0): the env is an ALLOWLIST.** Measured by the review: 37 vars matching
