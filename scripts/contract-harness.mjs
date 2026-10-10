@@ -1197,6 +1197,43 @@ const SCRUBBED_ENV = Object.freeze(['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK
   'TMUX', 'TMUX_PANE', 'XAUTHORITY', 'SSH_AGENT_PID', 'DOCKER_CONTEXT',
   'SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY']);
 /**
+ * The env ALLOWLIST (v0.33.0, BREAKING): the ONLY names the command inherits, plus each
+ * `--pass-env NAME|PREFIX_*` — and `isolated`'s own (TMPDIR=/tmp; the WEBCTL_* markers).
+ * A trailing `*` is a prefix. SCRUBBED_ENV is removed AFTER the allowlist, so a prefix pass
+ * (`XDG_*`) cannot bring a socket name back.
+ *
+ * ⛔ A denylist cannot keep up (measured by the review): 37 vars matching *_API_KEY, *_TOKEN,
+ * *SECRET reached the arm on an operator host — and the gate passes its full env. So does
+ * SESSION_MANAGER (it embeds the hostname and an ICE socket), ICEAUTHORITY, and
+ * CLIAI_<TOOL>_BROWSER_{SSH_,}TARGET (they NAME remote targets). CLIAI_* is NOT default.
+ * ⚠ The same filter applies to the env pid 1 starts with: BASH_ENV and SHELLOPTS are not on it.
+ */
+const DEFAULT_PASS_ENV = Object.freeze(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_*', 'TERM', 'TZ',
+  'NODE_OPTIONS', 'NODE_PATH', 'npm_config_*', 'WEBCTL_*']);
+/** A `--pass-env` value: an env NAME, or `<PREFIX>_*` (the prefix ends in `_`; `*` alone is refused). */
+const PASS_ENV_RE = /^(?:[A-Za-z_][A-Za-z0-9_]*|[A-Za-z][A-Za-z0-9_]*_\*)$/;
+
+/** @param {string} name @param {readonly string[]} patterns */
+function passEnvMatches(name, patterns) {
+  return patterns.some((p) => (p.endsWith('*') ? name.startsWith(p.slice(0, -1)) : name === p));
+}
+
+/**
+ * The env `isolated` gives what it starts: the ALLOWLIST (DEFAULT_PASS_ENV + `pass`) of `env`,
+ * minus SCRUBBED_ENV, with TMPDIR=/tmp (an inherited one may name a dir the /tmp mask hid).
+ * Idempotent — the fresh path applies it on the host AND again inside.
+ * @param {NodeJS.ProcessEnv} env @param {readonly string[]} pass @param {Record<string, string>} [own]
+ * @returns {NodeJS.ProcessEnv}
+ */
+function isolatedEnv(env, pass, own = {}) {
+  /** @type {NodeJS.ProcessEnv} */
+  const out = {};
+  const allow = [...DEFAULT_PASS_ENV, ...pass];
+  for (const [k, v] of Object.entries(env)) if (v !== undefined && passEnvMatches(k, allow)) out[k] = v;
+  for (const k of SCRUBBED_ENV) delete out[k];
+  return { ...out, ...own, TMPDIR: '/tmp' };
+}
+/**
  * Home dot-directories that hold LIVE state: signed-in browser profiles (~/.cache/<tool>),
  * the family's config (~/.config/webctl), keys and ControlMaster sockets (~/.ssh). A keep
  * in (or containing) one is allowed — it is the caller's choice — but NAMED on stderr.
@@ -1223,7 +1260,7 @@ const HIDE_SOURCE = 'webctl-isolated-hidden';
  * asserts "it is gone" fails only under `isolated`. libuv waits for the pids IT spawned and
  * node has no waitpid(-1); prctl(PR_SET_CHILD_SUBREAPER) is not reachable from node either, and
  * would not help — a pid 1 already IS the reaper, the question is only whether it calls wait.
- * ⇒ unshare's forked child is `bash -c PID1_REAPER`: it runs the real work ($@ — the node inner
+ * ⇒ unshare's forked child is `bash --norc -p -c PID1_REAPER` (PID1_BASH_FLAGS): it runs the real work ($@ — the node inner
  * half, or the nested path's node pid-1 helper) in the BACKGROUND and `wait`s on it. bash's
  * SIGCHLD handler reaps ANY child, re-parented orphans included (measured: state gone).
  *
@@ -1250,6 +1287,20 @@ const PID1_REAPER = [
   'while :; do t=; wait "$c"; rc=$?; [ -n "$t" ] || break; done',
   'exit "$rc"',
 ].join('\n');
+
+/**
+ * How pid 1's bash is started: `--norc -p -c PID1_REAPER`.
+ *
+ * ⛔ `bash -c` honoured the CALLER's shell config as pid 1 — WITH every namespace capability and
+ * BEFORE any mask (measured by the review): a BASH_ENV script ran; SHELLOPTS=xtrace traced the
+ * reaper; an exported `wait()` (BASH_FUNC_wait%%) REPLACED it, losing the exit code;
+ * SHELLOPTS=errexit + TERM ended the namespace before the command's trap (143, not its 7).
+ * ⇒ `-p` (privileged mode): BASH_ENV/ENV not read, functions not imported, SHELLOPTS/BASHOPTS
+ * ignored. ⛔ AND `--norc` (measured while fixing it): with SHLVL unset (the env allowlist drops
+ * it) and stdin a SOCKET (node's stdio pipes are socketpairs) bash decides rshd started it and
+ * sources ~/.bashrc — `-p` does not stop that branch, `--norc` does. Long options go first.
+ */
+const PID1_BASH_FLAGS = Object.freeze(['--norc', '-p', '-c']);
 
 /**
  * The absolute path of `bash` on PATH, or '' — pid 1 must be the reaping bash (PID1_REAPER).
@@ -1410,7 +1461,7 @@ function usageRefusal(why, command) {
  * NO host unix sockets.
  *
  * The outer half spawns
- * `unshare -rnm --pid --fork --mount-proc --kill-child --propagation=private <bash> -c PID1_REAPER … <node> <this file> __isolated-inner <netns> -- <cmd…>`
+ * `unshare -rnm --pid --fork --mount-proc --kill-child --propagation=private <bash> --norc -p -c PID1_REAPER … <node> <this file> __isolated-inner <netns> -- <cmd…>`
  * — pid 1 is a bash that REAPS orphans (PID1_REAPER), the inner half runs under it — with
  * two extra pipes: fd 3 is the STATUS channel, fd 4 carries the masking PLAN
  * (host mount-ns id, cwd, paths to re-expose, the host's path sockets — a list that
@@ -1472,12 +1523,26 @@ function runIsolated(a) {
   const command = sep < 0 ? [] : a.slice(sep + 1);
   /** @type {string[]} */
   const keeps = [];
+  /** @type {string[]} */
+  const pass = [];
   let bad = sep < 0 || command.length === 0;
   for (let i = 0; i < opts.length && !bad; i++) {
     if (opts[i] === '--keep' && opts[i + 1]) keeps.push(opts[++i]);
+    else if (opts[i] === '--pass-env' && i + 1 < opts.length) pass.push(opts[++i]);
     else bad = true;
   }
   if (bad) return Promise.resolve(usageRefusal('expected `-- <cmd> [args…]` after the options', command));
+  // ⚠ the refusal names the RULE and the option's position, never the value
+  for (const [i, p] of pass.entries()) {
+    if (!PASS_ENV_RE.test(p)) {
+      return Promise.resolve(usageRefusal(`--pass-env #${i + 1} is not an env NAME or a PREFIX_* pattern `
+        + '(letters, digits, `_`; a prefix ends in `_*`; a bare `*` is refused)', command));
+    }
+    if (SCRUBBED_ENV.includes(p)) {
+      return Promise.resolve(usageRefusal(`--pass-env #${i + 1} names a var isolation always REMOVES (a host socket, `
+        + 'display, address or state root) — set it inside the command instead', command));
+    }
+  }
   // ⛔ NESTED CALL: "already inside" is proven from the KERNEL. The marker alone is
   // trusted input — set on the host it would skip isolation entirely — so a marker
   // whose proof fails is REFUSED (no verdict, exit 2) before anything runs.
@@ -1506,8 +1571,8 @@ function runIsolated(a) {
     // signal dispositions (a bash background job would IGNORE SIGINT)
     const bash = bashOnPath();
     if (!bash) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${NO_BASH}. The command was NOT started.`, { command }));
-    return runCommand([bash, '-c', PID1_REAPER, 'webctl-isolated-pid1', process.execPath, SELF, PID1_INNER, '--', ...command],
-      priv.prefix, { pastUnshare: true });
+    return runCommand([bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', process.execPath, SELF, PID1_INNER, '--', ...command],
+      priv.prefix, { pastUnshare: true, pass });
   }
   let hostNs = '';
   let hostMnt = '';
@@ -1559,7 +1624,7 @@ function runIsolated(a) {
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
   const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
-    exempt: plan.exempt, sockets, ids });
+    exempt: plan.exempt, sockets, ids, pass });
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
     let child;
@@ -1569,12 +1634,13 @@ function runIsolated(a) {
         // process can be signalled or even seen. --kill-child: if unshare dies, so does
         // everything inside (pid 1 is the reaping bash, PID1_REAPER; the inner half runs under it).
         ['-rnm', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
-          bash, '-c', PID1_REAPER, 'webctl-isolated-pid1',
+          bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1',
           process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
+        // ⛔ the ALLOWLIST already here: pid 1 and the inner half never see what the command may not
         { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'],
-          env: { ...process.env, [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt, [HOST_PIDNS_ENV]: hostPid,
+          env: isolatedEnv(process.env, pass, { [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt, [HOST_PIDNS_ENV]: hostPid,
             [RO_ROOTS_ENV]: JSON.stringify(prot.roots), [HIDDEN_ENV]: JSON.stringify(prot.hidden),
-            [HOST_IDS_ENV]: JSON.stringify(ids) } });
+            [HOST_IDS_ENV]: JSON.stringify(ids) }) });
     } catch (e) {
       resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
       return;
@@ -1682,7 +1748,7 @@ async function runIsolatedInner(a) {
 
   // ⇩ only now, provably off the host network, read the plan. (On the host the
   // proofs above refuse first, so an unrelated fd 4 is never read.)
-  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], exempt: string[], sockets: string[], ids: unknown}} */
+  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], exempt: string[], sockets: string[], ids: unknown, pass: string[]}} */
   let plan;
   try {
     // node's stdio 'pipe' is a socketpair, not a FIFO; anything else is not ours
@@ -1694,7 +1760,8 @@ async function runIsolatedInner(a) {
     const binds = (/** @type {unknown} */ x) => Array.isArray(x)
       && x.every((b) => b && typeof b.p === 'string' && typeof b.rw === 'boolean');
     if (typeof plan.hostMnt !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
-      || !strs(plan.roots) || !strs(plan.hidden) || !strs(plan.exempt) || !strs(plan.sockets) || !hostIdsOf(plan.ids)) throw new Error('malformed');
+      || !strs(plan.roots) || !strs(plan.hidden) || !strs(plan.exempt) || !strs(plan.sockets) || !hostIdsOf(plan.ids)
+      || !strs(plan.pass) || !plan.pass.every((p) => PASS_ENV_RE.test(p))) throw new Error('malformed');
   } catch (e) {
     return refuse(`internal: no masking plan on fd 4 (${errMsg(e)}) — run via \`isolated\``);
   }
@@ -1756,7 +1823,7 @@ async function runIsolatedInner(a) {
   try { fs.closeSync(3); } catch { /* the command must not inherit it */ }
 
   for (const s of SIGS) process.off(s, early);
-  return runCommand(command, priv.prefix);
+  return runCommand(command, priv.prefix, { pass: plan.pass });
 }
 
 /**
@@ -2486,19 +2553,17 @@ function privilegeDrop(ids, { pidns = false } = {}) {
 }
 
 /**
- * Run the user command with the caller's cwd/stdio and a SCRUBBED env; resolve with
- * its exit code (128+signal when killed, 127 when it cannot be started). `prefix` is the
- * privilege drop (privilegeDrop).
+ * Run the user command with the caller's cwd/stdio and an ALLOWLISTED env (isolatedEnv);
+ * resolve with its exit code (128+signal when killed, 127 when it cannot be started).
+ * `prefix` is the privilege drop (privilegeDrop); `pass` the caller's `--pass-env` list.
  *
- * ⛔ The scrub applies on BOTH paths (fresh and nested): the vars it drops NAME host
- * sockets and displays, and TMPDIR is reset because an inherited one may name a
- * directory the /tmp mask just hid.
- * @param {string[]} command @param {string[]} [prefix] @returns {Promise<number>}
+ * ⛔ The allowlist applies on BOTH paths (fresh and nested) — a nested call honours only its
+ * OWN `--pass-env` — and SCRUBBED_ENV is removed even when a prefix would pass it.
+ * @param {string[]} command @param {string[]} [prefix]
+ * @param {{pastUnshare?: boolean, pass?: string[]}} [o] @returns {Promise<number>}
  */
-function runCommand(command, prefix = [], { pastUnshare = false } = {}) {
-  /** @type {NodeJS.ProcessEnv} */
-  const env = { ...process.env, TMPDIR: '/tmp' };
-  for (const k of SCRUBBED_ENV) delete env[k];
+function runCommand(command, prefix = [], { pastUnshare = false, pass = /** @type {string[]} */ ([]) } = {}) {
+  const env = isolatedEnv(process.env, pass);
   const argv = [...prefix, ...command];
   return new Promise((resolve) => {
     const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', env });

@@ -52,12 +52,16 @@ const git = (a, cwd) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: [
 /**
  * The fake consumer's contract. It reports what reached it, WRITES into its own
  * cwd (as real contracts do — build output, caches), and states which version of
- * itself is running. Optional behaviours are switched by FAKE_* variables, which
- * pass through the gate (and through `isolated`) like any caller env.
+ * itself is running. Optional behaviours are switched by FAKE_* variables — which the
+ * tests name, and world().env() RENAMES to WEBCTL_TEST_FAKE_*, the name the contract reads.
+ * ⛔ Why renamed: since v0.33.0 `isolated` passes an env ALLOWLIST, and the gate's production
+ * call passes no `--pass-env` (it must not: a contract's secrets are the caller's env). The
+ * WEBCTL_* prefix is default-passed, so the fakes reach the contract with the gate unchanged.
+ * Without the rename the FAKE_* behaviours switched OFF under `--scratch` (measured: 7 tests red).
  * @param {string} version
  */
 const contract = (version) => `#!/usr/bin/env bash
-if [ -n "\${FAKE_RAN:-}" ]; then : > "$FAKE_RAN"; fi
+if [ -n "\${WEBCTL_TEST_FAKE_RAN:-}" ]; then : > "$WEBCTL_TEST_FAKE_RAN"; fi
 echo "VERSION=${version}"
 [ -f local-override.sh ] && . ./local-override.sh
 echo "PWD=$PWD"
@@ -67,19 +71,19 @@ echo "DECLARED_PIN=$WEBCTL_DECLARED_PIN"
 echo "SWAPPED=$WEBCTL_GATE_SWAPPED"
 echo "SUB_HEAD=$(git -C vendor/base-webctl rev-parse HEAD)"
 echo "ran" > gate-was-here.txt
-if [ -n "\${FAKE_HOST_PORT:-}" ]; then
-  node -e 'const s=require("net").connect(+process.env.FAKE_HOST_PORT,"127.0.0.1");s.on("connect",()=>{console.log("NET=REACHED");s.destroy()});s.on("error",e=>console.log("NET=BLOCKED "+e.code))'
+if [ -n "\${WEBCTL_TEST_FAKE_HOST_PORT:-}" ]; then
+  node -e 'const s=require("net").connect(+process.env.WEBCTL_TEST_FAKE_HOST_PORT,"127.0.0.1");s.on("connect",()=>{console.log("NET=REACHED");s.destroy()});s.on("error",e=>console.log("NET=BLOCKED "+e.code))'
 fi
 # Markers go in the CWD (the scratch clone): \`isolated\` gives the contract a fresh
 # /tmp, so a host /tmp path written from in here would never be seen outside.
-if [ -n "\${FAKE_PAUSE:-}" ]; then
+if [ -n "\${WEBCTL_TEST_FAKE_PAUSE:-}" ]; then
   : > ./.fake-started
   for _ in $(seq 300); do [ -f ./.fake-go ] && break; sleep 0.1; done
 fi
-if [ -n "\${FAKE_STARTED:-}" ]; then : > ./.fake-started; sleep 30; fi
-if [ -n "\${FAKE_DEPS:-}" ]; then if [ -f node_modules/dep/index.js ]; then echo DEPS=PRESENT; else echo DEPS=ABSENT; fi; fi
-if [ -n "\${FAKE_WRITE_HOME:-}" ]; then if : > "$HOME/.gate-home-probe" 2>/dev/null; then echo HOME=WRITABLE; else echo HOME=READONLY; fi; fi
-if [ -n "\${FAKE_WIPE_TMP:-}" ]; then c="$(cat code.txt)"; cat out.txt; rm -rf /tmp/* 2>/dev/null; exit "$c"; fi
+if [ -n "\${WEBCTL_TEST_FAKE_STARTED:-}" ]; then : > ./.fake-started; sleep 30; fi
+if [ -n "\${WEBCTL_TEST_FAKE_DEPS:-}" ]; then if [ -f node_modules/dep/index.js ]; then echo DEPS=PRESENT; else echo DEPS=ABSENT; fi; fi
+if [ -n "\${WEBCTL_TEST_FAKE_WRITE_HOME:-}" ]; then if : > "$HOME/.gate-home-probe" 2>/dev/null; then echo HOME=WRITABLE; else echo HOME=READONLY; fi; fi
+if [ -n "\${WEBCTL_TEST_FAKE_WIPE_TMP:-}" ]; then c="$(cat code.txt)"; cat out.txt; rm -rf /tmp/* 2>/dev/null; exit "$c"; fi
 cat out.txt
 exit "$(cat code.txt)"
 `;
@@ -133,9 +137,10 @@ function world(o = {}) {
     consumerHead: git(['rev-parse', 'HEAD'], repo),
     /** @param {Record<string,string>} [extra] */
     env(extra = {}) {
+      const renamed = Object.fromEntries(Object.entries(extra).map(([k, v]) => [k.startsWith('FAKE_') ? `WEBCTL_TEST_${k}` : k, v]));
       const e = { ...process.env, WEBCTL_CONSUMERS_FILE: reg, WEBCTL_CONSUMERS_DIR: dir, TMPDIR: tmp,
         WEBCTL_GATE_SCRATCH_DIR: tmp,
-        WEBCTL_GATE_LOG_DIR: path.join(dir, 'gate-logs'), ...extra };
+        WEBCTL_GATE_LOG_DIR: path.join(dir, 'gate-logs'), ...renamed };
       delete e.NODE_TEST_CONTEXT;
       delete e.WEBCTL_HOST_NETNS;
       return e;

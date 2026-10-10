@@ -567,10 +567,10 @@ async function unixServer(p) {
   return { count: () => connections, close: () => new Promise((r) => srv.close(() => r(undefined))) };
 }
 
-/** Run argv directly (no harness). @param {string[]} argv @param {{cwd?: string}} [o] */
+/** Run argv directly (no harness). @param {string[]} argv @param {{cwd?: string, env?: NodeJS.ProcessEnv}} [o] */
 function runRaw(argv, o = {}) {
   return /** @type {Promise<{status:number, stdout:string, stderr:string}>} */ (new Promise((resolve) => {
-    const c = spawn(argv[0], argv.slice(1), { env: cleanEnv(), cwd: o.cwd });
+    const c = spawn(argv[0], argv.slice(1), { env: o.env || cleanEnv(), cwd: o.cwd });
     let stdout = ''; let stderr = '';
     c.stdout.on('data', (d) => { stdout += d; });
     c.stderr.on('data', (d) => { stderr += d; });
@@ -734,6 +734,91 @@ test('env scrub CONTROL: the same vars DO reach a command run without `isolated`
   assert.equal(/** @type {any} */ (c).TMPDIR, '/nonexistent/tmp');
   assert.equal(/** @type {any} */ (c).XDG_CACHE_HOME, '/nonexistent/real-cache', 'CONTROL: an XDG state root is inherited without `isolated`');
   for (const k of SCRUBBED) assert.equal(/** @type {any} */ (c)[k], HOSTILE_ENV[/** @type {keyof typeof HOSTILE_ENV} */ (k)], `CONTROL: ${k} is inherited without \`isolated\``);
+});
+
+// ── env ALLOWLIST (v0.33.0, BREAKING): only named vars reach the command ─────
+//
+// ⛔ Measured by the review: 37 vars matching *_API_KEY / *_TOKEN / *SECRET reached the arm
+// inside `isolated` on an operator host, and the gate passes its full env. A denylist cannot
+// keep up with names nobody has thought of yet. ⇒ An ALLOWLIST, plus `--pass-env NAME|PREFIX_*`.
+
+/** argv[1] = JSON list of names: prints `ENVSET {name: value|null}`. */
+const PRINT_NAMED = 'const n = JSON.parse(process.argv[1]); console.log("ENVSET " + JSON.stringify(Object.fromEntries(n.map((k) => [k, process.env[k] ?? null]))))';
+/** @param {string} out @returns {Record<string, string|null>[]} */
+const envSets = (out) => [...out.matchAll(/^ENVSET (.*)$/gm)].map((m) => JSON.parse(m[1]));
+/** Planted on the caller: must NOT reach the command unless passed. Fake values only. */
+const PLANTED = { FAKE_API_KEY: 'planted-not-a-real-key', FAKE_OTHER: 'planted-2', CLIAI_FAKE_TOOL_BROWSER_TARGET: 'planted-target',
+  SESSION_MANAGER: 'local/planted:@/tmp/.ICE-unix/1,unix/planted:/tmp/.ICE-unix/1', ICEAUTHORITY: '/nonexistent/ICEauthority',
+  BASH_ENV: '/nonexistent/bash-env', SHELLOPTS: 'xtrace' };
+/** Default-passed names, planted so their presence is the allowlist's doing. */
+const ALLOWED = { LANG: 'C.UTF-8', LC_PLANTED: 'lc-planted', TERM: 'dumb', TZ: 'UTC', NODE_PATH: '/nonexistent/node-path',
+  npm_config_planted: 'npm-planted', WEBCTL_PLANTED: 'webctl-planted', USER: 'planted-user', LOGNAME: 'planted-user', SHELL: '/bin/sh' };
+const ALL_NAMES = JSON.stringify([...Object.keys(PLANTED), ...Object.keys(ALLOWED), 'PATH', 'HOME', 'TMPDIR']);
+
+test('⛔ env ALLOWLIST: planted FAKE_API_KEY, CLIAI_*, SESSION_MANAGER, ICEAUTHORITY, BASH_ENV, SHELLOPTS are ABSENT — the default-passed names arrive', needsIsolation, async () => {
+  const r = await run(['isolated', '--', process.execPath, '-e', PRINT_NAMED, ALL_NAMES], { ...PLANTED, ...ALLOWED });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const [e] = envSets(r.stdout);
+  assert.ok(e, r.stdout);
+  for (const k of Object.keys(PLANTED)) assert.equal(e[k], null, `${k} reached the command`);
+  for (const [k, v] of Object.entries(ALLOWED)) assert.equal(e[k], v, `${k} (default-passed) did not arrive`);
+  assert.ok(e.PATH === process.env.PATH, 'PATH changed inside (not printed: it names home paths)');
+  assert.equal(e.TMPDIR, '/tmp');
+  assert.ok(e.HOME, 'HOME is default-passed');
+});
+
+test('env ALLOWLIST CONTROL: the planted vars DO reach a command run without `isolated`', async () => {
+  const r = await runRaw([process.execPath, '-e', PRINT_NAMED, ALL_NAMES], { env: cleanEnv({ ...PLANTED, ...ALLOWED }) });
+  const [e] = envSets(r.stdout);
+  for (const [k, v] of Object.entries(PLANTED)) assert.equal(e[k], v, `CONTROL: ${k} not inherited without isolated — the arm proves nothing`);
+});
+
+test('⭐ --pass-env NAME passes exactly that name; --pass-env PREFIX_* passes the prefix — repeatable', needsIsolation, async () => {
+  const one = await run(['isolated', '--pass-env', 'FAKE_API_KEY', '--', process.execPath, '-e', PRINT_NAMED, ALL_NAMES], PLANTED);
+  assert.equal(one.status, 0, one.stdout + one.stderr);
+  const [a] = envSets(one.stdout);
+  assert.equal(a.FAKE_API_KEY, PLANTED.FAKE_API_KEY);
+  assert.equal(a.FAKE_OTHER, null, 'a NAME pass let a sibling through');
+  const pre = await run(['isolated', '--pass-env', 'FAKE_*', '--pass-env', 'CLIAI_FAKE_TOOL_BROWSER_TARGET', '--',
+    process.execPath, '-e', PRINT_NAMED, ALL_NAMES], PLANTED);
+  assert.equal(pre.status, 0, pre.stdout + pre.stderr);
+  const [b] = envSets(pre.stdout);
+  assert.equal(b.FAKE_API_KEY, PLANTED.FAKE_API_KEY);
+  assert.equal(b.FAKE_OTHER, PLANTED.FAKE_OTHER);
+  assert.equal(b.CLIAI_FAKE_TOOL_BROWSER_TARGET, PLANTED.CLIAI_FAKE_TOOL_BROWSER_TARGET);
+  assert.equal(b.SESSION_MANAGER, null);
+  // ⛔ a PREFIX pass cannot bring a scrubbed socket name back
+  const xdg = await run(['isolated', '--pass-env', 'XDG_*', '--', process.execPath, '-e', PRINT_NAMED,
+    JSON.stringify(['XDG_RUNTIME_DIR', 'XDG_PLANTED'])], { XDG_RUNTIME_DIR: '/nonexistent/xdg', XDG_PLANTED: 'x' });
+  assert.equal(xdg.status, 0, xdg.stderr);
+  assert.deepEqual(envSets(xdg.stdout)[0], { XDG_RUNTIME_DIR: null, XDG_PLANTED: 'x' });
+});
+
+test('⛔ the NESTED path keeps the allowlist (its own --pass-env) and the markers', needsIsolation, async () => {
+  const MARKERS = JSON.stringify(['WEBCTL_HOST_NETNS', 'WEBCTL_HOST_MNTNS', 'WEBCTL_HOST_PIDNS', 'WEBCTL_RO_ROOTS', 'WEBCTL_HIDDEN_DIRS',
+    'WEBCTL_HOST_IDS', 'FAKE_API_KEY', 'FAKE_OTHER']);
+  const r = await run(['isolated', '--pass-env', 'FAKE_*', '--', 'sh', '-c',
+    '"$0" "$1" isolated -- "$0" -e "$2" "$3"; "$0" "$1" isolated --pass-env FAKE_OTHER -- "$0" -e "$2" "$3"',
+    process.execPath, TOOL, PRINT_NAMED, MARKERS], PLANTED);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const [plain, passed] = envSets(r.stdout);
+  assert.equal(plain.FAKE_API_KEY, null, 'the nested call passed a var it was not asked to');
+  assert.equal(passed.FAKE_OTHER, PLANTED.FAKE_OTHER, 'the nested --pass-env did not pass');
+  assert.equal(passed.FAKE_API_KEY, null);
+  for (const e of [plain, passed]) {
+    for (const k of ['WEBCTL_HOST_NETNS', 'WEBCTL_HOST_MNTNS', 'WEBCTL_HOST_PIDNS', 'WEBCTL_RO_ROOTS', 'WEBCTL_HIDDEN_DIRS', 'WEBCTL_HOST_IDS']) {
+      assert.ok(e[k] !== null, `the nested command lost the marker ${k}`);
+    }
+  }
+});
+
+test('⛔ --pass-env is VALIDATED: not NAME or PREFIX_*, or a scrubbed socket/display name → usage 3, nothing run', async () => {
+  for (const bad of ['*', '', 'A-B', 'FOO*', '1ABC', 'FOO_*_BAR', 'FOO BAR', 'DISPLAY', 'SSH_AUTH_SOCK', 'XDG_RUNTIME_DIR']) {
+    const r = await run(['isolated', '--pass-env', bad, '--', process.execPath, '-e', 'console.log("RAN-" + "MARKER")']);
+    assert.equal(r.status, 3, `--pass-env ${JSON.stringify(bad)}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN \(usage\): --pass-env #1 /m, `--pass-env ${JSON.stringify(bad)}`);
+    assert.doesNotMatch(r.stdout, /RAN-MARKER/);
+  }
 });
 
 test('⛔ a planted XDG_CACHE_HOME cannot redirect base\'s storage paths out of a temp HOME under `isolated`', needsIsolation, async () => {
@@ -1599,19 +1684,111 @@ test('⭐ ARM: the command cannot bind a port below 1024 (the netns belongs to t
  * gives up by itself after ~10 s, so a LOST signal ends as `TIMEOUT` rc 9 — never as an
  * orphan looping forever. @param {string[]} argv
  */
-function termAfterReady(argv) {
-  return /** @type {Promise<{status: number|null, signal: string|null, stdout: string}>} */ (new Promise((resolve) => {
-    const c = spawn(argv[0], argv.slice(1), { env: cleanEnv() });
-    let stdout = ''; let sent = false;
+function termAfterReady(argv, env = {}, sig = /** @type {NodeJS.Signals} */ ('SIGTERM')) {
+  return /** @type {Promise<{status: number|null, signal: string|null, stdout: string, stderr: string}>} */ (new Promise((resolve) => {
+    const c = spawn(argv[0], argv.slice(1), { env: cleanEnv(env) });
+    let stdout = ''; let stderr = ''; let sent = false;
+    c.stderr.on('data', (d) => { stderr += d; });
     c.stdout.on('data', (d) => {
       stdout += d;
-      if (!sent && /READY/.test(stdout)) { sent = true; c.kill('SIGTERM'); }
+      if (!sent && /READY/.test(stdout)) { sent = true; c.kill(sig); }
     });
-    c.on('close', (status, signal) => resolve({ status, signal, stdout }));
+    c.on('close', (status, signal) => resolve({ status, signal, stdout, stderr }));
   }));
 }
 const TRAPPER = 'trap "echo GOT-TERM; exit 7" TERM; echo READY; i=0; '
   + 'while [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; echo TIMEOUT; exit 9';
+const HUP_TRAPPER = TRAPPER.replace('GOT-TERM', 'GOT-HUP').replace('" TERM;', '" HUP;');
+
+test('⭐ SIGHUP to the harness reaches the command inside (its trap runs, its exit code comes back) — CONTROL without `isolated`', needsIsolation, async () => {
+  const r = await termAfterReady([process.execPath, TOOL, 'isolated', '--', 'sh', '-c', HUP_TRAPPER], {}, 'SIGHUP');
+  assert.match(r.stdout, /GOT-HUP/, `the command never saw the SIGHUP:\n${r.stdout}${r.stderr}`);
+  assert.equal(r.status, 7, r.stdout);
+  const c = await termAfterReady(['sh', '-c', HUP_TRAPPER], {}, 'SIGHUP');
+  assert.match(c.stdout, /GOT-HUP/);
+  assert.equal(c.status, 7);
+});
+
+// ── pid 1 is `bash --norc -p -c`: the caller's shell config never runs as pid 1 ──
+//
+// ⛔ Measured by the review: pid 1 was `bash -c`, so a BASH_ENV script ran as pid 1 WITH full
+// namespace capabilities BEFORE any mask; SHELLOPTS=xtrace traced the reaper; an exported
+// `wait()` REPLACED it; SHELLOPTS=errexit + TERM ended the namespace before the command's own
+// trap (rc 143, not 7, cleanup skipped). ⇒ `-p` (privileged mode) ignores all three.
+// ⛔ AND ~/.bashrc (measured while fixing it): with SHLVL unset — the env allowlist drops it —
+// and stdin a SOCKET (node's stdio pipes are socketpairs), bash believes rshd started it and
+// sources ~/.bashrc, `-p` or not. ⇒ `--norc` too.
+// Each arm passes the var with --pass-env: without it the ALLOWLIST already stops it, and the
+// arm would pass whatever pid 1 is.
+
+/** A throwaway dir holding a BASH_ENV script and a $HOME/.bashrc that each announce themselves. */
+function shellConfigDir() {
+  const dir = tmpdir();
+  fs.writeFileSync(path.join(dir, 'bash-env.sh'), 'echo "BASH_ENV-SOURCED $$" >&2\n');
+  fs.writeFileSync(path.join(dir, '.bashrc'), 'echo "BASHRC-SOURCED $$" >&2\n');
+  return dir;
+}
+const CMD_OK = 'console.log("CMD-RAN"); process.exit(5)';
+/** argv for: fresh `isolated` running node CMD_OK, and a NESTED one under it. @param {string[]} o outer opts @param {string[]} i inner opts */
+const freshAndNested = (o, i) => [['isolated', ...o, '--', process.execPath, '-e', CMD_OK],
+  ['isolated', ...o, '--', process.execPath, TOOL, 'isolated', ...i, '--', process.execPath, '-e', CMD_OK]];
+
+test('⛔ pid 1 ignores BASH_ENV (it would run as pid 1 with every capability, before any mask) — fresh AND nested', needsIsolation, async () => {
+  const dir = shellConfigDir();
+  // ⚠ SHLVL passed too: with it unset and stdin a socket, bash takes the rshd branch, sources
+  // ~/.bashrc and RETURNS before BASH_ENV — the arm passed vacuously without it (measured)
+  const env = { BASH_ENV: path.join(dir, 'bash-env.sh'), SHLVL: '5' };
+  const pe = ['--pass-env', 'BASH_ENV', '--pass-env', 'SHLVL'];
+  try {
+    for (const args of freshAndNested(['--keep', dir, ...pe], pe)) {
+      const r = await run(args, env);
+      assert.equal(r.status, 5, r.stdout + r.stderr);
+      assert.match(r.stdout, /^CMD-RAN$/m);
+      assert.doesNotMatch(r.stderr, /BASH_ENV-SOURCED/, `pid 1 sourced BASH_ENV (${args.length > 6 ? 'nested' : 'fresh'})`);
+    }
+    // CONTROL: the same BASH_ENV IS honoured by a plain `bash -c` — the arm can fail
+    const c = spawnSync('bash', ['-c', 'true'], { encoding: 'utf8', env: cleanEnv(env) });
+    assert.match(c.stderr, /BASH_ENV-SOURCED/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ pid 1 ignores SHELLOPTS=xtrace (no reaper trace) and an exported `wait` function — fresh AND nested', needsIsolation, async () => {
+  const env = { SHELLOPTS: 'xtrace', 'BASH_FUNC_wait%%': '() { echo HIJACKED-WAIT >&2; return 0; }' };
+  for (const args of freshAndNested(['--pass-env', 'SHELLOPTS', '--pass-env', 'BASH_FUNC_*'], ['--pass-env', 'SHELLOPTS', '--pass-env', 'BASH_FUNC_*'])) {
+    const r = await run(args, env);
+    assert.equal(r.status, 5, `an exported wait() replaced the reaper's (the exit code is lost):\n${r.stdout}${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /HIJACKED-WAIT/);
+    assert.doesNotMatch(r.stderr, /^\++ /m, `pid 1 honoured SHELLOPTS=xtrace:\n${r.stderr}`);
+  }
+  // CONTROL: a plain `bash -c` with the same env traces AND calls the exported wait
+  const c = spawnSync('bash', ['-c', 'sleep 0 & wait $!'], { encoding: 'utf8', env: cleanEnv(env) });
+  assert.match(c.stderr, /^\+ /m);
+  assert.match(c.stderr, /HIJACKED-WAIT/);
+});
+
+test('⛔ pid 1 ignores SHELLOPTS=errexit: TERM → the command\'s OWN trap runs and its code 7 comes back (not 143)', needsIsolation, async () => {
+  const r = await termAfterReady([process.execPath, TOOL, 'isolated', '--pass-env', 'SHELLOPTS', '--', 'sh', '-c', TRAPPER],
+    { SHELLOPTS: 'errexit' });
+  assert.match(r.stdout, /GOT-TERM/, `the command's trap never ran:\n${r.stdout}${r.stderr}`);
+  assert.equal(r.status, 7, `${r.status} ${r.signal}`);
+});
+
+test('⛔ pid 1 does not source ~/.bashrc when stdin is a SOCKET and SHLVL is unset (bash\'s "run by rshd" rule) — fresh AND nested', needsIsolation, async () => {
+  const home = shellConfigDir(); // a throwaway HOME under /tmp: kept by `isolated` as the arm's own
+  try {
+    for (const args of freshAndNested([], [])) {
+      const r = await run(args, { HOME: home });
+      assert.equal(r.status, 5, r.stdout + r.stderr);
+      assert.doesNotMatch(r.stderr, /BASHRC-SOURCED/, `pid 1 sourced $HOME/.bashrc (${args.length > 6 ? 'nested' : 'fresh'})`);
+    }
+    // CONTROL: `bash -c` with stdin a socket, SHLVL unset, sources it; `--norc` does not; `-p` alone still does
+    const ctl = (/** @type {string[]} */ flags) => spawnSync('bash', [...flags, 'true'], { encoding: 'utf8',
+      env: { PATH: String(process.env.PATH), HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] }).stderr;
+    assert.match(ctl(['-c']), /BASHRC-SOURCED/, 'CONTROL: bash did not take the rshd branch here — the arm proves nothing');
+    assert.match(ctl(['-p', '-c']), /BASHRC-SOURCED/, 'CONTROL: -p alone does not stop it (why --norc)');
+    assert.doesNotMatch(ctl(['--norc', '-p', '-c']), /BASHRC-SOURCED/);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
 
 test('⭐ SIGTERM to the harness reaches the command inside (its trap runs, its exit code comes back)', needsIsolation, async () => {
   const r = await termAfterReady([process.execPath, TOOL, 'isolated', '--', 'sh', '-c', TRAPPER]);
