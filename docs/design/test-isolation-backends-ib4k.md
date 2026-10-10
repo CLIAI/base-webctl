@@ -47,7 +47,7 @@ each with its positive control (`k3wn`). A backend that passes fewer arms is not
 | 4 | the home HIDDEN | ~/.ssh/config, ~/.config/webctl/config.toml → ENOENT | readable outside; a `--keep-ro` path readable, not writable |
 | 5 | no privilege | CapEff 0, NoNewPrivs 1; umount / remount refused | — |
 | 6 | env allowlist | a planted unknown var absent | `--pass-env` passes it |
-| 7 | writable only where declared | cwd and `--keep` writable | everything else EROFS/absent |
+| 7 | writable only where declared | a user-owned dir outside the home, base's root, the home → EROFS/absent | the cwd, `--keep` (inside and outside /tmp) writable; procfs writes and a nested `unshare -rn` still work |
 | 8 | no host-shared scratch | a file planted in the host's `/dev/shm` and `/var/tmp` → absent; a write there is not visible outside; the host's SysV IPC (a segment from `ipcmk -M`) not listed by `ipcs -m`, a `shmat` write never reaching it; the host's POSIX mqueues absent from `/dev/mqueue` | a file, a segment and a queue made inside are seen inside; a write made outside is read back |
 | 9 | no host keyring | `keyctl show @s` names no host keyring; a key added inside is gone outside | a key added inside is readable inside |
 | 10 | no host identity | hostname ≠ the host's; `/sys/class/net` and `/sys/devices/virtual/net` list only `lo`; `/etc/machine-id` absent or neutral, and not rewritable through its backing copy | the same reads outside show the host's values; the rewrite works on such a bind made outside |
@@ -70,11 +70,19 @@ the host's session keyring (possessor `alswrv`) and a host key was found; the ho
 interface name in `/sys/class/net` and `/etc/machine-id` were the host's. After: all closed, on all
 three paths (the table's rows 8–10).
 
-* **Row 7 — OPEN, needs a ruling.** `isolated` makes the home, base's root, the sensitive dot-dirs'
-  real paths and the keeps read-only or hidden; it does **not** remount the rest of `/`. A
-  **user-owned dir outside the home** (an `/opt/x` of one's own) is writable inside — measured, and
-  recorded in the table as a `todo`. Closing it means a read-only root with the declared paths
-  re-bound writable: a wider change, not taken in phase 1.
+* **Row 7 — CLOSED (ruling R1): the whole tree read-only.** Measured open in phase 1: a **user-owned
+  dir outside the home** (an `/opt/x` of one's own) was writable inside. Now, after the keeps are
+  staged and BEFORE the scratch masks, the hides and the keeps moving back, every mount reachable
+  from `/` — the root mount included — gets a per-mount `remount,bind,ro` (a mount ON `/` would not
+  move the process's root), except `/proc`, `/sys`, `/dev` (procfs writes — `oom_score_adj`, a nested
+  userns's `uid_map` — must keep working; measured: with `/proc` read-only the privilege drop itself
+  fails) and our own `/run`. Every WRITABLE item (cwd, `--keep`, a throwaway HOME, an outer's rw
+  re-bind) gets its own bind on top; one that CONTAINS a masked dir (a cwd of `/`) is refused. READ
+  BACK: `readOnlyGaps` over `/` minus the declared writable set → refuse on any gap. A mount point no
+  lookup can reach (EACCES — measured: docker's overlay rootfs under a root-owned 0710 dir) is
+  skipped: the capless command, the same uid, cannot reach it either. A stripped-markers call
+  carries an R1 outer's writable mounts wherever they are. ⚠ Lanes lose writes outside the declared
+  set (CHANGELOG v0.34.0 lists them).
 * **Row 8 — `/dev/shm` and `/var/tmp` get a fresh private tmpfs (mode 1777), as `/tmp` does.**
   ⇒ The keep rules are `/tmp`'s, NOT a new refusal: a `--keep` / `--keep-ro` BENEATH one is staged
   and re-bound with its mode (the write lands on the host); a keep that IS one, or an ancestor, is a
@@ -250,6 +258,7 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.34.0.
   `/sys/devices/virtual/net` read-back (row 10), the keyring join on every path and `unverified`
   (row 9, R3), the identity files read-only (row 10), the v0.33 refusal lead (§2), the runner guard
   (§2), the gate's last-match parse (§4), generation 7, `hostname` required (R2).
-* **Open:** row 7 for dirs outside the home (§1a); `/proc/keys` (§1a row 9, needs a re-ruling).
+* **Row 7 closed (R1):** the read-only root (§1a), on the fresh, nested and stripped paths.
+* **Open:** `/proc/keys` (§1a row 9, needs a re-ruling).
 * **Phase 2 — bwrap; phase 3 — docker (§3, §3a):** not started. Each lands by adding its probe,
   its run path, and its name to the table's IMPLEMENTED list — the guard test fails until it does.

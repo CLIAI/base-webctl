@@ -211,8 +211,8 @@ is the strongest form: it names the ownership in the function that reads it.
 
 **Headline: `isolated` chooses its BACKEND — unshare → bwrap → docker → refuse, never unisolated
 — and is judged by ONE arm table (ib4k §1, rows 1–11); and it closes the gaps v0.33 left open: a
-private `/var/tmp`, `/dev/shm`, SysV IPC and POSIX mqueues, a fresh session keyring, and the host's
-identity hidden.** Phase 1 of 3 (ib4k): only the **unshare** backend is implemented. Harness and
+private `/var/tmp`, `/dev/shm`, SysV IPC and POSIX mqueues, a fresh session keyring, the host's
+identity hidden — and a READ-ONLY root (row 7).** Phase 1 of 3 (ib4k): only the **unshare** backend is implemented. Harness and
 gate only; no `lib/` change. **`HARNESS_GENERATION` is 7** (below). No consumer change expected,
 except a contract that matches the new verdict field or a refusal's tail.
 
@@ -291,12 +291,36 @@ except a contract that matches the new verdict field or a refusal's tail.
   release gate the outer is base HEAD, so this bites only a lane whose own outer call is older. The
   nested path makes no IPC namespace of its own: it inherits its outer's.
 
+### Row 7 closed — the whole tree READ-ONLY (ruling R1)
+
+* Measured before: a user-owned dir OUTSIDE the home (an `/opt/x` of one's own) was WRITABLE inside —
+  `isolated` protected the home, base's root and the keeps, and left the rest of `/` as it was.
+* Now every mount reachable from `/` is remounted read-only (per mount, in the private mount
+  namespace), EXCEPT `/proc`, `/sys` and `/dev` (procfs writes — `oom_score_adj`, a nested userns's
+  `uid_map` — keep working for Chromium's sandbox and for `isolated`'s own privilege drop). Then, on
+  top and WRITABLE: the cwd, every `--keep`, a throwaway `HOME`, and the private `/tmp`, `/var/tmp`,
+  `/dev/shm`, `/run`. READ BACK: any other writable mount → refused. A mount point nothing can reach
+  (a root-owned 0710 dir — e.g. docker's overlay rootfs) is skipped: the command cannot reach it either.
+* A stripped-markers call carries an outer's writable mounts wherever they are (so a `--keep` outside
+  the home stays writable on all three paths).
+* ⚠ **What lanes LOSE** — writes anywhere outside the declared set now fail with **EROFS**:
+  * a user-owned dir outside the home, the cwd, the keeps and the scratch dirs (an `/opt/<own>`, a
+    `/srv/<own>`, a user-owned `/usr/local/...`);
+  * a tool CACHE there (a package manager, a compiler or a browser cache configured outside the
+    home) — point it at the cwd, a `--keep`, or `/tmp` (TMPDIR is `/tmp` already);
+  * a NESTED `isolated --keep <path>` of a path its outer did not keep writable (it is read-only in
+    the outer, and a nested call cannot widen that) — keep it in the outer call;
+  * a cwd that CONTAINS a masked dir (`/`, `/var`) is now refused: its writable bind would undo the
+    mask. Run from a test-owned directory.
+
 ### New refusals (fail closed)
 
 * no `hostname` tool in `/usr/sbin:/usr/bin:/sbin:/bin` (R2); a fresh sysfs the kernel refuses (F3);
   pid 1's `keyctl new_session` failing, on the fresh AND the nested path (R3, F5); the IPC namespace
   still the caller's, or `/dev/mqueue` not resolving to the fresh mqueue (F1); the identity files'
-  tmpfs not read-only (F6); a selected backend without a runner (F7).
+  tmpfs not read-only (F6); a selected backend without a runner (F7); a mount under `/` that cannot
+  be made read-only, or one still writable outside the declared set after it (R1); a cwd containing
+  a masked dir (R1).
 
 ### Generation 7 (ruling R4)
 
@@ -335,8 +359,6 @@ if (gen7) assert.match(stderr, /^isolated: home HIDDEN; .*; backend: [a-z]+/m);
 
 * **bwrap and docker backends** (phases 2 and 3, ib4k §3/§3a): not implemented. A host that forbids
   unprivileged user namespaces is still refused — the lane blocked by AppArmor is NOT unblocked yet.
-* **Row 7 is OPEN for dirs outside the home**: a user-owned dir outside the home (an `/opt/x` of
-  one's own) is WRITABLE inside — `isolated` never remounts `/` read-only. Recorded as a `todo` arm.
 * **Identity not hidden:** `/etc/hosts` (may name the host), `/proc/sys/kernel/random/boot_id`, DMI
   strings under `/sys/class/dmi/id`, **disk serials** (`/sys/class/block/*/device/serial` — block
   devices are not per network namespace, so a fresh sysfs still lists them), the kernel release.

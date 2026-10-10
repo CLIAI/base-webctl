@@ -311,6 +311,10 @@ contract's output when it is used.
   dbus-uuidgen keep working; their copies read-only). All read back before the command starts; a
   nested call under a v0.33 outer is refused saying "upgrade the outer". *Not hidden:* `/etc/hosts`,
   boot_id, DMI strings, disk serials, key descriptions in `/proc/keys`.
+* ⛔ **The root is READ-ONLY (v0.34.0, `ib4k` row 7).** Every mount but `/proc`, `/sys`, `/dev` is
+  remounted read-only; writable on top: the cwd, each `--keep`, a throwaway `HOME`, and the private
+  `/tmp`, `/var/tmp`, `/dev/shm`, `/run`. A write anywhere else is EROFS — a user-owned dir outside
+  the home, a tool cache there. Read back; a cwd containing a masked dir (`/`) is refused.
 * ⛔ **`isolated` fails CLOSED.** No `unshare`, unprivileged user namespaces disabled (or refused
   by AppArmor — named as **HOST POLICY**, below), a bad `WEBCTL_UNSHARE_BIN`, no
   `ip`/`ifconfig`, no `mount`, no `setpriv`, no `bash` (pid 1) — each looked up in
