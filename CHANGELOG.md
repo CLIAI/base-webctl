@@ -214,7 +214,8 @@ is the strongest form: it names the ownership in the function that reads it.
 private `/var/tmp`, `/dev/shm`, SysV IPC and POSIX mqueues, a fresh session keyring, the host's
 identity hidden — a READ-ONLY root (row 7) — and, holes in every released `isolated` found by review,
 a fresh minimal `/dev` (row 12) and a read-only cgroup tree in a cgroup namespace of its own (row 3).**
-**The unshare hardening release:** only the **unshare** backend is
+⛔ **A SECURITY update — not optional:** the `/dev` and cgroup fixes close holes in EVERY released
+`isolated` up to v0.33.1 (below). **The unshare hardening release:** only the **unshare** backend is
 implemented; **bwrap and docker land in v0.35.0**. Harness and gate only; no `lib/` change. **`HARNESS_GENERATION` is 7** (below). No consumer change expected,
 except a contract that matches the new verdict field or a refusal's tail.
 
@@ -307,7 +308,16 @@ except a contract that matches the new verdict field or a refusal's tail.
   release gate the outer is base HEAD, so this bites only a lane whose own outer call is older. The
   nested path makes no IPC namespace of its own: it inherits its outer's.
 
-### ⛔ Holes in EVERY released `isolated` (up to v0.33.1), found by review — closed
+### ⛔ SECURITY: holes in EVERY released `isolated` (up to v0.33.1), found by review — closed
+
+**Bumping to v0.34.0 is a security update, not optional.** On every released version, a command
+run under `isolated` — the mutant, the untrusted page, the code under test — could:
+
+* **inject keystrokes into the user's desktop:** `/dev/uinput` opened for write, i.e. a virtual
+  keyboard typing into whatever window has focus, a terminal included;
+* **kill its caller:** the caller's own `cgroup.kill` opened for write — one write kills every
+  process of the caller's scope: the release gate, the lane's harness, the user's session there.
+
 
 * **Row 12 — the host `/dev` was passed through WHOLE.** Measured inside: `/dev/uinput` opened for
   write (virtual-keyboard injection into the host desktop); the host devpts (the user's other
