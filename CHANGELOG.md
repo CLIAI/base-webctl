@@ -258,7 +258,8 @@ except a contract that matches the new verdict field or a refusal's tail.
   queue made inside are seen inside; the write outside is read back); **row 10** —
   `/sys/devices/virtual/net` lists only `lo`, and the neutral `/etc/machine-id` cannot be rewritten
   through its backing copy (`chmod` + write; control: the same routine changes such a bind made
-  outside); **row 9** is a named SKIP where `keyctl show @s` fails.
+  outside); **row 9** is a named SKIP where `keyctl show @s` fails, and **9b**: a host key's
+  possessor-only payload → EACCES inside by id (control: readable outside).
 
 ### Rows 8–10 closed (unshare)
 
@@ -362,14 +363,12 @@ if (gen7) assert.match(stderr, /^isolated: home HIDDEN; .*; backend: [a-z]+/m);
 * **Identity not hidden:** `/etc/hosts` (may name the host), `/proc/sys/kernel/random/boot_id`, DMI
   strings under `/sys/class/dmi/id`, **disk serials** (`/sys/class/block/*/device/serial` — block
   devices are not per network namespace, so a fresh sysfs still lists them), the kernel release.
-* **Key descriptions via `/proc/keys`** (review F2, OPEN — needs a re-ruling): the kernel lists every
-  key whose owner uid is mapped in the reader's user namespace — the real uid always is — under the
-  user VIEW bit, so the descriptions of the real uid's keys are enumerable inside, and a key whose
-  id is known is still `describe`-able under the user permission bits. Contents need the possessor
-  or read bit. ⚠ Masking `/proc/keys` was measured to break every nested `--mount-proc` (the
-  kernel refuses a new procfs while a locked mount covers a proc file) — `isolated`'s own nested and
-  stripped-markers paths included — and a shadowed clean procfs that avoids that lets any command
-  read the keys again with one `unshare -U --map-user … --mount-proc`.
+* **Key DESCRIPTIONS and ids** (review F2; ruled: no mask): the description (type, uid, perms, name)
+  and id of every key the user's uid owns stay enumerable inside — `/proc/keys`, `keyctl rdescribe` —
+  because the user VIEW bit applies without possession. PAYLOADS need possession or the user READ
+  bit: a host key with possessor-only read answers EACCES inside (arm 9b). A masked `/proc/keys` was
+  measured to break every nested `--mount-proc` (the kernel's `mnt_already_visible`), this verb's own
+  nested and stripped paths included, and a fresh nested procfs lists the keys again anyway.
 * Everything under v0.33.x's "does NOT cover" that is not listed above still applies (what a
   re-bind brings back is visible; the util-linux 2.38 PDEATHSIG window).
 

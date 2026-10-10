@@ -149,6 +149,16 @@ const tamper = (target) => {
     out.keyShowStatus = show.status;
     out.keyShowNamesHost = String(show.stdout).includes(cfg.keyName);
     out.keySearch = run(['keyctl', 'search', '@s', 'user', cfg.keyName]).status;
+    // 9b: the planted key's PAYLOAD by id — possessor-only read → EACCES inside (no possession); its
+    // DESCRIPTION stays readable under the user view bit (the documented residual, a diagnostic only)
+    let kid = '';
+    try { kid = fs.readFileSync(cfg.keyIdFile, 'utf8').trim(); } catch { /* none planted */ }
+    if (kid) {
+      const pr = run(['keyctl', 'print', kid]);
+      out.keyPayload = pr.status === 0 ? (String(pr.stdout).trim() === 'planted-by-test' ? 'READ' : 'other')
+        : /Permission denied/.test(String(pr.stderr)) ? 'EACCES' : `exit ${pr.status}`;
+      out.keyDescribe = run(['keyctl', 'rdescribe', kid]).status;
+    }
     const mine = `${cfg.keyName}-inside-${mode}`;
     const add = run(['keyctl', 'add', 'user', mine, 'v', '@s']);
     out.keySelf = add.status === 0 ? run(['keyctl', 'print', String(add.stdout).trim()]).stdout.trim() : `add-failed ${add.status}`;

@@ -107,7 +107,7 @@ try { fs.appendFileSync(${JSON.stringify(hits)}, JSON.stringify({ pid: process.p
       planted: `arm-planted-${process.pid}`, uid: process.getuid?.(), gid: process.getgid?.(), mount: MOUNT,
       tamperSrc: path.join(neutral, 'tamper-src'), tamperDst: path.join(neutral, 'tamper-dst'),
       ipcmk: IPCMK, python: PYTHON, shmPy: SHM_PY, ipcFile: path.join(keep, 'ipc.json'),
-      keyctl: !!KEYCTL, keyName: `webctl-arm-${process.pid}`, port: /** @type {net.AddressInfo} */ (listener.address()).port,
+      keyIdFile: path.join(keep, 'key-id'), keyctl: !!KEYCTL, keyName: `webctl-arm-${process.pid}`, port: /** @type {net.AddressInfo} */ (listener.address()).port,
       sockets, hostPid: process.pid, baseRoot: ROOT, probe: PROBE, harness: TOOL, preload, backend,
       self: path.join(keep, 'cfg.json') };
     fs.writeFileSync(cfg.self, JSON.stringify(cfg));
@@ -263,12 +263,19 @@ const ROWS = [
       assert.equal(r.keyShowStatus, 0, ctx(w, `${p}: \`keyctl show @s\` failed`));
       assert.equal(r.keyShowNamesHost, false, ctx(w, `${p}: \`keyctl show @s\` names the HOST's planted key`));
       assert.notEqual(r.keySearch, 0, ctx(w, `${p}: the host's planted key is found from inside`));
+      // 9b — what is GUARANTEED (ruling on F2): a possessor-only payload is unreadable without possession.
+      // ⚠ Its DESCRIPTION is not hidden (user view bit; /proc/keys, rdescribe) — the documented residual.
+      assert.equal(r.keyPayload, 'EACCES', ctx(w, `${p}: the host key's possessor-only payload is readable by id (${r.keyPayload})`));
       assert.deepEqual(w.post.keysLeft, [], ctx(w, `${p}: a key added inside is in the host's session keyring`));
     },
-    control: (w) => {
+    control: (w, t) => {
       assert.equal(w.outside.outside.keyShowNamesHost, true, 'control: `keyctl show @s` outside does not name the planted key');
       assert.equal(w.outside.outside.keySearch, 0, 'control: the planted key is not found outside');
       for (const p of PATHS) assert.equal(w.arm[p].keySelf, 'v', `${p}: a key added inside is not readable inside`);
+      assert.equal(w.outside.outside.keyPayload, 'READ', 'control: the planted key\'s payload is not readable outside (where it is possessed)');
+      for (const p of PATHS) {
+        if (w.arm[p].keyDescribe === 0) t.diagnostic(`${p}: the host key's DESCRIPTION is readable by id — the documented residual (ib4k §1a row 9)`);
+      }
     },
     deeper: '"⛔ keyctl missing → the run goes ahead and the verdict says keyring: shared"' },
   { n: 10, property: 'no host identity',

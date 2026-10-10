@@ -48,6 +48,11 @@ if (String(ent.stdout).split(':')[5] !== cfg.home) fail('NSS answers the uid fro
 if (cfg.keyctl) {
   const k = run(['keyctl', 'add', 'user', cfg.keyName, 'planted-by-test', '@s']);
   if (k.status !== 0) fail(`keyctl add: ${String(k.stderr).trim()}`);
+  // row 9b: POSSESSOR-only read (possessor all, user VIEW only) — what isolation guarantees is that the
+  // payload needs possession, which a fresh session keyring takes away; the id goes to the probe
+  const id = String(k.stdout).trim();
+  if (run(['keyctl', 'setperm', id, '0x3f010000']).status !== 0) fail('keyctl setperm');
+  fs.writeFileSync(cfg.keyIdFile, id);
 }
 // row 8 (SysV IPC, POSIX mqueues): this world has its OWN IPC namespace (`unshare --ipc`, the test)
 // and a fresh mqueue on /dev/mqueue — so the "host's" segment and queue below are throwaway too

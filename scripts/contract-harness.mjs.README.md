@@ -310,7 +310,8 @@ contract's output when it is used.
   back), and `/etc/machine-id` / `/etc/hostname` are neutral (`NEUTRAL_MACHINE_ID`; systemd-id128 and
   dbus-uuidgen keep working; their copies read-only). All read back before the command starts; a
   nested call under a v0.33 outer is refused saying "upgrade the outer". *Not hidden:* `/etc/hosts`,
-  boot_id, DMI strings, disk serials, key descriptions in `/proc/keys`.
+  boot_id, DMI strings, disk serials, key DESCRIPTIONS and ids (`/proc/keys`, `keyctl rdescribe` —
+  payloads need possession, which the fresh keyring takes away).
 * ⛔ **The root is READ-ONLY (v0.34.0, `ib4k` row 7).** Every mount but `/proc`, `/sys`, `/dev` is
   remounted read-only; writable on top: the cwd, each `--keep`, a throwaway `HOME`, and the private
   `/tmp`, `/var/tmp`, `/dev/shm`, `/run`. A write anywhere else is EROFS — a user-owned dir outside

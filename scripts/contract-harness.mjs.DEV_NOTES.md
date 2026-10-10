@@ -1572,6 +1572,18 @@ and scratch dirs, as before.
 A cwd that contains a masked dir is refused (`/var` ⊃ `/var/tmp`: an arm); one that contains the home
 too (`/`) keeps its older, bigger reason ("contains the home directory") — found by the full suite.
 
+**F2 — ruled (c): no mask; arm 9b tests what IS guaranteed.** Measured: a bind over `/proc/keys` makes
+every nested `--mount-proc` fail (`mount /proc failed: Operation not permitted` — the kernel's
+`mnt_already_visible` wants one procfs with no locked mount over a non-directory), the nested path's
+`unshare -U -m --pid --fork --mount-proc` and the stripped path's prefix included; a shadowed clean
+procfs restores nesting, but the nested fresh procfs then lists the keys again (11 lines, with
+`--map-user`). ⇒ Descriptions and ids stay enumerable (user VIEW bit; documented residual). Arm 9b:
+the world sets the planted key to possessor-only read (`0x3f010000`); inside, `keyctl print <id>` →
+EACCES on all three paths; control: `READ` outside, where the world's session keyring possesses it.
+The description stays readable by id inside — a diagnostic, never a pass. Sabotage: pid 1 skips
+`keyctl new_session` and the read-back is dropped → 9b red (`READ`), shown with the other row-9
+assertions removed from a copy so 9b alone is judged; with the read-back kept, the run is refused.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

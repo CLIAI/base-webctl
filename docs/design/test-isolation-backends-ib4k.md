@@ -49,7 +49,7 @@ each with its positive control (`k3wn`). A backend that passes fewer arms is not
 | 6 | env allowlist | a planted unknown var absent | `--pass-env` passes it |
 | 7 | writable only where declared | a user-owned dir outside the home, base's root, the home → EROFS/absent | the cwd, `--keep` (inside and outside /tmp) writable; procfs writes and a nested `unshare -rn` still work |
 | 8 | no host-shared scratch | a file planted in the host's `/dev/shm` and `/var/tmp` → absent; a write there is not visible outside; the host's SysV IPC (a segment from `ipcmk -M`) not listed by `ipcs -m`, a `shmat` write never reaching it; the host's POSIX mqueues absent from `/dev/mqueue` | a file, a segment and a queue made inside are seen inside; a write made outside is read back |
-| 9 | no host keyring | `keyctl show @s` names no host keyring; a key added inside is gone outside | a key added inside is readable inside |
+| 9 | no host keyring | `keyctl show @s` names no host keyring; a key added inside is gone outside; (9b) a host key's possessor-only PAYLOAD → EACCES by id. *Residual: descriptions and ids stay enumerable (§1a)* | a key added inside is readable inside; the payload is readable outside |
 | 10 | no host identity | hostname ≠ the host's; `/sys/class/net` and `/sys/devices/virtual/net` list only `lo`; `/etc/machine-id` absent or neutral, and not rewritable through its backing copy | the same reads outside show the host's values; the rewrite works on such a bind made outside |
 | 11 | no loader injection into the privileged half | `NODE_OPTIONS` / `LD_*` preloads never run before the masks | the command itself sees its allowed env |
 
@@ -109,13 +109,16 @@ three paths (the table's rows 8–10).
   `keyctl show @s` fails** (review F5): the join runs, but cannot be read back — the verdict says
   `keyring: unverified (keyctl show failed)` and row 9 is a named SKIP. ⚠ The user keyring (`@u`) is
   per user namespace on the measured kernel (its id differs inside); on kernels before 5.3 it was per
-  uid. ⚠ **`/proc/keys` (review F2) — OPEN, needs a re-ruling:** the kernel lists every key whose
-  owner uid is mapped in the reader's user namespace (the real uid always is) under the user VIEW
-  bit, so the DESCRIPTIONS of the real uid's keys are enumerable inside, and a known id is still
-  describable under the user permission bits (contents need possessor or read). Masking the file
-  was measured to break every nested `--mount-proc` (EPERM: no fully visible procfs left) — this
-  verb's own nested and stripped paths included; keeping a shadowed clean procfs fixes nesting but
-  lets one `unshare -U --map-user … --mount-proc` read the keys again (measured: 11 lines).
+  uid. ⚠ **RESIDUAL — key DESCRIPTIONS and ids (review F2; ruling (c), no mask):** the
+  description (type, uid, perms, name) and id of every key owned by the user's uid stay enumerable
+  inside — via `/proc/keys` and `keyctl rdescribe` — because the user VIEW bit applies without
+  possession, and the kernel lists every key whose owner uid is mapped in the reader's user namespace
+  (the real uid always is). What IS guaranteed (arm 9b): a PAYLOAD needs possession or the user READ
+  bit — a host key with possessor-only read (`0x3f010000`) answers EACCES inside, since the fresh
+  session keyring takes possession away. ⛔ Not masked, deliberately: a masked `/proc/keys` was
+  measured to break every nested `--mount-proc` (EPERM — `mnt_already_visible` wants a fully visible
+  procfs), this verb's own nested and stripped paths included, and a fresh nested procfs lists the
+  keys again anyway (measured: 11 lines).
 * **Row 10 — host identity.**
   * **hostname:** a UTS namespace (`unshare --uts`) named `webctl-isolated`. node has no
     `sethostname`, and `/proc/sys/kernel/hostname` belongs to the host's root (measured:
@@ -259,6 +262,6 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.34.0.
   (row 9, R3), the identity files read-only (row 10), the v0.33 refusal lead (§2), the runner guard
   (§2), the gate's last-match parse (§4), generation 7, `hostname` required (R2).
 * **Row 7 closed (R1):** the read-only root (§1a), on the fresh, nested and stripped paths.
-* **Open:** `/proc/keys` (§1a row 9, needs a re-ruling).
+* **Residual by ruling (F2, option c):** key descriptions and ids enumerable (§1a row 9) — no mask.
 * **Phase 2 — bwrap; phase 3 — docker (§3, §3a):** not started. Each lands by adding its probe,
   its run path, and its name to the table's IMPLEMENTED list — the guard test fails until it does.
