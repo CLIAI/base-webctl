@@ -2240,7 +2240,7 @@ async function runIsolatedInner(a) {
   // shadows a hide. ⛔ ONLY an explicit keep (plan.exempt): exempting every bind let a cwd (or
   // any implicit re-bind) at a hidden dir through (review of 5773fb8)
   const allHidden = [plan.home, ...plan.hidden];
-  const shown = hiddenGaps(mounts, allHidden, plan.exempt);
+  const shown = hiddenGaps(mounts || [], allHidden, plan.exempt); // null mounts refused above
   if (shown.length) {
     return refuse(`after hiding, ${shown.length} of ${allHidden.length} hidden dir(s) (the home, ~/.ssh, ~/.gnupg, the `
       + `state roots) do not resolve to the read-only '${HIDE_SOURCE}' tmpfs`);
@@ -2777,9 +2777,9 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
   /** @type {Bind[]} */ const binds = [];
   /** @type {string[]} */ const exempt = [];
   /** @type {string[]} */ const notes = [];
-  const items = [...explicit.map((p, i) => ({ p, label: `--keep #${i + 1}`, explicit: true, rw: true, rule: false, named: true, quiet: false })),
-    ...explicitRo.map((p, i) => ({ p, label: `--keep-ro #${i + 1}`, explicit: true, rw: false, rule: true, named: true, quiet: false })),
-    ...implicit.map((k) => ({ rule: false, named: false, quiet: false, ...k, explicit: false }))];
+  const items = [...explicit.map((p, i) => ({ p, label: `--keep #${i + 1}`, explicit: true, rw: true, rule: false, named: true, quiet: false, noHidden: false })),
+    ...explicitRo.map((p, i) => ({ p, label: `--keep-ro #${i + 1}`, explicit: true, rw: false, rule: true, named: true, quiet: false, noHidden: false })),
+    ...implicit.map((k) => ({ rule: false, named: false, quiet: false, noHidden: false, ...k, explicit: false }))];
   for (const k of items) {
     let real = '';
     try { real = fs.realpathSync(path.resolve(k.p)); } catch {
@@ -3146,6 +3146,8 @@ function singleMapping(map, inside, outside) {
  * --map-user: util-linux < 2.38), one that ignores its flags, a real uid of 0 — refused.
  * ⚠ Refusals never print the ids: they get pasted into a public repo's logs.
  * @param {{uid: number, gid: number} | null} ids the REAL uid/gid (host namespace)
+ * @param {{setpriv: string, unshare: string}} tools ABSOLUTE paths (privilegedTools) — never PATH
+ * @param {{pidns?: boolean}} [o]
  * @returns {{prefix: string[], why: string}}
  */
 function privilegeDrop(ids, tools, { pidns = false } = {}) {
