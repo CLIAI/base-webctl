@@ -1294,6 +1294,22 @@ test('⭐ a PATH dir under the hidden home is re-bound read-only: a script in it
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
+test('⛔ base\'s root UNDER the hidden home is re-bound READ-ONLY (the harness runs from it; a write is EROFS)', needsIsolation, async (t) => {
+  const home = fakeWholeHome();
+  const base = path.join(home, 'base-copy');
+  fs.mkdirSync(path.join(base, 'scripts'), { recursive: true });
+  fs.copyFileSync(TOOL, path.join(base, 'scripts', 'contract-harness.mjs'));
+  try {
+    const r = await underFakeHome(home, [process.execPath, path.join(base, 'scripts', 'contract-harness.mjs'), 'isolated', '--',
+      process.execPath, '-e', TRY_CREATE, path.join(base, 'x')]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(writeOf(r.stdout), 'EROFS', 'base\'s root under the home is writable inside');
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/base-copy; writable: nothing$/m, r.stderr);
+    assert.equal(fs.existsSync(path.join(base, 'x')), false);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
 test('⛔ REFUSED, naming the rule and NO path: a PATH entry or --keep-ro that IS the home, contains a hidden dir, or lies inside one', needsIsolation, async (t) => {
   const home = fakeWholeHome();
   const marker = path.join(home, 'work', 'RAN');
