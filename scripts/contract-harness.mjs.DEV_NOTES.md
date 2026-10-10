@@ -1494,6 +1494,21 @@ RED before (`REWRITTEN`), GREEN after, on all three paths.
 |---|---|---|
 | F6a | the identity tmpfs left writable (no ro remount, no read-back) | table row 10 (`REWRITTEN through its backing copy`) |
 
+**F4 — the refusal text broke a lane's regex.** Phase 1 refused `NOT RUN: no isolation backend can be
+used here — unshare: the kernel refused the namespaces (…)`; the perplexity lane matches
+`/NOT RUN: unshare exited 1/` (v0.33's text) and went red. Ruling: keep v0.33's leading text. ⇒ The
+unshare probe's kernel-refusal reason IS v0.33's wording (`unshareExitedWhy`, shared with the
+spawn-failed path, so the two cannot drift), and an UNPINNED refusal leads with the unshare reason,
+then appends `; no isolation backend can be used here — bwrap: <why>, docker: <why> (the command is
+never run unisolated)` (`refusalText`). unshare's own stderr — captured by the probe — is printed above
+the FAIL line, so "unshare's own message, if any, is above" stays true (v0.33's unshare wrote it
+straight to the caller's stderr). Every other unshare reason (a bad `WEBCTL_UNSHARE_BIN`, a missing
+tool, HOST POLICY) leads the same way, as v0.33 printed it. A PIN keeps the pin's text. The JSONL
+record is unchanged (`backend: null`, `skipped: [...]`). Arm: a fake `WEBCTL_UNSHARE_BIN` printing
+`unshare: unshare failed: Operation not permitted`, exit 1 → the lane's regex verbatim, the full line,
+and unshare's message before it. RED on the phase-1 harness (the regex did not match), GREEN after;
+also checked with the review's rig (fake unshare in a throwaway world): matches.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

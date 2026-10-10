@@ -179,7 +179,7 @@ test('⛔ an unknown WEBCTL_ISOLATION_BACKEND → refused by rule (value not pri
 test('⛔ unshare unavailable (a bad WEBCTL_UNSHARE_BIN) → REFUSED naming all three backends; the JSONL record lists each skip', async () => {
   const r = await run(['isolated', '--', 'true'], { WEBCTL_UNSHARE_BIN: '/nonexistent/unshare' });
   assert.equal(r.status, 1, r.stderr);
-  assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: no isolation backend can be used here — unshare: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file — it does not exist; bwrap: not implemented yet \(v0\.34 phase 2\); docker: not implemented yet \(v0\.34 phase 3\)/m);
+  assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file — it does not exist; no isolation backend can be used here — bwrap: not implemented yet \(v0\.34 phase 2\), docker: not implemented yet \(v0\.34 phase 3\) \(the command is never run unisolated\)/m);
   assert.doesNotMatch(r.stderr, /nonexistent/, 'the path is printed');
   const rec = recordOf(r.stdout);
   assert.equal(rec?.backend, null);
@@ -199,7 +199,7 @@ test('⛔ end to end: uid_map EPERM with the AppArmor sysctl at 1 → the unshar
     { env: cleanEnv({ WEBCTL_UNSHARE_BIN: fake }) });
     if (r.status === 97) { t.skip('SKIP (host): cannot fake the AppArmor sysctl in a throwaway namespace here'); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /NOT RUN: no isolation backend can be used here — unshare: HOST POLICY, not a fault of this lane: .*kernel\.apparmor_restrict_unprivileged_userns = 1.*\(1\) `sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0`.*\(2\) an AppArmor profile .*WEBCTL_UNSHARE_BIN=.*; bwrap: not implemented yet/);
+    assert.match(r.stderr, /NOT RUN: HOST POLICY, not a fault of this lane: .*kernel\.apparmor_restrict_unprivileged_userns = 1.*\(1\) `sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0`.*\(2\) an AppArmor profile .*WEBCTL_UNSHARE_BIN=.*; no isolation backend can be used here — bwrap: not implemented yet/);
     assert.equal(fs.existsSync(marker), false, 'the command ran');
     // CONTROL: the same fake WITHOUT the sysctl → the generic kernel reason, not HOST POLICY
     // (only where the HOST's sysctl is not 1 itself — then the control cannot be made here)
@@ -208,7 +208,29 @@ test('⛔ end to end: uid_map EPERM with the AppArmor sysctl at 1 → the unshar
     if (hostSysctl === '1') { t.diagnostic('control not run: the host sysctl is 1'); return; }
     const c = await run(['isolated', '--', 'true'], { WEBCTL_UNSHARE_BIN: fake });
     assert.equal(c.status, 1, c.stderr);
-    assert.match(c.stderr, /unshare: the kernel refused the namespaces/);
+    assert.match(c.stderr, /NOT RUN: unshare exited 1 before the isolated side reported in/);
     assert.doesNotMatch(c.stderr, /HOST POLICY/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ v0.33\'s refusal text is KEPT (review F4): a fake WEBCTL_UNSHARE_BIN printing EPERM and exiting 1 → the perplexity lane\'s own regex `/NOT RUN: unshare exited 1/` still matches; the backend summary is APPENDED', async (t) => {
+  let hostSysctl = '';
+  try { hostSysctl = fs.readFileSync('/proc/sys/kernel/apparmor_restrict_unprivileged_userns', 'utf8').trim(); } catch { /* absent */ }
+  if (hostSysctl === '1') { t.skip('SKIP (host): the AppArmor sysctl is 1 here — the refusal is HOST POLICY (its own arm)'); return; }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ib-select-'));
+  try {
+    const fake = path.join(dir, 'fake-unshare');
+    fs.writeFileSync(fake, '#!/bin/sh\necho "unshare: unshare failed: Operation not permitted" >&2\nexit 1\n', { mode: 0o755 });
+    const r = await run(['isolated', '--', 'true'], { WEBCTL_UNSHARE_BIN: fake });
+    assert.equal(r.status, 1, r.stderr);
+    // the lane's regex, verbatim
+    assert.match(r.stderr, /NOT RUN: unshare exited 1/);
+    assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: unshare exited 1 before the isolated side reported in — unprivileged user namespaces may be disabled \(kernel\.unprivileged_userns_clone \/ user\.max_user_namespaces\); unshare's own message, if any, is above; no isolation backend can be used here — bwrap: not implemented yet \(v0\.34 phase 2\), docker: not implemented yet \(v0\.34 phase 3\) \(the command is never run unisolated\)\. The command was NOT started\.$/m);
+    // "unshare's own message … is above" stays TRUE: the probe's stderr is printed before the FAIL line
+    assert.ok(r.stderr.indexOf('unshare: unshare failed: Operation not permitted') >= 0
+      && r.stderr.indexOf('unshare: unshare failed: Operation not permitted') < r.stderr.indexOf('FAIL  isolated:'), r.stderr);
+    const rec = recordOf(r.stdout);
+    assert.equal(rec?.backend, null);
+    assert.deepEqual(rec?.skipped.map((/** @type {{backend: string}} */ s) => s.backend), ['unshare', 'bwrap', 'docker']);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

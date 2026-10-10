@@ -1525,6 +1525,23 @@ function backendClause(c) {
   return `backend: ${c.backend}${c.skipped.length ? ` (skipped ${c.skipped.map((s) => `${s.backend}: ${s.why}`).join('; ')})` : ''}`;
 }
 
+/**
+ * The text after `NOT RUN: ` when no backend can be used. ⛔ UNPINNED, it LEADS WITH THE UNSHARE REASON
+ * as v0.33 worded it (review F4, ruling): a lane matches `/NOT RUN: unshare exited 1/`, and phase 1's
+ * `NOT RUN: no isolation backend can be used here — unshare: …` broke it. The backend summary follows:
+ * `…; no isolation backend can be used here — bwrap: <why>, docker: <why> (…)`. unshare's own stderr
+ * (`probeStderr`) is printed first, as v0.33's unshare printed it. A PIN keeps selectBackend's text (it
+ * names the pin). @param {BackendChoice} c @param {string | undefined} pinned @param {string} probeStderr
+ * @returns {string}
+ */
+function refusalText(c, pinned, probeStderr) {
+  const [first, ...rest] = c.skipped;
+  if ((pinned !== undefined && pinned !== '') || !first || first.backend !== 'unshare') return c.refuse;
+  if (probeStderr.trim()) process.stderr.write(probeStderr.endsWith('\n') ? probeStderr : `${probeStderr}\n`);
+  return `${first.why}${rest.length ? `; no isolation backend can be used here — ${rest.map((s) => `${s.backend}: ${s.why}`).join(', ')}` : ''}`
+    + ' (the command is never run unisolated)';
+}
+
 /** Phase-1 placeholders: these backends are specified (ib4k §3) but not implemented yet. */
 const NOT_IMPLEMENTED = Object.freeze({ bwrap: 'not implemented yet (v0.34 phase 2)', docker: 'not implemented yet (v0.34 phase 3)' });
 
@@ -1533,9 +1550,12 @@ const NOT_IMPLEMENTED = Object.freeze({ bwrap: 'not implemented yet (v0.34 phase
  * WEBCTL_UNSHARE_BIN, a tool missing from the system dirs, or the kernel refusing the namespaces —
  * with the AppArmor sysctl named as HOST POLICY (userNamespaceRefusal), as v0.33 refused.
  * ⛔ Side-effect free: the namespaces are made around `true` and gone when it exits.
- * @param {{bin: string, why: string}} ub @returns {string}
+ * ⛔ The kernel-refusal reason is v0.33's WORDING, exactly (review F4): lanes match it (a lane's own
+ * regex is `/NOT RUN: unshare exited 1/`). unshare's own stderr is kept in `seen.stderr`, for the
+ * refusal to print above itself — v0.33's unshare wrote it straight to the caller's stderr.
+ * @param {{bin: string, why: string}} ub @param {{stderr: string}} [seen] @returns {string}
  */
-function probeUnshare(ub) {
+function probeUnshare(ub, seen = { stderr: '' }) {
   if (ub.why) return ub.why;
   const { why } = privilegedTools(ub, false);
   if (why) return why;
@@ -1543,11 +1563,16 @@ function probeUnshare(ub) {
     stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
   if (r.error) return `cannot run unshare (${errMsg(r.error)})`;
   if (r.status === 0) return '';
-  const tail = String(r.stderr || '').trim().split('\n').pop()?.slice(0, 200) || `exit ${r.status ?? r.signal}`;
-  return userNamespaceRefusal(String(r.stderr || ''))
-    || `the kernel refused the namespaces (\`unshare -rnm --uts --ipc --pid\`: ${tail}) — unprivileged user namespaces `
-      + 'may be disabled (kernel.unprivileged_userns_clone / user.max_user_namespaces)';
+  seen.stderr = String(r.stderr || '');
+  return userNamespaceRefusal(seen.stderr) || unshareExitedWhy(r.status ?? r.signal);
 }
+/**
+ * v0.33's reason for an `unshare` that exited before isolating anything — kept WORD FOR WORD (review
+ * F4: lanes match `NOT RUN: unshare exited <n>`). @param {number|string|null} code
+ */
+const unshareExitedWhy = (code) => `unshare exited ${code} before the isolated side reported in — unprivileged `
+  + 'user namespaces may be disabled (kernel.unprivileged_userns_clone / user.max_user_namespaces); unshare\'s own '
+  + 'message, if any, is above';
 /** `true` from the system dirs (the probe's whole payload); '/bin/true' as the last resort. */
 const SYSTEM_TRUE = () => systemTool('true') || '/bin/true';
 
@@ -2161,14 +2186,15 @@ function runIsolated(a) {
   }
   // ⭐ THE BACKEND (ib4k §2): unshare → bwrap → docker → REFUSE; WEBCTL_ISOLATION_BACKEND pins one.
   // Each probe answers '' or a NAMED reason; a pinned one that cannot run is refused, never replaced.
+  const seen = { stderr: '' };
   const choice = selectBackend(process.env[BACKEND_ENV], [
-    { name: 'unshare', probe: () => probeUnshare(ub) },
+    { name: 'unshare', probe: () => probeUnshare(ub, seen) },
     { name: 'bwrap', probe: () => NOT_IMPLEMENTED.bwrap },
     { name: 'docker', probe: () => NOT_IMPLEMENTED.docker },
   ]);
   if (choice.refuse) {
-    return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${choice.refuse}. The command was NOT started.`,
-      { command, backend: null, skipped: choice.skipped }));
+    return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${refusalText(choice, process.env[BACKEND_ENV], seen.stderr)}. `
+      + 'The command was NOT started.', { command, backend: null, skipped: choice.skipped }));
   }
   // ⛔ every tool the privileged halves run: from the SYSTEM dirs, resolved HERE, passed on by path
   // (the unshare probe has already required every one of them)
@@ -2246,9 +2272,7 @@ function runIsolated(a) {
       dieByForwarded(fwd);
       const why = fail ? fail[1]
         : spawnErr ? `unshare could not be started (${spawnErr}) — is util-linux installed`
-          : diagnoseUserNamespace(ub.bin) || `unshare exited ${code ?? signal} before the isolated side reported in — unprivileged `
-            + 'user namespaces may be disabled (kernel.unprivileged_userns_clone / '
-            + 'user.max_user_namespaces); unshare\'s own message, if any, is above';
+          : diagnoseUserNamespace(ub.bin) || unshareExitedWhy(code ?? signal);
       resolve(report('isolated', EXIT.fail,
         `NOT RUN: ${why}. The command was NOT started, and is never run on the host as a fallback.`,
         { command, backend: choice.backend, skipped: choice.skipped }));
