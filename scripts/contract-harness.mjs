@@ -1764,7 +1764,12 @@ function runIsolated(a) {
   // ⭐ the verdict on the home: what is re-bound on top of the hidden home, as ~/… ONLY
   const rebound = (/** @type {boolean} */ rw) => plan.binds.filter((b) => b.rw === rw && isWithin(b.p, prot.home))
     .map((b) => (b.p === prot.home ? '~' : `~/${path.relative(prot.home, b.p)}`)).sort().join(', ') || 'nothing';
-  process.stderr.write(`isolated: home HIDDEN; re-bound read-only: ${rebound(false)}; writable: ${rebound(true)}\n`);
+  // ⭐ STRIPPED MARKERS: no HOST_NETNS, yet the KERNEL says we are inside one of ours — our tmpfs
+  // tag on /run and /tmp and a lo-only network. Measured: such a call isolates AGAIN, fully
+  // (its own netns and pidns, the home hidden again); never "only inherited". Say so.
+  const inside = unmaskedDirs().length === 0 && extraInterfaces() === 0
+    ? '; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully' : '';
+  process.stderr.write(`isolated: home HIDDEN; re-bound read-only: ${rebound(false)}; writable: ${rebound(true)}${inside}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
   const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,

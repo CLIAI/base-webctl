@@ -1729,6 +1729,47 @@ exec ${JSON.stringify(which('unshare'))} "$@"
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+// ── STRIPPED markers, and an outer older than v0.33.0 ────────────────────────
+//
+// The markers are the only thing that makes a call take the nested path. A command that strips
+// them (`env -u`, `env -i`) must never get "only inherited isolation" — and it does not: with no
+// HOST_NETNS the call takes the FRESH path, inside, and isolates AGAIN (measured: a new netns and
+// pidns, the home hidden again, the kernel proof PASSes). The kernel alone says where it is: our
+// tmpfs tag on /run and /tmp plus a lo-only network ⇒ the verdict states "already inside".
+
+const ALL_MARKERS = ['WEBCTL_HOST_NETNS', 'WEBCTL_HOST_MNTNS', 'WEBCTL_HOST_PIDNS', 'WEBCTL_RO_ROOTS', 'WEBCTL_HIDDEN_DIRS', 'WEBCTL_HOST_IDS'];
+const STRIP = ALL_MARKERS.map((k) => `-u ${k}`).join(' ');
+
+test('⛔ STRIPPED markers inside `isolated` → the call isolates AGAIN, fully (fresh path: own netns, kernel proof holds) and SAYS it is already inside', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'sh', '-c',
+    `readlink /proc/self/ns/net; env ${STRIP} "$0" "$1" isolated -- sh -c 'echo "INNER $(readlink /proc/self/ns/net)"; env | grep -c "^WEBCTL_HOST_" ; "$0" "$1" isolation-check 1 >/dev/null && echo PROOF-OK' "$0" "$1"; echo "RC $?"`,
+    process.execPath, TOOL]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^RC 0$/m, r.stdout + r.stderr);
+  const outer = r.stdout.split('\n')[0];
+  const inner = (r.stdout.match(/^INNER (\S+)$/m) || [])[1];
+  assert.ok(inner && inner !== outer, `the stripped call did not make its own network namespace (only inherited):\n${r.stdout}`);
+  assert.match(r.stdout, /^PROOF-OK$/m, `the kernel proof failed after a stripped re-isolation:\n${r.stderr}`);
+  assert.match(r.stderr, /^isolated: home HIDDEN; .*; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully$/m, r.stderr);
+  // CONTROL: from the host the verdict does not claim it
+  const c = await run(['isolated', '--', 'true']);
+  assert.equal(c.status, 0, c.stderr);
+  assert.doesNotMatch(c.stderr, /ALREADY INSIDE/);
+});
+
+test('⛔ VERSION SKEW: a v0.33 call nested under a ≤ v0.32 outer (no WEBCTL_HIDDEN_DIRS) → refused rc 2 saying "upgrade the outer", nothing run', needsIsolation, async () => {
+  const r = await run(['isolated', '--', 'sh', '-c',
+    'env -u WEBCTL_HIDDEN_DIRS "$0" "$1" isolated -- echo RAN-NESTED; echo "NESTED $?"', process.execPath, TOOL]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^NESTED 2$/m, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /^RAN-NESTED$/m);
+  assert.match(r.stderr, /the OUTER `isolated` is older than v0\.33\.0: it recorded no WEBCTL_HIDDEN_DIRS .* upgrade the outer one/);
+  // CONTROL: the same marker missing on the HOST (with others forged) is NOT read as version skew
+  const h = await nestedAttempt('net:[1]');
+  assert.equal(h.status, 2);
+  assert.doesNotMatch(h.stderr, /upgrade the outer/, 'a forged marker on the host was diagnosed as version skew');
+});
+
 test('⛔ fail closed: a NESTED call without the recorded real ids (WEBCTL_HOST_IDS unset) → FAIL, nothing run', needsIsolation, async () => {
   const r = await run(['isolated', '--', 'sh', '-c',
     'env -u WEBCTL_HOST_IDS "$0" "$1" isolated -- echo RAN-NESTED; echo "NESTED $?"', process.execPath, TOOL]);
