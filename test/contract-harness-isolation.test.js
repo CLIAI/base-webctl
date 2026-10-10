@@ -1019,7 +1019,7 @@ test('⛔ a cwd that IS (or contains) the home directory → FAIL, not run (it w
   for (const cwd of [PW_HOME, '/']) {
     const r = await run(['isolated', '--', process.execPath, '-e', 'console.log("RAN-" + "MARKER")'], {}, process.execPath, cwd);
     assert.equal(r.status, 1, `cwd ${cwd === PW_HOME ? '<HOME>' : cwd}: ${r.stdout}${r.stderr}`);
-    assert.match(r.stderr, /NOT RUN: the working directory contains the home directory, which isolation makes READ-ONLY/);
+    assert.match(r.stderr, /NOT RUN: the working directory contains the home directory, which isolation HIDES/);
     assert.doesNotMatch(r.stdout, /RAN-MARKER/);
   }
 });
@@ -1113,7 +1113,7 @@ async function underFakeHome(home, argv) {
 }
 const NO_FAKE_HOME = 'SKIP (host): cannot point the passwd home at a fake one here (bind over /etc/passwd, or NSS answers elsewhere)';
 
-test('⭐ ARM: ~/.ssh, ~/.gnupg and the state roots are EMPTY and READ-ONLY inside — fresh AND nested — nothing reaches the fake home', needsIsolation, async (t) => {
+test('⭐ ARM: ~/.ssh, ~/.gnupg and the state roots are ABSENT inside (the home is hidden whole) — fresh AND nested — nothing reaches the fake home', needsIsolation, async (t) => {
   const home = fakeSecretHome();
   try {
     const r = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--', 'sh', '-c',
@@ -1125,7 +1125,8 @@ test('⭐ ARM: ~/.ssh, ~/.gnupg and the state roots are EMPTY and READ-ONLY insi
     const dirs = dirsOf(fresh);
     for (const [d] of SECRETS) {
       assert.equal(reads[d], 'ENOENT', `${d}: the planted secret is READABLE inside:\n${r.stdout}${r.stderr}`);
-      assert.equal(dirs[d], '0 EROFS', `${d}: the mask is not an empty read-only dir:\n${r.stdout}`);
+      // v0.33.0: under the hidden home the dir does not exist at all (≤ the 4285c61 branch: an empty ro dir)
+      assert.equal(dirs[d], 'ENOENT ENOENT', `${d}: the dir is visible inside:\n${r.stdout}`);
       assert.equal(readsOf(nested || '')[d], 'ENOENT', `${d}: readable under a NESTED call:\n${r.stdout}`);
       assert.equal(fs.existsSync(path.join(home, d, '.webctl-probe')), false, `${d}: a write reached the fake home`);
     }
@@ -1187,8 +1188,10 @@ test('⛔ fail closed: a `mount` that silently SKIPS one hide → refused by the
   const binHome = homeTmpdir(); // not under /tmp: the fake must outlive the /tmp mask
   const bin = path.join(binHome, 'bin');
   fs.mkdirSync(bin);
-  const skip = path.join(home, '.ssh');
-  // pretends to hide ~/.ssh (exit 0, nothing mounted) and to make that non-mask read-only
+  // ⚠ v0.33.0: under the hidden home, ~/.ssh gets no mount of its own unless a re-bind contains it —
+  // so keep ~/.config, whose ~/.config/webctl IS hidden by its own tmpfs on top, and skip THAT
+  const skip = path.join(home, '.config', 'webctl');
+  // pretends to hide ~/.config/webctl (exit 0, nothing mounted) and to make that non-mask read-only
   fs.writeFileSync(path.join(bin, 'mount'), `#!/bin/sh
 for a in "$@"; do last="$a"; done
 [ "$last" = ${JSON.stringify(skip)} ] && exit 0
@@ -1196,14 +1199,158 @@ exec ${JSON.stringify(spawnSync('sh', ['-c', 'command -v mount'], { encoding: 'u
 `, { mode: 0o755 });
   const marker = path.join(binHome, 'RAN');
   try {
-    const r = await underFakeHome(home, ['env', `PATH=${bin}:${process.env.PATH}`, process.execPath, TOOL, 'isolated', '--keep', binHome, '--',
+    const r = await underFakeHome(home, ['env', `PATH=${bin}:${process.env.PATH}`, process.execPath, TOOL, 'isolated', '--keep', binHome,
+      '--keep', path.join(home, '.config'), '--',
       process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
     if (!r) { t.skip(NO_FAKE_HOME); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: after hiding, 1 of 6 hidden home dir\(s\) \(~\/\.ssh, ~\/\.gnupg, the state roots\) lack the read-only 'webctl-isolated-hidden' tmpfs on top/);
-    assert.equal(fs.existsSync(marker), false, 'the command ran with ~/.ssh visible');
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: after hiding, 1 of 7 hidden dir\(s\) \(the home, ~\/\.ssh, ~\/\.gnupg, the state roots\) do not resolve to the read-only 'webctl-isolated-hidden' tmpfs/);
+    assert.equal(fs.existsSync(marker), false, 'the command ran with ~/.config/webctl visible');
     assert.ok(!r.stderr.includes(home), 'the refusal printed a home path');
   } finally { for (const d of [home, binHome]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+// ── the WHOLE passwd home is HIDDEN (v0.33.0, BREAKING) ──────────────────────
+//
+// ⛔ A fixed hidden list misses every secret nobody listed — a read-only home is still a
+// READABLE home. ⇒ an empty read-only tmpfs over the whole passwd home; only what the arm
+// needs is re-bound on top: READ-ONLY base's root, node, the absolute command, every PATH
+// entry under the home, each `--keep-ro`; WRITABLE the cwd and each `--keep`. ⚠ A FAKE passwd
+// home throughout (underFakeHome): nothing here reads or plants anything in the real one.
+
+/** A fake home holding .ssh/config, .config/webctl/config.toml, an ordinary file, a PATH dir and two work dirs. */
+function fakeWholeHome() {
+  const home = homeTmpdir();
+  const put = (/** @type {string} */ rel, /** @type {string} */ txt, mode = 0o644) => {
+    fs.mkdirSync(path.dirname(path.join(home, rel)), { recursive: true });
+    fs.writeFileSync(path.join(home, rel), txt, { mode });
+  };
+  put('.ssh/config', 'Host planted-by-test\n');
+  put('.config/webctl/config.toml', 'planted = "by-test"\n');
+  put('notes.txt', 'an ordinary file nobody listed\n');
+  put('bin/hello-from-home', '#!/bin/sh\necho "HELLO from a PATH dir under the home"\n', 0o755);
+  put('data/ro.txt', 'read-only data\n');
+  fs.mkdirSync(path.join(home, 'work'));
+  return home;
+}
+/** argv[1] = home: `R <rel> <ok|errno>` per read; `W <rel> <ok|errno>` per exclusive create. */
+const PROBE_HOME = `const fs = require('fs'); const p = require('path'); const h = process.argv[1];
+for (const r of ['.ssh/config', '.config/webctl/config.toml', 'notes.txt', 'data/ro.txt']) {
+  let o; try { fs.readFileSync(p.join(h, r)); o = 'ok'; } catch (e) { o = e.code; } console.log('R ' + r + ' ' + o); }
+for (const w of ['data/new.txt', 'work/new.txt', 'new.txt']) {
+  let o; try { fs.writeFileSync(p.join(h, w), 'x', { flag: 'wx' }); o = 'ok'; } catch (e) { o = e.code; } console.log('W ' + w + ' ' + o); }`;
+/** @param {string} out @param {'R'|'W'} k @returns {Record<string, string>} */
+const probed = (out, k) => Object.fromEntries([...out.matchAll(new RegExp(`^${k} (\\S+) (\\S+)$`, 'gm'))].map((m) => [m[1], m[2]]));
+
+test('⭐ ARM: the WHOLE home is hidden — .ssh/config, .config/webctl/config.toml AND an unlisted file are ENOENT; --keep-ro is readable but EROFS; --keep is writable — fresh AND nested', needsIsolation, async (t) => {
+  const home = fakeWholeHome();
+  try {
+    const r = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--keep-ro', path.join(home, 'data'), '--keep', path.join(home, 'work'), '--',
+      'sh', '-c', '"$0" -e "$2" "$3"; echo NESTED; "$0" "$1" isolated -- "$0" -e "$2" "$3"', process.execPath, TOOL, PROBE_HOME, home]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    for (const [label, out] of r.stdout.split(/^NESTED$/m).map((o, i) => /** @type {[string, string]} */ ([['fresh', 'nested'][i], o]))) {
+      const R = probed(out, 'R');
+      const W = probed(out, 'W');
+      assert.equal(R['.ssh/config'], 'ENOENT', `${label}: ~/.ssh/config readable`);
+      assert.equal(R['.config/webctl/config.toml'], 'ENOENT', `${label}: ~/.config/webctl readable`);
+      assert.equal(R['notes.txt'], 'ENOENT', `${label}: an UNLISTED file in the home is readable — only the listed dirs are hidden`);
+      assert.equal(R['data/ro.txt'], 'ok', `${label}: a --keep-ro path is not readable:\n${r.stderr}`);
+      assert.equal(W['data/new.txt'], 'EROFS', `${label}: a --keep-ro path is WRITABLE`);
+      assert.equal(W['new.txt'], 'EROFS', `${label}: the hidden home is writable`);
+    }
+    assert.equal(probed(r.stdout.split(/^NESTED$/m)[0], 'W')['work/new.txt'], 'ok', 'a --keep under the home is not writable');
+    assert.equal(fs.readFileSync(path.join(home, 'work', 'new.txt'), 'utf8'), 'x', 'the --keep write did not reach the host');
+    assert.equal(fs.existsSync(path.join(home, 'data', 'new.txt')), false);
+    assert.equal(fs.existsSync(path.join(home, 'new.txt')), false);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('⭐ CONTROL: the same probe WITHOUT `isolated` (same fake home) reads everything and writes everywhere', needsIsolation, async (t) => {
+  const home = fakeWholeHome();
+  try {
+    const r = await underFakeHome(home, [process.execPath, '-e', PROBE_HOME, home]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    for (const v of Object.values(probed(r.stdout, 'R'))) assert.equal(v, 'ok', r.stdout + r.stderr);
+    for (const v of Object.values(probed(r.stdout, 'W'))) assert.equal(v, 'ok', r.stdout + r.stderr);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('⭐ a PATH dir under the hidden home is re-bound read-only: a script in it RUNS inside; the verdict lists re-binds as ~/… only', needsIsolation, async (t) => {
+  const home = fakeWholeHome();
+  try {
+    const r = await underFakeHome(home, ['env', `PATH=${path.join(home, 'bin')}:${process.env.PATH}`, process.execPath, TOOL, 'isolated',
+      '--keep-ro', path.join(home, 'data'), '--keep', path.join(home, 'work'), '--', 'sh', '-c', 'hello-from-home; ( : > "$0/bin/x" ) 2>/dev/null || echo "BIN-RO"', home]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^HELLO from a PATH dir under the home$/m, r.stderr);
+    assert.match(r.stdout, /^BIN-RO$/m, 'a PATH dir under the home was re-bound WRITABLE');
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/bin, ~\/data; writable: ~\/work$/m, r.stderr);
+    assert.ok(!r.stderr.includes(home), 'the verdict printed the home path');
+    // CONTROL: without the PATH entry the same name is not found inside
+    const c = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--', 'sh', '-c', 'hello-from-home || echo "NOT-FOUND $?"']);
+    assert.ok(c);
+    assert.match(c.stdout, /^NOT-FOUND 127$/m, c.stdout + c.stderr);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('⛔ REFUSED, naming the rule and NO path: a PATH entry or --keep-ro that IS the home, contains a hidden dir, or lies inside one', needsIsolation, async (t) => {
+  const home = fakeWholeHome();
+  const marker = path.join(home, 'work', 'RAN');
+  const cmd = [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`];
+  try {
+    const cases = /** @type {[string, string[], number, RegExp][]} */ ([
+      ['PATH = the home', ['env', `PATH=${home}:${process.env.PATH}`], 1, /PATH entry #1 is the home directory/],
+      ['PATH inside ~/.ssh', ['env', `PATH=${path.join(home, '.ssh')}:${process.env.PATH}`], 1, /PATH entry #1 lies inside a HIDDEN dir/],
+      ['PATH containing ~/.config/webctl', ['env', `PATH=${path.join(home, '.config')}:${process.env.PATH}`], 1, /PATH entry #1 contains a HIDDEN dir/],
+    ]);
+    for (const [what, pre, code, msg] of cases) {
+      const r = await underFakeHome(home, [...pre, process.execPath, TOOL, 'isolated', '--keep', path.join(home, 'work'), '--', ...cmd]);
+      if (!r) { t.skip(NO_FAKE_HOME); return; }
+      assert.equal(r.status, code, `${what}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, msg, what);
+      assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN/m, what);
+      assert.ok(!r.stderr.includes(home), `${what}: the refusal printed the path`);
+      assert.equal(fs.existsSync(marker), false, `${what}: ran`);
+    }
+    for (const [what, ro, msg] of /** @type {[string, string, RegExp][]} */ ([
+      ['--keep-ro = the home', home, /--keep-ro #1 is the home directory/],
+      ['--keep-ro inside ~/.ssh', path.join(home, '.ssh'), /--keep-ro #1 lies inside a HIDDEN dir/],
+      ['--keep-ro containing ~/.config/webctl', path.join(home, '.config'), /--keep-ro #1 contains a HIDDEN dir/]])) {
+      const r = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--keep-ro', ro, '--keep', path.join(home, 'work'), '--', ...cmd]);
+      assert.ok(r);
+      assert.equal(r.status, 3, `${what}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, msg, what);
+      assert.ok(!r.stderr.includes(home), `${what}: the refusal printed the path`);
+      assert.equal(fs.existsSync(marker), false, `${what}: ran`);
+    }
+    // CONTROL: an ordinary PATH dir and --keep-ro under the home are accepted
+    const c = await underFakeHome(home, ['env', `PATH=${path.join(home, 'bin')}:${process.env.PATH}`, process.execPath, TOOL, 'isolated',
+      '--keep-ro', path.join(home, 'data'), '--keep', path.join(home, 'work'), '--', ...cmd]);
+    assert.ok(c);
+    assert.equal(c.status, 0, c.stdout + c.stderr);
+    assert.equal(fs.existsSync(marker), true);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('⛔ PEEL: a NESTED `unshare -rm` inside cannot unmount the hidden home (locked) — CONTROL: with capabilities over a plain tmpfs it can', needsIsolation, async (t) => {
+  const home = fakeWholeHome();
+  const PEEL = 'unshare -rm sh -c \'echo NESTED-IN; umount -l "$0"; echo "UMOUNT $?"; umount -l "$0"; cat "$0/.ssh/config" >/dev/null 2>&1; echo "CAT $?"\' "$0"';
+  try {
+    const r = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--', 'sh', '-c', PEEL, home]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^NESTED-IN$/m, `the nested namespace was not even made (vacuous):\n${r.stderr}`);
+    assert.match(r.stdout, /^UMOUNT [1-9]\d*$/m, 'a nested namespace could unmount the hidden home');
+    assert.match(r.stdout, /^CAT [1-9]\d*$/m, '~/.ssh/config became readable after a nested unmount');
+    // CONTROL: namespace root WITH capabilities, over a tmpfs it mounted itself, peels it
+    const c = await underFakeHome(home, ['unshare', '-rm', 'sh', '-c',
+      'mount -t tmpfs t "$0" && { cat "$0/.ssh/config" >/dev/null 2>&1; echo "BEFORE $?"; } && umount -l "$0"; echo "UMOUNT $?"; cat "$0/.ssh/config" >/dev/null 2>&1; echo "CAT $?"', home]);
+    assert.ok(c);
+    assert.match(c.stdout, /^BEFORE [1-9]\d*$/m, c.stdout + c.stderr);
+    assert.match(c.stdout, /^UMOUNT 0$/m, c.stdout + c.stderr);
+    assert.match(c.stdout, /^CAT 0$/m, c.stdout + c.stderr);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
 // ── submounts: a ro remount hits only the TOP mount ──────────────────────────
@@ -1242,14 +1389,16 @@ test('⭐ ARM: that submount under home is EROFS inside `isolated` — every sub
   fs.writeFileSync(path.join(dir, 'try.cjs'), TRY_CREATE.replace('process.argv[1]', 'process.argv[2]'));
   try {
     const r = await withHomeSubmount(dir,
-      `"${process.execPath}" "${TOOL}" isolated -- "${process.execPath}" "$0/try.cjs" "$0/sub/f"`);
+      // v0.33.0: the home is hidden, so the dir comes back as a READ-ONLY re-bind — and that re-bind's
+      // submounts must be ro too (the rbind copies them writable)
+      `"${process.execPath}" "${TOOL}" isolated --keep-ro "$0" -- "${process.execPath}" "$0/try.cjs" "$0/sub/f"`);
     assert.equal(writeOf(r.stdout), 'EROFS', `a submount under home stayed writable:\n${r.stdout}${r.stderr}`);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 // ── the submount LOGIC, from an explicit mountinfo (no host dependency) ──────
 
-const { parseMountinfo, reachableMountsUnder, readOnlyGaps, hiddenGaps } = await import(pathToFileURL(TOOL).href);
+const { parseMountinfo, reachableMountsUnder, readOnlyGaps, hiddenGaps, resolveMount } = await import(pathToFileURL(TOOL).href);
 
 /** One mountinfo line. @param {number} id @param {number} parent @param {string} at @param {string} [o] */
 const mi = (id, parent, at, o = 'rw,relatime') => `${id} ${parent} 0:${id} / ${at} ${o} shared:1 - tmpfs src rw`;
@@ -1306,6 +1455,30 @@ test('⭐ logic: hiddenGaps — a hidden dir passes only with OUR read-only tmpf
   assert.deepEqual(hiddenGaps(m([row(200, 100, H, 'ro', 'webctl-isolated-hidden'), row(201, 200, H, 'rw', 'x')]), [H], [H]), [],
     'a keep exactly at the hidden dir is the caller\'s exception');
   assert.deepEqual(hiddenGaps(m([row(200, 100, '/home/u/.sshx', 'ro', 'webctl-isolated-hidden')]), [H], []), [H], 'a PREFIX is not the dir');
+});
+
+test('⭐ logic: hiddenGaps RESOLVES the path — a later mount on an ANCESTOR shadows a hide (review finding 7); a dir under the hidden home is covered by the home\'s mask', () => {
+  /** @param {number} id @param {number} parent @param {string} at @param {string} o @param {string} src */
+  const row = (id, parent, at, o, src) => `${id} ${parent} 0:${id} / ${at} ${o},relatime shared:1 - tmpfs ${src} rw`;
+  const HIDE = 'webctl-isolated-hidden';
+  const m = (/** @type {string[]} */ extra) => parseMountinfo([mi(1, 0, '/'), mi(30, 1, '/home'), ...extra].join('\n'));
+  const W = '/home/u/.config/webctl';
+  // the hidden home (100), a writable keep of ~/.config on it (150), webctl's own hide on that (200)
+  const good = [row(100, 30, '/home/u', 'ro', HIDE), row(150, 100, '/home/u/.config', 'rw', 'keep'), row(200, 150, W, 'ro', HIDE)];
+  assert.deepEqual(hiddenGaps(m(good), ['/home/u', W, '/home/u/.ssh'], ['/home/u/.config']), [],
+    '~/.ssh (no mount of its own) resolves to the home\'s mask');
+  assert.equal(resolveMount(m(good), '/home/u/.ssh/id').id, '100');
+  assert.equal(resolveMount(m(good), `${W}/x`).id, '200');
+  // ⛔ a LATER mount on the ANCESTOR ~/.config (stacked on the keep) — webctl's hide is still on top of ITS
+  // stack, so the old top-of-stack-at-the-path check passed; the path now resolves past it
+  const shadowed = [...good, row(300, 150, '/home/u/.config', 'rw', 'later')];
+  assert.deepEqual(hiddenGaps(m(shadowed), [W], ['/home/u/.config']), [W], 'an ancestor mount shadowed the hide');
+  const atPath = parseMountinfo([mi(1, 0, '/'), mi(30, 1, '/home'), ...shadowed].join('\n')).filter((r) => r.at === W);
+  assert.equal(atPath[atPath.length - 1].source, HIDE, 'CONTROL: at the path itself the hide IS still the top of its stack');
+  // …and a later mount on the HOME (shadowing everything under it)
+  assert.deepEqual(hiddenGaps(m([...good, row(400, 100, '/home/u', 'rw', 'later')]), ['/home/u', '/home/u/.ssh'], []), ['/home/u', '/home/u/.ssh']);
+  // a keep re-binding ~/.config WITHOUT webctl's own hide → webctl resolves to the keep: a gap
+  assert.deepEqual(hiddenGaps(m(good.slice(0, 2)), [W], ['/home/u/.config']), [W]);
 });
 
 // ── nesting: the previous `isolated` (writable home) is not "inside" ─────────
@@ -1581,7 +1754,8 @@ test('⭐ ARM: `isolated` inside `unshare -r` → a write into the REAL home is 
       '"$0" -e "$1" "$2"; id -u; unshare -rn sh -c "(ip link set lo up 2>/dev/null || ifconfig lo up) && echo NESTED-RN-OK"',
       process.execPath, TRY_CREATE, target], { cwd: ROOT });
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(writeOf(r.stdout), 'EROFS', `a write into the real home was not EROFS under an outer unshare -r:\n${r.stderr}`);
+    // v0.33.0: the throwaway dir is not even there (the home is HIDDEN): ENOENT, not EROFS
+    assert.equal(writeOf(r.stdout), 'ENOENT', `a write into the real home was not refused under an outer unshare -r:\n${r.stderr}`);
     assert.equal(fs.existsSync(target), false, 'the file appeared in the real home');
     assert.ok(r.stdout.split('\n').includes(String(process.getuid?.())), 'the command does not run as the real uid');
     assert.match(r.stdout, /^NESTED-RN-OK$/m, r.stderr);
@@ -1607,7 +1781,7 @@ test('⛔ a PATH-shadowed `getent` cannot redirect the read-only home (under an 
       'isolated', '--', process.execPath, '-e', TRY_CREATE, target], { cwd: ROOT });
     assert.equal(fs.existsSync(target), false, `the file appeared in the real home:\n${r.stdout}${r.stderr}`);
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(writeOf(r.stdout), 'EROFS', 'the fake getent was ignored, so the real home is the protected one');
+    assert.equal(writeOf(r.stdout), 'ENOENT', 'the fake getent was ignored, so the real home is the HIDDEN one');
     // control: the fake really answers when called by name, so the arm is not vacuous
     const c = spawnSync('sh', ['-c', 'getent passwd 0'], { encoding: 'utf8', env: { ...process.env, PATH: `${fake}:${process.env.PATH}` } });
     assert.match(c.stdout, new RegExp(`::${decoy}:`), 'CONTROL: the fake getent shadows the real one by PATH');
@@ -2022,7 +2196,7 @@ test('⛔ nesting: every other fact satisfied (full mask, ro home, own PIDs) but
   try {
     const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage(false), ROOT, PW_HOME, dir], 'mnt:[1]', env);
     assert.equal(r.status, 2, r.stdout + r.stderr);
-    assert.match(r.stderr, /1 of 1 hidden home dir\(s\) — ~\/\.ssh, the state roots — lack the 'webctl-isolated-hidden' mask here/);
+    assert.match(r.stderr, /1 of 1 hidden dir\(s\) — the home, ~\/\.ssh, the state roots — lack the 'webctl-isolated-hidden' mask here/);
     assert.doesNotMatch(r.stderr, /EQUALS|uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|WRITABLE here/, 'only the hidden fact should refuse');
     assert.equal(r.ran, false, 'a namespace with the secret dirs visible was accepted as `isolated`');
     const c = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage(true), ROOT, PW_HOME, dir], 'mnt:[1]', env);
@@ -2126,7 +2300,8 @@ test('⛔ fail closed: no `bash` on PATH (pid 1 must reap) → FAIL naming it, c
     assert.equal(r.ran, false, 'the command ran without a reaping pid 1');
     // nested: the outer call is ordinary; the inner one gets a PATH without bash
     const marker = path.join(dir, 'RAN-NESTED');
-    const n = await run(['isolated', '--keep', dir, '--', 'sh', '-c',
+    // ⚠ v0.33.0: the bin dir is under the (hidden) home — the outer call re-binds it with --keep-ro
+    const n = await run(['isolated', '--keep', dir, '--keep-ro', bin, '--', 'sh', '-c',
       'PATH="$2" "$0" "$1" isolated -- "$0" -e "require(\'fs\').writeFileSync(process.argv[1], \'x\')" "$3"; echo "NESTED-RC $?"',
       process.execPath, TOOL, bin, marker]);
     assert.equal(n.status, 0, n.stdout + n.stderr);

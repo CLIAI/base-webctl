@@ -38,7 +38,7 @@
 //   node <base>/scripts/contract-harness.mjs require-generation 5    # the floor; ANY non-zero = FAIL
 //   node <base>/scripts/contract-harness.mjs pin         --repo . --sub vendor/base-webctl
 //   node <base>/scripts/contract-harness.mjs no-revendor --repo . --sub vendor/base-webctl
-//   node <base>/scripts/contract-harness.mjs isolated [--keep <path>]… -- <cmd> [args…]   # every mutation arm (xrl4)
+//   node <base>/scripts/contract-harness.mjs isolated [--keep <path>]… [--keep-ro <path>]… [--pass-env <NAME|PREFIX_*>]… -- <cmd> [args…]   # every mutation arm (xrl4)
 //   node <base>/scripts/contract-harness.mjs isolated -- node <base>/scripts/contract-harness.mjs isolation-check <port>…
 //   node <base>/scripts/contract-harness.mjs sandbox-port [--bare]
 //   node <base>/scripts/contract-harness.mjs guard-live-port <port> [--pin-verified]
@@ -1159,15 +1159,17 @@ function walkJs(dir) {
 //     /tmp (and /var/run when it is a real directory), the paths the arm needs bound
 //     back, every host path socket still listed connect-tested and covered with
 //     /dev/null if it answers, and the env vars that NAME host sockets scrubbed.
-//   * ⛔ THE HOME DIRECTORY IS READ-ONLY. It holds the signed-in browser profiles
-//     (~/.cache/<tool>), ~/.config/webctl and ~/.ssh, and a mutant restoring a LITERAL
-//     path corrupts a live profile with no network at all. ⇒ the PASSWD home is rbound
-//     onto itself and remounted ro — with EVERY submount (a remount hits only the top) —
-//     and only the cwd and each `--keep` are re-opened writable on top of it.
-//   * ⛔ AND ITS SECRETS ARE HIDDEN. Read-only still let a mutant READ and print the ssh
-//     keys, ControlMaster sockets, an install salt and remote target configs. ⇒ ~/.ssh,
-//     ~/.gnupg and the family's state roots each get an EMPTY read-only tmpfs on top.
-//   * PID 1 REAPS: a bash, not node — node leaves re-parented orphans as zombies.
+//   * ⛔ THE HOME DIRECTORY IS HIDDEN, WHOLE (v0.33.0). It holds the signed-in browser
+//     profiles (~/.cache/<tool>), ~/.config/webctl and ~/.ssh: a mutant restoring a LITERAL
+//     path corrupts a live profile with no network at all (so the home was made READ-ONLY),
+//     and read-only still let it READ and print ssh keys, ControlMaster sockets, an install
+//     salt and remote target configs (so ~/.ssh and the state roots were HIDDEN) — and a fixed
+//     list misses every secret nobody listed. ⇒ the PASSWD home gets an EMPTY read-only tmpfs;
+//     re-bound on top READ-ONLY: base's root, node, the absolute command, every PATH entry
+//     under the home, each `--keep-ro`; WRITABLE: the cwd and each `--keep`. A hidden dir a
+//     re-bind would expose gets its own empty tmpfs again.
+//   * ⛔ THE ENV IS AN ALLOWLIST (v0.33.0): credentials in the caller's env reached the arm.
+//   * PID 1 REAPS: `bash --norc -p`, not node — node leaves re-parented orphans as zombies.
 //
 // It FAILS CLOSED: there is no path on which the command runs on the host.
 
@@ -1241,12 +1243,14 @@ function isolatedEnv(env, pass, own = {}) {
  */
 const SENSITIVE_DOTDIRS = Object.freeze(['.ssh', '.gnupg', '.config', '.cache', '.local', '.mozilla', '.pki']);
 /**
- * Home directories that are not merely read-only but HIDDEN: each gets an EMPTY, READ-ONLY tmpfs
- * on top (source HIDE_SOURCE). ⛔ Measured (`perplexity`): with the home only read-only, a
- * mutated test could READ and print the operator's ssh keys, live ControlMaster socket paths,
- * an install salt, and target configs naming remote hosts — into a log that may be public.
- * Only those that exist are hidden, each at its REAL path. An explicit `--keep` at or beneath
- * one re-exposes THAT path only (named on stderr); a keep CONTAINING one does not unhide it.
+ * Home directories hidden even where a re-bind would expose them. ⛔ Measured (`perplexity`): with
+ * the home only read-only, a mutated test could READ and print the operator's ssh keys, live
+ * ControlMaster socket paths, an install salt, and target configs naming remote hosts — into a log
+ * that may be public. Since v0.33.0 the WHOLE home is hidden; these get their OWN empty read-only
+ * tmpfs (source HIDE_SOURCE) wherever a re-bind contains them (a `--keep ~/.config` does not
+ * unhide ~/.config/webctl) and at their real path when it lies outside the home. An explicit
+ * `--keep` at or beneath one re-exposes THAT path only (named on stderr). A PATH entry or
+ * `--keep-ro` inside or containing one is REFUSED (planKeeps).
  */
 const HIDDEN_DIRS = Object.freeze(['.ssh', '.gnupg', '.cache/CLIAI', '.config/CLIAI', '.local/state/CLIAI', '.config/webctl']);
 /** The tmpfs source tag of a HIDDEN_DIRS mask; the post-check and the nesting proof look for it. */
@@ -1559,7 +1563,7 @@ function exitCodeOf(code, signal) {
   return 128 + (n || 1);
 }
 
-const ISOLATED_USAGE = 'usage: contract-harness.mjs isolated [--keep <path>]… -- <cmd> [args…]\n';
+const ISOLATED_USAGE = 'usage: contract-harness.mjs isolated [--keep <path>]… [--keep-ro <path>]… [--pass-env <NAME|PREFIX_*>]… -- <cmd> [args…]\n';
 
 /**
  * A USAGE refusal: the usage text, then a `FAIL  isolated: NOT RUN (usage): …` line +
@@ -1591,29 +1595,33 @@ function usageRefusal(why, command) {
  * ⛔ /tmp IS MASKED, AND THE ARM USUALLY LIVES THERE. Worktrees, the `--scratch` gate's
  * consumer clones and test fixtures are all commonly under /tmp. So these stay
  * visible at their SAME absolute paths: the cwd, base's own repo root, the command
- * if given by absolute path, node itself, a $HOME that lives under /tmp (a sandbox's
- * throwaway one), and every `--keep <path>`. Anything else the arm shares with its
- * caller under /tmp — a marker file, a fixture — needs a `--keep`. A keep may not
+ * if given by absolute path, node itself, WEBCTL_UNSHARE_BIN, a $HOME that lives under /tmp (a
+ * sandbox's throwaway one), every `--keep <path>` and `--keep-ro <path>`. Anything else the arm
+ * shares with its caller under /tmp — a marker file, a fixture — needs a keep. A keep may not
  * be /tmp or /run itself, an ancestor of either, a path under /run, or contain the
  * (passwd) home directory. ⚠ Only `--keep` paths are EXEMPT from the socket check below — a
- * socket in the cwd is still covered if it answers.
+ * socket in the cwd or under a `--keep-ro` is still covered if it answers.
  *
- * ⛔ THE PASSWD HOME IS READ-ONLY (not $HOME — the gate points that at a throwaway dir).
- * It is rbound onto itself and it and every reachable submount remounted ro; a dot-dir
- * of SENSITIVE_DOTDIRS that symlinks OUT of home is treated the same at its real path.
- * Re-opened WRITABLE on top: the cwd and each `--keep` under home. NOT base's repo root,
- * node or the command — those are only read, and base's root is shared by every consumer
- * under the release gate. A cwd containing the home is REFUSED (fail); a `--keep`
- * containing it is a usage error; a writable keep in or containing ~/.ssh, ~/.config,
- * ~/.cache … is allowed but NAMED on stderr (`isolated: note: …`). Every path is realpath'd
+ * ⛔ THE PASSWD HOME IS HIDDEN, WHOLE (not $HOME — the gate points that at a throwaway dir): an
+ * EMPTY read-only tmpfs over it (v0.33.0; it was read-only before, with a fixed list hidden).
+ * Re-bound on top, at the same paths — READ-ONLY: base's repo root, node, an absolute command,
+ * WEBCTL_UNSHARE_BIN, EVERY PATH entry under the home (or the tools there vanish), each
+ * `--keep-ro`; WRITABLE: the cwd and each `--keep`. Each re-bind's submounts get its mode too.
+ * base's root is read-only because under the release gate ONE checkout serves every consumer.
+ * A cwd containing the home is REFUSED (fail); a `--keep` containing it is a usage error; a
+ * writable keep in or containing ~/.ssh, ~/.config, ~/.cache … is allowed but NAMED on stderr
+ * (`isolated: note: …`). A real path of a SENSITIVE_DOTDIRS entry that symlinks OUT of home is
+ * made READ-ONLY there (the home's tmpfs hides only the symlink). Every path is realpath'd
  * first, so a symlink cannot smuggle the home in. Any mount that fails → refused; and the
- * result is READ BACK from /proc/self/mountinfo before the command starts.
+ * result is READ BACK from /proc/self/mountinfo before the command starts. The verdict line
+ * `isolated: home HIDDEN; re-bound read-only: …; writable: …` names the re-binds as `~/…` only.
  *
- * ⛔ AND THE SECRETS IN IT ARE HIDDEN (HIDDEN_DIRS): ~/.ssh, ~/.gnupg, ~/.cache/CLIAI,
- * ~/.config/CLIAI, ~/.local/state/CLIAI and ~/.config/webctl — those that exist, at their real
- * paths — each get an EMPTY read-only tmpfs on top, after the ro step, so nested calls inherit
- * them locked. An explicit `--keep` at or beneath one re-exposes THAT path (named on stderr);
- * one CONTAINING it does not unhide it. Read back from mountinfo too (hiddenGaps).
+ * ⛔ AND THE SECRET DIRS STAY HIDDEN UNDER A RE-BIND (HIDDEN_DIRS): ~/.ssh, ~/.gnupg,
+ * ~/.cache/CLIAI, ~/.config/CLIAI, ~/.local/state/CLIAI and ~/.config/webctl get their own empty
+ * read-only tmpfs where a re-bind contains them. A PATH entry or `--keep-ro` that IS the home,
+ * or contains or lies inside one of them, is REFUSED naming the rule and no path. An explicit
+ * `--keep` at or beneath one re-exposes THAT path (named on stderr). Read back from mountinfo by
+ * RESOLVING each path (hiddenGaps): a later mount on an ancestor would shadow a hide.
  *
  * ⛔ NEVER FALLS BACK TO THE HOST. No unshare, userns disabled, no `ip`/`ifconfig`, no
  * `mount`, a loopback that will not come up, a namespace that still sees a non-loopback
@@ -1627,11 +1635,16 @@ function usageRefusal(why, command) {
  * still make namespaces of its own — `unshare -rn`, Chromium's sandbox — which the earlier
  * setpriv capability drop broke (measured).
  *
- * The command's env drops DISPLAY, WAYLAND_DISPLAY, SSH_AUTH_SOCK,
- * DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST, XDG_RUNTIME_DIR, XDG_{CACHE,CONFIG,STATE,DATA}_HOME,
- * TMUX, TMUX_PANE, XAUTHORITY, SSH_AGENT_PID, DOCKER_CONTEXT and SSH_{CONNECTION,CLIENT,TTY}
- * (SCRUBBED_ENV) and gets TMPDIR=/tmp —
- * on the nested path too. argv goes through as an ARRAY: no shell sees the command.
+ * ⛔ THE ENV IS AN ALLOWLIST (v0.33.0, DEFAULT_PASS_ENV): PATH, HOME, USER, LOGNAME, SHELL, LANG,
+ * LC_*, TERM, TZ, NODE_OPTIONS, NODE_PATH, npm_config_*, WEBCTL_* — plus each `--pass-env
+ * NAME|PREFIX_*` — and SCRUBBED_ENV is removed even from those; TMPDIR=/tmp. On the nested path
+ * too, with the nested call's own `--pass-env`. argv goes through as an ARRAY: no shell sees
+ * the command.
+ *
+ * ⛔ HOST POLICY: an unprivileged user namespace refused by AppArmor
+ * (kernel.apparmor_restrict_unprivileged_userns=1) is named as such, with both fixes
+ * (userNamespaceRefusal). WEBCTL_UNSHARE_BIN — an absolute path to an executable — replaces
+ * `unshare` in EVERY invocation, so a host can grant userns to one dedicated binary.
  * @param {string[]} a
  * @returns {Promise<number>}
  */
@@ -1642,10 +1655,13 @@ function runIsolated(a) {
   /** @type {string[]} */
   const keeps = [];
   /** @type {string[]} */
+  const keepsRo = [];
+  /** @type {string[]} */
   const pass = [];
   let bad = sep < 0 || command.length === 0;
   for (let i = 0; i < opts.length && !bad; i++) {
     if (opts[i] === '--keep' && opts[i + 1]) keeps.push(opts[++i]);
+    else if (opts[i] === '--keep-ro' && opts[i + 1]) keepsRo.push(opts[++i]);
     else if (opts[i] === '--pass-env' && i + 1 < opts.length) pass.push(opts[++i]);
     else bad = true;
   }
@@ -1674,7 +1690,7 @@ function runIsolated(a) {
           + `namespace, but the kernel says otherwise — ${proof.why}. Unset it on the host; only `
           + '`isolated` sets it.', { command, namespace: proof.facts }));
     }
-    const nestedPlan = planKeeps(keeps, [], { home: '', roots: recordedRoRoots() || [], sensitive: [], hidden: [] });
+    const nestedPlan = planKeeps(keeps, [], { home: '', roots: recordedRoRoots() || [], sensitive: [], hidden: [], hideRule: [] }, keepsRo);
     if (nestedPlan.usage) return Promise.resolve(usageRefusal(nestedPlan.usage, command));
     // ⛔ and still capless: a nested call must not be the way back to capabilities — its
     // command, too, enters a uid-mapped child user namespace (read back as on the fresh path)
@@ -1728,7 +1744,9 @@ function runIsolated(a) {
     ...(ub.bin !== 'unshare' ? [{ p: ub.bin, label: UNSHARE_BIN_ENV, rw: false }] : []),
     // a throwaway HOME under /tmp is the arm's own (the family's sandboxes isolate HOME)
     ...(throwawayHome(ident.home) ? [{ p: throwawayHome(ident.home), label: 'HOME', rw: true }] : []),
-  ], prot);
+    // ⛔ the HIDDEN home: every PATH entry under it is re-bound READ-ONLY, or tools vanish
+    ...pathEntriesUnder(ident.home).map(({ p, n }) => ({ p, label: `PATH entry #${n}`, rw: false, rule: true })),
+  ], prot, keepsRo);
   if (plan.usage) return Promise.resolve(usageRefusal(plan.usage, command));
   if (plan.refuse) {
     return Promise.resolve(report('isolated', EXIT.fail,
@@ -1743,10 +1761,14 @@ function runIsolated(a) {
   const bash = bashOnPath();
   if (!bash) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${NO_BASH}. The command was NOT started.`, { command }));
   for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
+  // ⭐ the verdict on the home: what is re-bound on top of the hidden home, as ~/… ONLY
+  const rebound = (/** @type {boolean} */ rw) => plan.binds.filter((b) => b.rw === rw && isWithin(b.p, prot.home))
+    .map((b) => (b.p === prot.home ? '~' : `~/${path.relative(prot.home, b.p)}`)).sort().join(', ') || 'nothing';
+  process.stderr.write(`isolated: home HIDDEN; re-bound read-only: ${rebound(false)}; writable: ${rebound(true)}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
   const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
-    exempt: plan.exempt, sockets, ids, pass });
+    home: prot.home, exempt: plan.exempt, sockets, ids, pass });
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
     let child;
@@ -1761,7 +1783,9 @@ function runIsolated(a) {
         // ⛔ the ALLOWLIST already here: pid 1 and the inner half never see what the command may not
         { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'],
           env: isolatedEnv(process.env, pass, { [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt, [HOST_PIDNS_ENV]: hostPid,
-            [RO_ROOTS_ENV]: JSON.stringify(prot.roots), [HIDDEN_ENV]: JSON.stringify(prot.hidden),
+            // the home is recorded as HIDDEN (fact 8: its read-only mask), not as a ro root — under its
+            // 0555 tmpfs access(W_OK) answers EACCES before EROFS (mode bits are checked first)
+            [RO_ROOTS_ENV]: JSON.stringify(prot.roots), [HIDDEN_ENV]: JSON.stringify([prot.home, ...prot.hidden]),
             [HOST_IDS_ENV]: JSON.stringify(ids) }) });
     } catch (e) {
       resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
@@ -1806,10 +1830,11 @@ function errMsg(e) { return e instanceof Error ? e.message : String(e); }
  *   4. the mount namespace differs from the caller's;
  *   5. `lo` is brought up (`ip`, else `ifconfig`) and a self-connect on
  *      127.0.0.1 works, so local fakes and stubs still run;
- *   6. /run, /tmp (and a real /var/run) are covered with a fresh tmpfs, the protected
- *      roots (the passwd home) made read-only with every submount, the kept paths bound
- *      back — and /proc/self/mountinfo then SHOWS our tmpfs on top, and NO writable
- *      mount under a protected root outside a writable keep;
+ *   6. /run, /tmp (and a real /var/run) are covered with a fresh tmpfs, the passwd home
+ *      HIDDEN under an empty read-only one, the sensitive roots outside it made read-only
+ *      with every submount, the kept paths bound back — and /proc/self/mountinfo then SHOWS
+ *      our tmpfs on top, NO writable mount under a ro root or ro re-bind outside a writable
+ *      keep, and the home and each hidden dir RESOLVING to our read-only hide;
  *   7. every host path socket the outer half listed (except under a `--keep`) is
  *      connect-tested; one that still answers gets /dev/null bound over it and is
  *      tested again. Any that still answers → refuse.
@@ -1866,7 +1891,7 @@ async function runIsolatedInner(a) {
 
   // ⇩ only now, provably off the host network, read the plan. (On the host the
   // proofs above refuse first, so an unrelated fd 4 is never read.)
-  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], exempt: string[], sockets: string[], ids: unknown, pass: string[]}} */
+  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, pass: string[]}} */
   let plan;
   try {
     // node's stdio 'pipe' is a socketpair, not a FIFO; anything else is not ours
@@ -1878,6 +1903,7 @@ async function runIsolatedInner(a) {
     const binds = (/** @type {unknown} */ x) => Array.isArray(x)
       && x.every((b) => b && typeof b.p === 'string' && typeof b.rw === 'boolean');
     if (typeof plan.hostMnt !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
+      || typeof plan.home !== 'string' || !path.isAbsolute(plan.home)
       || !strs(plan.roots) || !strs(plan.hidden) || !strs(plan.exempt) || !strs(plan.sockets) || !hostIdsOf(plan.ids)
       || !strs(plan.pass) || !plan.pass.every((p) => PASS_ENV_RE.test(p))) throw new Error('malformed');
   } catch (e) {
@@ -1898,7 +1924,7 @@ async function runIsolatedInner(a) {
     return refuse(`the namespace loopback does not work after bringing it up (${errMsg(e)})`);
   }
 
-  const masked = maskSocketDirs(plan.binds, plan.roots, plan.hidden);
+  const masked = maskSocketDirs(plan.binds, plan.roots, plan.hidden, plan.home);
   if (masked) return refuse(masked);
   const unmasked = unmaskedDirs();
   if (unmasked.length) {
@@ -1914,11 +1940,13 @@ async function runIsolatedInner(a) {
     return refuse(`after the read-only step, ${gaps.length} mount(s) under the home directory or a read-only `
       + 'keep are still WRITABLE (or not mounted at all)');
   }
-  // ⭐ …and every hidden dir's TOP mount is our empty read-only tmpfs, unless a keep is exactly it
-  const shown = hiddenGaps(mounts, plan.hidden, plan.binds.map((b) => b.p));
+  // ⭐ …and the home and every hidden dir RESOLVE to our empty read-only tmpfs (their own, or an
+  // ancestor's), unless a keep is exactly there — a later mount on an ancestor shadows a hide
+  const allHidden = [plan.home, ...plan.hidden];
+  const shown = hiddenGaps(mounts, allHidden, plan.binds.map((b) => b.p));
   if (shown.length) {
-    return refuse(`after hiding, ${shown.length} of ${plan.hidden.length} hidden home dir(s) (~/.ssh, ~/.gnupg, the `
-      + `state roots) lack the read-only '${HIDE_SOURCE}' tmpfs on top`);
+    return refuse(`after hiding, ${shown.length} of ${allHidden.length} hidden dir(s) (the home, ~/.ssh, ~/.gnupg, the `
+      + `state roots) do not resolve to the read-only '${HIDE_SOURCE}' tmpfs`);
   }
   const res = await closeResidualSockets(plan.sockets, plan.exempt);
   if (res.still > 0) {
@@ -1976,6 +2004,24 @@ function throwawayHome(pwHome) {
     if (pw && isWithin(pw, real)) return '';
     return real !== tmp && isWithin(real, tmp) ? real : '';
   } catch { return ''; }
+}
+
+/**
+ * The PATH entries whose REAL path is the home or beneath it, with their 1-based position in
+ * PATH (refusals name the position, never the path). Relative and missing entries are skipped.
+ * ⚠ Bound at the REAL path: an entry that reaches into the home through a symlink OUTSIDE it
+ * is re-bound at its real path only (list that, or `--keep-ro` it).
+ * @param {string} home realpath'd @returns {{p: string, n: number}[]}
+ */
+function pathEntriesUnder(home) {
+  /** @type {{p: string, n: number}[]} */ const out = [];
+  for (const [i, d] of String(process.env.PATH || '').split(':').entries()) {
+    if (!path.isAbsolute(d)) continue;
+    let real = '';
+    try { real = fs.realpathSync(d); } catch { continue; }
+    if (home && isWithin(real, home)) out.push({ p: real, n: i + 1 });
+  }
+  return out;
 }
 
 /** Is `p` equal to `dir` or beneath it? @param {string} p @param {string} dir */
@@ -2091,19 +2137,25 @@ function realIdentity() {
 }
 
 /**
- * The directories `isolated` makes READ-ONLY: the PASSWD home (realpath), plus the real
- * path of every SENSITIVE_DOTDIRS entry that is a symlink OUT of home (a ~/.cache on a
- * bigger disk still holds the profiles). Roots under a masked dir are dropped — the mask
- * already hides them; nested roots collapse to the outer one.
+ * What `isolated` protects, from the PASSWD home (realpath):
  *
- * `hidden`: the real path of every HIDDEN_DIRS entry that exists, outer ones only, minus any
- * already hidden by the /run or /tmp mask. One that CONTAINS /run, /tmp or the home is refused:
- * an empty tmpfs there would hide the arm itself.
+ *   * `home` — HIDDEN whole (v0.33.0): an empty read-only tmpfs over it; what the arm needs is
+ *     re-bound on top (planKeeps). ⛔ A fixed hidden list missed every secret nobody listed —
+ *     a read-only home is still a READABLE one.
+ *   * `roots` — READ-ONLY: the real path of every SENSITIVE_DOTDIRS entry that is a symlink OUT
+ *     of home (a ~/.cache on a bigger disk still holds the profiles; the home tmpfs hides only
+ *     the symlink). Roots under a masked dir are dropped; nested roots collapse to the outer one.
+ *   * `hidden` — the real path of every HIDDEN_DIRS entry that exists, outer ones only, minus any
+ *     already hidden by the /run or /tmp mask: each gets its OWN empty tmpfs wherever a re-bind
+ *     would otherwise expose it (a `--keep ~/.config` does not unhide ~/.config/webctl), and
+ *     always when it lies outside the home. One that CONTAINS /run, /tmp or the home is refused.
+ *   * `hideRule` — every HIDDEN_DIRS path, nominal AND real, existing or not: a PATH entry or
+ *     `--keep-ro` inside or containing one is REFUSED (planKeeps).
  *
  * ⚠ Computed on the HOST side only, from realIdentity()'s home: inside the user namespace
  * we are uid 0, and os.userInfo() there answers root's home, not the caller's.
  * @param {string} home the real user's passwd home, realpath'd (realIdentity)
- * @returns {{home: string, roots: string[], sensitive: {name: string, real: string}[], hidden: string[], refuse?: string}}
+ * @returns {Prot & {refuse?: string}}
  */
 function protectedRoots(home) {
   /** @type {{name: string, real: string}[]} */
@@ -2111,40 +2163,49 @@ function protectedRoots(home) {
   for (const d of SENSITIVE_DOTDIRS) {
     try { sensitive.push({ name: `~/${d}`, real: fs.realpathSync(path.join(home, d)) }); } catch { /* absent */ }
   }
+  const hideRule = [...new Set(HIDDEN_DIRS.flatMap((d) => {
+    const nominal = path.join(home, d);
+    try { return [nominal, fs.realpathSync(nominal)]; } catch { return [nominal]; }
+  }))];
   const { all } = maskedDirs();
+  const none = (/** @type {string} */ refuse) => ({ home, roots: [], sensitive, hidden: [], hideRule, refuse });
+  if (all.some((m) => isWithin(m, home))) {
+    return none('the home directory CONTAINS /run or /tmp, so it cannot be hidden without hiding the arm too');
+  }
+  if (all.some((m) => isWithin(home, m))) {
+    // ⛔ A HOME under /run or /tmp would protect NOTHING: the mask hides it, and the real
+    // files are elsewhere. That is the signature of a wrong passwd answer, so refuse.
+    return none('the resolved home directory lies under /run or /tmp, so hiding it would protect nothing — '
+      + 'refusing rather than leaving the real home exposed');
+  }
   /** @type {string[]} */
   const hidden = [];
   const hideCands = HIDDEN_DIRS.map((d) => { try { return fs.realpathSync(path.join(home, d)); } catch { return ''; } })
     .filter((r) => r && !all.some((m) => isWithin(r, m))).sort((x, y) => x.length - y.length);
   for (const r of hideCands) {
     if (isWithin(home, r) || all.some((m) => isWithin(m, r))) {
-      return { home, roots: [], sensitive, hidden: [], refuse: 'the real path of a home directory isolation HIDES '
-        + '(~/.ssh, ~/.gnupg, a state root) CONTAINS the home, /run or /tmp, so hiding it would hide the arm too' };
+      return none('the real path of a home directory isolation HIDES (~/.ssh, ~/.gnupg, a state root) CONTAINS the '
+        + 'home, /run or /tmp, so hiding it would hide the arm too');
     }
     if (!hidden.some((o) => isWithin(r, o))) hidden.push(r);
   }
   /** @type {string[]} */
   const roots = [];
-  const cands = [home, ...sensitive.map((s) => s.real).filter((r) => !isWithin(r, home))]
-    .sort((x, y) => x.length - y.length);
+  const cands = sensitive.map((x) => x.real).filter((r) => !isWithin(r, home)).sort((x, y) => x.length - y.length);
   for (const r of cands) {
     if (all.some((m) => isWithin(m, r))) {
-      return { home, roots: [], sensitive, hidden, refuse: `${r === home ? 'the home directory' : 'a sensitive home directory\'s real path'} `
-        + 'CONTAINS /run or /tmp, so it cannot be made read-only without undoing the socket masking' };
+      return { ...none('a sensitive home directory\'s real path CONTAINS /run or /tmp, so it cannot be made read-only '
+        + 'without undoing the socket masking'), hidden };
     }
-    if (all.some((m) => isWithin(r, m))) {
-      // ⛔ A HOME under /run or /tmp would protect NOTHING: the mask hides it, and the real
-      // files are elsewhere. That is the signature of a wrong passwd answer, so refuse.
-      if (r === home) {
-        return { home, roots: [], sensitive, hidden, refuse: 'the resolved home directory lies under /run or /tmp, so '
-          + 'making it read-only would protect nothing — refusing rather than leaving the real home writable' };
-      }
-      continue; // a sensitive dir's real path hidden by the mask already
-    }
+    if (all.some((m) => isWithin(r, m))) continue; // hidden by the mask already
     if (!roots.some((o) => isWithin(r, o))) roots.push(r);
   }
-  return { home, roots, sensitive, hidden };
+  return { home, roots, sensitive, hidden, hideRule };
 }
+
+/**
+ * @typedef {{home: string, roots: string[], sensitive: {name: string, real: string}[], hidden: string[], hideRule: string[]}} Prot
+ */
 
 /**
  * @typedef {{id: string, parent: string, at: string, opts: string[], fstype: string, source: string}} MountRow
@@ -2227,17 +2288,45 @@ export function readOnlyGaps(mounts, roots, rwKeeps) {
 }
 
 /**
- * Hidden dirs whose TOP mount is not our read-only HIDE_SOURCE tmpfs — except one a keep is
- * mounted at exactly (the caller's explicit exception; it was hidden underneath first).
+ * The mount that path resolution of `p` LANDS ON, read from mountinfo: from the root mount,
+ * descend into the child whose mount point is the CLOSEST ancestor-or-self of `p` — of two
+ * children of one parent that both cover `p`, the shallower was mounted LATER and shadows the
+ * deeper — then to the top of the stack there; repeat. null when there is no root mount.
+ * @param {MountRow[]} mounts @param {string} p @returns {MountRow|null}
+ */
+export function resolveMount(mounts, p) {
+  const ids = new Set(mounts.map((m) => m.id));
+  /** @param {MountRow} m @returns {MountRow} */
+  const topOf = (m) => {
+    const on = mounts.filter((c) => c.parent === m.id && c.at === m.at && c !== m);
+    return on.length ? topOf(on.reduce((a, b) => (Number(b.id) > Number(a.id) ? b : a))) : m;
+  };
+  const root = mounts.find((m) => m.at === '/' && (!ids.has(m.parent) || m.parent === m.id));
+  if (!root) return null;
+  let cur = topOf(root);
+  for (;;) {
+    const at = cur.at;
+    const kids = mounts.filter((c) => c.parent === cur.id && c.at !== at && isWithin(p, c.at));
+    if (kids.length === 0) return cur;
+    cur = topOf(kids.reduce((a, b) => (b.at.length < a.at.length
+      || (b.at.length === a.at.length && Number(b.id) > Number(a.id)) ? b : a)));
+  }
+}
+
+/**
+ * Hidden dirs (the home first) that do NOT resolve to our read-only HIDE_SOURCE tmpfs — their
+ * own, or an ancestor's (a hidden dir under the home and under no re-bind is hidden by the
+ * home's) — except one a keep is mounted at exactly (the caller's explicit exception).
+ * ⛔ Resolved, not "the top of the stack AT the path" (review finding 7): a later mount on an
+ * ANCESTOR shadows a hide that is still on top of its own stack.
  * @param {MountRow[]} mounts @param {string[]} hidden @param {string[]} keeps every bind's path
  * @returns {string[]}
  */
 export function hiddenGaps(mounts, hidden, keeps) {
   return hidden.filter((h) => {
     if (keeps.includes(h)) return false;
-    const here = mounts.filter((m) => m.at === h);
-    const top = here.find((m) => !here.some((o) => o.parent === m.id));
-    return !(top && top.fstype === 'tmpfs' && top.source === HIDE_SOURCE && top.opts.includes('ro'));
+    const m = resolveMount(mounts, h);
+    return !(m && m.fstype === 'tmpfs' && m.source === HIDE_SOURCE && m.opts.includes('ro'));
   });
 }
 
@@ -2262,6 +2351,7 @@ function makeTreeReadOnly(root, rbindFirst) {
   if (!under) return 'a read-only root is not a mount point after binding it onto itself';
   const redact = under.map((m) => m.at).sort((x, y) => y.length - x.length);
   for (const [i, m] of under.entries()) {
+    if (m.opts.includes('ro')) continue; // already read-only (e.g. staged `-o ro`); the post-check reads it back
     const e = mountOrWhy(['-o', 'remount,bind,ro', m.at],
       `remount mount ${i + 1} of ${under.length} under a protected root read-only`, redact);
     if (e) return e;
@@ -2275,21 +2365,28 @@ function makeTreeReadOnly(root, rbindFirst) {
  */
 
 /**
- * Decide what must stay visible once /tmp is masked, and what is re-opened WRITABLE under
- * the read-only protected roots (the passwd home). ⚠ Messages name the keep by its LABEL
- * and the masked directory, never by its path.
+ * Decide what must stay visible once /tmp is masked and the home is HIDDEN, and with which
+ * mode. ⚠ Messages name an item by its LABEL (and position), never by its path.
  *
- * A bind is needed for (a) any keep strictly under /tmp — the mask hides it otherwise —
- * (b) a WRITABLE keep under a protected root; a read-only one there is covered by the
- * root's own ro mount — and (c) ANY keep at or beneath a HIDDEN dir, which its empty tmpfs
- * would hide. Writable: the cwd, $HOME under /tmp, every `--keep`. Read-only:
- * base's repo root, node, an absolute command.
+ * A bind is needed for (a) any item strictly under /tmp — the mask hides it otherwise — (b) ANY
+ * item under the hidden HOME (v0.33.0), (c) a WRITABLE item under a read-only root (a read-only
+ * one there is covered by the root's own ro mount), (d) any item at or beneath a HIDDEN dir,
+ * which its own empty tmpfs would hide, and (e) every `--keep-ro`, so it really is read-only.
+ * Writable: the cwd, $HOME under /tmp, every `--keep`. Read-only: base's repo root, node, an
+ * absolute command, WEBCTL_UNSHARE_BIN, every PATH entry under the home, every `--keep-ro`.
+ *
+ * ⛔ A PATH entry or `--keep-ro` (`rule`) is REFUSED if it IS the home, contains it, or contains
+ * or lies inside a hidden dir (Prot.hideRule): re-bound read-only it would EXPOSE what the
+ * hiding is for. A PATH entry's refusal is a FAIL (the caller's env), a `--keep-ro`'s a usage error.
+ * ⚠ Only `--keep` (writable) paths are EXEMPT from the socket check — a socket on a read-only
+ * mount still answers a connect.
  * @param {string[]} explicit `--keep` paths
- * @param {{p: string, label: string, rw: boolean}[]} implicit
- * @param {{home: string, roots: string[], sensitive: {name: string, real: string}[], hidden: string[]}} prot
+ * @param {{p: string, label: string, rw: boolean, rule?: boolean}[]} implicit
+ * @param {Prot} prot
+ * @param {string[]} [explicitRo] `--keep-ro` paths
  * @returns {{binds: Bind[], exempt: string[], notes: string[], usage?: string, refuse?: string}}
  */
-function planKeeps(explicit, implicit, prot) {
+function planKeeps(explicit, implicit, prot, explicitRo = []) {
   const { tmp, all } = maskedDirs();
   // ⚠ The roots hold the PASSWD home, not $HOME: os.homedir() honours $HOME, and an arm's
   // throwaway HOME under a kept scratch dir is exactly what a keep is for (measured: the
@@ -2297,8 +2394,9 @@ function planKeeps(explicit, implicit, prot) {
   /** @type {Bind[]} */ const binds = [];
   /** @type {string[]} */ const exempt = [];
   /** @type {string[]} */ const notes = [];
-  const items = [...explicit.map((p, i) => ({ p, label: `--keep #${i + 1}`, explicit: true, rw: true })),
-    ...implicit.map((k) => ({ ...k, explicit: false }))];
+  const items = [...explicit.map((p, i) => ({ p, label: `--keep #${i + 1}`, explicit: true, rw: true, rule: false })),
+    ...explicitRo.map((p, i) => ({ p, label: `--keep-ro #${i + 1}`, explicit: true, rw: false, rule: true })),
+    ...implicit.map((k) => ({ rule: false, ...k, explicit: false }))];
   for (const k of items) {
     let real = '';
     try { real = fs.realpathSync(path.resolve(k.p)); } catch {
@@ -2322,32 +2420,49 @@ function planKeeps(explicit, implicit, prot) {
         return k.explicit ? { binds, exempt, notes, usage: why } : { binds, exempt, notes, refuse: why };
       }
     }
-    // ⛔ A WRITABLE keep that IS a protected root, or contains one, re-opens all of it.
-    const contained = prot.roots.find((r) => isWithin(r, real));
+    // ⛔ the HIDDEN home: a read-only re-bind must not bring back what hiding it is for
+    if (k.rule && prot.home) {
+      const bad = real === prot.home ? 'is the home directory'
+        : isWithin(prot.home, real) ? 'contains the home directory'
+          : prot.hideRule.some((h) => isWithin(real, h)) ? 'lies inside a HIDDEN dir'
+            : prot.hideRule.some((h) => isWithin(h, real)) ? 'contains a HIDDEN dir' : '';
+      if (bad) {
+        const why = `${k.label} ${bad} (the home, ~/.ssh, ~/.gnupg, ~/.cache/CLIAI, ~/.config/CLIAI, ~/.local/state/CLIAI, `
+          + '~/.config/webctl) — re-bound read-only, it would EXPOSE what isolation hides; '
+          + (k.explicit ? 'keep a narrower path' : 'drop it from PATH for this call, or put a narrower dir there');
+        return k.explicit ? { binds, exempt, notes, usage: why } : { binds, exempt, notes, refuse: why };
+      }
+    }
+    // ⛔ A WRITABLE keep that IS (or contains) the home or a protected root re-opens all of it.
+    const contained = [...(prot.home ? [prot.home] : []), ...prot.roots].find((r) => isWithin(r, real));
     if (contained && k.rw) {
-      const what = contained === prot.home ? 'the home directory' : 'the real path of a sensitive home directory';
+      const what = contained === prot.home || !prot.home ? 'the home directory' : 'the real path of a sensitive home directory';
       if (k.explicit) {
         return { binds, exempt, notes, usage: `${k.label} contains ${what} — a keep is re-exposed WRITABLE and `
           + 'exempts the sockets beneath it, and home holds the browser profiles, ~/.config and the ssh '
           + 'sockets; keep a test-owned directory' };
       }
-      return { binds, exempt, notes, refuse: `${k.label} contains ${what}, which isolation makes READ-ONLY — `
+      return { binds, exempt, notes, refuse: `${k.label} contains ${what}, which isolation HIDES — `
         + 'run from a test-owned directory' };
     }
-    if (contained) continue; // read-only and containing a root: nothing beneath needs a bind
+    if (contained) continue; // read-only and containing the home or a root: nothing beneath it is re-bound
     if (k.rw) {
-      for (const s of prot.sensitive) {
-        if (isWithin(real, s.real) || isWithin(s.real, real)) {
-          notes.push(`${k.label} ${isWithin(real, s.real) ? 'is in' : 'contains'} ${s.name} — re-exposed WRITABLE`
+      for (const sd of prot.sensitive) {
+        if (isWithin(real, sd.real) || isWithin(sd.real, real)) {
+          notes.push(`${k.label} ${isWithin(real, sd.real) ? 'is in' : 'contains'} ${sd.name} — re-exposed WRITABLE`
             + `${k.explicit ? ', and its sockets exempt from the socket check,' : ''} at the caller's request`);
           break;
         }
       }
     }
+    const underHome = !!prot.home && isWithin(real, prot.home);
     const underRoot = prot.roots.some((r) => isWithin(real, r));
     const underHidden = prot.hidden.some((h) => isWithin(real, h));
-    if ((isWithin(real, tmp) && real !== tmp) || (underRoot && k.rw) || underHidden) binds.push({ p: real, rw: k.rw });
-    if (k.explicit) exempt.push(real);
+    const keepRo = k.explicit && !k.rw;
+    if ((isWithin(real, tmp) && real !== tmp) || underHome || (underRoot && k.rw) || underHidden || (keepRo && !underRoot)) {
+      binds.push({ p: real, rw: k.rw });
+    }
+    if (k.explicit && k.rw) exempt.push(real);
   }
   // A path beneath another kept path is already re-exposed by it — unless the outer one is
   // read-only and the inner writable: then the inner gets its own (later) mount on top. ⚠ Or
@@ -2379,12 +2494,35 @@ function hostPathSockets() {
 }
 
 /**
+ * The `mount` every masking step runs: `mount` on PATH until maskSocketDirs PINS it.
+ * ⛔ Once the home tmpfs is up, a PATH dir under the home is gone until its re-bind moves back —
+ * and with it a `mount` that lives there (measured: the no-setpriv arm's PATH is such a dir). ⇒
+ * right after /run is covered, the real `mount` is bound READ-ONLY at MOUNT_PIN and run from
+ * there. It stays visible inside: a read-only view of a binary already on PATH.
+ */
+const MOUNT = { bin: 'mount' };
+/** Where maskSocketDirs pins `mount` (inside the NEW /run). */
+const MOUNT_PIN = '.webctl-bin/mount';
+
+/**
+ * The real path of `name` on PATH (absolute entries only), or ''. @param {string} name
+ */
+function toolOnPath(name) {
+  for (const d of String(process.env.PATH || '').split(':')) {
+    if (!path.isAbsolute(d)) continue;
+    const p = path.join(d, name);
+    try { fs.accessSync(p, fs.constants.X_OK); if (fs.statSync(p).isFile()) return fs.realpathSync(p); } catch { /* next */ }
+  }
+  return '';
+}
+
+/**
  * Run `mount` (util-linux) with an argv ARRAY. @param {string[]} argv
  * @param {string} what for the reason @param {string[]} [redact] paths never to print
  * @returns {string} '' on success, else the reason
  */
 function mountOrWhy(argv, what, redact = []) {
-  const r = spawnSync('mount', argv, { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
+  const r = spawnSync(MOUNT.bin, argv, { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
   if (r.error) {
     const err = /** @type {NodeJS.ErrnoException} */ (r.error);
     return `cannot ${what}: ${err.code === 'ENOENT' ? "'mount' not found — install util-linux" : errMsg(err)}`;
@@ -2397,8 +2535,8 @@ function mountOrWhy(argv, what, redact = []) {
 
 /**
  * Cover /run, /tmp (and a real /var/run) with a fresh tmpfs, make every protected root
- * (the passwd home) READ-ONLY, and re-expose `binds` at the SAME paths — each with its
- * own mode.
+ * READ-ONLY, HIDE the home under an empty read-only tmpfs, and re-expose `binds` at the SAME
+ * paths — each with its own mode.
  *
  * ⛔ /tmp hides the arm itself, so: mount the new /run FIRST, rbind each kept path to
  * a staging point INSIDE it while the old /tmp is still visible, mount the new /tmp,
@@ -2412,70 +2550,88 @@ function mountOrWhy(argv, what, redact = []) {
  * would copy the ro submounts beneath it, and remounting those rw can fail on a mount
  * that was ro on the host.)
  *
- * ⛔ THE HIDDEN DIRS go in the SAME outer-before-inner sequence as the keeps moving back (a
- * hide before a keep at the same path): an empty tmpfs (mode 0555), the mount points of the
- * keeps beneath it created in it, then remounted READ-ONLY. ⇒ a keep CONTAINING a hidden dir
- * is covered there again; a keep AT or BENEATH one lands on top of it and shows only itself.
- * @param {Bind[]} binds @param {string[]} roots @param {string[]} [hidden]
+ * ⛔ THE HIDES go in the SAME outer-before-inner sequence as the keeps moving back (a hide before
+ * a keep at the same path): an empty tmpfs (mode 0555), the MISSING mount points of the keeps
+ * beneath it created in it, then remounted READ-ONLY. The HOME is always hidden; a hidden dir
+ * under it only where a re-bind CONTAINS it (elsewhere the home's tmpfs already hides it), and
+ * one outside the home always. ⇒ a keep CONTAINING a hidden dir is covered there again; a keep
+ * AT or BENEATH one lands on top of it and shows only itself.
+ * ⚠ A mount point is created only when MISSING: should a hide's tmpfs silently not be there,
+ * an existing FILE at a keep's path is the REAL file, and writing '' would truncate it.
+ * @param {Bind[]} binds @param {string[]} roots @param {string[]} [hidden] @param {string} [home]
  * @returns {string} '' on success, else the reason
  */
-function maskSocketDirs(binds, roots, hidden = []) {
+function maskSocketDirs(binds, roots, hidden = [], home = '') {
   const { run, tmp, all } = maskedDirs();
   const opts = (/** @type {string} */ d) => (d === tmp ? 'mode=1777' : 'mode=0755') + ',nosuid,nodev';
   const cover = (/** @type {string} */ d) => mountOrWhy(['-t', 'tmpfs', '-o', opts(d), MASK_SOURCE, d],
     `cover ${d} with a fresh tmpfs`);
   const stage = path.join(run, '.webctl-keep');
-  const secret = [...binds.map((b) => b.p), ...roots, ...hidden].sort((x, y) => y.length - x.length);
+  const hides = [...(home ? [home] : []),
+    ...hidden.filter((h) => !home || !isWithin(h, home) || binds.some((b) => b.p !== h && isWithin(h, b.p)))];
+  const secret = [...binds.map((b) => b.p), ...roots, ...hidden, ...(home ? [home] : [])].sort((x, y) => y.length - x.length);
+  /** @param {string} p @param {boolean} dir create a mount point only where there is none */
+  const mountPoint = (p, dir) => {
+    if (fs.existsSync(p)) return;
+    if (dir) fs.mkdirSync(p, { recursive: true });
+    else { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, '', { flag: 'wx' }); }
+  };
   try {
     for (const d of all.filter((x) => x !== tmp)) { const e = cover(d); if (e) return e; }
+    // ⛔ pin `mount` before anything it may live under is hidden (MOUNT)
+    const mbin = toolOnPath('mount');
+    if (mbin) {
+      const pin = path.join(run, MOUNT_PIN);
+      fs.mkdirSync(path.dirname(pin));
+      fs.writeFileSync(pin, '');
+      const e = mountOrWhy(['--bind', '-o', 'ro', mbin, pin], 'pin the mount binary read-only', secret);
+      if (e) return e;
+      MOUNT.bin = pin;
+    }
     fs.mkdirSync(stage);
     const isDir = binds.map((b) => fs.statSync(b.p).isDirectory());
     for (const [i, b] of binds.entries()) {
-      const s = path.join(stage, String(i));
-      if (isDir[i]) fs.mkdirSync(s); else fs.writeFileSync(s, '');
-      const e = mountOrWhy(['--rbind', b.p, s], `stage kept path ${i + 1} of ${binds.length}`, secret);
+      const st = path.join(stage, String(i));
+      if (isDir[i]) fs.mkdirSync(st); else fs.writeFileSync(st, '');
+      // a read-only bind is staged ro at its top at once (one `mount` less per PATH entry); its
+      // submounts are made ro after the move (makeTreeReadOnly), and all of it is read back
+      const e = mountOrWhy(b.rw ? ['--rbind', b.p, st] : ['--rbind', '-o', 'ro', b.p, st],
+        `stage kept path ${i + 1} of ${binds.length}`, secret);
       if (e) return e;
     }
     for (const r of roots) {
       const e = makeTreeReadOnly(r, true);
-      if (e) return `${e} — the home directory would stay WRITABLE`;
+      if (e) return `${e.split(r).join('<path>')} — a sensitive home directory would stay WRITABLE`;
     }
     const e = cover(tmp);
     if (e) return e;
     // outer before inner; at one path the hide first, so a keep exactly there lands on top
-    const ops = [...binds.map((b, i) => ({ p: b.p, i })), ...hidden.map((h) => ({ p: h, i: -1 }))]
+    const ops = [...binds.map((b, i) => ({ p: b.p, i })), ...hides.map((h) => ({ p: h, i: -1 }))]
       .sort((x, y) => x.p.length - y.p.length || Number(y.i < 0) - Number(x.i < 0));
     let nHide = 0;
     for (const { p: at, i } of ops) {
       if (i < 0) {
         nHide++;
-        const what = `hide sensitive home dir ${nHide} of ${hidden.length}`;
+        const what = `hide home dir ${nHide} of ${hides.length}`;
         const h = mountOrWhy(['-t', 'tmpfs', '-o', 'mode=0555,nosuid,nodev,noexec,size=1m', HIDE_SOURCE, at], what, secret);
         if (h) return h;
-        for (const [j, b] of binds.entries()) {
-          if (b.p === at || !isWithin(b.p, at)) continue;
-          if (isDir[j]) fs.mkdirSync(b.p, { recursive: true });
-          else { fs.mkdirSync(path.dirname(b.p), { recursive: true }); fs.writeFileSync(b.p, ''); }
-        }
+        for (const [j, b] of binds.entries()) if (b.p !== at && isWithin(b.p, at)) mountPoint(b.p, isDir[j]);
         const ro = mountOrWhy(['-o', 'remount,bind,ro', at], `${what} read-only`, secret);
         if (ro) return ro;
         continue;
       }
       const b = binds[i];
-      const s = path.join(stage, String(i));
-      // ⚠ Create the mount point only when MISSING (the fresh /tmp). Under a ro root it
-      // exists — and writing '' to an existing FILE keep would truncate the real file.
-      if (!fs.existsSync(b.p)) {
-        if (isDir[i]) fs.mkdirSync(b.p, { recursive: true });
-        else { fs.mkdirSync(path.dirname(b.p), { recursive: true }); fs.writeFileSync(b.p, ''); }
-      }
-      const m = mountOrWhy(['--move', s, b.p], `re-expose kept path ${i + 1} of ${binds.length}`, secret);
+      const st = path.join(stage, String(i));
+      // ⚠ Create the mount point only when MISSING (the fresh /tmp, the hidden home): under a ro
+      // root it exists — and writing '' to an existing FILE keep would truncate the real file.
+      mountPoint(b.p, isDir[i]);
+      const m = mountOrWhy(['--move', st, b.p], `re-expose kept path ${i + 1} of ${binds.length}`, secret);
       if (m) return m;
       if (!b.rw) {
         const r = makeTreeReadOnly(b.p, false);
         if (r) return r.split(b.p).join('<path>');
       }
-      try { if (isDir[i]) fs.rmdirSync(s); else fs.unlinkSync(s); } catch { /* left empty: harmless */ }
+      try { if (isDir[i]) fs.rmdirSync(st); else fs.unlinkSync(st); } catch { /* left empty: harmless */ }
     }
     try { fs.rmdirSync(stage); } catch { /* left empty: harmless */ }
   } catch (e) {
@@ -2734,11 +2890,15 @@ function runCommand(command, prefix = [], { pastUnshare = false, pass = /** @typ
 // WRITABLE — signed-in profiles, ~/.config, ~/.ssh. So a sixth:
 //
 //   6. each root in WEBCTL_RO_ROOTS (recorded at entry) answers access(W_OK) with EROFS
-//      (or is absent — masked);
+//      (or is absent — masked). Since v0.33.0 these are only the sensitive dot-dirs'
+//      real paths OUTSIDE the home; the home itself is fact 8's.
 //   7. /proc/self/ns/pid DIFFERS from WEBCTL_HOST_PIDNS — no host process is signalable.
-//   8. each dir in WEBCTL_HIDDEN_DIRS (recorded at entry) has OUR read-only tmpfs (source
-//      'webctl-isolated-hidden') in its mount stack — ~/.ssh and the state roots are HIDDEN.
-//      In the stack, not necessarily on top: a `--keep` at exactly that dir sits above it.
+//   8. each dir in WEBCTL_HIDDEN_DIRS (recorded at entry: the HOME first, then ~/.ssh and the
+//      state roots) has OUR read-only tmpfs (source 'webctl-isolated-hidden') in the mount
+//      stack AT it or at an ANCESTOR — the home's covers what no re-bind brings back. In the
+//      stack, not necessarily on top: a `--keep` at exactly that dir sits above it.
+//      ⚠ A ≤ v0.32.0 outer records no WEBCTL_HIDDEN_DIRS: when that is the ONLY failing fact
+//      the refusal says "upgrade the outer" (it is version skew, not a forged marker).
 //
 // ⚠ The roots are RECORDED, not re-derived: inside the user namespace we are uid 0 and
 // the passwd lookup answers root's home. access(2) rather than mountinfo because it asks
@@ -2800,7 +2960,7 @@ function extraInterfaces() {
 
 /**
  * Is this process provably inside the namespaces `isolated` made — no host network,
- * no host unix sockets, a read-only home with its secrets hidden, no host processes? All eight
+ * no host unix sockets, a HIDDEN home, no host processes? All eight
  * facts must hold; every one that fails
  * is named.
  * @returns {{inside: boolean, why: string, facts: Record<string, any>}}
@@ -2822,7 +2982,8 @@ function kernelInsideProof() {
   const writable = (roRoots || []).filter((r) => !['EROFS', 'ENOENT'].includes(writeOutcome(r))).length;
   const hidden = recordedPaths(HIDDEN_ENV);
   const mounts = readMountinfo() || [];
-  const shown = (hidden || []).filter((h) => !mounts.some((m) => m.at === h && m.source === HIDE_SOURCE && m.opts.includes('ro'))).length;
+  // a HIDE mask AT the dir or on an ANCESTOR (the home's hides everything under it no keep re-binds)
+  const shown = (hidden || []).filter((h) => !mounts.some((m) => isWithin(h, m.at) && m.source === HIDE_SOURCE && m.opts.includes('ro'))).length;
   /** @type {string[]} */
   const fails = [];
   if (!netns) fails.push('/proc/self/ns/net is unreadable');
@@ -2845,7 +3006,15 @@ function kernelInsideProof() {
   if (!roRoots) fails.push(`${RO_ROOTS_ENV} is not set (or malformed), so there is no recorded home directory to find read-only`);
   else if (writable) fails.push(`${writable} of ${roRoots.length} protected root(s) — the home directory — are WRITABLE here`);
   if (!hidden) fails.push(`${HIDDEN_ENV} is not set (or malformed), so there is no record of which home dirs must be hidden`);
-  else if (shown) fails.push(`${shown} of ${hidden.length} hidden home dir(s) — ~/.ssh, the state roots — lack the '${HIDE_SOURCE}' mask here`);
+  else if (shown) fails.push(`${shown} of ${hidden.length} hidden dir(s) — the home, ~/.ssh, the state roots — lack the '${HIDE_SOURCE}' mask here`);
+  // ⛔ VERSION SKEW: a ≤ v0.32.0 outer records no WEBCTL_HIDDEN_DIRS (and hides nothing). If that
+  // is the ONLY failing fact, say what it is — still refused, never "inherited" as if hidden.
+  const outerTooOld = process.env[HIDDEN_ENV] === undefined && fails.length === 1;
+  if (outerTooOld) {
+    fails[0] = `the OUTER \`isolated\` is older than v0.33.0: it recorded no ${HIDDEN_ENV} and did not hide the `
+      + 'home, and a nested call cannot hide it after the fact — upgrade the outer one (the base checkout running '
+      + 'the gate, or your contract\'s own outer call) to v0.33.0 or later';
+  }
   // ⚠ counts, never the roots: they are home paths, and refusals get pasted
   return { inside: fails.length === 0, why: fails.join('; '),
     facts: { netns, recorded: recorded ?? null, uidMap, extraInterfaces: extra,
@@ -3108,7 +3277,7 @@ switch (cmd) {
   default:
     process.stderr.write(
       'usage: contract-harness.mjs <generation|require-generation N|pin|no-revendor|gate-probe> [--repo D] [--sub P] [--lib D]\n'
-      + '       contract-harness.mjs isolated [--keep <path>]… -- <cmd> [args…] | isolation-check <port>… | sandbox-port [--bare] | guard-live-port <port> [--pin-verified]\n'
+      + '       contract-harness.mjs isolated [--keep <path>]… [--keep-ro <path>]… [--pass-env <NAME|PREFIX_*>]… -- <cmd> [args…] | isolation-check <port>… | sandbox-port [--bare] | guard-live-port <port> [--pin-verified]\n'
       + '⇒ exit 0 pass · 1 fail · 2 no verdict (reason on the last line) · 3 usage\n');
     code = EXIT.usage;
 }
