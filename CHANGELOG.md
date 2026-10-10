@@ -268,6 +268,12 @@ except a contract that matches the new verdict field or a refusal's tail.
   possessor-only payload → EACCES inside by id (control: readable outside); **row 7**: the read-only
   root locks nothing over `/proc` or `/sys` files — the nested and stripped paths' `--mount-proc`
   prefixes and a nested sysfs mount still work inside.
+* Arms added by the re-review: **row 12** (no host devices — `/dev` beyond the minimal set, the
+  host's devpts, `/dev/uinput`, `/dev/snd`; controls: a pty master and slave, `/dev/null`,
+  `/dev/urandom`, `/dev/tty`, `/dev/shm`, a nested `unshare -Ur --pid --fork --mount-proc`); **row 3**
+  — the caller's `cgroup.kill` / `cgroup.procs` do not open for write (opened, never written; control:
+  they do outside). ⛔ An ARM with a half this host cannot test (no `ipcmk`, no `/dev/uinput`, a
+  cgroup not delegated, …) is now a named **SKIP**, never a green pass (item 6).
 
 ### Rows 8–10 closed (unshare)
 
