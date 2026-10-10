@@ -2321,6 +2321,10 @@ const COUNTED_BINDS = /** @type {[RegExp, (n: number) => string][]} */ ([
  * what the caller NAMED (cwd, --keep, --keep-ro). Implicit re-binds are COUNTED (`N PATH
  * entries`) or named by LABEL (base's repo root, node, the command, WEBCTL_UNSHARE_BIN), with a
  * pointer to the opt-in. `verbose` (WEBCTL_ISOLATED_VERBOSE=1): every path, as `~/…`, as before.
+ * ⛔ `writable:` covers EVERY writable bind (re-review item 4): those outside the home too — named ones
+ * as `N named paths outside the home` (absolute paths under VERBOSE) — so it never says "nothing"
+ * while something is writable. ⚠ `more` (`; backend: …`) still follows every path: the gate reads the
+ * LAST `; backend:`, so a path containing one cannot win.
  * @param {Bind[]} binds @param {string} home @param {boolean} verbose @param {string} [more] appended before the pointer
  * @returns {string}
  */
@@ -2329,13 +2333,18 @@ function verdictLine(binds, home, verbose, more = '') {
   let counted = false;
   const list = (/** @type {boolean} */ rw) => {
     const under = binds.filter((b) => b.rw === rw && isWithin(b.p, home));
-    if (verbose) return under.map((b) => tilde(b.p)).sort().join(', ') || 'nothing';
+    // ⛔ WRITABLE binds OUTSIDE the home too (re-review item 4): a cwd and a --keep under /tmp — writable —
+    // printed "writable: nothing". Named ones are COUNTED (paths only under VERBOSE), implicit ones as below.
+    const outside = rw ? binds.filter((b) => b.rw && !isWithin(b.p, home)) : [];
+    if (verbose) return [...under.map((b) => tilde(b.p)).sort(), ...outside.map((b) => b.p).sort()].join(', ') || 'nothing';
     const named = under.filter((b) => b.named).map((b) => tilde(b.p)).sort();
-    const tallies = COUNTED_BINDS.map(([re, say]) => say(under.filter((b) => !b.named && re.test(b.label || '')).length))
-      .filter((t, i) => under.some((b) => !b.named && COUNTED_BINDS[i][0].test(b.label || '')));
-    const labels = [...new Set(under.filter((b) => !b.named && !COUNTED_BINDS.some(([re]) => re.test(b.label || '')))
+    const implicitOf = [...under, ...outside].filter((b) => !b.named);
+    const tallies = COUNTED_BINDS.map(([re, say]) => say(implicitOf.filter((b) => re.test(b.label || '')).length))
+      .filter((t, i) => implicitOf.some((b) => COUNTED_BINDS[i][0].test(b.label || '')));
+    const labels = [...new Set(implicitOf.filter((b) => !COUNTED_BINDS.some(([re]) => re.test(b.label || '')))
       .map((b) => b.label || 'a re-bind'))].sort();
-    const implicit = [...tallies, ...labels];
+    const n = outside.filter((b) => b.named).length;
+    const implicit = [...tallies, ...labels, ...(n ? [`${n} named path${n === 1 ? '' : 's'} outside the home`] : [])];
     if (implicit.length) counted = true;
     return [...named, ...implicit].join(', ') || 'nothing';
   };

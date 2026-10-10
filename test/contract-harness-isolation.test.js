@@ -1646,7 +1646,7 @@ test('⭐ a PATH dir under the hidden home is re-bound read-only: a script in it
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /^HELLO from a PATH dir under the home$/m, r.stderr);
     assert.match(r.stdout, /^BIN-RO$/m, 'a PATH dir under the home was re-bound WRITABLE');
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 1 PATH entry; writable: ~\/work; backend: unshare — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 1 PATH entry; writable: ~\/work, 1 named path outside the home; backend: unshare — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
     assert.ok(!r.stderr.includes(home), 'the verdict printed the home path');
     // CONTROL: without the PATH entry the same name is not found inside
     const c = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--', 'sh', '-c', 'hello-from-home || echo "NOT-FOUND $?"']);
@@ -1659,6 +1659,25 @@ test('⭐ a PATH dir under the hidden home is re-bound read-only: a script in it
 // private repos — and the gate tees it into logs; base is PUBLIC and its rule is that verdicts
 // carry COUNTS, never paths. ⇒ implicit re-binds are COUNTED; only what the caller NAMED (cwd,
 // --keep, --keep-ro) is listed; WEBCTL_ISOLATED_VERBOSE=1 lists everything (review of 5773fb8).
+// ⛔ The verdict listed only re-binds UNDER the home: a cwd and a --keep under /tmp — both writable — printed
+// "writable: nothing" (re-review item 4). Outside the home they are COUNTED; VERBOSE lists them.
+test('⛔ the verdict never says "writable: nothing" with a writable cwd and --keep OUTSIDE the home — it counts them; CONTROL: VERBOSE lists both', needsIsolation, async () => {
+  const cwd = tmpdir();
+  const keep = tmpdir();
+  try {
+    const argv = ['isolated', '--keep', keep, '--', process.execPath, '-e', 'require("fs").writeFileSync("w", "w")'];
+    const r = await run(argv, {}, process.execPath, cwd);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(fs.readFileSync(path.join(cwd, 'w'), 'utf8'), 'w', 'the cwd was not writable (the arm would be vacuous)');
+    assert.doesNotMatch(r.stderr, /writable: nothing/, r.stderr);
+    assert.match(r.stderr, /^isolated: home HIDDEN; [^\n]*; writable: 2 named paths outside the home; backend: unshare[^\n]* — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    const v = await run(argv, { WEBCTL_ISOLATED_VERBOSE: '1' }, process.execPath, cwd);
+    assert.equal(v.status, 0, v.stdout + v.stderr);
+    const both = [fs.realpathSync(cwd), fs.realpathSync(keep)].sort().join(', ');
+    assert.ok(v.stderr.split('\n').some((l) => l.startsWith('isolated: home HIDDEN; ') && l.includes(`; writable: ${both}; backend: unshare`)), v.stderr);
+  } finally { for (const d of [cwd, keep]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
 test('⛔ the verdict COUNTS implicit PATH re-binds — a distinctive PATH dir name never reaches stderr by default; CONTROL: WEBCTL_ISOLATED_VERBOSE=1 lists it', needsIsolation, async (t) => {
   const home = fakeWholeHome();
   const secretName = 'private-repo-zq7x';
@@ -1672,12 +1691,13 @@ test('⛔ the verdict COUNTS implicit PATH re-binds — a distinctive PATH dir n
     assert.match(r.stdout, /^HELLO from a PATH dir under the home$/m, 'the PATH dir was not re-bound (the count would be vacuous)');
     assert.ok(!r.stderr.includes(secretName), `an implicit PATH re-bind was NAMED on stderr:\n${r.stderr}`);
     assert.ok(!r.stderr.includes('~/bin'), `an implicit PATH re-bind was NAMED on stderr:\n${r.stderr}`);
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 2 PATH entries; writable: ~\/work; backend: unshare — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 2 PATH entries; writable: ~\/work, 1 named path outside the home; backend: unshare — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
     // CONTROL: the opt-in lists every path (so the default's silence is the fix, not a missing bind)
     const v = await underFakeHome(home, argv(['env', 'WEBCTL_ISOLATED_VERBOSE=1']));
     assert.ok(v);
     assert.equal(v.status, 0, v.stdout + v.stderr);
-    assert.match(v.stderr, new RegExp(`^isolated: home HIDDEN; re-bound read-only: ~/bin, ~/data, ~/${secretName}/bin; writable: ~/work; backend: unshare$`, 'm'), v.stderr);
+    // the cwd (base's checkout, outside the FAKE home) is listed by its absolute path under VERBOSE (item 4)
+    assert.ok(v.stderr.split('\n').includes(`isolated: home HIDDEN; re-bound read-only: ~/bin, ~/data, ~/${secretName}/bin; writable: ~/work, ${fs.realpathSync(ROOT)}; backend: unshare`), v.stderr);
     assert.ok(!v.stderr.includes(home), 'even verbose, the home itself is printed as ~');
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
@@ -1923,7 +1943,7 @@ test('⛔ base\'s root UNDER the hidden home is re-bound READ-ONLY (the harness 
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.equal(writeOf(r.stdout), 'EROFS', 'base\'s root under the home is writable inside');
     // base's root is not a path the caller named: it is named by its LABEL, never by its path
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: base's repo root; writable: nothing; backend: unshare — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: base's repo root; writable: 1 named path outside the home; backend: unshare — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
     assert.equal(fs.existsSync(path.join(base, 'x')), false);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });

@@ -241,6 +241,11 @@ except a contract that matches the new verdict field or a refusal's tail.
   `"skipped"`. ⚠ An earlier phase-1 build said `NOT RUN: no isolation backend can be used here —
   unshare: …`; it broke a lane's regex and is gone.
 * **The verdict line ends `…; backend: unshare`** (then `; keyring: …` when that deviates).
+* **`writable:` counts writable binds OUTSIDE the home** (re-review item 4): a cwd and a `--keep`
+  under `/tmp` printed `writable: nothing`. Now `writable: ~/work, 2 named paths outside the home`
+  (implicit ones by label or tally, as under the home); `WEBCTL_ISOLATED_VERBOSE=1` lists them by
+  absolute path. `; backend:` still follows every path. ⚠ A test anchoring `writable: nothing` or
+  `writable: ~/x;` where its cwd lies outside the home must allow the count.
   ⚠ A test anchoring the verdict's END (after `writable: …`) must allow it.
 * **The release gate** records the backend per consumer — read from its OWN `isolated` verdict, so
   nothing a consumer prints changes: scratch-mode envelopes gain `"isolation": "<backend>"` (`none`

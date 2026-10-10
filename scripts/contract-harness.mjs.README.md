@@ -365,7 +365,10 @@ contract's output when it is used.
     `isolated: home HIDDEN; re-bound read-only: ~/data, 2 PATH entries; writable: ~/work —
     WEBCTL_ISOLATED_VERBOSE=1 lists every path`. ⛔ It used to list them all (~95 on an operator
     host, private repo names among them) and the gate tees stderr into logs (review of 5773fb8).
-    `WEBCTL_ISOLATED_VERBOSE=1` restores the full `~/…` list for a local debug run.
+    `WEBCTL_ISOLATED_VERBOSE=1` restores the full `~/…` list for a local debug run. Writable
+    binds OUTSIDE the home (a cwd or `--keep` under `/tmp`) are counted too —
+    `writable: ~/work, 2 named paths outside the home` — never `nothing` while something is
+    writable (v0.34.0); VERBOSE lists them by absolute path.
   * ⛔ **A cwd at or beneath a hidden dir is REFUSED** (FAIL): it was re-bound writable there.
     Only an explicit `--keep` re-exposes a hidden dir. A NESTED `--keep` under the outer call's
     hidden home says the OUTER call hides it — keep it there.
