@@ -114,7 +114,11 @@ const tamper = (target) => {
   out.passedVar = process.env.ARM_PASSED_VAR ?? null;
   // 7 — writable only where declared
   out.writes = { cwd: tryWrite(process.cwd()), keep: tryWrite(cfg.keep), home: tryWrite(cfg.home), keepRo: out.keepRoWrite,
-    ...(inside ? { baseRoot: tryWrite(cfg.baseRoot) } : {}), outsideHome: tryWrite(cfg.outsideHome) };
+    ...(inside ? { baseRoot: tryWrite(cfg.baseRoot) } : {}), outsideHome: tryWrite(cfg.outsideHome), keepOutside: tryWrite(cfg.keepOutside) };
+  // 7 (R1): what the read-only root must NOT take away — procfs writes (Chromium's sandbox writes
+  // oom_score_adj and a nested userns's uid_map) and a nested user namespace
+  out.procWrite = errOf(() => fs.writeFileSync('/proc/self/oom_score_adj', fs.readFileSync('/proc/self/oom_score_adj', 'utf8')));
+  out.nestedUserns = run(['unshare', '-rn', 'true']).status;
   // 8 — no host-shared scratch: the world's planted files; a file made here, read back here
   out.shmPlanted = errOf(() => fs.readFileSync(path.join('/dev/shm', cfg.planted)));
   out.vartmpPlanted = errOf(() => fs.readFileSync(path.join('/var/tmp', cfg.planted)));

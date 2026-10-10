@@ -1535,6 +1535,43 @@ had to guess it from the nested call's own system dirs). Arm: the tool covered b
 file → NOT RUN, command not run; RED before (it ran with the note), GREEN after. Sabotage (the refusal
 removed) → the arm red (the run is then refused only by the inner plan check, with the wrong reason).
 
+**R1 — row 7 closed: the whole tree read-only (ruling; its own commit, revertable alone).** Phase 1
+protected the home, base's root and the keeps; a user-owned dir OUTSIDE the home was writable inside
+(the table's `todo`). Now `maskSocketDirs` runs `makeRootReadOnly()` after the keeps are staged and
+the protected roots are done, BEFORE the scratch masks, the hides and the keeps moving back: every
+mount reachable from `/` — the root mount included — gets a per-mount `remount,bind,ro`, except at or
+beneath our own `/run` (where the keeps are staged) and `ROOT_RW_TREES` (`/proc`, `/sys`, `/dev`).
+`mount --rbind / /` was not used: a mount ON `/` does not move this process's root. `planKeeps`
+re-binds EVERY writable item (cwd, `--keep`, a throwaway HOME, an outer's rw re-bind), so each lands
+on top writable; a writable item that CONTAINS a masked dir (a cwd of `/`) is refused (its bind would
+shadow the mask). The inner half READS BACK `readOnlyGaps(mountinfo, ['/'], declared rw set)` and
+refuses on any gap. `outerRebinds` carries an R1 outer's writable mounts ANYWHERE (its root is ro, so
+they are its declared set — a `--keep` outside the home); under an older outer (root rw) only the home
+and scratch dirs, as before.
+* **Measured: `/proc` must stay out.** With `/proc` in the ro step (sabotage R1b) the privilege drop
+  fails: `unshare: cannot open /proc/self/uid_map: Read-only file system`.
+* **Measured: unreachable mount points.** On the measuring host 84 overlay mounts (docker container
+  rootfs) refused the remount; their mount points sit under a root-owned 0710 dir, and namespace root's
+  capabilities do not cover an unmapped owner — `stat` gives EACCES, as namespace root AND as the user.
+  ⇒ `pathUnreachable()` (stat → EACCES/EPERM) skips them in the ro step and in the read-back: the
+  command, the same uid without capabilities, cannot reach them either. Any other remount failure is a
+  refusal (`cannot remount mount i of n under / read-only`, no path).
+* Arms (table row 7, all three paths): a user-owned dir outside the home → EROFS (control: writable
+  outside); controls that must survive: the cwd, a `--keep` under /tmp and one OUTSIDE the home and
+  /tmp writable, `/proc/self/oom_score_adj` writable, a nested `unshare -rn` exits 0. RED before (the
+  dir was writable), GREEN after.
+
+| # | sabotage | caught by |
+|---|---|---|
+| R1a | no ro step (read-back kept) | every run refused by the read-back → table red |
+| R1e | no ro step AND no read-back | table row 7 arm (`a user-owned dir outside the home is writable`) |
+| R1b | `/proc` not left alone | row 7 (the privilege drop fails: uid_map read-only) |
+| R1c | an R1 outer's rw mounts outside home/scratch not carried | row 7 control (stripped: the outside `--keep` read-only) |
+| R1d | writable items re-bound only where phase 1 did | row 7 control (fresh: the outside `--keep` read-only) |
+
+A cwd that contains a masked dir is refused (`/var` ⊃ `/var/tmp`: an arm); one that contains the home
+too (`/`) keeps its older, bigger reason ("contains the home directory") — found by the full suite.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

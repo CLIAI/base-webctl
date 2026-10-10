@@ -31,6 +31,7 @@ fs.writeFileSync(path.join(cfg.home, '.ssh', 'config'), 'Host planted-by-test\n'
 fs.writeFileSync(path.join(cfg.home, '.config', 'webctl', 'config.toml'), 'planted = true\n');
 fs.writeFileSync(path.join(cfg.keepRo, 'ro.txt'), 'readable\n');
 fs.mkdirSync(cfg.outsideHome, { recursive: true });
+fs.mkdirSync(cfg.keepOutside, { recursive: true });
 fs.writeFileSync(path.join('/dev/shm', cfg.planted), 'planted-by-test\n');
 fs.writeFileSync(path.join('/var/tmp', cfg.planted), 'planted-by-test\n');
 // row 10's tamper CONTROL: a read-only file bind made as `isolated` makes its neutral machine-id (a
@@ -87,7 +88,7 @@ const script = [
   '"$0" "$1" isolated -- "$0" "$2" nested "$3"',
   `env ${strip.join(' ')} "$0" "$1" isolated -- "$0" "$2" stripped "$3"`,
 ].join('; ');
-const arm = run([process.execPath, cfg.harness, 'isolated', '--keep', cfg.keep, '--keep-ro', cfg.keepRo, '--pass-env', 'ARM_PASSED_VAR', '--',
+const arm = run([process.execPath, cfg.harness, 'isolated', '--keep', cfg.keep, '--keep', cfg.keepOutside, '--keep-ro', cfg.keepRo, '--pass-env', 'ARM_PASSED_VAR', '--',
   'sh', '-c', script, process.execPath, cfg.harness, cfg.probe, cfg.self],
 { cwd: cfg.cwd, env: { ...env, ...(cfg.backend ? { WEBCTL_ISOLATION_BACKEND: cfg.backend } : {}) } });
 

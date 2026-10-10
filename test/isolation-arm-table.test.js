@@ -102,7 +102,8 @@ async function buildWorld(backend) {
     fs.writeFileSync(preload, `const fs = require('fs');
 let cap = ''; try { cap = (fs.readFileSync('/proc/self/status', 'utf8').match(/^CapEff:\\s*(\\S+)/m) || [])[1]; } catch {}
 try { fs.appendFileSync(${JSON.stringify(hits)}, JSON.stringify({ pid: process.pid, ppid: process.ppid, cap, argv: process.argv }) + '\\n'); } catch {}\n`);
-    const cfg = { neutral, home, keepRo: path.join(home, 'data'), outsideHome: path.join(neutral, 'outside-home'), keep, cwd,
+    const cfg = { neutral, home, keepRo: path.join(home, 'data'), outsideHome: path.join(neutral, 'outside-home'),
+      keepOutside: path.join(neutral, 'keep-outside'), keep, cwd,
       planted: `arm-planted-${process.pid}`, uid: process.getuid?.(), gid: process.getgid?.(), mount: MOUNT,
       tamperSrc: path.join(neutral, 'tamper-src'), tamperDst: path.join(neutral, 'tamper-dst'),
       ipcmk: IPCMK, python: PYTHON, shmPy: SHM_PY, ipcFile: path.join(keep, 'ipc.json'),
@@ -206,13 +207,20 @@ const ROWS = [
   { n: 7, property: 'writable only where declared',
     arm: (r, w, p) => {
       for (const k of ['home', 'keepRo', 'baseRoot']) assert.equal(r.writes[k], 'EROFS', ctx(w, `${p}: ${k} is writable (${r.writes[k]})`));
+      // ⛔ R1: EVERYTHING else — a user-owned dir outside the home, the cwd, the keeps and /tmp
+      assert.equal(r.writes.outsideHome, 'EROFS', ctx(w, `${p}: a user-owned dir outside the home is writable (${r.writes.outsideHome})`));
     },
     control: (w) => {
       for (const p of PATHS) {
         assert.equal(w.arm[p].writes.cwd, 'ok', `${p}: the cwd is not writable`);
         assert.equal(w.arm[p].writes.keep, 'ok', `${p}: the --keep dir is not writable`);
+        assert.equal(w.arm[p].writes.keepOutside, 'ok', `${p}: a --keep OUTSIDE the home and /tmp is not writable`);
+        // the read-only root must not take procfs writes or nested namespaces away (Chromium's sandbox)
+        assert.equal(w.arm[p].procWrite, 'ok', `${p}: /proc/self/oom_score_adj is not writable`);
+        assert.equal(w.arm[p].nestedUserns, 0, `${p}: a nested \`unshare -rn\` fails`);
       }
       assert.equal(w.outside.outside.writes.home, 'ok', 'control: the (fake) home is not writable outside');
+      assert.equal(w.outside.outside.writes.outsideHome, 'ok', 'control: the user-owned dir outside the home is not writable outside');
     },
     deeper: '"⭐ ARM: creating a new file directly under the passwd home → EROFS", "⛔ base\'s repo root is READ-ONLY …", the submount arms' },
   { n: 8, property: 'no host-shared scratch (/dev/shm, /var/tmp, SysV IPC, POSIX mqueues)',
@@ -355,12 +363,3 @@ test('⛔ the table covers EVERY backend the harness can run — extend IMPLEMEN
 const KEYRING_UNVERIFIED = 'SKIP (host): `keyctl show @s` fails here — the keyring row is UNVERIFIED (isolated says "keyring: unverified")';
 /** Row 9 without keyctl: a named SKIP — untested, never a pass. */
 const NO_KEYCTL = 'SKIP (host): keyctl not installed — the keyring row is UNTESTED here (isolated says "keyring: shared")';
-
-test('⚠ OPEN (row 7, measured): a user-owned dir OUTSIDE the home is WRITABLE inside — "everything else EROFS" needs a ruling', {
-  todo: 'ib4k §1 row 7 says everything but the cwd and --keep is EROFS/absent; `isolated` protects the home, '
-    + 'base\'s root and the keeps, and does not remount the rest of / read-only (v0.34 phase 1 does not change that)',
-}, async (t) => {
-  const w = await world('unshare');
-  if (w.skip) { t.skip(w.skip); return; }
-  for (const p of PATHS) assert.equal(w.arm[p].writes.outsideHome, 'EROFS', `${p}: a user-owned dir outside the home is writable`);
-});

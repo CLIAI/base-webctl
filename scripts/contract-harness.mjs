@@ -2016,6 +2016,10 @@ function usageRefusal(why, command) {
  * `--keep` at or beneath one re-exposes THAT path (named on stderr). Read back from mountinfo by
  * RESOLVING each path (hiddenGaps): a later mount on an ancestor would shadow a hide.
  *
+ * ⛔ THE ROOT IS READ-ONLY (v0.34.0, ib4k row 7, ruling R1): every mount reachable from `/` but
+ * /proc, /sys, /dev (makeRootReadOnly) — writable on top only the cwd, each `--keep`, a throwaway
+ * HOME and the private /tmp, /var/tmp, /dev/shm, /run. Read back (readOnlyGaps over `/`).
+ *
  * ⛔ NEVER FALLS BACK TO THE HOST. No unshare, userns disabled, no `ip`/`ifconfig`, no
  * `mount`, a loopback that will not come up, a namespace that still sees a non-loopback
  * interface or a listener, a mount that fails, a host socket that still answers after
@@ -2483,6 +2487,14 @@ async function runIsolatedInner(a) {
   if (idr.why) return refuse(idr.why);
   const idGaps = identityGaps();
   if (idGaps.length) return refuse(`after masking the host's identity, ${idGaps.join(', ')} still show(s) the HOST's`);
+  // ⭐ R1: READ BACK the read-only root — every mount reachable from / is ro, except the declared
+  // writable set (the rw keeps and cwd, our /run and scratch masks) and the kernel trees left alone
+  const rootGaps = readOnlyGaps(readMountinfo() || [], ['/'], [...plan.binds.filter((b) => b.rw).map((b) => b.p),
+    ...maskedDirs().all, ...ROOT_RW_TREES]).filter((g) => !g.at || !pathUnreachable(g.at));
+  if (rootGaps.length) {
+    return refuse(`after the read-only root step, ${rootGaps.length} mount(s) outside the declared writable set (the cwd, `
+      + '--keep, /tmp, /var/tmp, /dev/shm, /run) are still WRITABLE (or / is not mounted at all)');
+  }
   const res = await closeResidualSockets(plan.sockets, plan.exempt);
   if (res.still > 0) {
     return refuse(`${res.still} of ${res.checked} host path socket(s) still ANSWER after masking `
@@ -3183,8 +3195,14 @@ export function outerRebinds(mounts, home, masked, tmp) {
   if (!atHome || atHome.at !== home || !ours(atHome, HIDE_SOURCE) || !atHome.opts.includes('ro')) return null;
   /** @type {{p: string, rw: boolean}[]} */
   const out = [];
+  // ⛔ R1 (v0.34.0): under an outer whose ROOT is read-only, its writable mounts ANYWHERE are its declared
+  // writable set (a `--keep` outside the home and the scratch dirs too) — carried. Under an older outer
+  // (a writable root) only the home and the scratch dirs are, as before: never wider than it showed.
+  const rootRo = !!resolveMount(mounts, '/')?.opts.includes('ro');
   for (const m of mounts) {
-    const under = (isWithin(m.at, home) && m.at !== home) || scratch.some((t) => isWithin(m.at, t) && m.at !== t);
+    const rwElsewhere = rootRo && m.at !== '/' && !m.opts.includes('ro') && !ROOT_RW_TREES.some((t) => isWithin(m.at, t))
+      && !masked.some((d) => isWithin(m.at, d));
+    const under = (isWithin(m.at, home) && m.at !== home) || scratch.some((t) => isWithin(m.at, t) && m.at !== t) || rwElsewhere;
     if (!under || m.source === HIDE_SOURCE || m.source === MASK_SOURCE) continue;
     if (resolveMount(mounts, m.at)?.id !== m.id) continue; // shadowed, or stacked over: not visible here
     if (!out.some((o) => o.p === m.at)) out.push({ p: m.at, rw: !m.opts.includes('ro') });
@@ -3219,6 +3237,51 @@ function makeTreeReadOnly(root, rbindFirst) {
     if (e) return e;
   }
   return '';
+}
+
+/**
+ * The trees the read-only root (R1) leaves as they are: kernel interfaces, not the filesystem. A write
+ * there is governed by its own permissions (procfs: oom_score_adj, uid_map — Chromium's sandbox needs
+ * them; /dev/null; /dev/shm and /dev/mqueue get fresh mounts of our own).
+ */
+const ROOT_RW_TREES = Object.freeze(['/proc', '/sys', '/dev']);
+
+/**
+ * R1 (v0.34.0, ib4k row 7): remount EVERY mount reachable from `/` read-only — the root mount itself
+ * included — except at or beneath `leave` (our own /run, /proc, /sys, /dev). ⚠ The root cannot be
+ * re-bound onto itself (a mount ON `/` does not move this process's root), so each mount is remounted
+ * in place: a per-mount `bind,ro` in our own mount namespace, which the command — capless — cannot undo.
+ * ⚠ A mount point no path lookup can reach — measured: docker's overlay rootfs under a root-owned
+ * 0710 dir; namespace root's capabilities do not cover an UNMAPPED owner, so `remount` fails at the
+ * lookup — is skipped (pathUnreachable): the command, the same uid without capabilities, cannot reach
+ * it either. Any other failure is a refusal.
+ * ⚠ Paths never printed (host mount points name things): a failure says which of how many.
+ * @param {string[]} leave @returns {string} '' on success, else why
+ */
+function makeRootReadOnly(leave) {
+  const mounts = readMountinfo();
+  if (!mounts) return 'cannot read /proc/self/mountinfo to find the mounts to make read-only';
+  const under = reachableMountsUnder(mounts, '/');
+  if (!under) return 'no mount at / to make read-only';
+  const todo = under.filter((m) => !m.opts.includes('ro') && !leave.some((l) => isWithin(m.at, l)) && !pathUnreachable(m.at));
+  const redact = todo.map((m) => m.at).filter((p) => p !== '/').sort((x, y) => y.length - x.length);
+  for (const [i, m] of todo.entries()) {
+    const e = mountOrWhy(['-o', 'remount,bind,ro', m.at], `remount mount ${i + 1} of ${todo.length} under / read-only`, redact);
+    if (e) return e;
+  }
+  return '';
+}
+
+/**
+ * A path NO lookup from here can reach: stat fails with EACCES/EPERM (a search bit denied on the way).
+ * Namespace root holds no capability over an inode whose owner is unmapped, so what it cannot reach,
+ * the command (the same uid, capless) cannot either. @param {string} p @returns {boolean}
+ */
+function pathUnreachable(p) {
+  try { fs.statSync(p); return false; } catch (e) {
+    const c = /** @type {NodeJS.ErrnoException} */ (e).code;
+    return c === 'EACCES' || c === 'EPERM';
+  }
 }
 
 /**
@@ -3277,7 +3340,13 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
           return { binds, exempt, notes, refuse: `${k.label} is ${m} itself, which is masked — run from a `
             + 'test-owned directory beneath it' };
         }
-        // e.g. cwd '/': nothing beneath it needs re-exposing
+        // ⛔ R1 (v0.34.0): under the READ-ONLY root a writable item gets its own rw bind — over an
+        // ANCESTOR of a masked dir (a cwd of '/') that bind would shadow the mask. Refused — unless it
+        // contains the home too: that refusal (below) names the bigger problem.
+        if (k.rw && !(prot.home && isWithin(prot.home, real))) {
+          return { binds, exempt, notes, refuse: `${k.label} contains ${m}, which is masked — under the read-only root it `
+            + 'could be writable only by undoing the mask; run from a test-owned directory' };
+        }
       } else if (!scratch.includes(m) && isWithin(real, m)) {
         const why = `${k.label} is beneath ${m}, where host sockets live, and cannot be re-exposed `
           + 'without re-exposing them';
@@ -3332,7 +3401,9 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
     const underRoot = prot.roots.some((r) => isWithin(real, r));
     const underHidden = prot.hidden.some((h) => isWithin(real, h));
     const keepRo = k.explicit && !k.rw;
-    if (scratch.some((t) => isWithin(real, t) && real !== t) || underHome || (underRoot && k.rw) || underHidden || (keepRo && !underRoot)) {
+    // ⛔ R1 (v0.34.0): EVERY writable item gets its own bind — the root is made read-only, and only
+    // what is re-bound on top after that step stays writable
+    if (scratch.some((t) => isWithin(real, t) && real !== t) || underHome || k.rw || underHidden || (keepRo && !underRoot)) {
       binds.push({ p: real, rw: k.rw, label: k.label, named: k.named });
     }
     if (k.explicit && k.rw) exempt.push(real);
@@ -3457,6 +3528,12 @@ function maskSocketDirs(binds, roots, hidden = [], home = '') {
       const e = makeTreeReadOnly(r, true);
       if (e) return `${e.split(r).join('<path>')} — a sensitive home directory would stay WRITABLE`;
     }
+    // ⛔ R1 (v0.34.0, ib4k row 7): the WHOLE tree read-only — after the keeps are staged (they keep
+    // their own modes under the new /run) and BEFORE the scratch masks, the hides and the keeps moving
+    // back, which all land on top writable as declared. /proc, /sys and /dev are left alone (procfs
+    // writes — oom_score_adj, a nested userns's uid_map — must keep working for Chromium's sandbox).
+    const rootRo = makeRootReadOnly([...all.filter((x) => !scratch.includes(x)), ...ROOT_RW_TREES]);
+    if (rootRo) return `${rootRo} — a path outside the declared writable set would stay WRITABLE`;
     // ⛔ the SCRATCH dirs last (/tmp, /var/tmp, /dev/shm): a keep beneath one was staged above
     for (const d of scratch) { const e = cover(d); if (e) return e; }
     // outer before inner; at one path the hide first, so a keep exactly there lands on top

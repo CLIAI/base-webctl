@@ -1292,6 +1292,16 @@ test('⛔ a cwd that IS (or contains) the home directory → FAIL, not run (it w
   }
 });
 
+test('⛔ R1: a cwd that CONTAINS a masked dir (`/var` ⊃ `/var/tmp`) → FAIL, not run — under the read-only root its writable bind would shadow the mask', async (t) => {
+  let real = '';
+  try { real = fs.realpathSync('/var/tmp'); } catch { /* absent */ }
+  if (real !== '/var/tmp' || PW_HOME.startsWith('/var/')) { t.skip('SKIP (host): /var/tmp is not a real dir under /var here (or the home is under /var)'); return; }
+  const r = await run(['isolated', '--', process.execPath, '-e', 'console.log("RAN-" + "MARKER")'], {}, process.execPath, '/var');
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /NOT RUN: the working directory contains \/var\/tmp, which is masked — under the read-only root it could be writable only by undoing the mask/);
+  assert.doesNotMatch(r.stdout, /RAN-MARKER/);
+});
+
 test('⛔ a `--keep` SYMLINK to the home directory is realpath\'d → refused as containing it (usage 3)', async () => {
   const dir = tmpdir();
   const link = path.join(dir, 'innocent');
