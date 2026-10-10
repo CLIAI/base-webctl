@@ -243,6 +243,10 @@ test('⛔ scratch: the live tree — HEAD, submodule HEAD, porcelain, index, eve
     assert.match(r.out, /PASS {2}fake-webctl — tested [0-9a-f]{7} \(= the live HEAD; no uncommitted tracked changes\)/);
     // the gate's OWN verification, in its summary
     assert.match(r.out, /live trees verified byte-identical=1 CHANGED=0; gate-environment faults=0/);
+    // ⭐ ib4k §4: the backend per consumer (its envelope) and the mix (the summary) — read from the
+    // gate's own `isolated` verdict, nothing the consumer prints
+    assert.match(r.out, /^----- isolation backends: unshare=1 -----$/m, r.out);
+    assert.deepEqual(envelopes(r.stdout).filter((e) => e.type === 'consumer-test').map((e) => e.isolation), ['unshare']);
   } finally { w.cleanup(); }
 });
 
@@ -386,6 +390,8 @@ test('⛔ isolation UNAVAILABLE → GATE-ENVIRONMENT fault, consumer NOT run, ne
       // named as the HOST's fault — not counted as a lane verdict of any kind
       assert.doesNotMatch(r.out, /^(FAIL|SKIP|PASS) {2}fake-webctl/m, label);
       assert.match(r.out, /gate summary: pass=0 skip=0 fail=0/, label);
+      // ib4k §4: refused isolation is recorded as backend "none" in the mix
+      assert.match(r.out, /^----- isolation backends: none=1 -----$/m, label);
       const env = envelopes(r.stdout);
       assert.deepEqual(env.map((e) => e.type), ['error'], label);
       assert.equal(env[0].code, 'EGATEENV');
@@ -605,9 +611,12 @@ test('scratch: a hidden failure (exit 0 + TAP `not ok`) is a FAIL, reported exac
       assert.match(r.out, /not ok 1 - needs a fixture/);
       assert.match(r.out, /BLOCKED: fake-webctl failed against this base/);
     }
-    // the envelopes carry the same shape and the same verdict and reason
+    // the envelopes carry the same shape and the same verdict and reason — plus, in scratch mode only,
+    // the backend that isolated it (ib4k §4; in place nothing is isolated)
     const [es] = envelopes(rs.stdout); const [ep] = envelopes(rp.stdout);
-    assert.deepEqual(Object.keys(es), Object.keys(ep));
+    assert.deepEqual(Object.keys(es).filter((k) => k !== 'isolation'), Object.keys(ep));
+    assert.equal(es.isolation, 'unshare');
+    assert.equal(ep.isolation, undefined);
     assert.equal(es.result, 'fail'); assert.equal(es.result, ep.result);
     assert.equal(es.reason, ep.reason);
   } finally { s.cleanup(); p.cleanup(); }

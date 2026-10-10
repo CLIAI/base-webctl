@@ -336,13 +336,18 @@ json_escape() {
 # $4 = OPTIONAL reason. Emitted only when non-empty, so the envelope never
 # carries an empty string that reads like "no reason was given" when in fact
 # none was asked for.
+# ENVELOPE_ISOLATION (scratch mode): the isolation backend the gate's own `isolated` call used for
+# this consumer — added as "isolation" when set (ib4k §4), never an empty string.
+ENVELOPE_ISOLATION=""
 envelope() {
+  local iso=""
+  [ -z "$ENVELOPE_ISOLATION" ] || iso=",\"isolation\":\"$(json_escape "$ENVELOPE_ISOLATION")\""
   if [ -n "${4:-}" ]; then
-    printf '{"type":"consumer-test","ts":"%s","consumer":"%s","suite":"%s","result":"%s","reason":"%s"}\n' \
-      "$(ts)" "$1" "$2" "$3" "$(json_escape "$4")"
+    printf '{"type":"consumer-test","ts":"%s","consumer":"%s","suite":"%s","result":"%s","reason":"%s"%s}\n' \
+      "$(ts)" "$1" "$2" "$3" "$(json_escape "$4")" "$iso"
   else
-    printf '{"type":"consumer-test","ts":"%s","consumer":"%s","suite":"%s","result":"%s"}\n' \
-      "$(ts)" "$1" "$2" "$3"
+    printf '{"type":"consumer-test","ts":"%s","consumer":"%s","suite":"%s","result":"%s"%s}\n' \
+      "$(ts)" "$1" "$2" "$3" "$iso"
   fi
 }
 
@@ -375,9 +380,12 @@ declare -a probe_fails=()
 fails=()
 scratch_n=0 live_same=0 breach=0 envfault=0
 declare -a breaches=() envfaults=()
+# ⭐ the isolation backend per consumer, tallied for the summary (ib4k §4: "the summary shows the mix")
+declare -A iso_mix=()
 
 while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localDir; do
   [ -n "$name" ] || continue
+  ENVELOPE_ISOLATION=""
 
   if [ "$wired" != "true" ]; then
     # ⛔ IS THAT `wired:false` STILL TRUE? Nobody re-examines it.
@@ -777,6 +785,21 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     [ -n "$isolation_refused" ] \
       || isolation_refused="the isolated wrapper exited $rc without starting the contract and stated no reason"
   fi
+  if [ "$SCRATCH" = "1" ]; then
+    # ⭐ WHICH BACKEND isolated THIS consumer (ib4k §4) — read from the gate's OWN `isolated` call: its
+    # verdict line (`isolated: home HIDDEN; …; backend: <name>…`) is the last one BEFORE the start
+    # line; any later ones are the contract's own nested calls. Nothing the consumer prints changes.
+    # "none": isolation was refused (nothing ran); "unknown": no verdict named one (an older base).
+    if [ -n "$isolation_refused" ]; then
+      ENVELOPE_ISOLATION="none"
+    else
+      ENVELOPE_ISOLATION="$(awk -v s="$started_line" '$0 == s { exit }
+        /^isolated: home HIDDEN; / && match($0, /; backend: [a-z]+/) { b = substr($0, RSTART + 11, RLENGTH - 11) }
+        END { print b }' "$run_log")"
+      [ -n "$ENVELOPE_ISOLATION" ] || ENVELOPE_ISOLATION="unknown"
+    fi
+    iso_mix[$ENVELOPE_ISOLATION]=$(( ${iso_mix[$ENVELOPE_ISOLATION]:-0} + 1 ))
+  fi
 
   # The consumer's last word, used as the reason it declined a verdict.
   #
@@ -883,6 +906,9 @@ done < <(node "$HERE/read-consumers.mjs" ${WEBCTL_CONSUMERS_FILE:+"$WEBCTL_CONSU
 echo "----- gate summary: pass=$pass skip=$skip fail=$fail -----" >&2
 if [ "$SCRATCH" = "1" ]; then
   echo "----- scratch: $scratch_n consumer(s) cloned; live trees verified byte-identical=$live_same CHANGED=$breach; gate-environment faults=$envfault -----" >&2
+  mix=""
+  for b in $(printf '%s\n' "${!iso_mix[@]}" | sort); do mix="$mix $b=${iso_mix[$b]}"; done
+  echo "----- isolation backends:${mix:- none recorded} -----" >&2
 fi
 if [ "$stale" -gt 0 ]; then
   # Counted SEPARATELY. Folded into `skip` it is invisible, which is the whole
