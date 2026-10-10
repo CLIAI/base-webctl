@@ -455,11 +455,19 @@ const HOST_MNT = fs.readlinkSync('/proc/self/ns/mnt');
  * @param {Record<string,string>} [extraEnv]
  */
 /**
- * The v0.34 scratch masks a fixture's fake OUTER sandbox needs (ib4k row 8): our tmpfs on /var/tmp
- * and /dev/shm, where they exist — the nesting proof requires them since v0.34.0.
+ * What a fixture's fake OUTER sandbox needs since v0.34.0 for the nesting proof: our tmpfs on /var/tmp
+ * and /dev/shm (ib4k row 8) and the host's identity hidden (row 10) — the neutral hostname (needs
+ * `unshare --uts`), a fresh sysfs (only lo), neutral /etc/machine-id and /etc/hostname. After /run's
+ * tmpfs (the neutral copies are made there).
  */
-const SCRATCH_MASKS = ' && { [ ! -d /var/tmp ] || mount -t tmpfs webctl-isolated /var/tmp; }'
-  + ' && { [ ! -d /dev/shm ] || mount -t tmpfs webctl-isolated /dev/shm; }';
+const { NEUTRAL_MACHINE_ID: NEUTRAL_ID } = await import(pathToFileURL(TOOL).href);
+const V034_MASKS = ' && { [ ! -d /var/tmp ] || mount -t tmpfs webctl-isolated /var/tmp; }'
+  + ' && { [ ! -d /dev/shm ] || mount -t tmpfs webctl-isolated /dev/shm; }'
+  + ' && hostname webctl-isolated && mount -t sysfs webctl-isolated-sysfs /sys'
+  + ` && printf '%s\\n' ${NEUTRAL_ID} > /run/.mid && printf '%s\\n' webctl-isolated > /run/.hn`
+  + ' && { [ ! -f /etc/machine-id ] || mount --bind /run/.mid "$(realpath /etc/machine-id)"; }'
+  + ' && { [ ! -f /var/lib/dbus/machine-id ] || [ "$(realpath /var/lib/dbus/machine-id)" = "$(realpath /etc/machine-id)" ] || mount --bind /run/.mid /var/lib/dbus/machine-id; }'
+  + ' && { [ ! -f /etc/hostname ] || mount --bind /run/.hn "$(realpath /etc/hostname)"; }';
 
 async function nestedAttempt(recorded, prefix = [], recordedMnt, extraEnv = {}) {
   const argv = [...prefix, process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
@@ -1252,7 +1260,7 @@ test('⭐ a cwd under home is writable; `..` out of it is EROFS — the cwd is r
     assert.equal(fs.existsSync(path.join(dir, name)), false);
     // the cwd is a path the CALLER named: the verdict lists it (as ~/…), it is not merely counted
     const rel = `~/${path.relative(PW_HOME, fs.realpathSync(cwd))}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    assert.match(r.stderr, new RegExp(`^isolated: home HIDDEN; .*; writable: ${rel}( — |$)`, 'm'), r.stderr);
+    assert.match(r.stderr, new RegExp(`^isolated: home HIDDEN; .*; writable: ${rel}; backend: unshare( — |$)`, 'm'), r.stderr);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1609,7 +1617,7 @@ test('⭐ a PATH dir under the hidden home is re-bound read-only: a script in it
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /^HELLO from a PATH dir under the home$/m, r.stderr);
     assert.match(r.stdout, /^BIN-RO$/m, 'a PATH dir under the home was re-bound WRITABLE');
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 1 PATH entry; writable: ~\/work — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 1 PATH entry; writable: ~\/work; backend: unshare — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
     assert.ok(!r.stderr.includes(home), 'the verdict printed the home path');
     // CONTROL: without the PATH entry the same name is not found inside
     const c = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--', 'sh', '-c', 'hello-from-home || echo "NOT-FOUND $?"']);
@@ -1635,12 +1643,12 @@ test('⛔ the verdict COUNTS implicit PATH re-binds — a distinctive PATH dir n
     assert.match(r.stdout, /^HELLO from a PATH dir under the home$/m, 'the PATH dir was not re-bound (the count would be vacuous)');
     assert.ok(!r.stderr.includes(secretName), `an implicit PATH re-bind was NAMED on stderr:\n${r.stderr}`);
     assert.ok(!r.stderr.includes('~/bin'), `an implicit PATH re-bind was NAMED on stderr:\n${r.stderr}`);
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 2 PATH entries; writable: ~\/work — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 2 PATH entries; writable: ~\/work; backend: unshare — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
     // CONTROL: the opt-in lists every path (so the default's silence is the fix, not a missing bind)
     const v = await underFakeHome(home, argv(['env', 'WEBCTL_ISOLATED_VERBOSE=1']));
     assert.ok(v);
     assert.equal(v.status, 0, v.stdout + v.stderr);
-    assert.match(v.stderr, new RegExp(`^isolated: home HIDDEN; re-bound read-only: ~/bin, ~/data, ~/${secretName}/bin; writable: ~/work$`, 'm'), v.stderr);
+    assert.match(v.stderr, new RegExp(`^isolated: home HIDDEN; re-bound read-only: ~/bin, ~/data, ~/${secretName}/bin; writable: ~/work; backend: unshare$`, 'm'), v.stderr);
     assert.ok(!v.stderr.includes(home), 'even verbose, the home itself is printed as ~');
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
@@ -1886,7 +1894,7 @@ test('⛔ base\'s root UNDER the hidden home is re-bound READ-ONLY (the harness 
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.equal(writeOf(r.stdout), 'EROFS', 'base\'s root under the home is writable inside');
     // base's root is not a path the caller named: it is named by its LABEL, never by its path
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: base's repo root; writable: nothing — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: base's repo root; writable: nothing; backend: unshare — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
     assert.equal(fs.existsSync(path.join(base, 'x')), false);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
@@ -2137,12 +2145,12 @@ test('⛔ nesting: every OLD fact satisfied (netns, mntns, our tmpfs on /run+/tm
   // What the PREVIOUS `isolated` produced: a full mask, no read-only home.
   const stage = 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
     + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
-    + ' && mount -t tmpfs webctl-isolated /tmp' + SCRATCH_MASKS + ' && mkdir -p "$0" && mount --move /run/k "$0" && exec "$@"';
-  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage, ROOT],
+    + ' && mount -t tmpfs webctl-isolated /tmp' + V034_MASKS + ' && mkdir -p "$0" && mount --move /run/k "$0" && exec "$@"';
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--propagation=private', 'sh', '-c', stage, ROOT],
     'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: '[]' });
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(r.stderr, /1 of 1 protected root\(s\) — the home directory — are WRITABLE here/);
-  assert.doesNotMatch(r.stderr, /EQUALS|uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|PID namespace/, 'only the home fact should refuse');
+  assert.doesNotMatch(r.stderr, /EQUALS|uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|identity is visible|older than v0\.34|PID namespace/, 'only the home fact should refuse');
   assert.equal(r.ran, false, 'a namespace with a writable home was accepted as `isolated`');
 });
 
@@ -2319,6 +2327,82 @@ async function markerRun(dir, binds) {
   return r && { ...r, ran: fs.existsSync(marker) };
 }
 const which = (/** @type {string} */ b) => spawnSync('sh', ['-c', `command -v ${b}`], { encoding: 'utf8' }).stdout.trim();
+
+// ── host identity (v0.34.0, ib4k §1 row 10) ─────────────────────────────────
+//
+// ⛔ Measured open in v0.33: the hostname, /sys/class/net (every host interface name) and
+// /etc/machine-id were the host's inside. Now: a UTS namespace named `webctl-isolated` (set by the
+// system `hostname` tool), a fresh sysfs of the namespace's own netns (only lo), and neutral
+// /etc/machine-id and /etc/hostname — READ BACK before the command starts. The property on all
+// three paths is row 10 of isolation-arm-table.test.js (host identity compared as digests).
+
+/** A dir that is never masked nor hidden, to bind test files onto in a throwaway ns: /mnt, /srv, … */
+const NEUTRAL_MNT = ['/mnt', '/srv', '/media'].find((d) => {
+  try { return fs.statSync(d).isDirectory() && !ROOT.startsWith(`${d}/`); } catch { return false; }
+}) || '';
+
+test('⛔ no `hostname` tool → the command still runs, the verdict says `hostname: the host\'s (no \`hostname\` tool)` — CONTROL: with it, the hostname is the neutral one', needsIsolation, async (t) => {
+  const dir = tmpdir();
+  try {
+    const r = await withBinds(overTool(noexecFile(dir), 'hostname'), [process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
+      'console.log("RAN " + (require("os").hostname() === "webctl-isolated" ? "NEUTRAL" : "HOSTS"))']);
+    if (!r) { t.skip(NO_BINDS); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^RAN HOSTS$/m, 'without the tool the hostname cannot have been set');
+    assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: unshare.*; hostname: the host's \(no `hostname` tool\)/m);
+    const c = await run(['isolated', '--', process.execPath, '-e', 'console.log("RAN " + (require("os").hostname() === "webctl-isolated" ? "NEUTRAL" : "HOSTS"))']);
+    assert.equal(c.status, 0, c.stderr);
+    assert.match(c.stdout, /^RAN NEUTRAL$/m);
+    assert.doesNotMatch(c.stderr, /hostname:/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: a `hostname` that exits 0 and sets NOTHING → refused by the read-back ("the hostname still show(s) the HOST\'s"), command NOT run', needsIsolation, async (t) => {
+  const dir = tmpdir();
+  const fake = path.join(dir, 'hostname-fake');
+  fs.writeFileSync(fake, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  try {
+    const r = await markerRun(dir, overTool(fake, 'hostname'));
+    if (!r) { t.skip(NO_BINDS); return; }
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: after masking the host's identity, the hostname still show\(s\) the HOST's/);
+    assert.equal(r.ran, false, 'the command ran under the host\'s hostname');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⚠ a fresh sysfs REFUSED (a `mount` that fails `-t sysfs`) → /sys/class/net is MASKED (empty), said in a note, and the command runs', needsIsolation, async (t) => {
+  if (!NEUTRAL_MNT) { t.skip('SKIP (host): no /mnt, /srv or /media to hold the real mount'); return; }
+  const dir = tmpdir();
+  fs.writeFileSync(path.join(dir, 'real-mount'), '');
+  const fake = path.join(dir, 'mount-fake');
+  // ⚠ the real mount is reached through NEUTRAL_MNT, which no mask covers (/tmp is masked mid-way)
+  fs.writeFileSync(fake, `#!/bin/sh\ncase " $* " in *" sysfs "*) echo "mount: permission denied (fake)" >&2; exit 32;; esac\nexec ${NEUTRAL_MNT}/real-mount "$@"\n`, { mode: 0o755 });
+  try {
+    const r = await withBinds([[dir, NEUTRAL_MNT], [MOUNT_BIN, `${NEUTRAL_MNT}/real-mount`], [fake, `${NEUTRAL_MNT}/mount-fake`],
+      ...overTool(`${NEUTRAL_MNT}/mount-fake`, 'mount')], [process.execPath, TOOL, 'isolated', '--', 'sh', '-c', 'echo "NET [$(ls /sys/class/net | tr "\\n" " ")]"']);
+    if (!r) { t.skip(NO_BINDS); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stderr, /isolated: note: \/sys: a fresh sysfs was refused here — \/sys\/class\/net is MASKED \(empty\) instead/);
+    assert.match(r.stdout, /^NET \[\]$/m, 'the fallback mask left interface names visible');
+    // CONTROL: with sysfs permitted, only lo — and no note
+    const c = await run(['isolated', '--', 'sh', '-c', 'echo "NET [$(ls /sys/class/net | tr "\\n" " ")]"']);
+    assert.match(c.stdout, /^NET \[lo \]$/m, c.stdout + c.stderr);
+    assert.doesNotMatch(c.stderr, /sysfs was refused/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ /etc/machine-id: what the NEUTRAL id does to the tools that read it — systemd-id128 and dbus-uuidgen answer it (they do not break) — CONTROL: outside they answer the host\'s', needsIsolation, async (t) => {
+  const tools = [['systemd-id128', 'machine-id'], ['dbus-uuidgen', '--get']].filter(([b]) => ['/usr/bin', '/bin'].some((d) => fs.existsSync(path.join(d, b))));
+  if (!fs.existsSync('/etc/machine-id') || !tools.length) { t.skip('SKIP (host): no /etc/machine-id, or neither systemd-id128 nor dbus-uuidgen here'); return; }
+  for (const argv of tools) {
+    const inside = await run(['isolated', '--', ...argv]);
+    assert.equal(inside.status, 0, `${argv[0]} BROKE under the neutral id: ${inside.stderr}`);
+    assert.equal(inside.stdout.trim().replace(/-/g, ''), NEUTRAL_ID, `${argv[0]} did not answer the neutral id`);
+    const outside = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' });
+    assert.equal(outside.status, 0);
+    assert.notEqual(outside.stdout.trim().replace(/-/g, ''), NEUTRAL_ID, `CONTROL: ${argv[0]} answers the neutral id even outside`);
+  }
+});
 
 // ── the session keyring (v0.34.0, ib4k §1 row 9) ────────────────────────────
 //
@@ -3051,31 +3135,31 @@ test('⭐ ARM: a host process this test started → kill(pid, 0) is ESRCH inside
 test('⛔ nesting: every other fact satisfied (full mask, ro home) but the HOST PID namespace → refused by the pid fact alone', needsIsolation, async () => {
   const stage = 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
     + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
-    + ' && mount -t tmpfs webctl-isolated /tmp' + SCRATCH_MASKS + ' && mkdir -p "$0" && mount --move /run/k "$0"'
+    + ' && mount -t tmpfs webctl-isolated /tmp' + V034_MASKS + ' && mkdir -p "$0" && mount --move /run/k "$0"'
     + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift && exec "$@"';
-  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage, ROOT, PW_HOME],
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--propagation=private', 'sh', '-c', stage, ROOT, PW_HOME],
     'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: fs.readlinkSync('/proc/self/ns/pid'),
       WEBCTL_HIDDEN_DIRS: '[]' });
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(r.stderr, /the current PID namespace .* EQUALS the recorded host one/);
-  assert.doesNotMatch(r.stderr, /uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|WRITABLE here|mount namespace .* EQUALS/,
+  assert.doesNotMatch(r.stderr, /uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|identity is visible|older than v0\.34|WRITABLE here|mount namespace .* EQUALS/,
     'only the pid fact should refuse');
   assert.equal(r.ran, false, 'a namespace sharing the host PIDs was accepted as `isolated`');
 });
 
-test('⛔ VERSION SKEW (v0.34): every v0.33 fact satisfied but /var/tmp and /dev/shm NOT masked → refused rc 2 saying "upgrade the outer", nothing run — CONTROL: masked, it runs', needsIsolation, async () => {
+test('⛔ VERSION SKEW (v0.34): every v0.33 fact satisfied but /var/tmp, /dev/shm and the host identity NOT hidden → refused rc 2 saying "upgrade the outer", nothing run — CONTROL: hidden, it runs', needsIsolation, async () => {
   const stage = (/** @type {boolean} */ scratch) => 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
     + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
-    + ` && mount -t tmpfs webctl-isolated /tmp${scratch ? SCRATCH_MASKS : ''} && mkdir -p "$0" && mount --move /run/k "$0"`
+    + ` && mount -t tmpfs webctl-isolated /tmp${scratch ? V034_MASKS : ''} && mkdir -p "$0" && mount --move /run/k "$0"`
     + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift && exec "$@"';
   const env = { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: '[]',
     WEBCTL_HOST_IDS: JSON.stringify({ uid: process.getuid?.(), gid: process.getgid?.() }) };
-  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(false), ROOT, PW_HOME],
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(false), ROOT, PW_HOME],
     'mnt:[1]', env);
   assert.equal(r.status, 2, r.stdout + r.stderr);
-  assert.match(r.stderr, /the OUTER `isolated` is older than v0\.34\.0: .*(\/var\/tmp|\/dev\/shm).* the HOST's there .* upgrade the outer one to v0\.34\.0/);
+  assert.match(r.stderr, /the OUTER `isolated` is older than v0\.34\.0: .*(\/var\/tmp|\/dev\/shm).*the hostname.* the HOST's there, and a nested call cannot hide them .*upgrade the outer one to v0\.34\.0/);
   assert.equal(r.ran, false, 'a nested call ran with the host\'s /dev/shm and /var/tmp');
-  const c = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(true), ROOT, PW_HOME],
+  const c = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(true), ROOT, PW_HOME],
     'mnt:[1]', env);
   assert.doesNotMatch(c.stderr, /older than v0\.34|REFUSED/, `CONTROL: with the scratch masks the proof should pass:\n${c.stderr}`);
   assert.equal(c.ran, true, `CONTROL: with the scratch masks the nested call should RUN:\n${c.stdout}${c.stderr}`);
@@ -3085,17 +3169,17 @@ test('⛔ nesting: every other fact satisfied (full mask, ro home, own PIDs) but
   const dir = homeTmpdir(); // stands in for ~/.ssh: only its PATH is recorded and mounted on, in a throwaway mount ns
   const stage = (/** @type {boolean} */ hide) => 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
     + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
-    + ' && mount -t tmpfs webctl-isolated /tmp' + SCRATCH_MASKS + ' && mkdir -p "$0" && mount --move /run/k "$0"'
+    + ' && mount -t tmpfs webctl-isolated /tmp' + V034_MASKS + ' && mkdir -p "$0" && mount --move /run/k "$0"'
     + (hide ? ' && mount -t tmpfs -o ro webctl-isolated-hidden "$2"' : '')
     + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift 2 && exec "$@"';
   const env = { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: JSON.stringify([dir]) };
   try {
-    const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage(false), ROOT, PW_HOME, dir], 'mnt:[1]', env);
+    const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--propagation=private', 'sh', '-c', stage(false), ROOT, PW_HOME, dir], 'mnt:[1]', env);
     assert.equal(r.status, 2, r.stdout + r.stderr);
     assert.match(r.stderr, /1 of 1 hidden dir\(s\) — the home, ~\/\.ssh, the state roots — lack the 'webctl-isolated-hidden' mask here/);
-    assert.doesNotMatch(r.stderr, /EQUALS|uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|WRITABLE here/, 'only the hidden fact should refuse');
+    assert.doesNotMatch(r.stderr, /EQUALS|uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|identity is visible|older than v0\.34|WRITABLE here/, 'only the hidden fact should refuse');
     assert.equal(r.ran, false, 'a namespace with the secret dirs visible was accepted as `isolated`');
-    const c = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage(true), ROOT, PW_HOME, dir], 'mnt:[1]', env);
+    const c = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--propagation=private', 'sh', '-c', stage(true), ROOT, PW_HOME, dir], 'mnt:[1]', env);
     assert.doesNotMatch(c.stderr, /hidden home dir|REFUSED/, `CONTROL: with the mask in place the hidden fact should pass:\n${c.stderr}`);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

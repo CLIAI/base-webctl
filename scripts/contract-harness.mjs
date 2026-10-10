@@ -1548,7 +1548,7 @@ function probeUnshare(ub) {
 const SYSTEM_TRUE = () => systemTool('true') || '/bin/true';
 
 /**
- * @typedef {{unshare: string, bash: string, setpriv: string, mount: string, lo: [string, string[]][], keyctl: string}} Tools
+ * @typedef {{unshare: string, bash: string, setpriv: string, mount: string, lo: [string, string[]][], keyctl: string, hostname: string}} Tools
  *   every binary a privileged half runs, by ABSOLUTE path (SYSTEM_TOOL_DIRS / WEBCTL_UNSHARE_BIN).
  *   `keyctl`: OPTIONAL — '' when not installed (the session keyring is then the host's, and said so).
  *   `lo`: how to bring the loopback up — `ip`, then `ifconfig`, whichever exist. The NESTED path
@@ -1567,11 +1567,15 @@ function privilegedTools(ub, nested) {
   // OPTIONAL (v0.34.0): without keyctl the command keeps the host's session keyring — the run goes
   // ahead and the verdict says so (ib4k row 9 ruling); '' then
   const keyctl = systemTool('keyctl');
+  // OPTIONAL (v0.34.0, ib4k row 10): sets the neutral hostname in the fresh path's UTS namespace — the
+  // only way to call sethostname(2) (node has none, and /proc/sys/kernel/hostname belongs to the
+  // host's root). Without it the hostname stays the host's, and the verdict says so. Fresh path only.
+  const hostname = nested ? '' : systemTool('hostname');
   const mount = nested ? '' : systemTool('mount');
   /** @type {[string, string[]][]} */
   const lo = nested ? [] : /** @type {[string, string[]][]} */ ([[systemTool('ip'), ['link', 'set', 'lo', 'up']],
     [systemTool('ifconfig'), ['lo', 'up']]]).filter(([b]) => b);
-  const tools = { unshare: ub.bin, bash, setpriv, mount, lo, keyctl };
+  const tools = { unshare: ub.bin, bash, setpriv, mount, lo, keyctl, hostname };
   if (!bash) return { tools, why: NO_BASH };
   if (!setpriv) {
     return { tools, why: `cannot enter the uid-mapped child user namespace: ${noSystemTool('setpriv', 'install util-linux')}; `
@@ -1590,7 +1594,7 @@ function isTools(x) {
   const t = /** @type {Record<string, unknown>} */ (x);
   const abs = (/** @type {unknown} */ p) => typeof p === 'string' && path.isAbsolute(p);
   return !!t && typeof t === 'object' && abs(t.unshare) && abs(t.bash) && abs(t.setpriv) && abs(t.mount)
-    && (t.keyctl === '' || abs(t.keyctl))
+    && (t.keyctl === '' || abs(t.keyctl)) && (t.hostname === '' || abs(t.hostname))
     && Array.isArray(t.lo) && t.lo.length > 0
     && t.lo.every((e) => Array.isArray(e) && e.length === 2 && abs(e[0]) && Array.isArray(e[1]) && e[1].every((a) => typeof a === 'string'));
 }
@@ -2177,7 +2181,8 @@ function runIsolated(a) {
   const inside = outer ? '; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, '
     + 'keeping what the outer call re-bound (same modes)' : '';
   // ⚠ only a DEVIATION is named: without keyctl the session keyring stays the host's (ib4k row 9 ruling)
-  const keyringNote = tools.keyctl ? '' : '; keyring: shared (keyctl not installed)';
+  const keyringNote = (tools.keyctl ? '' : '; keyring: shared (keyctl not installed)')
+    + (tools.hostname ? '' : '; hostname: the host\'s (no `hostname` tool)');
   process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', `${inside}; ${backendClause(choice)}${keyringNote}`)}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
@@ -2205,7 +2210,8 @@ function runIsolated(a) {
         // --pid --fork --mount-proc: a private PID namespace with its own /proc, so no host
         // process can be signalled or even seen. --kill-child: if unshare dies, so does
         // everything inside (pid 1 is the reaping bash, PID1_REAPER; the inner half runs under it).
-        ['-rnm', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
+        // --uts (v0.34.0, ib4k row 10): a hostname of its own, set to NEUTRAL_HOSTNAME by the inner half
+        ['-rnm', '--uts', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
           tools.bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', tools.keyctl,
           process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         // ⛔ the PRIVILEGED env: unshare, pid 1 and the inner half (namespace root, full caps, before
@@ -2418,6 +2424,13 @@ async function runIsolatedInner(a) {
     return refuse(`after hiding, ${shown.length} of ${allHidden.length} hidden dir(s) (the home, ~/.ssh, ~/.gnupg, the `
       + `state roots) do not resolve to the read-only '${HIDE_SOURCE}' tmpfs`);
   }
+  // ⛔ HOST IDENTITY (v0.34.0, ib4k row 10): a neutral hostname, a sysfs of THIS netns (only lo), neutral
+  // /etc/machine-id and /etc/hostname — then READ BACK (identityGaps), not trusted
+  const idr = maskIdentity(plan.tools);
+  if (idr.why) return refuse(idr.why);
+  for (const n of idr.notes) process.stderr.write(`isolated: note: ${n}\n`);
+  const idGaps = identityGaps(!!plan.tools.hostname);
+  if (idGaps.length) return refuse(`after masking the host's identity, ${idGaps.join(', ')} still show(s) the HOST's`);
   const res = await closeResidualSockets(plan.sockets, plan.exempt);
   if (res.still > 0) {
     return refuse(`${res.still} of ${res.checked} host path socket(s) still ANSWER after masking `
@@ -2456,6 +2469,108 @@ async function runIsolatedInner(a) {
   const ran = runCommand(pid1HelperArgv(command, 3, false), priv.prefix, { env: plan.env });
   for (const s of SIGS) process.off(s, early);
   return ran;
+}
+
+/** The hostname every fresh `isolated` namespace gets (ib4k §1 row 10). */
+export const NEUTRAL_HOSTNAME = 'webctl-isolated';
+/**
+ * The /etc/machine-id every `isolated` namespace sees: one fixed, obviously synthetic id (the hex of
+ * "webctl-isolated\0"), the same on every host and run. ⚠ NOT absent and NOT all zeros: systemd and
+ * dbus treat both as "no machine id" and some tools then refuse to start; a valid-looking constant
+ * keeps them working while telling nothing about the host (measured: DEV_NOTES, row 10).
+ */
+export const NEUTRAL_MACHINE_ID = '77656263746c2d69736f6c6174656400';
+/** The files bound over with a neutral copy, and what each holds. Absent → skipped (nothing to hide). */
+const IDENTITY_FILES = Object.freeze([['/etc/machine-id', `${NEUTRAL_MACHINE_ID}\n`], ['/var/lib/dbus/machine-id', `${NEUTRAL_MACHINE_ID}\n`],
+  ['/etc/hostname', `${NEUTRAL_HOSTNAME}\n`]]);
+
+/**
+ * Hide the HOST's identity inside the fresh namespaces (ib4k §1 row 10). Measured open in v0.33: the
+ * hostname, /sys/class/net (every host interface name — and MAC) and /etc/machine-id were the host's.
+ *
+ *   1. hostname: `hostname NEUTRAL_HOSTNAME` in our own UTS namespace (`unshare --uts`); without the
+ *      tool it stays the host's (noted in the verdict, outer half).
+ *   2. /sys: a FRESH sysfs, mounted from inside our network namespace, lists only that namespace's
+ *      interfaces — `lo` — in /sys/class/net (and /sys/devices/virtual/net). It covers every host
+ *      submount of /sys, so the cgroup tree (node reads its memory limit there) is staged first and
+ *      moved back on top. ⚠ If the kernel refuses the sysfs mount, /sys/class/net gets an empty
+ *      read-only tmpfs instead — no interface at all, said in a note.
+ *   3. /etc/machine-id, /var/lib/dbus/machine-id, /etc/hostname: a neutral copy (made in OUR /run)
+ *      bound over each real file, read-only. A symlink to one already covered is covered by it.
+ * @param {Tools} tools @returns {{why: string, notes: string[]}}
+ */
+function maskIdentity(tools) {
+  /** @type {string[]} */ const notes = [];
+  if (tools.hostname) {
+    const r = spawnSync(tools.hostname, [NEUTRAL_HOSTNAME], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
+    if (r.status !== 0) return { why: `cannot set the neutral hostname: \`hostname\` exited ${r.status ?? r.signal ?? r.error?.message}`, notes };
+  }
+  const mounts = readMountinfo() || [];
+  const cg = '/sys/fs/cgroup';
+  const stage = '/run/.webctl-cgroup';
+  const hasCg = mounts.some((m) => m.at === cg);
+  try {
+    if (hasCg) {
+      fs.mkdirSync(stage);
+      const e = mountOrWhy(['--rbind', cg, stage], 'stage the cgroup tree before the fresh sysfs');
+      if (e) return { why: e, notes };
+    }
+    const sys = mountOrWhy(['-t', 'sysfs', '-o', 'nosuid,nodev,noexec', SYSFS_SOURCE, '/sys'], 'mount a fresh sysfs');
+    if (sys) {
+      // fall back: no interface names at all (an empty read-only tmpfs over the class dir)
+      const t = mountOrWhy(['-t', 'tmpfs', '-o', 'ro,nosuid,nodev,noexec,size=4k,mode=0755', SYSFS_SOURCE, '/sys/class/net'],
+        'mask /sys/class/net (a fresh sysfs was refused)');
+      if (t) return { why: `${sys}; ${t}`, notes };
+      // ⚠ the staged cgroup copy stays at the stage dir (the original is still at /sys/fs/cgroup, untouched)
+      notes.push('/sys: a fresh sysfs was refused here — /sys/class/net is MASKED (empty) instead');
+    } else if (hasCg) {
+      const e = mountOrWhy(['--move', stage, cg], 'move the cgroup tree back onto the fresh sysfs');
+      if (e) return { why: e, notes };
+    }
+    if (hasCg) { try { fs.rmdirSync(stage); } catch { /* still a mount (fallback) or gone: harmless */ } }
+    const dir = '/run/.webctl-identity';
+    fs.mkdirSync(dir, { mode: 0o755 });
+    /** @type {string[]} */ const done = [];
+    for (const [f, text] of IDENTITY_FILES) {
+      let real = '';
+      try { real = fs.realpathSync.native(f); if (!fs.statSync(real).isFile()) continue; } catch { continue; } // absent: nothing to hide
+      if (done.includes(real) || maskedDirs().all.some((m) => isWithin(real, m))) continue; // covered already
+      const copy = path.join(dir, String(done.length));
+      fs.writeFileSync(copy, text, { mode: 0o444 });
+      const b = mountOrWhy(['--bind', copy, real], `bind a neutral ${path.basename(f)}`);
+      if (b) return { why: b, notes };
+      const ro = mountOrWhy(['-o', 'remount,bind,ro', real], `make the neutral ${path.basename(f)} read-only`);
+      if (ro) return { why: ro, notes };
+      done.push(real);
+    }
+  } catch (e) {
+    return { why: `masking the host's identity failed (${errMsg(e)})`, notes };
+  }
+  return { why: '', notes };
+}
+/** The source tag of the fresh sysfs (or its fallback mask). */
+const SYSFS_SOURCE = 'webctl-isolated-sysfs';
+
+/**
+ * What of the HOST's identity is visible HERE — read from the kernel and the files, not from what
+ * was mounted (ib4k §1 row 10). [] when nothing. Used by the fresh path after masking and by the
+ * nesting proof. ⚠ Names only WHAT is visible, never the value: refusals get pasted into logs.
+ * @param {boolean} hostnameTool the hostname can be set here (else it is not judged — see the verdict)
+ * @returns {string[]}
+ */
+function identityGaps(hostnameTool) {
+  /** @type {string[]} */ const gaps = [];
+  if (hostnameTool && os.hostname() !== NEUTRAL_HOSTNAME) gaps.push('the hostname');
+  /** @type {string[]} */ let names = [];
+  try { names = fs.readdirSync('/sys/class/net'); } catch { /* absent: none listed */ }
+  const extra = names.filter((n) => n !== 'lo').length;
+  if (extra) gaps.push(`${extra} interface name(s) in /sys/class/net`);
+  for (const [f, text] of IDENTITY_FILES) {
+    let got = null;
+    try { got = fs.readFileSync(f, 'utf8'); } catch { continue; } // absent (or unreadable): nothing shown
+    if (got.trim() !== text.trim()) gaps.push(f);
+  }
+  return gaps;
 }
 
 /**
@@ -3669,9 +3784,17 @@ function kernelInsideProof() {
   if (!mntns) fails.push('/proc/self/ns/mnt is unreadable');
   if (!recordedMnt) fails.push(`${HOST_MNTNS_ENV} is not set, so there is no recorded host mount namespace to differ from`);
   else if (mntns === recordedMnt) fails.push(`the current mount namespace ${mntns} EQUALS the recorded host one`);
+  // ⚠ v034: facts a v0.33 OUTER cannot satisfy (its /var/tmp, /dev/shm and identity are the host's)
+  const newScratch = maskedDirs().scratch.filter((d) => d !== maskedDirs().tmp);
+  let v034 = 0;
   if (unmasked.length) {
     fails.push(`no '${MASK_SOURCE}' tmpfs on top of ${unmasked.join(', ')} (the host's unix sockets there are reachable)`);
+    if (unmasked.every((d) => newScratch.includes(d))) v034++;
   }
+  // ⛔ v0.34.0 (ib4k row 10): the host's identity must not be visible (the hostname judged only where a
+  // `hostname` tool exists — without one the outer could not set it, and said so in its verdict)
+  const idGaps = identityGaps(!!systemTool('hostname'));
+  if (idGaps.length) { fails.push(`the HOST's identity is visible: ${idGaps.join(', ')}`); v034++; }
   if (!pidns) fails.push('/proc/self/ns/pid is unreadable');
   if (!recordedPid) fails.push(`${HOST_PIDNS_ENV} is not set, so there is no recorded host PID namespace to differ from`);
   else if (pidns === recordedPid) fails.push(`the current PID namespace ${pidns} EQUALS the recorded host one (host processes can be signalled)`);
@@ -3680,26 +3803,26 @@ function kernelInsideProof() {
   if (!hidden) fails.push(`${HIDDEN_ENV} is not set (or malformed), so there is no record of which home dirs must be hidden`);
   else if (shown) fails.push(`${shown} of ${hidden.length} hidden dir(s) — the home, ~/.ssh, the state roots — lack the '${HIDE_SOURCE}' mask here`);
   // ⛔ VERSION SKEW: a ≤ v0.32.0 outer records no WEBCTL_HIDDEN_DIRS (and hides nothing). If that
-  // is the ONLY failing fact, say what it is — still refused, never "inherited" as if hidden.
-  const outerTooOld = process.env[HIDDEN_ENV] === undefined && fails.length === 1;
-  // ⛔ …and a v0.33 outer masks /tmp but not /var/tmp or /dev/shm (v0.34.0, ib4k row 8): when THAT is
-  // the only failing fact, say so — refused all the same (the command would see the host's scratch)
-  const newScratch = maskedDirs().scratch.filter((d) => d !== maskedDirs().tmp);
-  if (!outerTooOld && fails.length === 1 && unmasked.length > 0 && unmasked.every((d) => newScratch.includes(d))) {
-    fails[0] = `the OUTER \`isolated\` is older than v0.34.0: ${unmasked.join(' and ')} ${unmasked.length > 1 ? 'are' : 'is'} the `
-      + 'HOST\'s there (no private tmpfs), and a nested call cannot mask them for its caller — upgrade the outer one to v0.34.0 or later';
-  }
+  // is the ONLY failing fact besides the v0.34 ones, say what it is — still refused, never
+  // "inherited" as if hidden.
+  const outerTooOld = process.env[HIDDEN_ENV] === undefined && fails.length - v034 === 1;
   if (outerTooOld) {
-    fails[0] = `the OUTER \`isolated\` is older than v0.33.0: it recorded no ${HIDDEN_ENV} and did not hide the `
+    fails.splice(0, fails.length, `the OUTER \`isolated\` is older than v0.33.0: it recorded no ${HIDDEN_ENV} and did not hide the `
       + 'home, and a nested call cannot hide it after the fact — upgrade the outer one (the base checkout running '
-      + 'the gate, or your contract\'s own outer call) to v0.33.0 or later';
+      + 'the gate, or your contract\'s own outer call) to v0.34.0 or later');
+  } else if (v034 > 0 && fails.length === v034) {
+    // ⛔ …and a v0.33 outer masks /tmp but not /var/tmp or /dev/shm, and hides no identity (ib4k rows 8,
+    // 10): when only THOSE fail, say so — refused all the same (the command would see the host's)
+    const what = [...(unmasked.length ? unmasked : []), ...idGaps];
+    fails.splice(0, fails.length, `the OUTER \`isolated\` is older than v0.34.0: ${what.join(', ')} ${what.length > 1 ? 'are' : 'is'} `
+      + 'the HOST\'s there, and a nested call cannot hide them for its caller — upgrade the outer one to v0.34.0 or later');
   }
   // ⚠ counts, never the roots: they are home paths, and refusals get pasted
   return { inside: fails.length === 0, why: fails.join('; '),
     facts: { netns, recorded: recorded ?? null, uidMap, extraInterfaces: extra,
       mntns, recordedMnt: recordedMnt ?? null, pidns, recordedPid: recordedPid ?? null, unmasked,
       roRoots: roRoots ? roRoots.length : null, writableRoRoots: writable,
-      hidden: hidden ? hidden.length : null, shownHidden: shown } };
+      hidden: hidden ? hidden.length : null, shownHidden: shown, identityShown: idGaps.length } };
 }
 
 /**
