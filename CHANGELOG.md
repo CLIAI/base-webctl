@@ -298,6 +298,14 @@ unhide `~/.config/webctl`); `--keep` at or beneath one re-exposes that path only
   reading `~/.ssh/config` / `known_hosts`, gpg's keyring and config, shell rc files, a tool's
   own cache or config under `~/.cache` / `~/.config` / `~/.local`. Give the arm a throwaway
   `HOME` holding what it needs, or `--keep-ro` the one dir it must read.
+* ⛔ **`xq`'s checkout is re-bound READ-ONLY** (gate regression, measured: two consumers'
+  no-host-literals check `xq machine ls --json` went PASS → NO VERDICT / FAIL, unfixable from a
+  lane under the gate). `~/.local/bin/xq` is a symlink into a git checkout elsewhere under the
+  home and xq imports its `lib/` (`No module named 'lib'` with only the script). If `xq` on the
+  caller's PATH really lives under the home, its git root (walk up for `.git`; none → its dir)
+  is re-bound read-only, named `xq's root`. **For `xq` only** — a generic "follow PATH
+  symlinks" would re-expose dozens of repos on an operator host. A root that is the home, or
+  is, contains or lies inside a hidden dir is not re-bound (noted, no path).
 * A PATH entry that reaches the home through a symlink OUTSIDE it is re-bound at its real path
   only. Cost measured on the operator host (~100 PATH entries under the home): `isolated --
   true` 1.29 s → 1.46 s.

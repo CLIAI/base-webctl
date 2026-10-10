@@ -1925,6 +1925,8 @@ function runIsolated(a) {
   const mi = readMountinfo();
   const outer = mi && extraInterfaces() === 0 && uidMapKind() === 'mapped' ? outerRebinds(mi, prot.home, maskedAll, maskedTmp) : null;
   const atHidden = (outer || []).filter((b) => prot.hideRule.includes(b.p)).length;
+  // ⛔ xq's checkout (read-only; xq ONLY — xqRoot)
+  const xq = xqRoot(prot.home, prot.hideRule);
   const carried = (outer || []).filter((b) => !prot.hideRule.includes(b.p)).filter((b) => {
     try { const st = fs.statSync(b.p); return st.isDirectory() || st.isFile(); } catch { return false; } // not a /dev/null cover
   });
@@ -1945,6 +1947,7 @@ function runIsolated(a) {
     ...pathEntriesUnder(ident.home).map(({ p, n }) => ({ p, label: `PATH entry #${n}`, rw: false, rule: true })),
     // ⛔ never wider: exactly what the outer call made visible here, each with its mode (outerRebinds)
     ...carried.map((b, i) => ({ p: b.p, label: `outer re-bind #${i + 1}`, rw: b.rw, quiet: true })),
+    ...(xq.p ? [{ p: xq.p, label: "xq's root", rw: false }] : []),
   ], prot, keepsRo);
   if (plan.usage) return Promise.resolve(usageRefusal(plan.usage, command));
   if (plan.refuse) {
@@ -1961,6 +1964,10 @@ function runIsolated(a) {
   const { tools, why: noTool } = privilegedTools(ub, false);
   if (noTool) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${noTool}. The command was NOT started.`, { command }));
   for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
+  if (xq.why) {
+    process.stderr.write(`isolated: note: xq's root (the checkout \`xq\` on PATH lives in, under the home) ${xq.why} — NOT `
+      + 're-bound, so xq will not run inside; install xq from a checkout outside the hidden dirs\n');
+  }
   if (atHidden) {
     process.stderr.write(`isolated: note: ${atHidden} outer re-bind(s) AT a hidden dir (~/.ssh, a state root, …) not carried — `
       + '--keep it again in this call\n');
@@ -2283,6 +2290,44 @@ function pathEntriesUnder(home) {
     if (home && isWithin(real, home)) out.push({ p: real, n: i + 1 });
   }
   return out;
+}
+
+/**
+ * The dir to re-bind READ-ONLY so `xq` (base's runtime layer, rx9q) runs inside — or why not.
+ *
+ * ⛔ GATE REGRESSION (measured): the usual install is `~/.local/bin/xq`, a SYMLINK into a git
+ * checkout elsewhere under the home. With the home hidden, the PATH entry is re-bound but the
+ * symlink dangles; re-binding the script alone fails ("No module named 'lib'": xq imports its
+ * repo's lib/). Two private consumers' no-host-literals check (`xq machine ls --json`) went PASS
+ * → NO VERDICT / FAIL, and a lane cannot fix it under the gate (a nested --keep-ro of a path the
+ * outer hid is refused). ⇒ if `xq` — the first one on the caller's PATH, absolute entries only —
+ * really lives under the home, its GIT ROOT (walk up from its real dir for `.git`, the home
+ * included; none → the real dir itself).
+ * ⛔ DELIBERATELY NARROW: `xq` only. Following every PATH symlink would re-expose dozens of repos
+ * on an operator host (measured: ~95 PATH entries there). And never a root that IS the home or
+ * IS, CONTAINS or lies INSIDE a hidden dir (`why`, no path) — then xq does not run inside.
+ * @param {string} home realpath'd @param {string[]} hideRule Prot.hideRule
+ * @returns {{p: string, why: string}} p '' when there is nothing to re-bind (why says if refused)
+ */
+function xqRoot(home, hideRule) {
+  let real = '';
+  for (const d of String(process.env.PATH || '').split(':')) {
+    if (!path.isAbsolute(d)) continue;
+    const c = path.join(d, 'xq');
+    try { if (fs.statSync(c).isFile()) { fs.accessSync(c, fs.constants.X_OK); real = fs.realpathSync(c); break; } } catch { /* next */ }
+  }
+  if (!home || !real || !isWithin(real, home)) return { p: '', why: '' };
+  let root = '';
+  for (let d = path.dirname(real); isWithin(d, home); d = path.dirname(d)) {
+    if (fs.existsSync(path.join(d, '.git'))) { root = d; break; }
+    if (d === home) break;
+  }
+  root = root || path.dirname(real);
+  const why = root === home ? 'is the home directory'
+    : isWithin(home, root) ? 'contains the home directory'
+      : hideRule.some((h) => isWithin(root, h)) ? 'lies inside a HIDDEN dir'
+        : hideRule.some((h) => isWithin(h, root)) ? 'contains a HIDDEN dir' : '';
+  return why ? { p: '', why } : { p: root, why: '' };
 }
 
 /** Is `p` equal to `dir` or beneath it? @param {string} p @param {string} dir */

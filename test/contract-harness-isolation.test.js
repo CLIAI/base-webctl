@@ -1562,6 +1562,87 @@ test('⛔ the verdict COUNTS implicit PATH re-binds — a distinctive PATH dir n
 // A NESTED `--keep <path under the outer's hidden home>` used to fail "--keep #1 does not exist"
 // (exit 3) — true, but it sent people looking for a typo. The path is HIDDEN by the outer call,
 // and only the outer call can re-bind it (review of 5773fb8, finding 8a).
+// ⛔ GATE REGRESSION (measured): `xq` (base's runtime layer, rx9q) was unusable inside — the
+// usual install is ~/.local/bin/xq, a SYMLINK into a git checkout elsewhere under the (hidden)
+// home, and xq imports its repo's lib/ ("No module named 'lib'" with only the script re-bound).
+// Two private consumers' no-host-literals check went PASS → NO VERDICT / FAIL, and a lane cannot
+// fix it under the gate. ⇒ the git root of xq's REAL path is re-bound READ-ONLY — for `xq` ONLY:
+// following every PATH symlink would re-expose dozens of repos on an operator host.
+
+/**
+ * A fake repo at `<home>/<rel>` (with `.git` unless `git` is false) holding lib/data.txt and an
+ * executable bin/<name> that prints that lib file through its OWN real path; `<home>/.local/bin/<name>`
+ * symlinks to it. @param {string} home @param {string} rel @param {string} name @param {boolean} [git]
+ */
+function fakeRepoTool(home, rel, name, git = true) {
+  const root = path.join(home, rel);
+  fs.mkdirSync(path.join(root, 'lib'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'bin'), { recursive: true });
+  if (git) fs.mkdirSync(path.join(root, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'lib', 'data.txt'), `${name.toUpperCase()}-LIB-READ\n`);
+  fs.writeFileSync(path.join(root, 'bin', name), '#!/bin/sh\nd=$(dirname "$(readlink -f "$0")")\ncat "$d/../lib/data.txt"\n', { mode: 0o755 });
+  fs.mkdirSync(path.join(home, '.local', 'bin'), { recursive: true });
+  fs.symlinkSync(path.join(root, 'bin', name), path.join(home, '.local', 'bin', name));
+  return root;
+}
+/**
+ * The fake ~/.local/bin, then the system dirs ONLY: a real `xq` elsewhere on the caller's PATH must
+ * neither answer for the fake (a dangling first candidate falls through to the next) nor run.
+ * @param {string} home
+ */
+const xqPath = (home) => `${path.join(home, '.local', 'bin')}:/usr/bin:/bin`;
+/** argv[1] = home, argv[2] = xq's repo, argv[3] = the other repo: runs both tools, tries a write into xq's lib. */
+const XQ_PROBE = `const { spawnSync } = require('child_process'); const fs = require('fs'); const p = require('path');
+const [h, xr, or] = process.argv.slice(1);
+for (const t of ['xq', 'other']) { const r = spawnSync(t, { encoding: 'utf8' }); console.log(t.toUpperCase() + ' ' + (String(r.stdout || '').trim() || ('FAILED ' + (r.error ? r.error.code : r.status)))); }
+const o = (f) => { try { f(); return 'ok'; } catch (e) { return e.code; } };
+console.log('XQ-WRITE ' + o(() => fs.writeFileSync(p.join(xr, 'lib', 'w-' + process.pid), 'x')));
+console.log('OTHER-READ ' + o(() => fs.readFileSync(p.join(or, 'lib', 'data.txt'))));
+console.log('SSH ' + o(() => fs.readFileSync(p.join(h, '.ssh', 'id_test'))));`;
+
+test('⛔ xq: a ~/.local/bin/xq SYMLINK into a git checkout under the hidden home → that checkout\'s root is re-bound READ-ONLY (xq runs, nothing writable); another PATH symlink\'s repo stays HIDDEN', needsIsolation, async (t) => {
+  const home = fakeSecretHome();
+  const xr = fakeRepoTool(home, 'src/xq-checkout', 'xq');
+  const or = fakeRepoTool(home, 'src/other-checkout', 'other');
+  try {
+    const r = await underFakeHome(home, ['env', `PATH=${xqPath(home)}`,
+      process.execPath, TOOL, 'isolated', '--', process.execPath, '-e', XQ_PROBE, home, xr, or]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^XQ XQ-LIB-READ$/m, `xq could not read its own repo's lib/ inside:\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /^XQ-WRITE EROFS$/m, `xq's root is WRITABLE inside:\n${r.stdout}`);
+    // CONTROL: the other PATH symlink's repo is NOT followed — it stays hidden
+    assert.match(r.stdout, /^OTHER FAILED /m, `another PATH symlink's repo was re-bound:\n${r.stdout}`);
+    assert.match(r.stdout, /^OTHER-READ ENOENT$/m, r.stdout);
+    assert.match(r.stdout, /^SSH ENOENT$/m, r.stdout);
+    // named by LABEL, never by path (the checkout's name is private)
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: [^;]*xq's root/m, r.stderr);
+    assert.ok(!r.stderr.includes('xq-checkout'), `xq's root was named by path:\n${r.stderr}`);
+    // CONTROL: with WEBCTL_ISOLATED_VERBOSE=1 it is listed by path
+    const v = await underFakeHome(home, ['env', `PATH=${xqPath(home)}`, 'WEBCTL_ISOLATED_VERBOSE=1',
+      process.execPath, TOOL, 'isolated', '--', 'true']);
+    assert.ok(v && v.stderr.includes('~/src/xq-checkout'), v ? v.stderr : 'skipped');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('⛔ xq: a root that IS, CONTAINS or lies INSIDE a hidden dir (or is the home) is NOT re-bound — said on stderr, no path; the hidden dirs stay hidden', needsIsolation, async (t) => {
+  for (const [what, rel] of [['inside ~/.ssh', '.ssh/xq-checkout'], ['containing ~/.config/webctl', '.config'], ['the home itself (a dotfiles repo)', '']]) {
+    const home = fakeSecretHome();
+    const xr = fakeRepoTool(home, rel, 'xq');
+    try {
+      const r = await underFakeHome(home, ['env', `PATH=${xqPath(home)}`,
+        process.execPath, TOOL, 'isolated', '--', process.execPath, '-e', XQ_PROBE, home, xr, xr]);
+      if (!r) { t.skip(NO_FAKE_HOME); return; }
+      assert.equal(r.status, 0, `${what}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout, /^XQ FAILED /m, `${what}: xq's root was re-bound:\n${r.stdout}`);
+      assert.match(r.stdout, /^SSH ENOENT$/m, `${what}: ${r.stdout}`);
+      assert.match(r.stderr, /^isolated: note: xq's root .* — NOT re-bound/m, `${what}: ${r.stderr}`);
+      assert.ok(!r.stderr.includes(home) && !(rel && r.stderr.includes(rel)), `${what}: a path was printed:\n${r.stderr}`);
+      assert.doesNotMatch(r.stderr, /re-bound read-only: [^;]*xq's root/, `${what}: ${r.stderr}`);
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  }
+});
+
 test('⛔ a NESTED --keep / --keep-ro under the OUTER call\'s hidden home → usage 3 saying the OUTER call hides it (no path) — CONTROL: kept by the outer, it works', needsIsolation, async (t) => {
   const home = fakeWholeHome();
   const work = path.join(home, 'work');

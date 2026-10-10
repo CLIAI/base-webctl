@@ -345,10 +345,15 @@ contract's output when it is used.
   *npm:* `npm test` behaves as on the host; it only skips its debug logfile under
   `~/.npm/_logs` (set `npm_config_cache` under `/tmp` if you want it).
   *xq:* a check that asks xq for machine names (e.g. a no-host-literals scan) ran INSIDE
-  under v0.32 (measured by `fetlife`, with `UV_NO_CACHE=1`). With the home hidden it needs
-  xq's own dirs under the home re-bound — `--keep-ro` them, and pass `UV_NO_CACHE` with
-  `--pass-env` *(reasoned, not yet re-measured)*. Without them it silently falls back to fewer
-  names, so a lane should treat "xq did not answer" as a FAIL, not a warning, when xq is installed.
+  under v0.32 (measured by `fetlife`, with `UV_NO_CACHE=1`). ⛔ With the home hidden it broke
+  (measured under the gate: PASS → NO VERDICT / FAIL in two consumers): `~/.local/bin/xq` is a
+  symlink into a git checkout elsewhere under the home, and xq imports that checkout's `lib/`.
+  ⇒ If `xq` on your PATH really lives under the home, **its git root is re-bound READ-ONLY**
+  (named `xq's root` in the verdict, never by path). For `xq` ONLY — following every PATH
+  symlink would re-expose dozens of repos on an operator host. A root that is the home, or is,
+  contains or lies inside a hidden dir is NOT re-bound (a note says so). Pass `UV_NO_CACHE` with
+  `--pass-env` if your check sets it. A lane should still treat "xq did not answer" as a FAIL,
+  not a warning, when xq is installed — it falls back to fewer names silently.
 * ⛔ **BREAKING (v0.33.0): the env is an ALLOWLIST.** Measured by the review: 37 vars matching
   `*_API_KEY`, `*_TOKEN`, `*SECRET` reached the arm on an operator host — and the gate passes its
   full env. Default-passed: `PATH HOME USER LOGNAME SHELL LANG LC_* TERM TZ NODE_OPTIONS

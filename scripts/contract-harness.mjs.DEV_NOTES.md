@@ -1071,6 +1071,32 @@ nothing, so it did not break.
   logic + the integration arm; the resolveMount (visible) filter off → logic; hides not excluded
   → logic; the carry not passed to planKeeps → the integration arm.
 
+### ⛔ xq could not run inside (gate regression, v0.33.0)
+
+Measured by the lead on the release gate: two private consumers' documented no-host-literals
+check (`xq machine ls --json`, `UV_NO_CACHE=1`) went PASS → NO VERDICT / FAIL. `~/.local/bin/xq`
+is a symlink into a git checkout elsewhere under the home; the PATH entry is re-bound, the
+symlink dangles. Re-binding only the script fails `No module named 'lib'` (xq imports its repo's
+`lib/`), and a nested `--keep-ro` of a path the outer hid is refused — a lane cannot fix it.
+* **Arm, before the fix** (fake home; `~/.local/bin/xq` → `~/src/xq-checkout/bin/xq`, a script
+  that cats `../lib/data.txt` through its real path; `~/.local/bin/other` → another checkout):
+  `XQ FAILED ENOENT`. After: `XQ XQ-LIB-READ`, a write into its lib `EROFS`, `OTHER FAILED`, the
+  other checkout `ENOENT`, `~/.ssh` `ENOENT`; the verdict says `xq's root`, never the name.
+  ⚠ The arm's PATH is the fake `~/.local/bin` + `/usr/bin:/bin` ONLY: with the caller's PATH, the
+  dangling fake fell through to the REAL `xq` further on PATH (it ran and printed its help).
+* ⇒ `xqRoot(home, hideRule)`: the first `xq` on the caller's PATH (absolute entries), realpath'd;
+  if under the home, walk up from its dir for `.git` (the home included); none → its dir.
+  Refused (a note, no path; xq then does not run inside) when the root IS the home or contains
+  it, or lies inside or contains a hideRule dir. Re-bound read-only as an implicit item, label
+  `xq's root`.
+* ⛔ **Deliberately NOT generic.** Following every PATH symlink to its git root would re-expose
+  dozens of repos on an operator host (~95 PATH entries there, many symlinked checkouts) — the
+  very exposure the verdict-count fix keeps out of logs would then be readable by the arm. One
+  named tool, base's own runtime layer, is the scope; another tool needs its `--keep-ro`.
+* **Sabotage (all caught):** a generic symlink-following rule → the main arm (`OTHER` ran); xq's
+  root writable → the main arm; the hidden/home check off → the refusal arm; the root marked
+  `named` (listed by path) → the main arm.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
