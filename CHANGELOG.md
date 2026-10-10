@@ -213,8 +213,9 @@ is the strongest form: it names the ownership in the function that reads it.
 — and is judged by ONE arm table (ib4k §1, rows 1–12); and it closes the gaps v0.33 left open: a
 private `/var/tmp`, `/dev/shm`, SysV IPC and POSIX mqueues, a fresh session keyring, the host's
 identity hidden — a READ-ONLY root (row 7) — and, holes in every released `isolated` found by review,
-a fresh minimal `/dev` (row 12) and a read-only cgroup tree in a cgroup namespace of its own (row 3).** Phase 1 of 3 (ib4k): only the **unshare** backend is implemented. Harness and
-gate only; no `lib/` change. **`HARNESS_GENERATION` is 7** (below). No consumer change expected,
+a fresh minimal `/dev` (row 12) and a read-only cgroup tree in a cgroup namespace of its own (row 3).**
+**The unshare hardening release:** only the **unshare** backend is
+implemented; **bwrap and docker land in v0.35.0**. Harness and gate only; no `lib/` change. **`HARNESS_GENERATION` is 7** (below). No consumer change expected,
 except a contract that matches the new verdict field or a refusal's tail.
 
 ### Backend selection (ib4k §2, §4)
@@ -227,7 +228,7 @@ except a contract that matches the new verdict field or a refusal's tail.
 * **`WEBCTL_ISOLATION_BACKEND=unshare|bwrap|docker`** pins one. A pinned backend that cannot be used
   is a **refusal**, never a fallback; an unknown value is refused by rule. A nested call validates
   it and selects nothing (it runs inside its outer call's sandbox).
-* ⚠ **Phase 1:** `bwrap` and `docker` answer `not implemented yet (v0.34 phase 2/3)`. So on a host
+* ⚠ **unshare only:** `bwrap` and `docker` answer `not implemented yet (v0.35.0)`. So on a host
   where unshare cannot run (the AppArmor sysctl — v0.33's HOST-POLICY text is kept as unshare's
   reason) `isolated` still REFUSES; a pin to bwrap or docker is refused. A backend that is selected
   but has no runner yet is refused, `internal: backend <x> has no runner yet` (review F7) — it is
@@ -406,7 +407,7 @@ if (gen7) assert.match(stderr, /^isolated: home HIDDEN; .*; backend: [a-z]+/m);
 
 ### ⛔ What this does NOT cover
 
-* **bwrap and docker backends** (phases 2 and 3, ib4k §3/§3a): not implemented. A host that forbids
+* **bwrap/docker backends: v0.35.0** (ib4k §3/§3a): not implemented here. A host that forbids
   unprivileged user namespaces is still refused — the lane blocked by AppArmor is NOT unblocked yet.
 * **Identity not hidden:** `/etc/hosts` (may name the host), `/proc/sys/kernel/random/boot_id`, DMI
   strings under `/sys/class/dmi/id`, **disk serials** (`/sys/class/block/*/device/serial` — block

@@ -5,7 +5,7 @@
 // a probe failure is a RECORDED reason, never a crash. WEBCTL_ISOLATION_BACKEND pins one backend;
 // a pinned backend that cannot be used is a REFUSAL naming why — never a silent fallback.
 //
-// v0.34 phase 1: only `unshare` is implemented. bwrap and docker answer "not implemented yet"
+// v0.34.0 (unshare only): bwrap and docker answer "not implemented yet (v0.35.0)"
 // as their reason, so a pin to either is refused and a host where unshare cannot run is refused
 // naming all three.
 
@@ -140,21 +140,21 @@ test('⭐ WEBCTL_ISOLATION_BACKEND=unshare pins the implemented backend → runs
   assert.match(r.stderr, /; backend: unshare(?: —|$)/m);
 });
 
-test('⛔ WEBCTL_ISOLATION_BACKEND=bwrap / docker (phase 1: not implemented) → REFUSED naming why, the command NOT run, no fallback to unshare', needsNs, async () => {
+test('⛔ WEBCTL_ISOLATION_BACKEND=bwrap / docker (v0.34.0: not implemented, v0.35.0) → REFUSED naming why, the command NOT run, no fallback to unshare', needsNs, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ib-select-'));
   try {
-    for (const [b, phase] of [['bwrap', 2], ['docker', 3]]) {
+    for (const b of ['bwrap', 'docker']) {
       const marker = path.join(dir, `RAN-${b}`);
       const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`],
         { WEBCTL_ISOLATION_BACKEND: String(b) });
       assert.equal(r.status, 1, `${b}: ${r.stdout}${r.stderr}`);
       assert.match(r.stderr, new RegExp(`^FAIL {2}isolated: NOT RUN: WEBCTL_ISOLATION_BACKEND pins the ${b} backend, which cannot be used here — `
-        + `${b}: not implemented yet \\(v0\\.34 phase ${phase}\\) \\(a pinned backend never falls back`, 'm'));
+        + `${b}: not implemented yet \\(v0\\.35\\.0\\) \\(a pinned backend never falls back`, 'm'));
       assert.doesNotMatch(r.stderr, /^isolated: home HIDDEN/m, `${b}: a verdict was printed, so something ran`);
       assert.equal(fs.existsSync(marker), false, `${b}: the command ran`);
       const rec = recordOf(r.stdout);
       assert.equal(rec?.backend, null);
-      assert.deepEqual(rec?.skipped, [{ backend: b, why: `not implemented yet (v0.34 phase ${phase})` }]);
+      assert.deepEqual(rec?.skipped, [{ backend: b, why: 'not implemented yet (v0.35.0)' }]);
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -179,7 +179,7 @@ test('⛔ an unknown WEBCTL_ISOLATION_BACKEND → refused by rule (value not pri
 test('⛔ unshare unavailable (a bad WEBCTL_UNSHARE_BIN) → REFUSED naming all three backends; the JSONL record lists each skip', async () => {
   const r = await run(['isolated', '--', 'true'], { WEBCTL_UNSHARE_BIN: '/nonexistent/unshare' });
   assert.equal(r.status, 1, r.stderr);
-  assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file — it does not exist; no isolation backend can be used here — bwrap: not implemented yet \(v0\.34 phase 2\), docker: not implemented yet \(v0\.34 phase 3\) \(the command is never run unisolated\)/m);
+  assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file — it does not exist; no isolation backend can be used here — bwrap: not implemented yet \(v0\.35\.0\), docker: not implemented yet \(v0\.35\.0\) \(the command is never run unisolated\)/m);
   assert.doesNotMatch(r.stderr, /nonexistent/, 'the path is printed');
   const rec = recordOf(r.stdout);
   assert.equal(rec?.backend, null);
@@ -225,7 +225,7 @@ test('⛔ v0.33\'s refusal text is KEPT (review F4): a fake WEBCTL_UNSHARE_BIN p
     assert.equal(r.status, 1, r.stderr);
     // the lane's regex, verbatim
     assert.match(r.stderr, /NOT RUN: unshare exited 1/);
-    assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: unshare exited 1 before the isolated side reported in — unprivileged user namespaces may be disabled \(kernel\.unprivileged_userns_clone \/ user\.max_user_namespaces\); unshare's own message, if any, is above; no isolation backend can be used here — bwrap: not implemented yet \(v0\.34 phase 2\), docker: not implemented yet \(v0\.34 phase 3\) \(the command is never run unisolated\)\. The command was NOT started\.$/m);
+    assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: unshare exited 1 before the isolated side reported in — unprivileged user namespaces may be disabled \(kernel\.unprivileged_userns_clone \/ user\.max_user_namespaces\); unshare's own message, if any, is above; no isolation backend can be used here — bwrap: not implemented yet \(v0\.35\.0\), docker: not implemented yet \(v0\.35\.0\) \(the command is never run unisolated\)\. The command was NOT started\.$/m);
     // "unshare's own message … is above" stays TRUE: the probe's stderr is printed before the FAIL line
     assert.ok(r.stderr.indexOf('unshare: unshare failed: Operation not permitted') >= 0
       && r.stderr.indexOf('unshare: unshare failed: Operation not permitted') < r.stderr.indexOf('FAIL  isolated:'), r.stderr);

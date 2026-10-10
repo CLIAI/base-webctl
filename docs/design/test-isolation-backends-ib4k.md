@@ -218,8 +218,8 @@ above it, as v0.33's was. A pin keeps the pin's text. ⛔ A backend that is SELE
 yet is refused (`internal: backend <x> has no runner yet`, review F7) — everything after selection
 is unshare's runner until each phase adds its own. Only a PROBE failure moves on to the next backend;
 once a backend is chosen, a failure inside it (a mask that fails, a read-back that disagrees) is a
-FAIL, never a reason to try the next. Until phases 2–3 land, `bwrap` and `docker` answer
-`not implemented yet (v0.34 phase 2/3)`: a pin to either is refused, and a host where unshare
+FAIL, never a reason to try the next. Until v0.35.0, `bwrap` and `docker` answer
+`not implemented yet (v0.35.0)`: a pin to either is refused, and a host where unshare
 cannot run is refused naming all three. An unknown pin is refused by rule (its value is not
 printed). A **nested** call makes no sandbox of its own (it runs inside its outer call's): the pin
 is validated there, and selects nothing.
@@ -290,9 +290,15 @@ is validated there, and selects nothing.
 
 ## 5. Order
 
-After v0.33.0 (hidden home, env allowlist, `--keep-ro`, `WEBCTL_UNSHARE_BIN`): v0.34.0
-implements §1's shared arm set first (parameterised by backend), then bwrap, then docker.
-A lane blocked by host policy (the Ubuntu host above) resumes on v0.34.0.
+After v0.33.0 (hidden home, env allowlist, `--keep-ro`, `WEBCTL_UNSHARE_BIN`):
+
+* **v0.34.0 — the unshare hardening release, unshare only:** §1's shared arm set (parameterised by
+  backend) and the selection frame (§2, §4); rows 7–12 closed for unshare, plus the cgroup arm of
+  row 3. The `/dev` (row 12) and cgroup (row 3) holes were open in every released `isolated` — a
+  security update.
+* **v0.35.0 — bwrap, then docker** (§3, §3a), each judged by the same table.
+
+A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with bwrap or docker.
 
 ## 6. Status (2026-10-10)
 
@@ -314,5 +320,5 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.34.0.
   mount read-write inside. The command cannot drive this itself: it cannot reach the daemon (host
   unix sockets masked, row 2) and holds no capability to mount one; the daemon must already be
   running on the host, as the same user, and choose to lie.
-* **Phase 2 — bwrap; phase 3 — docker (§3, §3a):** not started. Each lands by adding its probe,
+* **v0.35.0 — bwrap, then docker (§3, §3a, §5):** not started. Each lands by adding its probe,
   its run path, and its name to the table's IMPLEMENTED list — the guard test fails until it does.

@@ -1548,7 +1548,7 @@ function refusalText(c, pinned, probeStderr) {
 }
 
 /** Phase-1 placeholders: these backends are specified (ib4k §3) but not implemented yet. */
-const NOT_IMPLEMENTED = Object.freeze({ bwrap: 'not implemented yet (v0.34 phase 2)', docker: 'not implemented yet (v0.34 phase 3)' });
+const NOT_IMPLEMENTED = Object.freeze({ bwrap: 'not implemented yet (v0.35.0)', docker: 'not implemented yet (v0.35.0)' });
 
 /**
  * Can the `unshare` backend run here? '' when yes, else the NAMED reason (ib4k §2): an invalid

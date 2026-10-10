@@ -1360,7 +1360,7 @@ not help: this path runs only because the markers were stripped, and that var is
 
 **Selection.** `selectBackend(pinned, probes)` is pure and exported (logic-tested with injected
 probes); `runIsolated` hands it three probes: unshare (`probeUnshare`), and bwrap/docker as
-`not implemented yet (v0.34 phase 2/3)`. The unshare probe is everything that used to refuse
+`not implemented yet (v0.34 phase 2/3)` (renamed `(v0.35.0)` when the release was numbered). The unshare probe is everything that used to refuse
 before `unshare` was spawned — a bad `WEBCTL_UNSHARE_BIN`, a privileged tool missing from the
 system dirs — plus one side-effect-free `unshare -rnm --uts --pid --fork true`, whose stderr goes
 through `userNamespaceRefusal()` (so the AppArmor case keeps its v0.33 HOST-POLICY text). It is

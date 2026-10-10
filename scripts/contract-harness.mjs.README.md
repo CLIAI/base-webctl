@@ -292,8 +292,8 @@ contract's output when it is used.
 * ⭐ **The BACKEND (v0.34.0, `ib4k` §2).** `isolated` probes **unshare → bwrap → docker** and uses
   the first that can run; none → refused, naming each and why (`NOT RUN: no isolation backend can
   be used here — unshare: <reason>; bwrap: …; docker: …`). **`WEBCTL_ISOLATION_BACKEND=<name>`**
-  pins one — unavailable is a refusal, never a fallback. ⚠ Phase 1: only **unshare** is
-  implemented; bwrap and docker answer `not implemented yet (v0.34 phase 2/3)`. The verdict line
+  pins one — unavailable is a refusal, never a fallback. ⚠ v0.34.0: only **unshare** is
+  implemented; bwrap and docker answer `not implemented yet (v0.35.0)`. The verdict line
   ends `; backend: unshare`; a refusal's JSONL record carries `"backend"` and `"skipped"`. A refusal
   LEADS with the unshare reason, worded as in v0.33 (`NOT RUN: unshare exited 1 before …`), then
   `; no isolation backend can be used here — bwrap: …, docker: …`. The one
