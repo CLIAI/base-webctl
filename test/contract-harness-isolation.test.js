@@ -2238,6 +2238,34 @@ console.log('SUB ' + o(() => fs.readFileSync(p.join(h, 'sub', 'f'))));`;
 /** @param {string} out @returns {Record<string, string>} */
 const probeOf = (out) => Object.fromEntries([...out.matchAll(/^(RW-READ|RW-WRITE|RO-READ|RO-WRITE|SSH|SUB) (\S+)$/gm)].map((m) => [m[1], m[2]]));
 
+// ⛔ GATE REGRESSION (measured by the lead: 8 of a consumer lane's 10 gate failures): the hide
+// tmpfs was mode 0555, so access(home, W_OK) answered EACCES — DAC runs before the read-only
+// check — not EROFS. A ≤ v0.32 harness nested with its markers stripped records the home as a
+// read-only ROOT and judges it by access(W_OK): anything but EROFS/ENOENT is "WRITABLE" →
+// "1 of 1 protected root(s) — the home directory — are WRITABLE here". ≤ v0.32's read-only home
+// answered EROFS. ⇒ the hides are owner-writable in their MODE, read-only by their MOUNT.
+/** argv[1] = home: access(W_OK) and a create, on the home and on a hidden dir kept-around (~/.config/webctl). */
+const HOME_WRITE_PROBE = `const fs = require('fs'); const p = require('path'); const h = process.argv[1];
+const o = (f) => { try { f(); return 'ok'; } catch (e) { return e.code; } };
+console.log('HOME-ACCESS ' + o(() => fs.accessSync(h, fs.constants.W_OK)));
+console.log('HOME-CREATE ' + o(() => fs.writeFileSync(p.join(h, 'probe-' + process.pid), 'x', { flag: 'wx' })));
+console.log('HIDE-ACCESS ' + o(() => fs.accessSync(p.join(h, '.config', 'webctl'), fs.constants.W_OK)));
+console.log('HIDE-CREATE ' + o(() => fs.writeFileSync(p.join(h, '.config', 'webctl', 'probe-' + process.pid), 'x', { flag: 'wx' })));`;
+
+test('⛔ the hidden home (and a hidden dir) answer a write CHECK with EROFS, like a read-only home — not EACCES — fresh AND nested', needsIsolation, async (t) => {
+  const home = fakeSecretHome();
+  try {
+    // --keep ~/.config: ~/.config/webctl then gets its OWN hide tmpfs (it is under a re-bind)
+    const r = await underFakeHome(home, ['sh', '-c', '"$0" "$1" isolated --keep "$2/.config" -- sh -c \'"$0" -e "$1" "$2"; '
+      + '"$0" "$3" isolated -- "$0" -e "$1" "$2"\' "$0" "$3" "$2" "$1"', process.execPath, TOOL, home, HOME_WRITE_PROBE]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const lines = r.stdout.split('\n').filter((l) => /^(HOME|HIDE)-/.test(l));
+    assert.deepEqual(lines, ['HOME-ACCESS EROFS', 'HOME-CREATE EROFS', 'HIDE-ACCESS EROFS', 'HIDE-CREATE EROFS',
+      'HOME-ACCESS EROFS', 'HOME-CREATE EROFS', 'HIDE-ACCESS EROFS', 'HIDE-CREATE EROFS'], `${r.stdout}${r.stderr}`);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
 test('⛔ STRIPPED markers under an outer that re-bound paths under the home: the inner call KEEPS them, same mode (rw stays rw, ro stays ro); ~/.ssh stays hidden', needsIsolation, async (t) => {
   const home = fakeSecretHome();
   for (const d of ['keep-rw', 'keep-ro']) { fs.mkdirSync(path.join(home, d)); fs.writeFileSync(path.join(home, d, 'f'), 'x'); }

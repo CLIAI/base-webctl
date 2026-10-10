@@ -679,9 +679,11 @@ suite runs with cwd = its root, which re-opens it through the cwd.
   `access(W_OK)` with `EROFS` — so the previous `isolated` (every other fact satisfied, home
   writable) is refused — and each dir in `WEBCTL_HIDDEN_DIRS` (the home first) to have our
   read-only hide AT it or at an ANCESTOR. The roots are recorded, not re-derived: inside the
-  user namespace we are uid 0, and the passwd lookup answers root's home. ⚠ The home is in
-  `WEBCTL_HIDDEN_DIRS`, not `WEBCTL_RO_ROOTS`: under its 0555 tmpfs `access(W_OK)` answers
-  `EACCES` (mode bits are checked before the read-only mount), measured.
+  user namespace we are uid 0, and the passwd lookup answers root's home. The home is in BOTH
+  `WEBCTL_HIDDEN_DIRS` (first) and `WEBCTL_RO_ROOTS` (first), as ≤ v0.32 recorded it. ⛔ Its hide
+  is mode **0755** and read-only by its MOUNT: with mode 0555 `access(W_OK)` answered `EACCES`
+  (DAC runs before the read-only check), so a ≤ v0.32 harness nested with its markers stripped
+  judged the home "WRITABLE" and refused — 8 of a consumer lane's 10 gate failures (measured).
 * **⛔ Read-only is not HIDDEN** (the first v0.33.0 step, measured by `perplexity`; since
   superseded by hiding the whole home, above). A mutated test could
   still READ and print `~/.ssh` keys, live ControlMaster socket paths, an install salt and

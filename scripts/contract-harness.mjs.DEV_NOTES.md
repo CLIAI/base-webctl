@@ -789,8 +789,9 @@ entry under the home, each new `--keep-ro`; WRITABLE the cwd and each `--keep`.
   the home and each hidden dir must land on our ro tmpfs. Logic-tested from explicit mountinfo,
   with a CONTROL showing the old per-path check passes the shadowed case.
 * **Fact 6 vs the home.** Recording the home in `WEBCTL_RO_ROOTS` failed every nested call:
-  under the 0555 tmpfs `access(W_OK)` is `EACCES` (mode bits first), not `EROFS`. The home is
-  recorded only in `WEBCTL_HIDDEN_DIRS` (first); fact 8 accepts the hide at the dir or an ancestor.
+  under the 0555 tmpfs `access(W_OK)` is `EACCES` (mode bits first), not `EROFS`. The home was
+  then recorded only in `WEBCTL_HIDDEN_DIRS`. ⚠ **Superseded** (gate regression, below): the
+  hides are mode 0755 now and the home is in both lists again.
 * **The rule** (planKeeps `rule`): a PATH entry or `--keep-ro` that IS the home, contains it,
   or contains / lies inside a hidden dir (nominal AND real paths, existing or not) is refused —
   a PATH entry as FAIL (the caller's env), `--keep-ro` as usage. Messages carry the label and
@@ -1156,6 +1157,32 @@ the trap by up to 100 ms).
 * **Sabotage (all caught):** `LATE.cli` off → the TERM ×3 arm (`7 SIGTERM 7 7 SIGTERM SIGTERM`);
   the old "no child ⇒ early" → the logic arm; no `loudAgain()` before a re-raise → the
   early-TERM and Ctrl-C arms (5 red: the harness no longer dies by the signal).
+
+### ⛔ The 0555 hide answered a write CHECK with EACCES (gate regression, v0.33.0)
+
+Measured by the lead on the release gate — 8 of a consumer lane's 10 failures (earlier blamed
+on the stripped-markers carry; only 1 was). A ≤ v0.32 harness nested inside v0.33 with its
+markers stripped takes ITS fresh path, records the home as a read-only ROOT, and its
+isolation-check judges each root by `access(W_OK)`: anything but `EROFS`/`ENOENT` is
+"WRITABLE". Our hide tmpfs was mode 0555: DAC runs before the read-only check, so `EACCES` →
+`1 of 1 protected root(s) — the home directory — are WRITABLE here`. A ≤ v0.32 read-only home
+answered `EROFS`. (A real create was always `EROFS`: open(O_CREAT) takes the mount write lock
+first.)
+* ⇒ **`HIDE_MODE = '0755'`** for every hide (home and hidden dirs): owner-writable by MODE —
+  the owner is the namespace root, i.e. the real uid — read-only by MOUNT. And the home is
+  recorded in `WEBCTL_RO_ROOTS` again (first), as ≤ v0.32 did, so our own fact 6 checks it too.
+* **Arm** (fake home; `--keep ~/.config` so `~/.config/webctl` has its own hide; fresh AND
+  nested): `access(W_OK)` and an exclusive create on the home and on that hidden dir are all
+  `EROFS`. Before: `HOME-ACCESS EACCES`, `HIDE-ACCESS EACCES` (creates `EROFS`).
+* **Measured manually, not a repo test** (it needs git history): a throwaway worktree of
+  v0.31.0 under scratch, `--keep`'d by a v0.33 outer; its `isolated -- isolation-check 4927 4937`
+  with the six markers stripped → **PASS** (mode 0755); with 0555 → `FAIL … 1 of 1 protected
+  root(s) — the home directory — are WRITABLE here`, as the lead measured. With the markers
+  KEPT: PASS at 0755; at 0555 *with the home back in RO_ROOTS* → NO VERDICT (the same EACCES
+  through the recorded root) — the two changes only work together.
+* **Sabotage:** `HIDE_MODE` 0555 → the arm red, and 25 more — every arm with a nested call
+  (the nested proof now reads the recorded home root as `WRITABLE`). Restored: the 77 nesting /
+  home / hidden arms pass.
 
 ### The import guard
 

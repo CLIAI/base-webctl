@@ -321,6 +321,12 @@ unhide `~/.config/webctl`); `--keep` at or beneath one re-exposes that path only
   an explicit `--keep` re-exposes a hidden dir; the read-back now exempts only those.
 * A NESTED `--keep`/`--keep-ro` under the OUTER call's hidden home now says the outer call hides
   it (keep it there), not "does not exist" (still exit 3).
+* ⛔ **A write CHECK on the hidden home answers `EROFS`, as a read-only home did** (gate
+  regression, measured: 8 of a consumer lane's 10 gate failures). The hide tmpfs was mode 0555,
+  so `access(home, W_OK)` answered `EACCES`, and a ≤ v0.32 harness nested with its markers
+  stripped refused: `1 of 1 protected root(s) — the home directory — are WRITABLE here`. The
+  hides are mode 0755 now, read-only by their mount; the home is recorded in `WEBCTL_RO_ROOTS`
+  again. Measured: a v0.31.0 harness's stripped-markers `isolation-check` inside → PASS.
 * The note for a writable re-bind inside `~/.ssh`, `~/.config`, `~/.cache`, … reads right for a
   cwd: `the working directory is in ~/.cache — re-exposed WRITABLE because the command runs
   there` (it said "at the caller's request", which only a `--keep` is).

@@ -1332,6 +1332,8 @@ const SENSITIVE_DOTDIRS = Object.freeze(['.ssh', '.gnupg', '.config', '.cache', 
 const HIDDEN_DIRS = Object.freeze(['.ssh', '.gnupg', '.cache/CLIAI', '.config/CLIAI', '.local/state/CLIAI', '.config/webctl']);
 /** The tmpfs source tag of a HIDDEN_DIRS mask; the post-check and the nesting proof look for it. */
 const HIDE_SOURCE = 'webctl-isolated-hidden';
+/** A hide's MODE: owner-writable, so a write check answers EROFS (its MOUNT is read-only), as a read-only home did. */
+const HIDE_MODE = '0755';
 
 /**
  * pid 1 of every PID namespace `isolated` makes (fresh AND nested): a bash that REAPS.
@@ -2014,9 +2016,10 @@ function runIsolated(a) {
   // the COMMAND's env: the allowlist + our markers. It travels in the plan (fd 4) and is applied
   // only when the command is spawned; every half before that gets privilegedEnv() of it.
   const cmdEnv = isolatedEnv(process.env, pass, { [HOST_NETNS_ENV]: hostNs, [HOST_MNTNS_ENV]: hostMnt, [HOST_PIDNS_ENV]: hostPid,
-    // the home is recorded as HIDDEN (fact 8: its read-only mask), not as a ro root — under its
-    // 0555 tmpfs access(W_OK) answers EACCES before EROFS (mode bits are checked first)
-    [RO_ROOTS_ENV]: JSON.stringify(prot.roots), [HIDDEN_ENV]: JSON.stringify([prot.home, ...prot.hidden]),
+    // the home is recorded as HIDDEN (fact 8: its read-only mask) AND, again, as a read-only ROOT
+    // (fact 6), as ≤ v0.32 did: its hide is mode 0755 (HIDE_MODE), so access(W_OK) answers EROFS.
+    // (With 0555 it answered EACCES and the home had been dropped from this list.)
+    [RO_ROOTS_ENV]: JSON.stringify([prot.home, ...prot.roots]), [HIDDEN_ENV]: JSON.stringify([prot.home, ...prot.hidden]),
     [HOST_IDS_ENV]: JSON.stringify(ids) });
   const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
     home: prot.home, exempt: plan.exempt, sockets, ids, env: cmdEnv, tools });
@@ -2931,7 +2934,7 @@ function mountOrWhy(argv, what, redact = []) {
  * that was ro on the host.)
  *
  * ⛔ THE HIDES go in the SAME outer-before-inner sequence as the keeps moving back (a hide before
- * a keep at the same path): an empty tmpfs (mode 0555), the MISSING mount points of the keeps
+ * a keep at the same path): an empty tmpfs (mode HIDE_MODE, 0755 — read-only by its MOUNT), the MISSING mount points of the keeps
  * beneath it created in it, then remounted READ-ONLY. The HOME is always hidden; a hidden dir
  * under it only where a re-bind CONTAINS it (elsewhere the home's tmpfs already hides it), and
  * one outside the home always. ⇒ a keep CONTAINING a hidden dir is covered there again; a keep
@@ -2983,7 +2986,11 @@ function maskSocketDirs(binds, roots, hidden = [], home = '') {
       if (i < 0) {
         nHide++;
         const what = `hide home dir ${nHide} of ${hides.length}`;
-        const h = mountOrWhy(['-t', 'tmpfs', '-o', 'mode=0555,nosuid,nodev,noexec,size=1m', HIDE_SOURCE, at], what, secret);
+        // ⛔ mode 0755, NOT 0555 (gate regression): read-only is the MOUNT's job. With 0555 a write
+        // CHECK — access(W_OK) — answered EACCES (DAC runs first) instead of EROFS, and a ≤ v0.32
+        // harness nested with stripped markers judged the home "WRITABLE" and refused. Owned by
+        // the namespace root = the real uid, so the owner bit lets the check reach the ro mount.
+        const h = mountOrWhy(['-t', 'tmpfs', '-o', `mode=${HIDE_MODE},nosuid,nodev,noexec,size=1m`, HIDE_SOURCE, at], what, secret);
         if (h) return h;
         for (const [j, b] of binds.entries()) if (b.p !== at && isWithin(b.p, at)) mountPoint(b.p, isDir[j]);
         const ro = mountOrWhy(['-o', 'remount,bind,ro', at], `${what} read-only`, secret);
@@ -3282,8 +3289,9 @@ export function runCommand(command, prefix = [], { pastUnshare = false, env = /*
 // WRITABLE — signed-in profiles, ~/.config, ~/.ssh. So a sixth:
 //
 //   6. each root in WEBCTL_RO_ROOTS (recorded at entry) answers access(W_OK) with EROFS
-//      (or is absent — masked). Since v0.33.0 these are only the sensitive dot-dirs'
-//      real paths OUTSIDE the home; the home itself is fact 8's.
+//      (or is absent — masked): the HOME (its hide is mode 0755, read-only by its mount, so
+//      the check reaches EROFS — with 0555 it was EACCES), then the sensitive dot-dirs' real
+//      paths OUTSIDE it. The home is fact 8's too.
 //   7. /proc/self/ns/pid DIFFERS from WEBCTL_HOST_PIDNS — no host process is signalable.
 //   8. each dir in WEBCTL_HIDDEN_DIRS (recorded at entry: the HOME first, then ~/.ssh and the
 //      state roots) has OUR read-only tmpfs (source 'webctl-isolated-hidden') in the mount
