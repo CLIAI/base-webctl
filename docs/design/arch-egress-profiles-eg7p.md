@@ -11,7 +11,7 @@ tech:
     version: "zone netvm property (none enforced; tor/vpn refused until built)"
   - name: "Docker networks"
     version: "internal bridge networks"
-relates_to: [rx9q, nl0c, lg1n, ow9k, btg4]
+relates_to: [rx9q, nl0c, lg1n, ow9k, btg4, ib4k]
 depends_on: [rx9q, nl0c]
 expands: [nl0c]
 similar_to: [nl0c]
