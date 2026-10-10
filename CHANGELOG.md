@@ -215,7 +215,8 @@ privileged halves), its pid 1 is `bash --norc -p` and REAPS orphans, and a signa
 slip in before it is heard.** Measured gaps
 from `perplexity` and from the review of this branch; scope ruled by `webctl:mgr` (2026-10-07).
 xrl4 §"Mutation arms run with no host network, no host unix sockets and a hidden home".
-Harness only; no `lib/` change.
+Harness only; no `lib/` change. **`HARNESS_GENERATION` is 6** — `isolated`'s behaviour changed
+(below: how to pass `--pass-env` and stay green on a generation-5 pin too).
 
 ### ⛔ BREAKING — the env is an ALLOWLIST
 
@@ -258,6 +259,28 @@ by default:**
   ⚠ **Under the release gate**, the gate's own (outer) `isolated` call passes no extra env, so
   your nested `--pass-env X` only finds an `X` your contract sets itself: a toggle exported on
   the host (`…_TESTS_HOST_NETWORK=1` in your shell) is ABSENT under the gate.
+
+* ⛔ **Stay green on BOTH your current pin and v0.33.0.** A v0.32 harness (generation 5)
+  REFUSES `--pass-env` as an unknown option (usage, exit 3) — so pass it only when the vendored
+  harness is **generation ≥ 6** (`HARNESS_GENERATION`, bumped by this release). Ask the harness
+  with `require-generation 6` (exit 0 = yes; ANY non-zero = no — a harness older than
+  generation 4 does not know the verb and exits 3):
+
+  ```bash
+  PASS_ENV=()
+  if node "$H" require-generation 6 >/dev/null 2>&1; then PASS_ENV=(--pass-env 'CGWC_*'); fi
+  node "$H" isolated "${PASS_ENV[@]}" -- …          # bash ≥ 4.4 for an empty array under set -u
+  ```
+
+  ```js
+  const { spawnSync } = require('node:child_process'); // ESM: the same names from 'node:child_process'
+  const gen6 = spawnSync(process.execPath, [H, 'require-generation', '6'], { stdio: 'ignore' }).status === 0;
+  const passEnv = gen6 ? ['--pass-env', 'CGWC_*'] : [];
+  spawnSync(process.execPath, [H, 'isolated', ...passEnv, '--', ...cmd], { stdio: 'inherit' });
+  ```
+
+  ⚠ Ask the VERB; do not load the harness as a module to read the constant: a harness older
+  than v0.31.0 has no import guard and would run a verb from YOUR argv.
 
 * The release gate's own `isolated` call passes **no** extras: a contract gets the default
   list (its `WEBCTL_*` included). base's gate tests now name their fake-contract knobs

@@ -1097,6 +1097,20 @@ symlink dangles. Re-binding only the script fails `No module named 'lib'` (xq im
   root writable → the main arm; the hidden/home check off → the refusal arm; the root marked
   `named` (listed by path) → the main arm.
 
+### Generation 6 (v0.33.0)
+
+`isolated` CHANGED behaviour — the env allowlist (a lane's own vars now need `--pass-env`), the
+hidden home, system-dir tools — so the marker moves 5 → 6, per its own rule ("bump when a check's
+BEHAVIOUR changes"). The v0.30 note below ("Generation unchanged (4). These verbs are additive")
+was right for ADDING the verb; this changes what it does. Practical reason: a lane must know
+whether `--pass-env` exists before passing it — generation 5 refuses the unknown option (usage,
+exit 3) — and `require-generation 6` is the question that answers it on every pin (CHANGELOG:
+bash and node snippets). The test that pinned "stays at 5" now pins 6 and the snippet's exits.
+* **Measured, the bash snippet on both pins:** v0.32.0's harness answers `require-generation 6`
+  with 1 and `isolated --pass-env X` with 3 (the refusal the snippet avoids); the snippet then
+  runs `isolated -- true` → 0. On this branch it passes `--pass-env 'CGWC_*'` and the command sees
+  `CGWC_X=1`. **Sabotage:** the constant back to 5 → the generation arm red.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

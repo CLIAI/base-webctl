@@ -379,9 +379,12 @@ test('guard-live-port: no listener → PASS; a bad port → usage', async () => 
   assert.equal((await run(['guard-live-port', 'abc'])).status, 3);
 });
 
-test('the new verbs are ADDITIVE: HARNESS_GENERATION stays at 5 (set by the no-revendor change; isolation adds none)', async () => {
+test('HARNESS_GENERATION is 6: `isolated` CHANGED behaviour in v0.33.0 (env allowlist, hidden home) — lanes key `--pass-env` on it', async () => {
   const r = await run(['generation']);
-  assert.equal(JSON.parse(r.stdout.trim()).generation, 5);
+  assert.equal(JSON.parse(r.stdout.trim()).generation, 6);
+  // the shape lanes copy (CHANGELOG v0.33.0): `require-generation 6` gates `--pass-env`
+  assert.equal((await run(['require-generation', '6'])).status, 0);
+  assert.equal((await run(['require-generation', '7'])).status, 1);
 });
 
 // ── isolation-check: the precondition a lane runs INSIDE `isolated` ───────────

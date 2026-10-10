@@ -35,7 +35,7 @@
 //
 // Usage:
 //   node <base>/scripts/contract-harness.mjs generation
-//   node <base>/scripts/contract-harness.mjs require-generation 5    # the floor; ANY non-zero = FAIL
+//   node <base>/scripts/contract-harness.mjs require-generation 6    # the floor; ANY non-zero = FAIL
 //   node <base>/scripts/contract-harness.mjs pin         --repo . --sub vendor/base-webctl
 //   node <base>/scripts/contract-harness.mjs no-revendor --repo . --sub vendor/base-webctl
 //   node <base>/scripts/contract-harness.mjs isolated [--keep <path>]… [--keep-ro <path>]… [--pass-env <NAME|PREFIX_*>]… -- <cmd> [args…]   # every mutation arm (xrl4)
@@ -64,7 +64,11 @@ import { fileURLToPath } from 'node:url';
  * wording. A consumer records the generation it was written against; a sweep
  * then asks "who is below N?" rather than diffing five divergent copies.
  */
-export const HARNESS_GENERATION = 5;
+export const HARNESS_GENERATION = 6;
+// ⇧ 6 (v0.33.0): the `isolated` verb's BEHAVIOUR changed — the env is an allowlist (a lane's own
+// vars need `--pass-env`, which a generation-5 harness refuses as an unknown option), the passwd
+// home is hidden, privileged tools come from the system dirs. A contract that passes
+// `--pass-env` keys it on `require-generation 6` (CHANGELOG v0.33.0, "stay green on both pins").
 
 /**
  * ⚠ NOT BUMPED BY `gate-probe`, DELIBERATELY. The marker answers "who is

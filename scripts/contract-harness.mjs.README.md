@@ -41,7 +41,7 @@ Recording `CONTRACT_HARNESS_GENERATION` in a comment is not enforcing it. Put th
 first in your contract, and treat **any** non-zero as FAIL:
 
 ```bash
-node "$H" require-generation 5 || { echo "FAIL: base harness below generation 5 (downgraded submodule?)"; exit 1; }
+node "$H" require-generation 6 || { echo "FAIL: base harness below generation 6 (downgraded submodule?)"; exit 1; }
 ```
 
 * ⭐ **Why a VERB, not `generation --min N`.** Measured: every harness before
@@ -172,7 +172,7 @@ shape that let the original grep pass.
 
 ### `generation`
 
-⚠ **Now 5.** History, each a change in what a verdict MEANS:
+⚠ **Now 6.** History, each a change in what a verdict MEANS:
 
 * **2** — `no-revendor` sees copies in subdirectories and under new names.
 * **3** — `pin` FAILS on drift and on an undeclared submodule; only a mode-160000
@@ -182,8 +182,12 @@ shape that let the original grep pass.
 * **5** — `no-revendor`: a file named like a base module is a shim only if it imports
   **that** module; importing a sibling no longer excuses an edited copy (`substack`).
   ⚠ Lanes that were green on 4 with a same-named copy go **red** — that is the fix.
+* **6** (v0.33.0) — `isolated` changed behaviour: the env is an **allowlist** (`--pass-env`,
+  which generation 5 refuses as an unknown option), the passwd home is **hidden**, privileged
+  tools come from the system dirs only. Key `--pass-env` on `require-generation 6` to stay green
+  on both pins (CHANGELOG v0.33.0).
 
-A sweep asks *"who is below 5?"* — and, since generation 4, *"whose contract does not
+A sweep asks *"who is below 6?"* — and, since generation 4, *"whose contract does not
 call `require-generation`?"*, because a recorded number nobody checks protects nothing.
 
 ### `require-generation <N>`
