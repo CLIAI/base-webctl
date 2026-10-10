@@ -1645,6 +1645,25 @@ caller's cgroup.kill opens for WRITE inside (ok)`), GREEN after.
 | C2b | not made read-only AND no read-back | row 3 arm: `fresh: the caller's cgroup.kill opens for WRITE inside (ok)` |
 | C2c | no `--cgroup` on the fresh path (read-back kept) | every run refused: `the cgroup namespace is still the CALLER's` |
 
+**Item 7 — the `/sys` exemption dropped.** The re-review measured it not load-bearing. `/sys` left
+`ROOT_RW_TREES` (`['/proc', '/dev']`), so the R1 step remounts the host `/sys` and every submount
+read-only — the cgroup tree too, before `maskIdentity` stages it. `outerRebinds` now excludes
+`KERNEL_TREES` (`/proc`, `/sys`, `/dev`): without it an outer's fresh sysfs would be CARRIED as a
+writable outer re-bind. The fresh sysfs on top stays read-write; the root read-back exempts exactly
+that mount (`freshSysfs`: at `/sys`, `sysfs`, our source tag), not its submounts.
+* **Measured: a read-only fresh sysfs breaks nesting.** First try: drop the exemption AND mount the
+  fresh sysfs `ro`. Inside, both `mount -t sysfs x /sys` and `mount -t sysfs -o ro …` in a nested
+  `unshare -rnm` failed `fsmount() failed: VFS: Mount too revealing.`, and the stripped-markers path
+  refused (`cannot mount a fresh sysfs`). With the host `/sys` read-only but the fresh sysfs `rw`,
+  both nested mounts work.
+
+| # | sabotage (on a copy) | caught by |
+|---|---|---|
+| S7a | item 2's cgroup ro step and its read-back removed, item 7 kept | nothing — GREEN: the R1 step made the cgroup tree read-only already (the second layer) |
+| S7b | the same, AND `/sys` back in `ROOT_RW_TREES` | row 3 arm: `fresh: the caller's cgroup.kill opens for WRITE inside (ok)` |
+| S7c | the fresh sysfs mounted `ro` | the stripped-markers path refused: `cannot mount a fresh sysfs` — every row red |
+| S7d | the read-back's `freshSysfs` exemption removed | every run refused: `1 mount(s) outside the declared writable set … still WRITABLE` |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

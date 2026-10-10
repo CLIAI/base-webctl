@@ -77,9 +77,15 @@ three paths (the table's rows 8–10).
   dir outside the home** (an `/opt/x` of one's own) was writable inside. Now, after the keeps are
   staged and BEFORE the scratch masks, the hides and the keeps moving back, every mount reachable
   from `/` — the root mount included — gets a per-mount `remount,bind,ro` (a mount ON `/` would not
-  move the process's root), except `/proc`, `/sys`, `/dev` (procfs writes — `oom_score_adj`, a nested
-  userns's `uid_map` — must keep working; measured: with `/proc` read-only the privilege drop itself
-  fails) and our own `/run`. Every WRITABLE item (cwd, `--keep`, a throwaway HOME, an outer's rw
+  move the process's root), except `/proc` (procfs writes — `oom_score_adj`, a nested userns's
+  `uid_map` — must keep working; measured: with `/proc` read-only the privilege drop itself fails),
+  `/dev` (replaced whole, row 12) and our own `/run`. ⛔ **`/sys` is NOT exempt** (re-review, item 7):
+  the exemption was not load-bearing (measured: every arm passes with it gone); the host's `/sys`, its
+  cgroup tree included, goes read-only underneath the fresh sysfs (row 10). The fresh sysfs ON TOP
+  stays read-write, and the read-back exempts exactly that one mount — not its submounts: ⚠ *measured:*
+  a fresh sysfs mounted `ro` makes every nested sysfs mount — `ro` or not — fail "Mount too revealing",
+  the stripped-markers path's own included (kernel 7.1). Sysfs writes from the user namespace are
+  governed by sysfs's own permissions (its files belong to the host's root). Every WRITABLE item (cwd, `--keep`, a throwaway HOME, an outer's rw
   re-bind) gets its own bind on top; one that CONTAINS a masked dir (a cwd of `/`) is refused. READ
   BACK: `readOnlyGaps` over `/` minus the declared writable set → refuse on any gap. A mount point no
   lookup can reach (EACCES — measured: docker's overlay rootfs under a root-owned 0710 dir) is
@@ -298,7 +304,7 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.34.0.
   (row 9, R3), the identity files read-only (row 10), the v0.33 refusal lead (§2), the runner guard
   (§2), the gate's last-match parse (§4), generation 7, `hostname` required (R2).
 * **Row 7 closed (R1):** the read-only root (§1a), on the fresh, nested and stripped paths.
-* **Re-review (2026-10-10):** row 12 — a minimal fresh `/dev` — and row 3's cgroup arm — a cgroup
+* **Re-review (2026-10-10):** the host `/sys` read-only under the fresh sysfs (§1a row 7); row 12 — a minimal fresh `/dev` — and row 3's cgroup arm — a cgroup
   namespace and a read-only cgroup tree (§1a): two holes in every released `isolated` up to v0.33.1.
 * **Residual by ruling (F2, option c):** key descriptions and ids enumerable (§1a row 9) — no mask.
   The read-only root is proved not to block nested procfs/sysfs mounts (an arm in row 7).

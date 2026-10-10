@@ -323,8 +323,10 @@ except a contract that matches the new verdict field or a refusal's tail.
 * Measured before: a user-owned dir OUTSIDE the home (an `/opt/x` of one's own) was WRITABLE inside —
   `isolated` protected the home, base's root and the keeps, and left the rest of `/` as it was.
 * Now every mount reachable from `/` is remounted read-only (per mount, in the private mount
-  namespace), EXCEPT `/proc`, `/sys` and `/dev` (procfs writes — `oom_score_adj`, a nested userns's
-  `uid_map` — keep working for Chromium's sandbox and for `isolated`'s own privilege drop). Then, on
+  namespace), EXCEPT `/proc` (procfs writes — `oom_score_adj`, a nested userns's `uid_map` — keep
+  working for Chromium's sandbox and for `isolated`'s own privilege drop) and `/dev` (replaced whole,
+  row 12). The host `/sys` goes read-only too, underneath the fresh sysfs, which itself stays
+  read-write (a read-only one breaks every nested sysfs mount — measured). Then, on
   top and WRITABLE: the cwd, every `--keep`, a throwaway `HOME`, and the private `/tmp`, `/var/tmp`,
   `/dev/shm`, `/run`. READ BACK: any other writable mount → refused. A mount point nothing can reach
   (a root-owned 0710 dir — e.g. docker's overlay rootfs) is skipped: the command cannot reach it either.

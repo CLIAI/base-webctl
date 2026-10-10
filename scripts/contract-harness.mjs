@@ -2017,7 +2017,7 @@ function usageRefusal(why, command) {
  * RESOLVING each path (hiddenGaps): a later mount on an ancestor would shadow a hide.
  *
  * ⛔ THE ROOT IS READ-ONLY (v0.34.0, ib4k row 7, ruling R1): every mount reachable from `/` but
- * /proc, /sys, /dev (makeRootReadOnly) — writable on top only the cwd, each `--keep`, a throwaway
+ * /proc and /dev (makeRootReadOnly; /dev then replaced by a fresh one) — writable on top only the cwd, each `--keep`, a throwaway
  * HOME and the private /tmp, /var/tmp, /dev/shm, /run. Read back (readOnlyGaps over `/`).
  *
  * ⛔ NEVER FALLS BACK TO THE HOST. No unshare, userns disabled, no `ip`/`ifconfig`, no
@@ -2500,9 +2500,14 @@ async function runIsolatedInner(a) {
   const idGaps = identityGaps();
   if (idGaps.length) return refuse(`after masking the host's identity, ${idGaps.join(', ')} still show(s) the HOST's`);
   // ⭐ R1: READ BACK the read-only root — every mount reachable from / is ro, except the declared
-  // writable set (the rw keeps and cwd, our /run and scratch masks) and the kernel trees left alone
-  const rootGaps = readOnlyGaps(readMountinfo() || [], ['/'], [...plan.binds.filter((b) => b.rw).map((b) => b.p),
-    ...maskedDirs().all, ...ROOT_RW_TREES]).filter((g) => !g.at || !pathUnreachable(g.at));
+  // writable set (the rw keeps and cwd, our /run and scratch masks), the kernel trees left alone and
+  // OUR fresh sysfs itself (not its submounts: the cgroup tree under it is read back too)
+  const rmi = readMountinfo() || [];
+  const sysTop = resolveMount(rmi, '/sys');
+  const freshSysfs = !!sysTop && sysTop.at === '/sys' && sysTop.fstype === 'sysfs' && sysTop.source === SYSFS_SOURCE;
+  const rootGaps = readOnlyGaps(rmi, ['/'], [...plan.binds.filter((b) => b.rw).map((b) => b.p),
+    ...maskedDirs().all, ...ROOT_RW_TREES]).filter((g) => !g.at || !pathUnreachable(g.at))
+    .filter((g) => !(freshSysfs && g.at === '/sys'));
   if (rootGaps.length) {
     return refuse(`after the read-only root step, ${rootGaps.length} mount(s) outside the declared writable set (the cwd, `
       + '--keep, /tmp, /var/tmp, /dev/shm, /run) are still WRITABLE (or / is not mounted at all)');
@@ -3333,7 +3338,7 @@ export function outerRebinds(mounts, home, masked, tmp) {
   // (a writable root) only the home and the scratch dirs are, as before: never wider than it showed.
   const rootRo = !!resolveMount(mounts, '/')?.opts.includes('ro');
   for (const m of mounts) {
-    const rwElsewhere = rootRo && m.at !== '/' && !m.opts.includes('ro') && !ROOT_RW_TREES.some((t) => isWithin(m.at, t))
+    const rwElsewhere = rootRo && m.at !== '/' && !m.opts.includes('ro') && !KERNEL_TREES.some((t) => isWithin(m.at, t))
       && !masked.some((d) => isWithin(m.at, d));
     const under = (isWithin(m.at, home) && m.at !== home) || scratch.some((t) => isWithin(m.at, t) && m.at !== t) || rwElsewhere;
     if (!under || m.source === HIDE_SOURCE || m.source === MASK_SOURCE) continue;
@@ -3374,14 +3379,22 @@ function makeTreeReadOnly(root, rbindFirst) {
 
 /**
  * The trees the read-only root (R1) leaves as they are: kernel interfaces, not the filesystem. A write
- * there is governed by its own permissions (procfs: oom_score_adj, uid_map — Chromium's sandbox needs
- * them; /dev/null; /dev/shm and /dev/mqueue get fresh mounts of our own).
+ * there is governed by its own permissions (procfs: oom_score_adj, uid_map — Chromium's sandbox and the
+ * privilege drop need them; /dev is replaced whole by freshDev).
+ * ⛔ NOT /sys (re-review item 7): the exemption was not load-bearing — the host /sys goes read-only
+ * underneath the fresh sysfs, and so does its cgroup tree before it is staged (a second layer under
+ * maskIdentity's own ro step). The fresh sysfs ON TOP stays read-write, and the root read-back exempts
+ * exactly it (freshSysfs): mounted `ro`, every nested sysfs mount — the stripped-markers path's own
+ * among them — is refused "Mount too revealing" (measured, kernel 7.1). A write to sysfs from the
+ * user namespace is governed by sysfs's own permissions (owned by the host's root).
  */
-const ROOT_RW_TREES = Object.freeze(['/proc', '/sys', '/dev']);
+const ROOT_RW_TREES = Object.freeze(['/proc', '/dev']);
+/** Kernel trees an outer call's writable mounts are never CARRIED from (outerRebinds): ours, made again. */
+const KERNEL_TREES = Object.freeze(['/proc', '/sys', '/dev']);
 
 /**
  * R1 (v0.34.0, ib4k row 7): remount EVERY mount reachable from `/` read-only — the root mount itself
- * included — except at or beneath `leave` (our own /run, /proc, /sys, /dev). ⚠ The root cannot be
+ * included — except at or beneath `leave` (our own /run, /proc, /dev). ⚠ The root cannot be
  * re-bound onto itself (a mount ON `/` does not move this process's root), so each mount is remounted
  * in place: a per-mount `bind,ro` in our own mount namespace, which the command — capless — cannot undo.
  * ⚠ A mount point no path lookup can reach — measured: docker's overlay rootfs under a root-owned
@@ -3671,8 +3684,9 @@ function maskSocketDirs(binds, roots, hidden = [], home = '') {
     }
     // ⛔ R1 (v0.34.0, ib4k row 7): the WHOLE tree read-only — after the keeps are staged (they keep
     // their own modes under the new /run) and BEFORE the scratch masks, the hides and the keeps moving
-    // back, which all land on top writable as declared. /proc, /sys and /dev are left alone (procfs
-    // writes — oom_score_adj, a nested userns's uid_map — must keep working for Chromium's sandbox).
+    // back, which all land on top writable as declared. /proc and /dev are left alone (procfs writes —
+    // oom_score_adj, a nested userns's uid_map — must keep working for Chromium's sandbox; /dev is
+    // replaced whole below). /sys is NOT (re-review item 7): the host's goes read-only under the fresh sysfs.
     const rootRo = makeRootReadOnly([...all.filter((x) => !scratch.includes(x)), ...ROOT_RW_TREES]);
     if (rootRo) return `${rootRo} — a path outside the declared writable set would stay WRITABLE`;
     // ⛔ HOST DEVICES (v0.34.0, ib4k row 12): a minimal fresh /dev over the host's — after the keeps are
