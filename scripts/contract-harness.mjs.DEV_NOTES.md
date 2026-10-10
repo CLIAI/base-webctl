@@ -1038,6 +1038,39 @@ all bottoms only when none matches.
   submount); CONTROL: without our re-mask, the outer stack is the live one. Red before.
 * **Sabotage:** the filter off → the logic arm red.
 
+### ⛔ Stripped markers hid what the OUTER call had re-bound (gate regression, v0.33.0)
+
+Measured by the lead on the release gate: a nested call whose WEBCTL_* markers were stripped
+takes the FRESH path and hid the home again, so the consumer repo (under `~/.cache/…`) and run
+home the gate keeps, and the outer's cwd, vanished — a consumer suite failed 8 tests `Cannot find
+module '<repo>/tools/isolated-run.mjs'`; the verdict read `… writable: nothing`. v0.32 hid
+nothing, so it did not break.
+* **Arm, before the fix** (fake home; outer `--keep ~/keep-rw --keep-ro ~/keep-ro --keep
+  <scratch>`; inner stripped, cwd = scratch): `RW-READ ENOENT, RW-WRITE ENOENT, RO-READ ENOENT,
+  RO-WRITE ENOENT`. ⚠ It first FAILED outright on the shadowed-stack false gap (previous
+  section) — the carry's arm found that one. After: `ok, ok, ok, EROFS`, `~/.ssh` ENOENT; the
+  verdict counts `1 outer re-bind` on each side, no path.
+* ⇒ `outerRebinds(mounts, home, masked, tmp)` (pure, exported): null unless the mount table
+  PROVES an outer call — our MASK_SOURCE tmpfs on top of every masked dir AND our read-only
+  HIDE_SOURCE tmpfs on top AT the home; runIsolated adds lo-only and a mapped uid_map. Then every
+  mount strictly under the home or /tmp that `resolveMount` lands on (visible, not shadowed or
+  stacked over), minus our hides and masks, with `rw = !ro`. runIsolated drops one exactly AT a
+  hideRule path (it would trip the post-check; noted) and non-dir/non-file ones (a /dev/null
+  cover), and passes the rest to planKeeps as implicit, `quiet` (the outer call already noted
+  them) items labelled `outer re-bind #n` — COUNTED by verdictLine (`COUNTED_BINDS`).
+* **Why /tmp too:** the fresh call re-masks /tmp exactly as it re-hides the home; an outer
+  `--keep /tmp/x` or a /tmp cwd vanished the same way.
+* ⚠ **Counts can shift between the lines:** a PATH entry that reaches a re-bound dir through a
+  symlink in the hidden home is skipped inside (the symlink is gone) and its real path arrives
+  as an outer re-bind instead — measured on the operator host: `91 PATH entries` outside,
+  `89 PATH entries, 2 outer re-binds` inside, the same 91 paths (verbose diff).
+* **CONTROL arm:** not nested (a tmpfs under the fake home, visible to the caller) → `SUB ENOENT`
+  inside, no `outer re-bind`. **Logic arm:** the carry with modes; null for each missing proof
+  (home not hidden by us, /tmp not ours, a rw hide, something on top of the hide, no home).
+* **Sabotage (all caught):** the hide-at-home proof dropped → logic; every carry `rw: true` →
+  logic + the integration arm; the resolveMount (visible) filter off → logic; hides not excluded
+  → logic; the carry not passed to planKeeps → the integration arm.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

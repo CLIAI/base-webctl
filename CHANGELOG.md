@@ -368,7 +368,21 @@ per path with pid 1 held trapless for 300 ms; 0 lost.
   outer**, rather than looking like a forged marker.
 * **Stripped markers** (`env -u WEBCTL_…`, `env -i`) inside `isolated`: measured to isolate
   AGAIN, fully (fresh path: its own netns and pidns, the home hidden again), never "only
-  inherited"; the verdict line says `ALREADY INSIDE … isolated AGAIN, fully`.
+  inherited"; the verdict line says `ALREADY INSIDE … isolated AGAIN, fully, keeping what the
+  outer call re-bound (same modes)`.
+* ⛔ **…and it KEEPS what the outer call re-bound** (gate regression, measured by the lead on the
+  release gate): hiding the home again made the paths the OUTER call had re-exposed — the
+  consumer repo and run home the gate keeps, the outer's cwd — vanish; a consumer suite failed 8
+  tests `Cannot find module '<repo under ~/.cache/…>/tools/isolated-run.mjs'` (v0.32 hid nothing,
+  so it did not break). When the KERNEL proves the outer sandbox — our tmpfs on `/run` and
+  `/tmp`, our read-only hide AT the home, a lo-only netns, a mapped uid_map — every mount a path
+  lookup reaches under the home or `/tmp` is re-bound with its SAME mode (rw stays rw, ro stays
+  ro); counted in the verdict as `N outer re-binds`. Never wider: only what is visible inside,
+  never a parent, the hidden dirs hidden again; an outer re-bind exactly AT a hidden dir is not
+  carried (noted; `--keep` it again). Without the proof nothing is carried.
+* A read-only re-bind at a path where the outer call already had a mount (base's root, when the
+  outer's cwd was base's root) was FALSELY reported "still WRITABLE" — the outer's stack, shadowed
+  by the re-masked `/tmp`, was checked too. Only the stack path resolution reaches is checked now.
 
 ### ⛔ What this does NOT cover
 

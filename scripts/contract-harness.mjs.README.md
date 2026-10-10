@@ -413,6 +413,11 @@ contract's output when it is used.
   * **Stripped markers** (`env -u …`, `env -i`): the call takes the FRESH path, inside, and
     isolates **again, fully** — its own netns and pidns, the home hidden again (measured); the
     verdict adds `ALREADY INSIDE an isolated namespace whose markers were stripped`.
+    ⛔ It **keeps what the outer call re-bound** under the home and `/tmp`, each with the SAME
+    mode (counted: `N outer re-binds`) — hiding them again broke a consumer suite under the gate
+    (`Cannot find module '<repo under ~/.cache>/…'`). Only with the kernel's proof of the outer
+    sandbox (our masks, our hide AT the home, lo only, a mapped uid_map); never a parent, never a
+    hidden dir (one kept exactly AT a hidden dir is not carried — keep it again).
   *(A lane's
   own `…_IN_NETNS=1` marker, set on the host, skipped isolation for a whole suite. The id
   alone can be fabricated; uid_map alone proves only a USER namespace — `unshare -r`

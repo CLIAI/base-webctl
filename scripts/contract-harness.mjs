@@ -1917,6 +1917,17 @@ function runIsolated(a) {
   if (prot.refuse) {
     return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${prot.refuse}. The command was NOT started.`, { command }));
   }
+  // ⭐ STRIPPED MARKERS: no HOST_NETNS, yet the KERNEL says we are inside one of ours — our tmpfs on
+  // /run and /tmp, our read-only hide AT the home, a lo-only netns, a mapped uid_map. Such a call
+  // isolates AGAIN, fully (its own netns and pidns, the home hidden again) — and KEEPS what the
+  // outer call re-bound under the home and /tmp, same mode (outerRebinds; the gate regression).
+  const { all: maskedAll, tmp: maskedTmp } = maskedDirs();
+  const mi = readMountinfo();
+  const outer = mi && extraInterfaces() === 0 && uidMapKind() === 'mapped' ? outerRebinds(mi, prot.home, maskedAll, maskedTmp) : null;
+  const atHidden = (outer || []).filter((b) => prot.hideRule.includes(b.p)).length;
+  const carried = (outer || []).filter((b) => !prot.hideRule.includes(b.p)).filter((b) => {
+    try { const st = fs.statSync(b.p); return st.isDirectory() || st.isFile(); } catch { return false; } // not a /dev/null cover
+  });
   const plan = planKeeps(keeps, [
     { p: process.cwd(), label: 'the working directory', rw: true, named: true, noHidden: true },
     // ⛔ READ-ONLY: under the release gate ONE base checkout serves every consumer in turn,
@@ -1932,6 +1943,8 @@ function runIsolated(a) {
     ...(throwawayHome(ident.home) ? [{ p: throwawayHome(ident.home), label: 'HOME', rw: true }] : []),
     // ⛔ the HIDDEN home: every PATH entry under it is re-bound READ-ONLY, or tools vanish
     ...pathEntriesUnder(ident.home).map(({ p, n }) => ({ p, label: `PATH entry #${n}`, rw: false, rule: true })),
+    // ⛔ never wider: exactly what the outer call made visible here, each with its mode (outerRebinds)
+    ...carried.map((b, i) => ({ p: b.p, label: `outer re-bind #${i + 1}`, rw: b.rw, quiet: true })),
   ], prot, keepsRo);
   if (plan.usage) return Promise.resolve(usageRefusal(plan.usage, command));
   if (plan.refuse) {
@@ -1948,11 +1961,12 @@ function runIsolated(a) {
   const { tools, why: noTool } = privilegedTools(ub, false);
   if (noTool) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${noTool}. The command was NOT started.`, { command }));
   for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
-  // ⭐ STRIPPED MARKERS: no HOST_NETNS, yet the KERNEL says we are inside one of ours — our tmpfs
-  // tag on /run and /tmp and a lo-only network. Measured: such a call isolates AGAIN, fully
-  // (its own netns and pidns, the home hidden again); never "only inherited". Say so.
-  const inside = unmaskedDirs().length === 0 && extraInterfaces() === 0
-    ? '; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully' : '';
+  if (atHidden) {
+    process.stderr.write(`isolated: note: ${atHidden} outer re-bind(s) AT a hidden dir (~/.ssh, a state root, …) not carried — `
+      + '--keep it again in this call\n');
+  }
+  const inside = outer ? '; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, '
+    + 'keeping what the outer call re-bound (same modes)' : '';
   process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', inside)}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
@@ -2015,6 +2029,11 @@ function runIsolated(a) {
 
 /** `1`: the verdict line lists EVERY re-bound path (as `~/…`), implicit ones included. */
 const VERBOSE_ENV = 'WEBCTL_ISOLATED_VERBOSE';
+/** Implicit re-binds the verdict COUNTS (never names): [label pattern, how to say N of them]. */
+const COUNTED_BINDS = /** @type {[RegExp, (n: number) => string][]} */ ([
+  [/^PATH entry #/, (n) => `${n} PATH entr${n === 1 ? 'y' : 'ies'}`],
+  [/^outer re-bind #/, (n) => `${n} outer re-bind${n === 1 ? '' : 's'}`],
+]);
 
 /**
  * The verdict on the hidden home: `isolated: home HIDDEN; re-bound read-only: …; writable: …`.
@@ -2035,9 +2054,11 @@ function verdictLine(binds, home, verbose, more = '') {
     const under = binds.filter((b) => b.rw === rw && isWithin(b.p, home));
     if (verbose) return under.map((b) => tilde(b.p)).sort().join(', ') || 'nothing';
     const named = under.filter((b) => b.named).map((b) => tilde(b.p)).sort();
-    const paths = under.filter((b) => !b.named && /^PATH entry #/.test(b.label || '')).length;
-    const labels = [...new Set(under.filter((b) => !b.named && !/^PATH entry #/.test(b.label || '')).map((b) => b.label || 'a re-bind'))].sort();
-    const implicit = [...(paths ? [`${paths} PATH entr${paths === 1 ? 'y' : 'ies'}`] : []), ...labels];
+    const tallies = COUNTED_BINDS.map(([re, say]) => say(under.filter((b) => !b.named && re.test(b.label || '')).length))
+      .filter((t, i) => under.some((b) => !b.named && COUNTED_BINDS[i][0].test(b.label || '')));
+    const labels = [...new Set(under.filter((b) => !b.named && !COUNTED_BINDS.some(([re]) => re.test(b.label || '')))
+      .map((b) => b.label || 'a re-bind'))].sort();
+    const implicit = [...tallies, ...labels];
     if (implicit.length) counted = true;
     return [...named, ...implicit].join(', ') || 'nothing';
   };
@@ -2578,6 +2599,39 @@ export function hiddenGaps(mounts, hidden, keeps) {
   });
 }
 
+/**
+ * What an OUTER `isolated` call had re-bound under the `home` it hid, and under its /tmp mask —
+ * each mount a path lookup lands on there, with its mode — or null when the mount table does NOT
+ * prove we are inside such a call: our tmpfs (MASK_SOURCE) on top of every masked dir AND our
+ * read-only hide (HIDE_SOURCE) on top AT the home.
+ *
+ * ⛔ GATE REGRESSION (measured on the release gate): a nested call whose WEBCTL_* markers were
+ * stripped takes the FRESH path and hid the home AGAIN — the consumer repo and run home the gate
+ * keeps, and the outer's cwd, vanished; a consumer suite failed 8 tests "Cannot find module
+ * '<repo under ~/.cache>/…'". v0.32 hid nothing, so it did not break. ⇒ runIsolated re-binds
+ * these, SAME mode: rw stays rw, ro stays ro. ⛔ NEVER WIDER: only paths a lookup reaches HERE
+ * (so visible to the caller already), never a parent; the hides themselves and our /tmp mask are
+ * not carried (the fresh call re-makes them); nothing at all without the proof.
+ * ⚠ Facts beyond the mount table (a lo-only netns, a mapped uid_map) are the caller's to add.
+ * @param {MountRow[]} mounts @param {string} home realpath'd @param {string[]} masked maskedDirs().all
+ * @param {string} tmp maskedDirs().tmp @returns {{p: string, rw: boolean}[] | null}
+ */
+export function outerRebinds(mounts, home, masked, tmp) {
+  const ours = (/** @type {MountRow|null} */ m, /** @type {string} */ src) => !!m && m.fstype === 'tmpfs' && m.source === src;
+  if (!home || masked.length === 0 || !masked.every((d) => ours(resolveMount(mounts, d), MASK_SOURCE))) return null;
+  const atHome = resolveMount(mounts, home);
+  if (!atHome || atHome.at !== home || !ours(atHome, HIDE_SOURCE) || !atHome.opts.includes('ro')) return null;
+  /** @type {{p: string, rw: boolean}[]} */
+  const out = [];
+  for (const m of mounts) {
+    const under = (isWithin(m.at, home) && m.at !== home) || (isWithin(m.at, tmp) && m.at !== tmp);
+    if (!under || m.source === HIDE_SOURCE || m.source === MASK_SOURCE) continue;
+    if (resolveMount(mounts, m.at)?.id !== m.id) continue; // shadowed, or stacked over: not visible here
+    if (!out.some((o) => o.p === m.at)) out.push({ p: m.at, rw: !m.opts.includes('ro') });
+  }
+  return out;
+}
+
 /** @returns {MountRow[]|null} null when /proc/self/mountinfo is unreadable */
 function readMountinfo() {
   try { return parseMountinfo(fs.readFileSync('/proc/self/mountinfo', 'utf8')); } catch { return null; }
@@ -2631,7 +2685,7 @@ function makeTreeReadOnly(root, rbindFirst) {
  * ⚠ Only `--keep` (writable) paths are EXEMPT from the socket check — a socket on a read-only
  * mount still answers a connect.
  * @param {string[]} explicit `--keep` paths
- * @param {{p: string, label: string, rw: boolean, rule?: boolean, named?: boolean, noHidden?: boolean}[]} implicit
+ * @param {{p: string, label: string, rw: boolean, rule?: boolean, named?: boolean, noHidden?: boolean, quiet?: boolean}[]} implicit
  * @param {Prot} prot
  * @param {string[]} [explicitRo] `--keep-ro` paths
  * @returns {{binds: Bind[], exempt: string[], notes: string[], usage?: string, refuse?: string}}
@@ -2644,9 +2698,9 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
   /** @type {Bind[]} */ const binds = [];
   /** @type {string[]} */ const exempt = [];
   /** @type {string[]} */ const notes = [];
-  const items = [...explicit.map((p, i) => ({ p, label: `--keep #${i + 1}`, explicit: true, rw: true, rule: false, named: true })),
-    ...explicitRo.map((p, i) => ({ p, label: `--keep-ro #${i + 1}`, explicit: true, rw: false, rule: true, named: true })),
-    ...implicit.map((k) => ({ rule: false, named: false, ...k, explicit: false }))];
+  const items = [...explicit.map((p, i) => ({ p, label: `--keep #${i + 1}`, explicit: true, rw: true, rule: false, named: true, quiet: false })),
+    ...explicitRo.map((p, i) => ({ p, label: `--keep-ro #${i + 1}`, explicit: true, rw: false, rule: true, named: true, quiet: false })),
+    ...implicit.map((k) => ({ rule: false, named: false, quiet: false, ...k, explicit: false }))];
   for (const k of items) {
     let real = '';
     try { real = fs.realpathSync(path.resolve(k.p)); } catch {
@@ -2703,7 +2757,7 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
         + 'run from a test-owned directory' };
     }
     if (contained) continue; // read-only and containing the home or a root: nothing beneath it is re-bound
-    if (k.rw) {
+    if (k.rw && !k.quiet) { // an outer call's re-bind (quiet) was noted by THAT call
       for (const sd of prot.sensitive) {
         if (isWithin(real, sd.real) || isWithin(sd.real, real)) {
           notes.push(`${k.label} ${isWithin(real, sd.real) ? 'is in' : 'contains'} ${sd.name} — re-exposed WRITABLE`

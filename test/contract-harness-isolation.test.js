@@ -1753,6 +1753,39 @@ test('⭐ logic: a stack at the same path whose ANCESTOR is shadowed (a re-maske
   assert.deepEqual(reachableMountsUnder(noRemask, '/tmp/x/root').map((/** @type {any} */ m) => m.id), ['20']);
 });
 
+const { outerRebinds } = await import(pathToFileURL(TOOL).href);
+/** One mountinfo line with a SOURCE. @param {number} id @param {number} parent @param {string} at @param {string} o @param {string} src */
+const mis = (id, parent, at, o, src) => `${id} ${parent} 0:${id} / ${at} ${o} shared:1 - tmpfs ${src} rw`;
+
+test('⭐ logic: outerRebinds carries what an OUTER call re-bound (same modes), only with the PROOF — our masks on /run and /tmp AND our read-only hide AT the home', () => {
+  const H = '/home/u';
+  const lines = [
+    mis(1, 0, '/', 'rw', 'root'),
+    mis(2, 1, '/home', 'rw', 'disk'), // the home's PARENT: never carried
+    mis(10, 1, '/run', 'rw', 'webctl-isolated'),
+    mis(11, 1, '/tmp', 'rw', 'webctl-isolated'),
+    mis(12, 2, H, 'ro', 'webctl-isolated-hidden'), // the outer's hide of the home
+    mis(20, 12, `${H}/keep-rw`, 'rw', 'disk'),
+    mis(21, 12, `${H}/keep-ro`, 'ro', 'disk'),
+    mis(22, 20, `${H}/keep-rw/.config/webctl`, 'ro', 'webctl-isolated-hidden'), // a hide: re-made, not carried
+    mis(23, 12, `${H}/gone`, 'rw', 'disk'),
+    mis(24, 23, `${H}/gone`, 'ro', 'disk'), // stacked over 23: only the top (24) is visible
+    mis(30, 11, '/tmp/work', 'rw', 'disk'), // the outer's cwd under its /tmp mask
+  ];
+  const ok = outerRebinds(parseMountinfo(lines.join('\n')), H, ['/run', '/tmp'], '/tmp');
+  assert.deepEqual(ok, [{ p: `${H}/keep-rw`, rw: true }, { p: `${H}/keep-ro`, rw: false }, { p: `${H}/gone`, rw: false },
+    { p: '/tmp/work', rw: true }]);
+  // ⛔ NO PROOF, NOTHING CARRIED: the home not hidden (a plain mount there), our tag missing on /tmp, a
+  // hide that is not read-only, or a hide stacked UNDER something else at the home
+  const without = (/** @type {number} */ id, /** @type {string} */ line = '') => parseMountinfo(lines.map((l) => (l.startsWith(`${id} `) ? line : l)).filter(Boolean).join('\n'));
+  assert.equal(outerRebinds(without(12, mis(12, 2, H, 'ro', 'disk')), H, ['/run', '/tmp'], '/tmp'), null, 'home not hidden by us');
+  assert.equal(outerRebinds(without(11, mis(11, 1, '/tmp', 'rw', 'tmpfs')), H, ['/run', '/tmp'], '/tmp'), null, '/tmp not ours');
+  assert.equal(outerRebinds(without(12, mis(12, 2, H, 'rw', 'webctl-isolated-hidden')), H, ['/run', '/tmp'], '/tmp'), null, 'hide not ro');
+  assert.equal(outerRebinds(parseMountinfo([...lines, mis(40, 12, H, 'rw', 'disk')].join('\n')), H, ['/run', '/tmp'], '/tmp'), null,
+    'something on top of the hide AT the home');
+  assert.equal(outerRebinds(parseMountinfo(lines.join('\n')), '', ['/run', '/tmp'], '/tmp'), null, 'no home');
+});
+
 test('⭐ logic: readOnlyGaps names every writable reachable mount, exempts writable keeps, and passes an all-ro tree', () => {
   const allRw = parseMountinfo(MOUNTINFO);
   assert.equal(readOnlyGaps(allRw, ['/home/u'], []).length, 6);
@@ -2079,11 +2112,63 @@ test('⛔ STRIPPED markers inside `isolated` → the call isolates AGAIN, fully 
   const inner = (r.stdout.match(/^INNER (\S+)$/m) || [])[1];
   assert.ok(inner && inner !== outer, `the stripped call did not make its own network namespace (only inherited):\n${r.stdout}`);
   assert.match(r.stdout, /^PROOF-OK$/m, `the kernel proof failed after a stripped re-isolation:\n${r.stderr}`);
-  assert.match(r.stderr, /^isolated: home HIDDEN; .*; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully( — WEBCTL_ISOLATED_VERBOSE=1 lists every path)?$/m, r.stderr);
+  assert.match(r.stderr, /^isolated: home HIDDEN; .*; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, keeping what the outer call re-bound \(same modes\)( — WEBCTL_ISOLATED_VERBOSE=1 lists every path)?$/m, r.stderr);
   // CONTROL: from the host the verdict does not claim it
   const c = await run(['isolated', '--', 'true']);
   assert.equal(c.status, 0, c.stderr);
   assert.doesNotMatch(c.stderr, /ALREADY INSIDE/);
+});
+
+// ⛔ GATE REGRESSION (measured on the release gate): a call whose markers were stripped takes the
+// FRESH path inside and HID THE HOME AGAIN — so what the OUTER call had re-bound under it (the
+// gate keeps the consumer repo and its run home; the outer's cwd) vanished: a consumer suite
+// failed 8 tests with "Cannot find module '<repo under ~/.cache>/…'". ⇒ when the KERNEL shows we
+// are inside an `isolated` sandbox, the fresh hide re-binds what the outer had visible under the
+// home (and under its /tmp), each with the SAME mode — never more.
+
+/** argv[1] = the fake home: RW/RO reads and creates in keep-rw / keep-ro, and a read of ~/.ssh/id_test. */
+const OUTER_KEEP_PROBE = `const fs = require('fs'); const p = require('path'); const h = process.argv[1];
+const o = (f) => { try { f(); return 'ok'; } catch (e) { return e.code; } };
+console.log('RW-READ ' + o(() => fs.readFileSync(p.join(h, 'keep-rw', 'f'))));
+console.log('RW-WRITE ' + o(() => fs.writeFileSync(p.join(h, 'keep-rw', 'new-' + process.pid), 'x')));
+console.log('RO-READ ' + o(() => fs.readFileSync(p.join(h, 'keep-ro', 'f'))));
+console.log('RO-WRITE ' + o(() => fs.writeFileSync(p.join(h, 'keep-ro', 'new-' + process.pid), 'x')));
+console.log('SSH ' + o(() => fs.readFileSync(p.join(h, '.ssh', 'id_test'))));
+console.log('SUB ' + o(() => fs.readFileSync(p.join(h, 'sub', 'f'))));`;
+/** @param {string} out @returns {Record<string, string>} */
+const probeOf = (out) => Object.fromEntries([...out.matchAll(/^(RW-READ|RW-WRITE|RO-READ|RO-WRITE|SSH|SUB) (\S+)$/gm)].map((m) => [m[1], m[2]]));
+
+test('⛔ STRIPPED markers under an outer that re-bound paths under the home: the inner call KEEPS them, same mode (rw stays rw, ro stays ro); ~/.ssh stays hidden', needsIsolation, async (t) => {
+  const home = fakeSecretHome();
+  for (const d of ['keep-rw', 'keep-ro']) { fs.mkdirSync(path.join(home, d)); fs.writeFileSync(path.join(home, d, 'f'), 'x'); }
+  const scratch = tmpdir(); // the inner call's cwd: kept by the outer, NOT under the home
+  try {
+    const r = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--keep', path.join(home, 'keep-rw'),
+      '--keep-ro', path.join(home, 'keep-ro'), '--keep', scratch, '--', 'sh', '-c',
+      `cd "$1" && env ${STRIP} "$0" "$2" isolated -- "$0" -e "$3" "$4"`, process.execPath, scratch, TOOL, OUTER_KEEP_PROBE, home]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stderr, /ALREADY INSIDE an isolated namespace whose markers were stripped/, 'premise: the inner call took the fresh path');
+    assert.deepEqual(probeOf(r.stdout), { 'RW-READ': 'ok', 'RW-WRITE': 'ok', 'RO-READ': 'ok', 'RO-WRITE': 'EROFS', SSH: 'ENOENT', SUB: 'ENOENT' },
+      `${r.stdout}${r.stderr}`);
+    // ⚠ by COUNT, never the path (the gate tees stderr into logs)
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: [^;]*\b1 outer re-bind\b[^;]*; writable: [^;]*\b1 outer re-bind\b/m, r.stderr);
+    assert.ok(!/keep-r[ow]/.test(r.stderr.split('\n').filter((l) => /ALREADY INSIDE/.test(l)).join('\n')), r.stderr);
+  } finally { for (const d of [home, scratch]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+test('CONTROL: NOT nested, a mount under the home is NOT re-bound (nothing is carried without the kernel\'s proof of an outer sandbox)', needsIsolation, async (t) => {
+  const home = fakeSecretHome();
+  try {
+    // a writable tmpfs under the fake home, in the throwaway namespace only — visible to the caller
+    const r = await underFakeHome(home, ['sh', '-c', 'mkdir -p "$1/sub" && mount -t tmpfs webctl-test-sub "$1/sub" && echo x > "$1/sub/f" && cat "$1/sub/f" >/dev/null '
+      + '&& echo HOST-SEES-SUB; shift; exec "$@"', 'sh', home, process.execPath, TOOL, 'isolated', '--', process.execPath, '-e', OUTER_KEEP_PROBE, home]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^HOST-SEES-SUB$/m, 'premise: the caller sees the mount under the home');
+    assert.equal(probeOf(r.stdout).SUB, 'ENOENT', `a mount under the home was carried into a call that is NOT nested:\n${r.stdout}${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /outer re-bind/, r.stderr);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
 test('⛔ VERSION SKEW: a v0.33 call nested under a ≤ v0.32 outer (no WEBCTL_HIDDEN_DIRS) → refused rc 2 saying "upgrade the outer", nothing run', needsIsolation, async () => {
