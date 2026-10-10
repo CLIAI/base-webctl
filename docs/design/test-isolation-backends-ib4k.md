@@ -308,5 +308,11 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.34.0.
   namespace and a read-only cgroup tree (§1a): two holes in every released `isolated` up to v0.33.1.
 * **Residual by ruling (F2, option c):** key descriptions and ids enumerable (§1a row 9) — no mask.
   The read-only root is proved not to block nested procfs/sysfs mounts (an arm in row 7).
+* **Residual (re-review, item 8): `pathUnreachable` trusts ONE `stat`.** The read-only root skips a
+  mount point whose `stat` answers EACCES/EPERM (§1a row 7) — in the ro step and in its read-back.
+  A user's own FUSE daemon could answer EACCES to that one `stat` and grant access later, leaving its
+  mount read-write inside. The command cannot drive this itself: it cannot reach the daemon (host
+  unix sockets masked, row 2) and holds no capability to mount one; the daemon must already be
+  running on the host, as the same user, and choose to lie.
 * **Phase 2 — bwrap; phase 3 — docker (§3, §3a):** not started. Each lands by adding its probe,
   its run path, and its name to the table's IMPLEMENTED list — the guard test fails until it does.
