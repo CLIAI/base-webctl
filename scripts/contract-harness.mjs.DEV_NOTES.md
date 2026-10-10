@@ -1179,7 +1179,9 @@ first.)
   with the six markers stripped → **PASS** (mode 0755); with 0555 → `FAIL … 1 of 1 protected
   root(s) — the home directory — are WRITABLE here`, as the lead measured. With the markers
   KEPT: PASS at 0755; at 0555 *with the home back in RO_ROOTS* → NO VERDICT (the same EACCES
-  through the recorded root) — the two changes only work together.
+  through the recorded root) — the two changes only work together. Re-measured with the v0.31.0
+  worktree UNDER THE HOME (the lead's layout; `git worktree add --detach`, removed after with
+  `git worktree remove --force`): identical — 0555 stripped FAIL / kept NO VERDICT; 0755 PASS / PASS.
 * **Sabotage:** `HIDE_MODE` 0555 → the arm red, and 25 more — every arm with a nested call
   (the nested proof now reads the recorded home root as `WRITABLE`). Restored: the 77 nesting /
   home / hidden arms pass.
