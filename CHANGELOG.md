@@ -254,7 +254,7 @@ by default:**
   # chatgpt
   node "$H" isolated --pass-env 'CGWC_*' --pass-env CLIAI_CHATGPT_WEBCTL_TESTS_HOST_NETWORK -- …
   # substack
-  node "$H" isolated --pass-env SUBSTACK_WEBCTL_TESTS_HOST_PID -- …
+  node "$H" isolated --pass-env SUBSTACK_WEBCTL_TESTS_HOST_PID --pass-env UV_CACHE_DIR -- …
   # perplexity
   node "$H" isolated --pass-env FIXTURE_PARENT_NETNS -- …
   # aliexpress
@@ -264,6 +264,12 @@ by default:**
   ⚠ **Under the release gate**, the gate's own (outer) `isolated` call passes no extra env, so
   your nested `--pass-env X` only finds an `X` your contract sets itself: a toggle exported on
   the host (`…_TESTS_HOST_NETWORK=1` in your shell) is ABSENT under the gate.
+
+  ⚠ **A lane that runs `uv` inside must pass its uv knobs:** `--pass-env UV_CACHE_DIR` (or
+  `--pass-env 'UV_*'` if it sets several, e.g. `UV_NO_CACHE`). Dropped by the allowlist, uv falls
+  back to `~/.cache/uv` — under the HIDDEN home — and fails `ENOENT` / `EROFS`. Measured by a
+  consumer lane: its contract set `UV_CACHE_DIR=/tmp/uv-cache`, the allowlist dropped it, and a
+  cwd test failed.
 
 * ⛔ **Stay green on BOTH your current pin and v0.33.0.** A v0.32 harness (generation 5)
   REFUSES `--pass-env` as an unknown option (usage, exit 3) — so pass it only when the vendored
@@ -343,6 +349,13 @@ unhide `~/.config/webctl`); `--keep` at or beneath one re-exposes that path only
   is re-bound read-only, named `xq's root`. **For `xq` only** — a generic "follow PATH
   symlinks" would re-expose dozens of repos on an operator host. A root that is the home, or
   is, contains or lies inside a hidden dir is not re-bound (noted, no path).
+  ⛔ **And never an `xq` a run could have planted** (measured by review: npm puts the writable
+  `<cwd>/node_modules/.bin` on PATH; a planted `node_modules/.bin/xq -> <any repo under the
+  home>/<an executable>` made the NEXT run re-bind that repo — hidden → 11 entries visible).
+  The first `xq` on PATH is ignored (`xq ignored: found in a writable location` / `…: not named
+  xq`, by label) when its PATH entry, any link of its symlink chain or its real file lies in the
+  cwd, a `--keep` / `--keep-ro`, `/tmp`, `TMPDIR`, `/var/tmp` or `/dev/shm`, or its real file is
+  not named exactly `xq`.
 * A PATH entry that reaches the home through a symlink OUTSIDE it is re-bound at its real path
   only. Cost measured on the operator host (~100 PATH entries under the home): `isolated --
   true` 1.29 s → 1.46 s.
@@ -423,8 +436,9 @@ per path with pid 1 held trapless for 300 ms; 0 lost.
   `/tmp`, our read-only hide AT the home, a lo-only netns, a mapped uid_map — every mount a path
   lookup reaches under the home or `/tmp` is re-bound with its SAME mode (rw stays rw, ro stays
   ro); counted in the verdict as `N outer re-binds`. Never wider: only what is visible inside,
-  never a parent, the hidden dirs hidden again; an outer re-bind exactly AT a hidden dir is not
-  carried (noted; `--keep` it again). Without the proof nothing is carried.
+  never a parent, the hidden dirs hidden again; an outer re-bind AT **or WITHIN** a hidden dir
+  is not carried (noted by count; `--keep` it again — review F2: one strictly inside, an outer
+  `--keep ~/.ssh/<sub>`, was carried writable, silently). Without the proof nothing is carried.
 * A read-only re-bind at a path where the outer call already had a mount (base's root, when the
   outer's cwd was base's root) was FALSELY reported "still WRITABLE" — the outer's stack, shadowed
   by the re-masked `/tmp`, was checked too. Only the stack path resolution reaches is checked now.
@@ -446,8 +460,19 @@ per path with pid 1 held trapless for 300 ms; 0 lost.
   nothing runs, but one that already started runs unsupervised.
 * The signal-forwarder ORDERING (finding 5 above) is reasoned and logic-tested, not hit end to
   end.
-* `runCommand` fails cleanly (FAIL, 127) when spawn throws synchronously (an argv node refuses,
-  E2BIG): it rejected with a stack trace and left its signal forwarder installed.
+* `runCommand` fails cleanly when spawn throws synchronously (an argv node refuses, E2BIG): it
+  rejected with a stack trace and left its signal forwarder installed. It — and its async
+  `'error'` — now exit **1** (the harness's FAIL), not 127: argv[0] there is the isolation
+  chain, and 127 reads "command not found" (review F3; the fresh path's unshare spawn already
+  failed 1). The pid-1 helper that spawns the COMMAND had no catch at all: an env var over
+  128 KiB (MAX_ARG_STRLEN; the env pipe has no such limit) → E2BIG rejected it — now FAIL, 1.
+* Fixed (pre-existing): a signal landing as the command exited could LOSE its exit status —
+  `127` (`wait: pid 2 is not a child of this shell`) or `143` instead of the command's own
+  code; 1 of 150 under load with TERM ×3, ~8% with a 1 ms burst. A bash race: the blocking
+  `wait` reaped the child as a trapped signal arrived and returned before recording its status.
+  pid 1 now never blocks in `wait` while a signal can arrive: it polls (`kill -0` + a 20 ms
+  fork-free `read -t`), lets bash's SIGCHLD handler reap, then ignores INT/TERM/HUP for one
+  final `wait`. About 6 ms more per `isolated` call; no newer bash required.
 * Fixed (pre-existing): TERM ×3 in quick succession after the command's trap came back **143**
   instead of the trap's code (measured: 9–10/25 with the TERMs 60 ms apart). A late TERM killed a
   node half during its own exit, after it had dropped its forwarder. Now 150/150 return the

@@ -1071,6 +1071,15 @@ nothing, so it did not break.
 * **Sabotage (all caught):** the hide-at-home proof dropped → logic; every carry `rw: true` →
   logic + the integration arm; the resolveMount (visible) filter off → logic; hides not excluded
   → logic; the carry not passed to planKeeps → the integration arm.
+* ⛔ **AT or WITHIN (review F2, reasoned).** The drop was `hideRule.includes(b.p)` — equality —
+  while planKeeps's rules use isWithin: an outer `--keep ~/.ssh` was dropped with a note, an
+  outer explicit `--keep ~/.ssh/<sub>` (or `~/.config/webctl/<sub>`) was CARRIED rw, silently,
+  into a call that never asked for it. ⇒ `inHidden` = isWithin any hideRule dir, for the drop
+  AND the note's count (`N outer re-bind(s) AT or WITHIN a hidden dir … not carried`).
+  **Arm** (fake home; outer `--keep ~/.ssh/sub --keep ~/.config/webctl/sub --keep ~/plain`, inner
+  stripped): before, inner `ok ok ok`; after `ENOENT ENOENT ok` (CONTROL: `~/plain` still
+  carried), the note with `2`, no path. **Sabotage (caught):** the carry by equality → the arm;
+  the note's count by equality → the arm.
 
 ### ⛔ xq could not run inside (gate regression, v0.33.0)
 
@@ -1127,6 +1136,20 @@ had this.
   the FAIL line printed. Red before (`REJECTED`). E2BIG is not driven end to end: sizing an argv
   that fits node's exec but not the chain's is host-dependent.
 * **Sabotage:** `fwd.remove()` dropped from the catch → the arm red (forwarder left installed).
+* ⛔ **127 → EXIT.fail (review F3).** The fresh path's unshare spawn fails 1; runCommand's catch
+  and its async `'error'` said 127 — "command not found" — about the isolation CHAIN (setpriv,
+  argv[0]), not the command. Both now `EXIT.fail`, the message naming `(the isolation chain)`.
+  The arm now expects 1, and calls `runCommand(['/nonexistent-webctl-chain'])` for the async
+  path (`ASYNC 1`). Before: 127 / 127.
+* ⛔ **runPid1 had no catch (review F3).** The helper that spawns the COMMAND: a synchronous throw
+  rejected its Promise. Driven end to end after all, here: an env var of 256 KiB (over
+  MAX_ARG_STRLEN, 128 KiB per string) passes the env PIPE untouched and makes the command's
+  execve fail E2BIG, which node THROWS. **Arm:** runPid1 (exported for it) in a child, the env
+  on fd 3: before, it REJECTED (`E2BIG`); after, resolves 1, listener counts unchanged,
+  `FAIL  isolated: NOT RUN: cannot start '/bin/true': spawn E2BIG — …`. Its async `'error'`
+  (the command absent inside) keeps 127: that one IS the command not found.
+* **Sabotage (all caught):** runPid1's `fwd.remove()` dropped → its arm; runPid1's code 127 →
+  its arm; runCommand's catch 127 → its arm; runCommand's `'error'` 127 → `ASYNC` red.
 
 ### TERM ×3 → 143 instead of the trap's code (re-review, LOW; pre-existing)
 
@@ -1154,9 +1177,57 @@ the trap by up to 100 ms).
   run ⇒ a false pass ≈ 0.6^12); a logic arm drives forwardSignalsPastUnshare (exported) with a
   real, childless stand-in for unshare: after `started` nothing is killed and it is not early;
   CONTROL before `started`: SIGKILL, early.
+* ⚠ **The invariant it rests on (review F4), now stated at `LATE.cli = true`:** every verb ends
+  in `process.exit`, one forwarder per process — so the no-op listeners live only while the
+  process is exiting. A future LONG-LIVED verb must clear `LATE.cli` (or `loudAgain()`) once its
+  forwarder is removed, or it ignores Ctrl-C for the rest of its life. A comment, not an arm:
+  no such verb exists to test.
 * **Sabotage (all caught):** `LATE.cli` off → the TERM ×3 arm (`7 SIGTERM 7 7 SIGTERM SIGTERM`);
   the old "no child ⇒ early" → the logic arm; no `loudAgain()` before a re-raise → the
   early-TERM and Ctrl-C arms (5 red: the harness no longer dies by the signal).
+
+### ⛔ pid 1's `wait` lost the command's status to a late signal (bash; v0.33.0, pre-existing)
+
+Seen as a flake of the `TERM ×3 (60 ms apart)` arm: `127` in 1 of 6 runs; reproduced 1 of 150
+under 6× parallel load, stderr `webctl-isolated-pid1: line 7: wait: pid 2 is not a child of this
+shell`. In plain bash too (no namespace, a node child: 13 of 240), so not pid-1 specific.
+* **Not the window first assumed.** "wait completes, a trap runs after it, the loop waits again
+  on a forgotten pid" is harmless on bash 5.3: a collected pid's status is kept, and `wait`
+  answers it again (measured: three `wait`s in a row → 7, 7, 7). A splice-a-`sleep`-after-`wait`
+  arm built on that theory PASSED on the old code — dropped.
+* **Traced (strace -f, a failing run):** two TERMs interrupted `wait` (`wait4 … ERESTARTSYS`,
+  each forwarded); the third wait4 RETURNED the child (`WEXITSTATUS == 7`) and SIGTERM was
+  delivered in the same instant; bash's trap handler jumped out of the `wait` builtin before the
+  status was recorded → `wait` said 143, the trap's `kill` got ESRCH, the next `wait` →
+  `wait4(-1, WNOHANG) = ECHILD` → "not a child" → `exit_group(127)`. The 7 existed nowhere.
+  ⇒ the proposed check — `kill -0 "$c"` after each `wait`, break when gone — would turn the 127
+  into 143: the child IS gone, its status with it. Logged per wait: `143 t=1` ×3, then `127`.
+  A burst also made a RE-`wait` of an already-recorded status come back 143 (`W rc=7`, then
+  `W rc=143` with no trap logged in between).
+* ⇒ **pid 1 never blocks in `wait` while a signal can arrive.** It POLLS: `kill -0 "$c"`, then
+  `read -t 0.02 -u 9` on its own read-write end of `<(:)` (a pipe nobody writes: a sleep with no
+  fork; fd 9 opened AFTER the child was forked, so the child never has it). A trapped signal
+  interrupts the read, so forwarding stays prompt. The child's exit is reaped by bash's SIGCHLD
+  handler — outside `wait` — and recorded. When `kill -0` fails (a zombie still passes; only
+  bash reaps it, so failing means bash holds the status) there is nothing left to forward:
+  `trap '' INT TERM HUP`, then ONE `wait`, which nothing can interrupt. `trap : CHLD` does NOT
+  wake `read -t` (measured: the full timeout), hence the 20 ms poll. No /dev/fd → the old loop.
+  Bash ≥ 5.1 (`wait -p`) is NOT required.
+* ⚠ **pid reuse:** in our PID namespace pid 1 is the only reaper and pids are allocated upward,
+  so `$c` can name another process only after bash reaped it AND pids wrapped (pid_max); even
+  then the poll lasts only while that process lives. Same in plain bash.
+* **Arm (deterministic in effect, statistical in form):** PID1_REAPER in plain bash over a child
+  that traps TERM → `exit 7`; once it is READY, 30 TERMs 1 ms apart; 150 runs, all must be 7.
+  The window is inside bash, so no splice can widen it; the burst hits it. **Before: 8 of 100**
+  wrong sequentially (3× 127, 5× 143); 2–6% under load. After: 0/100 sequential, 0/1200 under
+  5× load (sh and node children), 150/150 in the arm. A false pass of the old code ≈ 0.92^150.
+  End to end (`isolated -- sh -c <trapper>`, TERM ×3 60 ms apart, 6× parallel): before 1/150
+  wrong, after **0/300**.
+  Second arm: no signal → the status as is (5), and fd 9 absent in the child.
+* **Cost:** ≈ 6 ms more per run (100 sequential: 2.16 s → 2.57 s, the old one also losing 8).
+* **Sabotage (all caught):** the old loop restored → the burst arm; the poll replaced by
+  `wait` (traps still ignored after) → the burst arm (`not a child`); `trap ''` dropped → the
+  burst arm; fd 9 opened before the fork → the fd arm.
 
 ### ⛔ The 0555 hide answered a write CHECK with EACCES (gate regression, v0.33.0)
 
@@ -1179,10 +1250,46 @@ first.)
   with the six markers stripped → **PASS** (mode 0755); with 0555 → `FAIL … 1 of 1 protected
   root(s) — the home directory — are WRITABLE here`, as the lead measured. With the markers
   KEPT: PASS at 0755; at 0555 *with the home back in RO_ROOTS* → NO VERDICT (the same EACCES
-  through the recorded root) — the two changes only work together.
+  through the recorded root) — the two changes only work together. Re-measured with the v0.31.0
+  worktree UNDER THE HOME (the lead's layout; `git worktree add --detach`, removed after with
+  `git worktree remove --force`): identical — 0555 stripped FAIL / kept NO VERDICT; 0755 PASS / PASS.
 * **Sabotage:** `HIDE_MODE` 0555 → the arm red, and 25 more — every arm with a nested call
   (the nested proof now reads the recorded home root as `WRITABLE`). Restored: the 77 nesting /
   home / hidden arms pass.
+
+### ⛔ xqRoot followed a PLANTED `xq` (review F1, HIGH, v0.33.0)
+
+Measured by the review: xqRoot took the first `xq` on the CALLER's PATH — and npm puts the
+writable `<cwd>/node_modules/.bin` there. A mutated test writes `node_modules/.bin/xq -> <any repo
+under the home>/<an executable>`; the NEXT run re-binds that repo's whole git root read-only
+(no `.git` → the executable's dir, e.g. a tool's config dir). A private repo went from hidden to
+11 entries visible; the verdict said only "xq's root" both times.
+* ⇒ **(a)** the first `xq` on PATH is IGNORED when any hop lies — lexically or really — in a place
+  a run can write: the PATH entry, each symlink of the chain (walked hop by hop with
+  readlink, not only realpath'd: a link in /tmp between two legitimate ones is the case
+  realpath hides), and the real file (the walk's last hop). The places: the cwd, every `--keep`
+  AND `--keep-ro` (the caller can write them), `/tmp` (realpath'd), `os.tmpdir()` (TMPDIR),
+  `/var/tmp`, `/dev/shm` (both shared with the host inside), a throwaway HOME, the outer call's
+  writable re-binds. **(b)** the real file's basename must be exactly `xq`: a mutant cannot create
+  files outside its writable dirs, so it can only point at an EXISTING file, and one named `xq`
+  is xq's checkout or nothing. **(c)** ignored → no re-bind, a note by LABEL
+  (`xq ignored: found in a writable location` / `…: not named xq`), never the path. The note
+  is printed only when the real file is under the home (otherwise nothing would be re-bound).
+* The FIRST `xq` is judged, never skipped past: it is the one the command's own PATH lookup
+  finds, and falling through to a later one would make the planted entry a way to choose
+  which `xq` is trusted. (A DANGLING first candidate still falls through, as before: statSync.)
+* **Arms (one test, 6 cases; fake home):** a link at `<cwd>/node_modules/.bin/xq`, in a `--keep`
+  dir, in a `--keep-ro` dir, in a dir under /tmp, an intermediate hop in /tmp
+  (`~/.local/bin/xq → /tmp/…/xq → <repo>/bin/xq`), and a `~/.local/bin/xq` → `<repo>/bin/some-tool`
+  — each into a private git repo under the home. **Before: all 6 `SECRET-READ ok`**, verdict
+  `re-bound read-only: xq's root`. After: `ENOENT`, the note, no path. **CONTROL** per case
+  (5 of 6): the same repo through the legitimate `~/.local/bin/xq → <repo>/bin/xq` → `ok`, no
+  note. The existing main xq arm stays the readable / `EROFS`-on-write control.
+* **Sabotage (all caught):** (a) off → cwd case; the hop walk off (PATH entry only) → the
+  intermediate-link case; (b) off → the not-named-xq case; `--keep-ro` dropped from the places →
+  its case; `--keep` dropped → its case; the cwd dropped → its case; /tmp and TMPDIR dropped →
+  the /tmp case. A separate final-file-dir check was REMOVED: its sabotage passed — the walk's
+  last hop realpaths that same dir.
 
 ### The import guard
 

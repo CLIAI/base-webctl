@@ -355,7 +355,12 @@ contract's output when it is used.
   ⇒ If `xq` on your PATH really lives under the home, **its git root is re-bound READ-ONLY**
   (named `xq's root` in the verdict, never by path). For `xq` ONLY — following every PATH
   symlink would re-expose dozens of repos on an operator host. A root that is the home, or is,
-  contains or lies inside a hidden dir is NOT re-bound (a note says so). Pass `UV_NO_CACHE` with
+  contains or lies inside a hidden dir is NOT re-bound (a note says so). ⛔ Nor is one a run
+  could have PLANTED: if the PATH entry `xq` is found in, any link on the way to it, or the
+  real file lies in the cwd (npm's `node_modules/.bin`!), a `--keep` / `--keep-ro`, `/tmp`,
+  `TMPDIR`, `/var/tmp` or `/dev/shm` — or the real file is not named exactly `xq` — it is
+  ignored (`isolated: note: xq ignored: …`, no path). Install xq as `~/.local/bin/xq` → its
+  checkout and keep both out of your keeps. Pass `UV_NO_CACHE` with
   `--pass-env` if your check sets it. A lane should still treat "xq did not answer" as a FAIL,
   not a warning, when xq is installed — it falls back to fewer names silently.
 * ⛔ **BREAKING (v0.33.0): the env is an ALLOWLIST.** Measured by the review: 37 vars matching
@@ -426,7 +431,8 @@ contract's output when it is used.
     mode (counted: `N outer re-binds`) — hiding them again broke a consumer suite under the gate
     (`Cannot find module '<repo under ~/.cache>/…'`). Only with the kernel's proof of the outer
     sandbox (our masks, our hide AT the home, lo only, a mapped uid_map); never a parent, never a
-    hidden dir (one kept exactly AT a hidden dir is not carried — keep it again).
+    hidden dir (one kept AT or WITHIN a hidden dir — `--keep ~/.ssh/sub` — is not carried,
+    a note counts them; keep it again).
   *(A lane's
   own `…_IN_NETNS=1` marker, set on the host, skipped isolation for a whole suite. The id
   alone can be fabricated; uid_map alone proves only a USER namespace — `unshare -r`

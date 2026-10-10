@@ -1352,10 +1352,27 @@ const HIDE_MODE = '0755';
  *   * fds 3/4 (the fresh path's status and plan pipes) pass to the background child, which
  *     needs them; bash then closes its OWN copies.
  *   * INT/TERM/HUP are trapped (pid 1 receives nothing it has no handler for) and forwarded to
- *     the child; a trapped signal interrupts `wait` (>128), so it waits AGAIN until the child
- *     itself ended — bash keeps a reaped child's status for a second `wait` (measured) — and
- *     exits with the CHILD's status. A signal after the traps but before the child exists ends
- *     pid 1 at once (128+n), and the namespace with it.
+ *     the child. A signal after the traps but before the child exists ends pid 1 at once
+ *     (128+n), and the namespace with it.
+ *   * ⛔ pid 1 NEVER BLOCKS IN THE `wait` BUILTIN WHILE A SIGNAL CAN ARRIVE. It used to (`wait`,
+ *     interrupted by a trap → >128 → wait again) and LOST the child's status: `TERM ×3` → 127 in
+ *     1 of 150 runs under load, `wait: pid 2 is not a child of this shell`. Traced (strace, bash
+ *     5.3): the blocking wait4 inside `wait` RETURNED the child (status 7) as a trapped TERM
+ *     arrived; bash's trap handler jumped out of `wait` before the status was recorded, `wait`
+ *     said 143, and the kernel had already reaped the child — so the 7 existed nowhere, and the
+ *     next `wait` answered 127. (A `kill -0` check after each wait cannot recover it: the child is
+ *     gone either way.) A burst also made a re-`wait` of an already-recorded status say 143.
+ *     ⇒ pid 1 POLLS: `kill -0` the child, then `read -t 0.02` on a pipe nobody writes (fd 9, our
+ *     own read-write end of `<(:)`, opened AFTER the child was forked so it never inherits it) —
+ *     a sleep with no fork, which a trapped signal interrupts so forwarding stays prompt. The
+ *     child's exit is REAPED meanwhile by bash's SIGCHLD handler, outside `wait`, and recorded;
+ *     once `kill -0` fails (a zombie still passes; only bash reaps it, so failing means bash has
+ *     its status), there is nothing left to forward: INT/TERM/HUP are IGNORED and ONE `wait`
+ *     collects the recorded status, uninterruptibly. Cost ≈ 10 ms of exit latency on average.
+ *     ⚠ `kill -0` and pid reuse: inside our PID namespace pid 1 is the only reaper and allocates
+ *     upward, so $c cannot name another process until bash reaped it AND pids wrapped (pid_max);
+ *     even then the poll only lasts while that process lives. Plain bash (the arms) the same.
+ *     Fallback, no /dev/fd: the old interrupted-`wait` loop (correct but for that race).
  *   * ⛔ A signal BEFORE the traps is LOST, not handled: pid 1 ignores what it has no handler for.
  *     (This comment used to claim "nothing starts after the caller gave up" — measured false by
  *     the review: 24 of 40 early TERMs lost, the command ran to exit 0.) The window is closed
@@ -1365,15 +1382,20 @@ const HIDE_MODE = '0755';
  *     which is why the node helper stays between this pid 1 and the command on BOTH paths.
  * Fail closed: no bash in the system dirs → refused (privilegedTools), never a non-reaping pid 1.
  */
-const PID1_REAPER = [
-  'c=; t=',
-  'f() { t=1; if [ -n "$c" ]; then kill -s "$1" "$c" 2>/dev/null; else exit "$2"; fi; }',
+export const PID1_REAPER = [
+  'c=',
+  'f() { if [ -n "$c" ]; then kill -s "$1" "$c" 2>/dev/null; else exit "$2"; fi; }',
   "trap 'f INT 130' INT; trap 'f TERM 143' TERM; trap 'f HUP 129' HUP",
   '"$@" <&0 &',
   'c=$!',
   'exec 3>&- 4<&-',
-  'while :; do t=; wait "$c"; rc=$?; [ -n "$t" ] || break; done',
-  'exit "$rc"',
+  'if { exec 9<> <(:); } 2>/dev/null; then',
+  '  while kill -0 "$c" 2>/dev/null; do read -t 0.02 -u 9 -r _; done',
+  'else',
+  '  while kill -0 "$c" 2>/dev/null; do wait "$c"; done',
+  'fi',
+  "trap '' INT TERM HUP",
+  'wait "$c"',
 ].join('\n');
 
 /** The AppArmor knob that makes an unprivileged `unshare -r` fail with uid_map EPERM (Ubuntu ≥ 23.10). */
@@ -1699,7 +1721,7 @@ function statusChannel(child) {
  * ⚠ Internal: reached only through the nested path's prefix, never documented as a verb.
  * @param {string[]} a @returns {Promise<number>}
  */
-function runPid1(a) {
+export function runPid1(a) {
   // `--status`: fd 3 is the nested path's status pipe — write `started` on it, then close it
   const status = a[0] === '--status';
   let rest = status ? a.slice(1) : a;
@@ -1729,7 +1751,19 @@ function runPid1(a) {
     }
   }
   return new Promise((resolve) => {
-    const child = spawn(command[0], command.slice(1), { stdio: 'inherit', env });
+    /** @type {import('node:child_process').ChildProcess} */
+    let child;
+    try {
+      child = spawn(command[0], command.slice(1), { stdio: 'inherit', env });
+    } catch (e) {
+      // ⛔ spawn THROWS (not 'error') for exec failures outside node's "run-time" list — E2BIG: an
+      // env var over MAX_ARG_STRLEN arrives fine on the env PIPE (review F3). Without this the
+      // Promise rejected: a stack, no FAIL line, and our forwarder left installed.
+      fwd.remove();
+      resolve(report('isolated', EXIT.fail, `NOT RUN: cannot start '${command[0]}': ${errMsg(e)} — the harness could `
+        + 'not hand the command to the kernel (too large an argv/env?). The command was NOT started.'));
+      return;
+    }
     fwd.attach(child);
     child.on('error', (e) => { fwd.remove(); resolve(report('isolated', 127, `NOT RUN: cannot start '${command[0]}': ${errMsg(e)}`)); });
     child.on('close', (code, signal) => { fwd.remove(); resolve(exitCodeOf(code, signal)); });
@@ -1960,12 +1994,17 @@ function runIsolated(a) {
   const { all: maskedAll, tmp: maskedTmp } = maskedDirs();
   const mi = readMountinfo();
   const outer = mi && extraInterfaces() === 0 && uidMapKind() === 'mapped' ? outerRebinds(mi, prot.home, maskedAll, maskedTmp) : null;
-  const atHidden = (outer || []).filter((b) => prot.hideRule.includes(b.p)).length;
-  // ⛔ xq's checkout (read-only; xq ONLY — xqRoot)
-  const xq = xqRoot(prot.home, prot.hideRule);
-  const carried = (outer || []).filter((b) => !prot.hideRule.includes(b.p)).filter((b) => {
+  // ⛔ AT or WITHIN a hidden dir: not carried. Equality alone (≤ review F2) dropped `--keep ~/.ssh`
+  // with a note but carried an outer `--keep ~/.ssh/<sub>` WRITABLE, silently. Only THIS call's
+  // own explicit --keep may re-expose a hidden dir.
+  const inHidden = (/** @type {{p: string}} */ b) => prot.hideRule.some((h) => isWithin(b.p, h));
+  const atHidden = (outer || []).filter(inHidden).length;
+  const carried = (outer || []).filter((b) => !inHidden(b)).filter((b) => {
     try { const st = fs.statSync(b.p); return st.isDirectory() || st.isFile(); } catch { return false; } // not a /dev/null cover
   });
+  // ⛔ xq's checkout (read-only; xq ONLY — xqRoot), and never one found through a WRITABLE place
+  const xq = xqRoot(prot.home, prot.hideRule, [process.cwd(), ...keeps, ...keepsRo, maskedTmp, os.tmpdir(), '/var/tmp',
+    '/dev/shm', throwawayHome(ident.home), ...carried.filter((b) => b.rw).map((b) => b.p)]);
   const plan = planKeeps(keeps, [
     { p: process.cwd(), label: 'the working directory', rw: true, named: true, noHidden: true },
     // ⛔ READ-ONLY: under the release gate ONE base checkout serves every consumer in turn,
@@ -2000,12 +2039,14 @@ function runIsolated(a) {
   const { tools, why: noTool } = privilegedTools(ub, false);
   if (noTool) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${noTool}. The command was NOT started.`, { command }));
   for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
+  // ⚠ by LABEL: the planted link's location and target are exactly what must not be printed
+  if (xq.ignored) process.stderr.write(`isolated: note: xq ignored: ${xq.ignored} — its root is NOT re-bound\n`);
   if (xq.why) {
     process.stderr.write(`isolated: note: xq's root (the checkout \`xq\` on PATH lives in, under the home) ${xq.why} — NOT `
       + 're-bound, so xq will not run inside; install xq from a checkout outside the hidden dirs\n');
   }
   if (atHidden) {
-    process.stderr.write(`isolated: note: ${atHidden} outer re-bind(s) AT a hidden dir (~/.ssh, a state root, …) not carried — `
+    process.stderr.write(`isolated: note: ${atHidden} outer re-bind(s) AT or WITHIN a hidden dir (~/.ssh, a state root, …) not carried — `
       + '--keep it again in this call\n');
   }
   const inside = outer ? '; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, '
@@ -2343,17 +2384,56 @@ function pathEntriesUnder(home) {
  * ⛔ DELIBERATELY NARROW: `xq` only. Following every PATH symlink would re-expose dozens of repos
  * on an operator host (measured: ~95 PATH entries there). And never a root that IS the home or
  * IS, CONTAINS or lies INSIDE a hidden dir (`why`, no path) — then xq does not run inside.
+ * ⛔ AND NEVER ONE A RUN COULD HAVE PLANTED (measured by review, v0.33.0): npm puts the writable
+ * `<cwd>/node_modules/.bin` on PATH, so a mutated test wrote `node_modules/.bin/xq -> <any repo
+ * under the home>/<an executable>` and the NEXT run re-bound that repo's whole git root (a private
+ * repo: hidden → 11 entries visible; the verdict said only "xq's root"). ⇒ `ignored` (a LABEL, no
+ * path) when (a) the PATH entry, any link of the symlink chain (walked hop by hop) or the real
+ * file lies — lexically or really — within `writable` (the cwd, every --keep / --keep-ro, /tmp,
+ * TMPDIR, /var/tmp, /dev/shm, a throwaway HOME, the outer call's writable re-binds), or (b) the
+ * real file is not named exactly `xq`: a mutant cannot create files outside its writable dirs,
+ * so it can only point at an existing file — and one named `xq` is xq's checkout or nothing.
+ * The FIRST `xq` on PATH is judged, never skipped past: it is the one the command would run.
  * @param {string} home realpath'd @param {string[]} hideRule Prot.hideRule
- * @returns {{p: string, why: string}} p '' when there is nothing to re-bind (why says if refused)
+ * @param {string[]} writable the places a run (this one or an earlier one) can write
+ * @returns {{p: string, why: string, ignored: string}} p '' when there is nothing to re-bind
+ *   (why / ignored say if refused)
  */
-function xqRoot(home, hideRule) {
-  let real = '';
+function xqRoot(home, hideRule, writable) {
+  const none = { p: '', why: '', ignored: '' };
+  /** @type {string[]} */ const spots = [];
+  for (const w of writable) {
+    if (!w || !path.isAbsolute(w)) continue;
+    spots.push(path.resolve(w));
+    try { spots.push(fs.realpathSync(w)); } catch { /* absent: its lexical path is enough */ }
+  }
+  const writableAt = (/** @type {string} */ d) => {
+    let r = d;
+    try { r = fs.realpathSync(d); } catch { /* lexical only */ }
+    return spots.some((s) => isWithin(d, s) || isWithin(r, s));
+  };
+  let found = '';
   for (const d of String(process.env.PATH || '').split(':')) {
     if (!path.isAbsolute(d)) continue;
     const c = path.join(d, 'xq');
-    try { if (fs.statSync(c).isFile()) { fs.accessSync(c, fs.constants.X_OK); real = fs.realpathSync(c); break; } } catch { /* next */ }
+    try { if (fs.statSync(c).isFile()) { fs.accessSync(c, fs.constants.X_OK); found = c; break; } } catch { /* next */ }
   }
-  if (!home || !real || !isWithin(real, home)) return { p: '', why: '' };
+  if (!found) return none;
+  let real = '';
+  try { real = fs.realpathSync(found); } catch { return none; }
+  if (!home || !isWithin(real, home)) return none;
+  let ignored = '';
+  // (a) every hop: the PATH entry, each link's own dir, and the last hop — the real file's dir (realpath'd)
+  for (let cur = found, hop = 0; hop < 64; hop++) {
+    if (writableAt(path.dirname(cur))) { ignored = 'found in a writable location'; break; }
+    let st;
+    try { st = fs.lstatSync(cur); } catch { break; }
+    if (!st.isSymbolicLink()) break;
+    try { cur = path.resolve(path.dirname(cur), fs.readlinkSync(cur)); } catch { break; }
+  }
+  // (b)
+  if (!ignored && path.basename(real) !== 'xq') ignored = 'not named xq';
+  if (ignored) return { ...none, ignored };
   let root = '';
   for (let d = path.dirname(real); isWithin(d, home); d = path.dirname(d)) {
     if (fs.existsSync(path.join(d, '.git'))) { root = d; break; }
@@ -2364,7 +2444,7 @@ function xqRoot(home, hideRule) {
     : isWithin(home, root) ? 'contains the home directory'
       : hideRule.some((h) => isWithin(root, h)) ? 'lies inside a HIDDEN dir'
         : hideRule.some((h) => isWithin(h, root)) ? 'contains a HIDDEN dir' : '';
-  return why ? { p: '', why } : { p: root, why: '' };
+  return why ? { ...none, why } : { ...none, p: root };
 }
 
 /** Is `p` equal to `dir` or beneath it? @param {string} p @param {string} dir */
@@ -3210,8 +3290,8 @@ function privilegeDrop(ids, tools, { pidns = false } = {}) {
 
 /**
  * Run `prefix` + `command` (a chain ending in the `__isolated-pid1` helper, pid1HelperArgv) with
- * the caller's cwd/stdio; resolve with its exit code (128+signal when killed, 127 when it cannot
- * be started). `prefix` is the privilege drop (privilegeDrop); `env` the COMMAND's env — the
+ * the caller's cwd/stdio; resolve with its exit code (128+signal when killed; EXIT.fail when the
+ * CHAIN cannot be started — not 127, which reads "command not found"). `prefix` is the privilege drop (privilegeDrop); `env` the COMMAND's env — the
  * ALLOWLIST (isolatedEnv: the fresh path's plan.env, or the nested call's own `--pass-env`).
  *
  * ⛔ `env` is NOT the chain's env: setpriv, unshare -U, pid 1's bash and the helper get
@@ -3238,8 +3318,11 @@ export function runCommand(command, prefix = [], { pastUnshare = false, env = /*
     } catch (e) {
       // ⛔ spawn THROWS for an argv node refuses (a NUL) or an exec error outside its "run-time" list
       // (E2BIG): without this the Promise rejected (a stack, no FAIL line) with our forwarder left on
+      // ⚠ EXIT.fail, not 127 (review F3): argv[0] is the privilege-drop chain, not the command — 127
+      // reads "command not found"; the fresh path's equivalent (unshare cannot start) is EXIT.fail
       fwd.remove();
-      resolve(report('isolated', 127, `NOT RUN: cannot start '${argv[0]}': ${errMsg(e)}. The command was NOT started.`));
+      resolve(report('isolated', EXIT.fail, `NOT RUN: cannot start '${argv[0]}' (the isolation chain): ${errMsg(e)}. `
+        + 'The command was NOT started.'));
       return;
     }
     const envPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[pastUnshare ? 4 : 3]);
@@ -3249,7 +3332,8 @@ export function runCommand(command, prefix = [], { pastUnshare = false, env = /*
     fwd.attach(child);
     child.on('error', (e) => {
       fwd.remove();
-      resolve(report('isolated', 127, `NOT RUN: cannot start '${argv[0]}': ${errMsg(e)}`));
+      resolve(report('isolated', EXIT.fail, `NOT RUN: cannot start '${argv[0]}' (the isolation chain): ${errMsg(e)}. `
+        + 'The command was NOT started.'));
     });
     child.on('close', (code, signal) => {
       if (fwd.early?.()) dieByForwarded(fwd); // killed before pid 1 could hear it: die by the signal
@@ -3646,6 +3730,13 @@ function isEntryScript() {
 // ⚠ Body deliberately NOT re-indented: keeps this guard a two-line diff against
 // concurrent edits to the dispatch.
 if (isEntryScript()) {
+// ⛔ INVARIANT that makes LATE.cli safe (review F4): every verb below ENDS IN process.exit (the
+// last line), and a process runs at most ONE forwarder at a time (one isolated half per process).
+// So the no-op listeners a removed forwarder leaves behind (quietLateSignals) live only for the
+// last few ticks of a process that is already exiting — a late INT/TERM/HUP is swallowed there,
+// on purpose. ⚠ A future LONG-LIVED verb (a server, a watch loop, anything that keeps running
+// after its child exits) must NOT inherit this: it would ignore Ctrl-C for the rest of its life.
+// Such a verb clears LATE.cli (or calls loudAgain()) once its forwarder is removed.
 LATE.cli = true; // a removed forwarder leaves a no-op listener until exit (quietLateSignals)
 const [, , cmd, ...args] = process.argv;
 const repo = path.resolve(opt(args, 'repo', '.'));
