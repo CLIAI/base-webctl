@@ -2538,7 +2538,8 @@ const IDENTITY_FILES = Object.freeze([['/etc/machine-id', `${NEUTRAL_MACHINE_ID}
  *      moved back on top. ⛔ If the kernel refuses the sysfs mount: REFUSED (review F3) — a mask over
  *      /sys/class/net alone left /sys/devices/virtual/net naming the host's interfaces.
  *   3. /etc/machine-id, /var/lib/dbus/machine-id, /etc/hostname: a neutral copy (made in OUR /run)
- *      bound over each real file, read-only. A symlink to one already covered is covered by it.
+ *      bound over each real file, read-only — the copies on a tmpfs of their own, then remounted
+ *      READ-ONLY, so no writable name is left (review F6). A symlink to one already covered is covered by it.
  * @param {Tools} tools @returns {{why: string}}
  */
 function maskIdentity(tools) {
@@ -2570,6 +2571,8 @@ function maskIdentity(tools) {
     if (hasCg) { try { fs.rmdirSync(stage); } catch { /* gone: harmless */ } }
     const dir = '/run/.webctl-identity';
     fs.mkdirSync(dir, { mode: 0o755 });
+    const t = mountOrWhy(['-t', 'tmpfs', '-o', 'mode=0755,nosuid,nodev,noexec,size=16k', IDENTITY_SOURCE, dir], 'mount the neutral identity files\' tmpfs');
+    if (t) return { why: t };
     /** @type {string[]} */ const done = [];
     for (const [f, text] of IDENTITY_FILES) {
       let real = '';
@@ -2579,15 +2582,27 @@ function maskIdentity(tools) {
       fs.writeFileSync(copy, text, { mode: 0o444 });
       const b = mountOrWhy(['--bind', copy, real], `bind a neutral ${path.basename(f)}`);
       if (b) return { why: b };
-      const ro = mountOrWhy(['-o', 'remount,bind,ro', real], `make the neutral ${path.basename(f)} read-only`);
-      if (ro) return { why: ro };
+      const rb = mountOrWhy(['-o', 'remount,bind,ro', real], `make the neutral ${path.basename(f)} read-only`);
+      if (rb) return { why: rb };
       done.push(real);
+    }
+    // ⛔ THE COPIES' OWN tmpfs, READ-ONLY (review F6): bound and ro, each copy still had a writable NAME in
+    // our /run, owned by the real uid — `chmod u+w` + a write there rewrote what /etc/machine-id read
+    // (measured). Unlinking them is NOT the fix: the kernel refuses a mount on top of a bind whose
+    // file is unlinked, so a stripped-markers call could not bind its own (measured: refused). Read back.
+    const ro = mountOrWhy(['-o', 'remount,bind,ro', dir], 'make the neutral identity files\' tmpfs read-only');
+    if (ro) return { why: ro };
+    const m = resolveMount(readMountinfo() || [], dir);
+    if (!m || m.at !== dir || m.source !== IDENTITY_SOURCE || !m.opts.includes('ro')) {
+      return { why: 'the neutral identity files are not on their own read-only tmpfs — they could be rewritten' };
     }
   } catch (e) {
     return { why: `masking the host's identity failed (${errMsg(e)})` };
   }
   return { why: '' };
 }
+/** The source tag of the tmpfs holding the neutral identity files (read-only once bound). */
+const IDENTITY_SOURCE = 'webctl-isolated-identity';
 /** The source tag of the fresh sysfs. */
 const SYSFS_SOURCE = 'webctl-isolated-sysfs';
 

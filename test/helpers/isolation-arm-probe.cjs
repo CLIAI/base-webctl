@@ -44,6 +44,34 @@ const tryWrite = (dir) => errOf(() => {
 /** @param {string[]} a */
 const run = (a) => spawnSync(a[0], a.slice(1), { encoding: 'utf8' });
 
+/**
+ * Try to change what `target` (a file BIND) reads WITHOUT writing through it: find its backing file
+ * from /proc/self/mountinfo (another mount of the same device whose root is a prefix of the bind's
+ * root), chmod it writable and write it. 'changed' | 'unchanged' | '<errno>' (target unreadable).
+ * ⚠ The content is never returned: only whether it moved.
+ * @param {string} target
+ */
+const tamper = (target) => {
+  let before = '';
+  try { before = fs.readFileSync(target, 'utf8'); } catch (e) { return `<${e.code}>`; }
+  const unesc = (/** @type {string} */ x) => x.replace(/\\([0-7]{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8)));
+  const rows = fs.readFileSync('/proc/self/mountinfo', 'utf8').split('\n').filter(Boolean)
+    .map((l) => l.split(' ')).map((f) => ({ dev: f[2], root: unesc(f[3]), at: unesc(f[4]) }));
+  const bind = rows.filter((r) => r.at === target).pop();
+  if (bind) {
+    for (const m of rows) {
+      if (m.dev !== bind.dev || m === bind || !(bind.root === m.root || bind.root.startsWith(m.root === '/' ? '/' : `${m.root}/`))) continue;
+      const backing = path.join(m.at, bind.root.slice(m.root === '/' ? 0 : m.root.length));
+      try { fs.chmodSync(backing, 0o644); } catch { /* not ours, or read-only */ }
+      try { fs.writeFileSync(backing, 'tampered-by-arm\n'); } catch { /* read-only, or gone */ }
+    }
+  }
+  try { fs.writeFileSync(target, 'tampered-by-arm\n'); } catch { /* through the bind: EROFS */ }
+  let after = '';
+  try { after = fs.readFileSync(target, 'utf8'); } catch (e) { return `<${e.code}>`; }
+  return after === before ? 'unchanged' : 'changed';
+};
+
 (async () => {
   /** @type {Record<string, unknown>} */
   const out = { mode };
@@ -138,6 +166,9 @@ const run = (a) => spawnSync(a[0], a.slice(1), { encoding: 'utf8' });
   try { eh = fs.readFileSync('/etc/hostname', 'utf8').trim(); } catch (e) { eh = `<${e.code}>`; }
   out.etcHostname = /^<.*>$/.test(eh) ? eh : digest(eh);
   out.etcHostnameIsNeutral = eh === 'webctl-isolated';
+  // row 10 (F6): the neutral file cannot be rewritten through its BACKING copy (chmod + write); the
+  // control is the same routine against a read-only bind the world made outside (cfg.tamperDst)
+  out.machineIdTamper = inside ? tamper('/etc/machine-id') : tamper(cfg.tamperDst);
   // 11 — loader vars: the command still sees NODE_OPTIONS (its preload logged this process)
   out.nodeOptions = !!process.env.NODE_OPTIONS;
   process.stdout.write(`ARM-RESULT ${JSON.stringify(out)}\n`);

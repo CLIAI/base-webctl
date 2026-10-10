@@ -33,6 +33,12 @@ fs.writeFileSync(path.join(cfg.keepRo, 'ro.txt'), 'readable\n');
 fs.mkdirSync(cfg.outsideHome, { recursive: true });
 fs.writeFileSync(path.join('/dev/shm', cfg.planted), 'planted-by-test\n');
 fs.writeFileSync(path.join('/var/tmp', cfg.planted), 'planted-by-test\n');
+// row 10's tamper CONTROL: a read-only file bind made as `isolated` makes its neutral machine-id (a
+// 0444 copy bound over a file, remounted ro) — the probe outside must be able to change what it reads
+fs.writeFileSync(cfg.tamperSrc, 'neutral\n', { mode: 0o444 });
+fs.writeFileSync(cfg.tamperDst, 'host\n');
+if (run([cfg.mount, '--bind', cfg.tamperSrc, cfg.tamperDst]).status !== 0
+  || run([cfg.mount, '-o', 'remount,bind,ro', cfg.tamperDst]).status !== 0) fail('the tamper control bind');
 const pw = path.join(cfg.neutral, 'passwd');
 fs.writeFileSync(pw, `u:x:${cfg.uid}:${cfg.gid}::${cfg.home}:/bin/sh\n`);
 if (run([cfg.mount, '--bind', pw, '/etc/passwd']).status !== 0) fail('bind over /etc/passwd');

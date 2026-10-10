@@ -104,6 +104,7 @@ let cap = ''; try { cap = (fs.readFileSync('/proc/self/status', 'utf8').match(/^
 try { fs.appendFileSync(${JSON.stringify(hits)}, JSON.stringify({ pid: process.pid, ppid: process.ppid, cap, argv: process.argv }) + '\\n'); } catch {}\n`);
     const cfg = { neutral, home, keepRo: path.join(home, 'data'), outsideHome: path.join(neutral, 'outside-home'), keep, cwd,
       planted: `arm-planted-${process.pid}`, uid: process.getuid?.(), gid: process.getgid?.(), mount: MOUNT,
+      tamperSrc: path.join(neutral, 'tamper-src'), tamperDst: path.join(neutral, 'tamper-dst'),
       ipcmk: IPCMK, python: PYTHON, shmPy: SHM_PY, ipcFile: path.join(keep, 'ipc.json'),
       keyctl: !!KEYCTL, keyName: `webctl-arm-${process.pid}`, port: /** @type {net.AddressInfo} */ (listener.address()).port,
       sockets, hostPid: process.pid, baseRoot: ROOT, probe: PROBE, harness: TOOL, preload, backend,
@@ -272,9 +273,13 @@ const ROWS = [
       assert.ok(r.machineId === '<ENOENT>' || r.machineId === digest(harness.NEUTRAL_MACHINE_ID || '-unset-'),
         ctx(w, `${p}: /etc/machine-id is neither absent nor the neutral one`));
       assert.ok(r.etcHostname === '<ENOENT>' || r.etcHostnameIsNeutral, ctx(w, `${p}: /etc/hostname is the host's`));
+      if (r.machineId !== '<ENOENT>') {
+        assert.equal(r.machineIdTamper, 'unchanged', ctx(w, `${p}: /etc/machine-id was REWRITTEN through its backing copy (chmod + write)`));
+      }
     },
     control: (w, t) => {
       const o = w.outside.outside;
+      assert.equal(o.machineIdTamper, 'changed', 'control: chmod + write of a read-only bind\'s backing file does not change it — the tamper arm cannot fail');
       assert.equal(o.hostnameIsNeutral, false, 'control: the host is itself named webctl-isolated — the arm cannot tell');
       if (o.netNonLo === 0) t.diagnostic('control: this host has only lo — the /sys/class/net arm is UNTESTED here, not passed');
       else assert.ok(o.netNonLo > 0);

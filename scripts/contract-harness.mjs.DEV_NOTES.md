@@ -1477,6 +1477,23 @@ sees it too): all three RED before (the nested one ran), GREEN after.
 | R3a | pid 1's `|| :` restored | the fresh and the nested join arms |
 | R3b | the nested `runCommand` ignores a `fail` line | the nested join arm |
 
+**F6 — the neutral machine-id could be rewritten through its backing copy (row 10).** The copies
+(`/run/.webctl-identity/N`, mode 0444) were bound over `/etc/machine-id` etc. and the BINDS remounted
+ro — but each copy kept a name in our writable /run, owned by the real uid: `chmod u+w` + a write
+there changed what `/etc/machine-id` read inside (measured by the review; the arm reproduced it).
+Tried first: unlink the copies once bound. ⛔ That broke the STRIPPED path — measured: the kernel
+refuses a mount on top of a bind whose file is unlinked (`cannot bind a neutral machine-id`), and a
+stripped-markers call binds its own over the outer's. ⇒ The copies live on a tmpfs of their own
+(`webctl-isolated-identity`), remounted `bind,ro` after the binds (a superblock `remount,ro` is refused
+while binds of it exist — measured), and read back (resolves to that tmpfs, `ro`). Arm (table row 10):
+the probe finds the bind's backing file from mountinfo (same device, root prefix), chmods and writes
+it, then re-reads; control: the same routine changes a 0444-copy-bound-ro file the world made outside.
+RED before (`REWRITTEN`), GREEN after, on all three paths.
+
+| # | sabotage | caught by |
+|---|---|---|
+| F6a | the identity tmpfs left writable (no ro remount, no read-back) | table row 10 (`REWRITTEN through its backing copy`) |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
