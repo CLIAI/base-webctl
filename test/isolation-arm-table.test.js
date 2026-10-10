@@ -314,6 +314,7 @@ for (const backend of IMPLEMENTED) {
       if (row.n === 9 && !KEYCTL) { t.skip(NO_KEYCTL); return; }
       const w = await world(backend);
       if (w.skip) { t.skip(w.skip); return; }
+      if (row.n === 9 && w.outside.outside.keyShowStatus !== 0) { t.skip(KEYRING_UNVERIFIED); return; }
       assert.ok(!w.broken, w.broken);
       assert.equal(w.armStatus, 0, ctx(w, `the arm run exited ${w.armStatus}`));
       assert.match(w.armErr, new RegExp(`^isolated: home HIDDEN; .*backend: ${backend}`, 'm'), ctx(w, 'the verdict does not name the backend'));
@@ -326,6 +327,7 @@ for (const backend of IMPLEMENTED) {
       if (row.n === 9 && !KEYCTL) { t.skip(NO_KEYCTL); return; }
       const w = await world(backend);
       if (w.skip) { t.skip(w.skip); return; }
+      if (row.n === 9 && w.outside.outside.keyShowStatus !== 0) { t.skip(KEYRING_UNVERIFIED); return; }
       assert.ok(!w.broken, w.broken);
       if (!row.control) { t.diagnostic('no control by design (ib4k §1: —) — see the deeper arms'); assert.ok(w.outside.outside); return; }
       assert.ok(w.outside.outside, 'no reading from outside');
@@ -344,6 +346,8 @@ test('⛔ the table covers EVERY backend the harness can run — extend IMPLEMEN
   assert.deepEqual(ROWS.map((r) => r.n), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], 'ib4k §1 has rows 1–11');
 });
 
+/** Row 9 where `keyctl show @s` fails (review F5): a named SKIP — isolated says "keyring: unverified". */
+const KEYRING_UNVERIFIED = 'SKIP (host): `keyctl show @s` fails here — the keyring row is UNVERIFIED (isolated says "keyring: unverified")';
 /** Row 9 without keyctl: a named SKIP — untested, never a pass. */
 const NO_KEYCTL = 'SKIP (host): keyctl not installed — the keyring row is UNTESTED here (isolated says "keyring: shared")';
 

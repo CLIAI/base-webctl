@@ -1458,6 +1458,25 @@ only masks `/sys/class/net` → NOT RUN by the read-back (was: ran). Both RED be
 | F3a | the read-back reads `/sys/class/net` only | the class-net-only arm (the command ran) |
 | F3b | the phase-1 fallback restored (mask + note + run) | the refused-sysfs arm |
 
+**F5 + R3 — the keyring join and its read-back (row 9).** Two silent paths. (1) keyctl installed but
+the HOST's `keyctl show @s` failing gave `plan.keyring = ''`, and the inner half then skipped the
+read-back without a word. Now, like the keyctl-absent ruling, the run goes ahead and the verdict says
+`keyring: unverified (keyctl show failed)`; the table SKIPs row 9 by name when its world's
+`keyctl show @s` fails. (2) pid 1's `keyctl new_session || :` — on the fresh path the read-back caught
+a failed join (as "still the HOST's"), on the NESTED path nothing did: the nested command ran in its
+outer's keyring, silently. Now (ruling R3) pid 1 itself refuses: `fail cannot join a fresh session
+keyring (…)` on fd 3 — the status channel on both paths — then exit 1, before starting anything; the
+nested path's `runCommand` reports a `fail` line it receives before `started` (it reported nothing).
+Arms with a fake `keyctl` (`show`/`new_session` failing; the nested case keyed on a flag file the
+outer command creates just before its nested call — `WEBCTL_HOST_NETNS` would not do, the fresh pid 1
+sees it too): all three RED before (the nested one ran), GREEN after.
+
+| # | sabotage | caught by |
+|---|---|---|
+| F5a | the `unverified` note dropped | the show-fails arm |
+| R3a | pid 1's `|| :` restored | the fresh and the nested join arms |
+| R3b | the nested `runCommand` ignores a `fail` line | the nested join arm |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

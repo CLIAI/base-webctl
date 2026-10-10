@@ -2471,6 +2471,63 @@ test('⛔ fail closed: a `keyctl` whose new_session silently does NOTHING → re
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+/**
+ * A `keyctl` over the system one: `show` and `new_session` exit 1 when `failShow` / `failJoin` say so
+ * (`failJoin` a PATH = only once that file exists — the outer command makes it just before its nested
+ * call, so the outer's pid 1 joins and the nested one's fails); everything else goes to the real one.
+ * @param {string} dir @param {{failShow?: boolean, failJoin?: boolean | string}} o @returns {[string, string][]}
+ */
+function fakeKeyctl(dir, o) {
+  const real = realCopyAt(dir, 'keyctl');
+  const fake = path.join(dir, 'keyctl-fake');
+  const join = typeof o.failJoin === 'string' ? `[ -e ${JSON.stringify(o.failJoin)} ] && exit 1;;` : o.failJoin ? 'exit 1;;' : ';;';
+  fs.writeFileSync(fake, `#!/bin/sh\ncase "$1" in show) ${o.failShow ? 'exit 1;;' : ';;'} new_session) ${join} esac\n`
+    + `exec ${JSON.stringify(real)} "$@"\n`, { mode: 0o755 });
+  return [[KEYCTL_SYS, real], ...overTool(fake, 'keyctl')];
+}
+
+test('⛔ keyctl installed but the HOST\'s `keyctl show @s` FAILS (review F5) → the command runs, and the verdict says `keyring: unverified (keyctl show failed)` — never a silent skip of the read-back', needsIsolation, async (t) => {
+  if (!KEYCTL_SYS) { t.skip(NO_KEYCTL); return; }
+  const dir = tmpdir();
+  try {
+    const r = await markerRun(dir, fakeKeyctl(dir, { failShow: true }));
+    if (!r) { t.skip(NO_BINDS); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(r.ran, true, 'the command did not run (the ruling: like keyctl absent, it runs, and says so)');
+    assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: unshare; keyring: unverified \(keyctl show failed\)/m);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed (R3): pid 1\'s `keyctl new_session` FAILS → NOT RUN, named by pid 1 itself — never `|| :`', needsIsolation, async (t) => {
+  if (!KEYCTL_SYS) { t.skip(NO_KEYCTL); return; }
+  const dir = tmpdir();
+  try {
+    const r = await markerRun(dir, fakeKeyctl(dir, { failJoin: true }));
+    if (!r) { t.skip(NO_BINDS); return; }
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot join a fresh session keyring \(`keyctl new_session` failed in pid 1\)/);
+    assert.equal(r.ran, false, 'the command ran in the caller\'s session keyring');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed (R3), NESTED: a nested call\'s pid 1 whose `keyctl new_session` FAILS → the nested call is NOT RUN, named — CONTROL: the outer call ran', needsIsolation, async (t) => {
+  if (!KEYCTL_SYS) { t.skip(NO_KEYCTL); return; }
+  const dir = tmpdir();
+  const outerRan = path.join(dir, 'OUTER');
+  const marker = path.join(dir, 'RAN');
+  try {
+    const flag = path.join(dir, 'NESTED-NOW');
+    const r = await withBinds(fakeKeyctl(dir, { failJoin: flag }), [process.execPath, TOOL, 'isolated', '--keep', dir, '--', 'sh', '-c',
+      ': > "$1" && : > "$4" && exec "$0" "$2" isolated -- "$0" -e "require(\'fs\').writeFileSync(process.argv[1], \'x\')" "$3"',
+      process.execPath, outerRan, TOOL, marker, flag]);
+    if (!r) { t.skip(NO_BINDS); return; }
+    assert.equal(fs.existsSync(outerRan), true, 'CONTROL: the outer call did not run (its own join failed?)\n' + r.stderr);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot join a fresh session keyring \(`keyctl new_session` failed in pid 1\)/);
+    assert.equal(fs.existsSync(marker), false, 'the nested command ran without its own session keyring');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('⛔ fail closed: no `setpriv` in the system dirs → FAIL naming it, command NOT run (never with capabilities)', needsIsolation, async (t) => {
   const dir = tmpdir();
   try {

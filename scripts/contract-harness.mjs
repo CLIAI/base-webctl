@@ -1389,14 +1389,18 @@ const HIDE_MODE = '0755';
  *     (KEYCTL_JOIN_SESSION_KEYRING in keyctl, then KEYCTL_SESSION_TO_PARENT — which needs a
  *     single-threaded parent of the same creds: this bash, not node), inherited by everything it
  *     starts. Not `keyctl session -`: that prints "Joined session keyring: N" on the COMMAND's
- *     stderr. Its failure is not judged here: the fresh path READS BACK the keyring (inner half).
+ *     stderr. ⛔ Its failure is a REFUSAL (ruling R3): pid 1 writes `fail …` on fd 3 — the status
+ *     channel on BOTH paths — and exits before starting anything (it was `|| :`, which passed
+ *     silently on the nested path: review F5). The fresh path also READS BACK the keyring (inner half).
  */
 export const PID1_REAPER = [
   'k=$1; shift',
   'c=',
   'f() { if [ -n "$c" ]; then kill -s "$1" "$c" 2>/dev/null; else exit "$2"; fi; }',
   "trap 'f INT 130' INT; trap 'f TERM 143' TERM; trap 'f HUP 129' HUP",
-  'if [ -n "$k" ]; then "$k" new_session >/dev/null 2>&1 || :; fi',
+  // ⛔ a FAILED join is a refusal (R3), said on the status channel (fd 3) — never `|| :` (review F5)
+  "if [ -n \"$k\" ]; then \"$k\" new_session >/dev/null 2>&1 || { echo 'fail cannot join a fresh session keyring "
+    + '(`keyctl new_session` failed in pid 1) — the command would run in the session keyring of its caller\' >&3; exit 1; }; fi',
   '"$@" <&0 &',
   'c=$!',
   'exec 3>&- 4<&-',
@@ -2182,8 +2186,12 @@ function runIsolated(a) {
   }
   const inside = outer ? '; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, '
     + 'keeping what the outer call re-bound (same modes)' : '';
-  // ⚠ only a DEVIATION is named: without keyctl the session keyring stays the host's (ib4k row 9 ruling)
-  const keyringNote = (tools.keyctl ? '' : '; keyring: shared (keyctl not installed)')
+  // the HOST's session keyring id, for the inner half's read-back ('' = keyctl absent or no keyring answer)
+  const keyring = tools.keyctl ? sessionKeyringId(tools.keyctl) : '';
+  // ⚠ only a DEVIATION is named: without keyctl the session keyring stays the host's (ib4k row 9 ruling);
+  // ⛔ with keyctl but no host reading, the join still runs (and fails closed) but cannot be READ BACK —
+  // said, never a silent skip (review F5)
+  const keyringNote = (!tools.keyctl ? '; keyring: shared (keyctl not installed)' : keyring ? '' : '; keyring: unverified (keyctl show failed)')
     + (tools.hostname ? '' : '; hostname: the host\'s (no `hostname` tool)');
   process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', `${inside}; ${backendClause(choice)}${keyringNote}`)}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
@@ -2196,8 +2204,6 @@ function runIsolated(a) {
     // (With 0555 it answered EACCES and the home had been dropped from this list.)
     [RO_ROOTS_ENV]: JSON.stringify([prot.home, ...prot.roots]), [HIDDEN_ENV]: JSON.stringify([prot.home, ...prot.hidden]),
     [HOST_IDS_ENV]: JSON.stringify(ids) });
-  // the HOST's session keyring id, for the inner half's read-back ('' = keyctl absent or no keyring answer)
-  const keyring = tools.keyctl ? sessionKeyringId(tools.keyctl) : '';
   const payload = JSON.stringify({ hostMnt, hostIpc, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
     home: prot.home, exempt: plan.exempt, sockets, ids, env: cmdEnv, tools, keyring });
   return new Promise((resolve) => {
@@ -3678,6 +3684,9 @@ export function runCommand(command, prefix = [], { pastUnshare = false, env = /*
     });
     child.on('close', (code, signal) => {
       if (fwd.early?.()) dieByForwarded(fwd); // killed before pid 1 could hear it: die by the signal
+      // ⛔ pid 1 refused before starting anything (its keyring join, R3): report it, as the fresh path does
+      const fail = st && !st.started() ? st.text().match(/^fail (.*)$/m) : null;
+      if (fail) { fwd.remove(); resolve(report('isolated', EXIT.fail, `NOT RUN: ${fail[1]}. The command was NOT started.`)); return; }
       resolve(exitOrDieBy(fwd, code, signal));
     });
   });
