@@ -209,8 +209,10 @@ is the strongest form: it names the ownership in the function that reads it.
 
 ## v0.33.0 — (unreleased)
 
-**Headline: `isolated` HIDES the whole home, passes an env ALLOWLIST, its pid 1 is `bash --norc
--p` and REAPS orphans, and a signal can no longer slip in before it is heard.** Measured gaps
+**Headline: `isolated` HIDES the whole home — except what it re-binds, among them EVERY PATH dir
+under the home, which may itself hold secrets — passes an env ALLOWLIST (and a shorter one to the
+privileged halves), its pid 1 is `bash --norc -p` and REAPS orphans, and a signal can no longer
+slip in before it is heard.** Measured gaps
 from `perplexity` and from the review of this branch; scope ruled by `webctl:mgr` (2026-10-07).
 xrl4 §"Mutation arms run with no host network, no host unix sockets and a hidden home".
 Harness only; no `lib/` change.
@@ -219,7 +221,7 @@ Harness only; no `lib/` change.
 
 37 vars matching `*_API_KEY`, `*_TOKEN`, `*SECRET` reached the arm on an operator host
 (measured by the review), and the gate passes its full env. **Only these reach the command
-by default** (and pid 1, and the inner half):
+by default:**
 
 * `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TZ`, `NODE_OPTIONS`,
   `NODE_PATH`, `npm_config_*`, `WEBCTL_*` — plus `TMPDIR=/tmp` and `isolated`'s own markers
@@ -231,6 +233,14 @@ by default** (and pid 1, and the inner half):
   a prefix ends in `_*`; a bare `*` is refused). The socket/display/address names isolation
   removes (`DISPLAY`, `SSH_AUTH_SOCK`, `XDG_RUNTIME_DIR`, …) are refused by name and stripped
   even from a prefix pass. A nested call honours only its OWN `--pass-env`.
+* ⛔ **Loader vars never reach a PRIVILEGED half.** Everything that runs before the command's
+  capability drop — `unshare`, pid 1's bash, the inner node (namespace root, full caps, before
+  any mask), the `mount`/`ip` it runs, `setpriv`/`unshare -U` — gets only `PATH HOME USER LOGNAME
+  LANG LC_* TERM TZ TMPDIR WEBCTL_*`. Measured by the review of 5773fb8: `NODE_OPTIONS=--require
+  <preload>` ran the preload in the inner node with a FULL CapEff, the real home readable; a
+  `--pass-env 'LD_*'` reached every C binary of the chain. The command's env travels in a pipe
+  and is applied by the small node helper that spawns it, after the drop — so the command still
+  gets `NODE_OPTIONS` and whatever you `--pass-env`, and nothing before it does.
 * **Declare yours** — ready to copy into each lane's `isolated` call (`webctl:mgr`'s pre-check):
 
   ```bash
@@ -243,6 +253,10 @@ by default** (and pid 1, and the inner half):
   # aliexpress
   node "$H" isolated --pass-env ALIEXPRESS_WEBCTL_ARM_REAL_HARNESS -- …
   ```
+
+  ⚠ **Under the release gate**, the gate's own (outer) `isolated` call passes no extra env, so
+  your nested `--pass-env X` only finds an `X` your contract sets itself: a toggle exported on
+  the host (`…_TESTS_HOST_NETWORK=1` in your shell) is ABSENT under the gate.
 
 * The release gate's own `isolated` call passes **no** extras: a contract gets the default
   list (its `WEBCTL_*` included). base's gate tests now name their fake-contract knobs
@@ -266,8 +280,18 @@ unhide `~/.config/webctl`); `--keep` at or beneath one re-exposes that path only
 
 * **Refused**, naming the rule and no path: a PATH entry (FAIL) or `--keep-ro` (usage, exit 3)
   that IS the home, or contains or lies inside one of those dirs.
-* **A verdict line** on stderr names what came back, home-relative only:
-  `isolated: home HIDDEN; re-bound read-only: ~/bin, ~/data; writable: ~/work`.
+* **A verdict line** on stderr says what came back. ⛔ It lists by path (home-relative) ONLY what
+  you named — the cwd, `--keep`, `--keep-ro`; PATH entries are COUNTED and other implicit
+  re-binds named by label (review of 5773fb8: it listed ~95 PATH dirs, private repo names among
+  them, and the gate tees stderr into logs):
+  `isolated: home HIDDEN; re-bound read-only: ~/data, 2 PATH entries, base's repo root; writable:
+  ~/work — WEBCTL_ISOLATED_VERBOSE=1 lists every path`. `WEBCTL_ISOLATED_VERBOSE=1` restores the
+  full `~/…` list.
+* ⛔ **A cwd at or beneath a hidden dir is REFUSED** (FAIL, the rule named, no path): it used to be
+  re-bound WRITABLE there — a cwd at `~/.ssh` ran with `~/.ssh` writable (review of 5773fb8). Only
+  an explicit `--keep` re-exposes a hidden dir; the read-back now exempts only those.
+* A NESTED `--keep`/`--keep-ro` under the OUTER call's hidden home now says the outer call hides
+  it (keep it there), not "does not exist" (still exit 3).
 * ⛔ **What now breaks: anything that reads the home INDIRECTLY** — git's `~/.gitconfig` (and
   commit signing with `gpg.format=ssh`, which reads the key under `~/.ssh`), ssh or git-over-ssh
   reading `~/.ssh/config` / `known_hosts`, gpg's keyring and config, shell rc files, a tool's
@@ -302,6 +326,10 @@ and the command **ran to exit 0** after the caller gave up. Here: 4/40 fresh, 40
 ⇒ Until the half under pid 1 reports `started`, a forwarded signal SIGKILLs unshare (the
 namespace dies with it) and `isolated` **dies by the signal** — fresh and nested. Arm: 8 runs
 per path with pid 1 held trapless for 300 ms; 0 lost.
+* And every node half now installs its signal forwarder BEFORE its child exists (a signal before
+  the spawn is buffered, then delivered): the inner half and the pid-1 helper each had a gap with
+  no handler at all, where a TERM killed the half outright and the command was SIGKILLed with its
+  trap unrun (review of 5773fb8). Pinned by a logic arm; the gap is too narrow to hit from outside.
 
 ### Host policy: AppArmor, and `WEBCTL_UNSHARE_BIN`
 
@@ -325,11 +353,21 @@ per path with pid 1 held trapless for 300 ms; 0 lost.
 
 ### ⛔ What this does NOT cover
 
-* What a re-bind brings back is visible: a secret inside the cwd, a keep, a PATH dir or base's
-  root (other than the six hidden dirs) is readable. A profile or config OUTSIDE the home (and
-  not via a symlinked dot-dir) is not covered at all.
-* `/var/tmp` and `/dev/shm` are writable and shared with the host; `/sys/class/net` lists the
-  host's interface names.
+* ⛔ **What a re-bind brings back is visible — and EVERY PATH dir under the home is re-bound.** A
+  secret inside the cwd, a keep, a PATH dir (a `~/bin` holding a token file, a repo checkout on
+  PATH) or base's root — other than the six hidden dirs — is readable. A profile or config
+  OUTSIDE the home (and not via a symlinked dot-dir) is not covered at all.
+* *Planned for v0.34.0 (ib4k shared arm set):* `/var/tmp` and `/dev/shm` are writable and shared
+  with the host; the host's session keyring is shared (`keyctl show @s` lists it, possessor
+  `alswrv`); there is no UTS namespace (the hostname is visible); `/sys/class/net` (interface
+  names and MACs) and `/etc/machine-id` are readable.
+* `--kill-child` relies on util-linux closing its fork/`PR_SET_PDEATHSIG` race: ≥ 2.39 polls a
+  pidfd of the original parent after the prctl and exits if it is gone (read in its source).
+  On 2.38 — the minimum, for `--map-user` — a SIGKILL to unshare in that window can leave pid 1
+  orphaned; if the harness died too, the inner half's `started` write then fails (EPIPE) and
+  nothing runs, but one that already started runs unsupervised.
+* The signal-forwarder ORDERING (finding 5 above) is reasoned and logic-tested, not hit end to
+  end.
 * `WEBCTL_RO_ROOTS` and `WEBCTL_HIDDEN_DIRS` are recorded input; the other nesting facts still
   require a real masked namespace.
 * The AppArmor message is tested by its logic (the sysctl path is a parameter), not end to end.

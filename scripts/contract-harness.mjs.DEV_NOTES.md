@@ -1005,8 +1005,22 @@ deliberately not re-indented, to keep the guard a two-line diff against concurre
 * **The home is hidden whole**, but what a re-bind brings back is visible: a PATH entry, the
   cwd, a keep, base's root. A secret INSIDE one of those (other than the six HIDDEN_DIRS) is
   exposed. A secret OUTSIDE the home (and not via a symlinked dot-dir) is not covered at all.
-* **`/var/tmp` and `/dev/shm`** are writable and shared with the host, and `/sys/class/net`
-  lists the host's interface names (review, minor 9 — not addressed).
+* **Planned for v0.34.0 (ib4k shared arm set), not addressed here:** `/var/tmp` and `/dev/shm`
+  are writable and shared with the host (review, minor 9); the host's session keyring is shared
+  (`keyctl show @s` lists it, `alswrv`); no UTS namespace (the hostname is visible);
+  `/sys/class/net` (interface names, MACs) and `/etc/machine-id` are readable (review of 5773fb8).
+* **`--kill-child` and the PDEATHSIG race** (review of 5773fb8, finding 6). Read in util-linux's
+  `sys-utils/unshare.c`: the forked child calls `prctl(PR_SET_PDEATHSIG)`, and since **2.39** it
+  first `pidfd_open`s the parent and, after the prctl, `poll`s it — gone ⇒ the child exits
+  (`HAVE_PIDFD_OPEN` builds; 2.38 has no such check; this host runs 2.42). So on ≥ 2.39 a SIGKILL
+  to unshare between fork and prctl cannot leave pid 1 orphaned. On 2.38 (the floor, for
+  `--map-user`) it can. Our own partial cover: if the HARNESS is gone too, the inner half's
+  `started` write on fd 3 fails (EPIPE, node ignores SIGPIPE) or its plan read hits EOF, and it
+  refuses — nothing runs. Not covered: unshare killed alone in that window while the harness
+  lives (the command then runs, unsignalable by the harness), or a command already started. A
+  cheap check from inside is not available: pid 1's parent is outside its PID namespace
+  (`getppid()` is 0), so "is unshare still there" cannot be asked from the namespace.
+  Not reproduced (not attempted: the window is a few syscalls wide).
 * **`NODE_OPTIONS` is default-passed to the COMMAND** (and its `--require` runs there, capless,
   after every mask). It no longer reaches any half that runs before the drop (above).
 * **`bash` is required** (pid 1, the reaper). Absent → FAIL.

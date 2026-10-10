@@ -523,8 +523,7 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
 * **Ctrl-C stops the caller.** A forwarded signal that ended the command is re-raised, so
   `isolated` dies BY it and bash's cooperative-exit rule stops a trap-less parent (before:
   it carried on with `$? = 130`).
-* **Env ALLOWLIST** (v0.33.0, BREAKING) on the fresh and the nested path — and for pid 1 and
-  the inner half too. *Measured by the review:* 37 vars matching `*_API_KEY`, `*_TOKEN`,
+* **Env ALLOWLIST** (v0.33.0, BREAKING) on the fresh and the nested path. *Measured by the review:* 37 vars matching `*_API_KEY`, `*_TOKEN`,
   `*SECRET` reached the arm on an operator host, and the gate passes its full env; a denylist
   cannot keep up. Default: `PATH HOME USER LOGNAME SHELL LANG LC_* TERM TZ NODE_OPTIONS
   NODE_PATH npm_config_* WEBCTL_*`, plus `TMPDIR=/tmp` (an inherited one may name a directory
@@ -538,7 +537,17 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
   `SSH_AGENT_PID`, `DOCKER_CONTEXT`, `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_TTY` (the last three
   carry the operator's addresses); naming one of them in `--pass-env` is a usage error. A
   nested call honours only its OWN `--pass-env`. *The gate's own call passes none:* its
-  tests' fake-contract knobs travel as `WEBCTL_TEST_FAKE_*`.
+  tests' fake-contract knobs travel as `WEBCTL_TEST_FAKE_*` — and a lane's nested `--pass-env X`
+  finds only an `X` its contract sets (a host-exported toggle is absent under the gate).
+* **The PRIVILEGED halves get less than the command** (review of 5773fb8). Everything before
+  the capability drop — `unshare`, pid 1's bash, the inner node (namespace root, full caps,
+  before any mask), its `mount`/`ip`, `setpriv`/`unshare -U` — gets only `PATH HOME USER LOGNAME
+  LANG LC_* TERM TZ TMPDIR WEBCTL_*`. *Measured:* a `NODE_OPTIONS=--require` preload (default-
+  passed to the command) ran in the inner node with a full CapEff; a passed `LD_*` was loaded by
+  every C binary of the chain. A loader denylist cannot be complete, so this one is an allowlist
+  too. The command's env (markers included) is computed once, travels in the plan pipe, and is
+  applied only by the `__isolated-pid1` helper that spawns the command, after the drop — on the
+  fresh path as well as the nested one.
 * **A nested call still gets its own PID namespace.** Network and masks are inherited (the
   mounts stay locked), but the process table is not: a lane that runs its suite through
   `isolated`, under the gate's own `isolated`, must not let the suite signal the contract
@@ -610,8 +619,16 @@ suite runs with cwd = its root, which re-opens it through the cwd.
 * **A re-bind must not expose what is hidden.** A PATH entry (FAIL) or `--keep-ro` (usage)
   that IS the home, or **contains** or **lies inside** a hidden dir, is refused, naming the
   rule and no path.
-* **The verdict** lists what came back, home-relative only:
-  `isolated: home HIDDEN; re-bound read-only: ~/…; writable: ~/…`.
+* **The verdict COUNTS, it does not list** (review of 5773fb8: it listed ~95 PATH re-binds on
+  an operator host, private repo names among them, and the gate tees it into logs). By path —
+  home-relative — only what the caller NAMED (cwd, `--keep`, `--keep-ro`); PATH entries as a
+  count; other implicit re-binds by label (base's repo root, node, the command,
+  `WEBCTL_UNSHARE_BIN`). `WEBCTL_ISOLATED_VERBOSE=1` lists every path.
+* **Hidden EXCEPT what is re-bound.** Every PATH dir under the home comes back read-only, so a
+  secret inside one is readable; so is one inside the cwd, a keep or base's root.
+* **A cwd at or beneath a hidden dir is refused** (FAIL, no path): it would be re-bound WRITABLE
+  there — measured, a cwd at `~/.ssh` ran with it writable. The read-back exempts only explicit
+  `--keep`s, so no implicit re-bind can sit on a hide either.
 * **`mount` is pinned.** Once the home's tmpfs is up, a PATH dir under the home is gone until
   its re-bind moves back — and a `mount` living there with it (measured: an arm's PATH was such
   a dir). ⇒ right after `/run` is covered, the real `mount` is bound read-only under the new
@@ -668,8 +685,8 @@ suite runs with cwd = its root, which re-opens it through the cwd.
   read-only step, in one outer-before-inner sequence with the keeps moving back. Inside, each
   lists nothing, a read is `ENOENT`, a create `EROFS` (measured). An explicit `--keep` at or
   beneath one re-exposes **that path only** (named on stderr); a keep that merely **contains**
-  one does not unhide it; the cwd, base's root, node and an absolute command beneath one are
-  bound back. Read back from mountinfo: each hidden dir's top mount must be ours (unless a
+  one does not unhide it; base's root, node and an absolute command beneath one are bound back
+  (the cwd there is refused since the review of 5773fb8). Read back from mountinfo: each hidden dir's top mount must be ours (unless a
   keep sits exactly there), else refused. Nesting fact: each dir recorded in
   `WEBCTL_HIDDEN_DIRS` carries the mask. **BREAKING** for a test that reads these dirs.
   *Tested* with a fake passwd home (a fake `/etc/passwd` bound in a throwaway `unshare -rm`),

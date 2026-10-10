@@ -1208,7 +1208,8 @@ const SCRUBBED_ENV = Object.freeze(['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK
  * *SECRET reached the arm on an operator host — and the gate passes its full env. So does
  * SESSION_MANAGER (it embeds the hostname and an ICE socket), ICEAUTHORITY, and
  * CLIAI_<TOOL>_BROWSER_{SSH_,}TARGET (they NAME remote targets). CLIAI_* is NOT default.
- * ⚠ The same filter applies to the env pid 1 starts with: BASH_ENV and SHELLOPTS are not on it.
+ * ⚠ The halves that run BEFORE the command (pid 1, the inner node, the drop) get even less:
+ * PRIVILEGED_PASS_ENV. BASH_ENV and SHELLOPTS are on neither list.
  */
 const DEFAULT_PASS_ENV = Object.freeze(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_*', 'TERM', 'TZ',
   'NODE_OPTIONS', 'NODE_PATH', 'npm_config_*', 'WEBCTL_*']);
@@ -1711,7 +1712,9 @@ function usageRefusal(why, command) {
  * made READ-ONLY there (the home's tmpfs hides only the symlink). Every path is realpath'd
  * first, so a symlink cannot smuggle the home in. Any mount that fails → refused; and the
  * result is READ BACK from /proc/self/mountinfo before the command starts. The verdict line
- * `isolated: home HIDDEN; re-bound read-only: …; writable: …` names the re-binds as `~/…` only.
+ * `isolated: home HIDDEN; re-bound read-only: …; writable: …` lists by path (`~/…`) only what the
+ * caller named — PATH entries are COUNTED (verdictLine; WEBCTL_ISOLATED_VERBOSE=1 lists all).
+ * A cwd at or beneath a hidden dir is REFUSED (it would be re-bound writable there).
  *
  * ⛔ AND THE SECRET DIRS STAY HIDDEN UNDER A RE-BIND (HIDDEN_DIRS): ~/.ssh, ~/.gnupg,
  * ~/.cache/CLIAI, ~/.config/CLIAI, ~/.local/state/CLIAI and ~/.config/webctl get their own empty
@@ -1735,8 +1738,9 @@ function usageRefusal(why, command) {
  * ⛔ THE ENV IS AN ALLOWLIST (v0.33.0, DEFAULT_PASS_ENV): PATH, HOME, USER, LOGNAME, SHELL, LANG,
  * LC_*, TERM, TZ, NODE_OPTIONS, NODE_PATH, npm_config_*, WEBCTL_* — plus each `--pass-env
  * NAME|PREFIX_*` — and SCRUBBED_ENV is removed even from those; TMPDIR=/tmp. On the nested path
- * too, with the nested call's own `--pass-env`. argv goes through as an ARRAY: no shell sees
- * the command.
+ * too, with the nested call's own `--pass-env`. ⛔ That is the COMMAND's env: every half before
+ * it gets PRIVILEGED_PASS_ENV only, and the command's env reaches the `__isolated-pid1` helper
+ * that spawns it down a pipe. argv goes through as an ARRAY: no shell sees the command.
  *
  * ⛔ HOST POLICY: an unprivileged user namespace refused by AppArmor
  * (kernel.apparmor_restrict_unprivileged_userns=1) is named as such, with both fixes

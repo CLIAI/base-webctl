@@ -270,7 +270,7 @@ contract's output when it is used.
 
 | verb | does | exit |
 |---|---|---|
-| `isolated [--keep <path>]… [--keep-ro <path>]… [--pass-env <NAME\|PREFIX_*>]… -- <cmd> [args…]` | runs `<cmd>` in private user+network+mount+**PID** namespaces (`unshare -rnm --pid --fork --mount-proc`) — no host process can be seen or signalled, and everything the arm started dies with it: the ONLY interface is its own `lo`, brought up first so local fakes/stubs work; `/run` and `/tmp` (and a real `/var/run`) are a fresh tmpfs, so the host's unix sockets — docker, X11, ssh-agent, session bus — are gone. The **passwd home is HIDDEN, whole** (an empty read-only tmpfs); re-bound on top **read-only**: base's repo root, node, an absolute `<cmd>`, `WEBCTL_UNSHARE_BIN`, **every PATH entry under the home**, each `--keep-ro`; **writable**: the cwd, a `$HOME` under `/tmp`, each `--keep`. `~/.ssh`, `~/.gnupg`, `~/.cache/CLIAI`, `~/.config/CLIAI`, `~/.local/state/CLIAI` and `~/.config/webctl` stay hidden under any re-bind that contains them. **pid 1 is `bash --norc -p`, and reaps orphans.** Caller's cwd and stdio; the **env is an ALLOWLIST** — `PATH HOME USER LOGNAME SHELL LANG LC_* TERM TZ NODE_OPTIONS NODE_PATH npm_config_* WEBCTL_*` plus each `--pass-env`, never `DISPLAY`/`WAYLAND_DISPLAY`/`SSH_AUTH_SOCK`/`DBUS_SESSION_BUS_ADDRESS`/`DOCKER_HOST`/`XDG_RUNTIME_DIR`, `XDG_{CACHE,CONFIG,STATE,DATA}_HOME`, `TMUX`/`TMUX_PANE`/`XAUTHORITY`/`SSH_AGENT_PID`/`DOCKER_CONTEXT`, `SSH_{CONNECTION,CLIENT,TTY}`; `TMPDIR=/tmp`; argv as an array (no shell). One stderr verdict line: `isolated: home HIDDEN; re-bound read-only: ~/…; writable: ~/…`. | the command's exit code; **1** (FAIL, with a JSONL `"check":"isolated"` record) when isolation could not be established — **the command is then not started**; a signal before it started: **dies by that signal** |
+| `isolated [--keep <path>]… [--keep-ro <path>]… [--pass-env <NAME\|PREFIX_*>]… -- <cmd> [args…]` | runs `<cmd>` in private user+network+mount+**PID** namespaces (`unshare -rnm --pid --fork --mount-proc`) — no host process can be seen or signalled, and everything the arm started dies with it: the ONLY interface is its own `lo`, brought up first so local fakes/stubs work; `/run` and `/tmp` (and a real `/var/run`) are a fresh tmpfs, so the host's unix sockets — docker, X11, ssh-agent, session bus — are gone. The **passwd home is HIDDEN, whole** (an empty read-only tmpfs); re-bound on top **read-only**: base's repo root, node, an absolute `<cmd>`, `WEBCTL_UNSHARE_BIN`, **every PATH entry under the home**, each `--keep-ro`; **writable**: the cwd, a `$HOME` under `/tmp`, each `--keep`. `~/.ssh`, `~/.gnupg`, `~/.cache/CLIAI`, `~/.config/CLIAI`, `~/.local/state/CLIAI` and `~/.config/webctl` stay hidden under any re-bind that contains them. **pid 1 is `bash --norc -p`, and reaps orphans.** Caller's cwd and stdio; the **env is an ALLOWLIST** — `PATH HOME USER LOGNAME SHELL LANG LC_* TERM TZ NODE_OPTIONS NODE_PATH npm_config_* WEBCTL_*` plus each `--pass-env`, never `DISPLAY`/`WAYLAND_DISPLAY`/`SSH_AUTH_SOCK`/`DBUS_SESSION_BUS_ADDRESS`/`DOCKER_HOST`/`XDG_RUNTIME_DIR`, `XDG_{CACHE,CONFIG,STATE,DATA}_HOME`, `TMUX`/`TMUX_PANE`/`XAUTHORITY`/`SSH_AGENT_PID`/`DOCKER_CONTEXT`, `SSH_{CONNECTION,CLIENT,TTY}`; `TMPDIR=/tmp`; argv as an array (no shell). One stderr verdict line: `isolated: home HIDDEN; re-bound read-only: …; writable: …` — paths only for what you named (cwd, `--keep`, `--keep-ro`), PATH entries COUNTED; `WEBCTL_ISOLATED_VERBOSE=1` lists every path. | the command's exit code; **1** (FAIL, with a JSONL `"check":"isolated"` record) when isolation could not be established — **the command is then not started**; a signal before it started: **dies by that signal** |
 | `isolation-check <port>…` | run INSIDE `isolated`. Each named port: a connect to `127.0.0.1:<port>` must fail with **exactly `ECONNREFUSED`** (lo up, nothing listening) — `ENETUNREACH` means the loopback is DOWN and is a FAIL. A control listener it opens on the namespace loopback must be reachable. The kernel proof below must hold. | 0 pass · 1 fail, naming every condition that failed · 3 usage |
 | `sandbox-port [--bare]` | binds `127.0.0.1:0`, reads the port, closes it, **asserts a connect is refused**, prints it (JSONL + human line; `--bare` = the number only, for `$(…)`) | 0 |
 | `guard-live-port <port> [--pin-verified]` | defence in depth where `isolated` is not used: **REFUSES** when `127.0.0.1:<port>` listens **or** answers CDP (`GET /json/version` 200), naming both facts, unless `--pin-verified` | 0 pass · 1 refused · 3 usage |
@@ -321,8 +321,17 @@ contract's output when it is used.
     it would expose what the hiding is for. A cwd that is (or contains) the home → FAIL; a
     `--keep` containing it → usage 3 (symlinks are realpath'd first). A writable keep in
     `~/.ssh`, `~/.config`, `~/.cache`, … is allowed and **named** on stderr (`isolated: note: …`).
-  * ⭐ **The verdict line** names what came back, home-relative only:
-    `isolated: home HIDDEN; re-bound read-only: ~/bin, ~/data; writable: ~/work`.
+  * ⛔ **Hidden EXCEPT what is re-bound** — and every PATH dir under the home is re-bound: a
+    secret in one (a token file in `~/bin`, a repo checkout on PATH) is readable inside.
+  * ⭐ **The verdict line** lists by path (home-relative) only what you NAMED — the cwd,
+    `--keep`, `--keep-ro`; PATH entries are COUNTED, other implicit re-binds named by label:
+    `isolated: home HIDDEN; re-bound read-only: ~/data, 2 PATH entries; writable: ~/work —
+    WEBCTL_ISOLATED_VERBOSE=1 lists every path`. ⛔ It used to list them all (~95 on an operator
+    host, private repo names among them) and the gate tees stderr into logs (review of 5773fb8).
+    `WEBCTL_ISOLATED_VERBOSE=1` restores the full `~/…` list for a local debug run.
+  * ⛔ **A cwd at or beneath a hidden dir is REFUSED** (FAIL): it was re-bound writable there.
+    Only an explicit `--keep` re-exposes a hidden dir. A NESTED `--keep` under the outer call's
+    hidden home says the OUTER call hides it — keep it there.
   * **What breaks:** anything that reads the home **indirectly** — git's `~/.gitconfig` (and
     `gpg.format=ssh` commit signing), ssh's `~/.ssh/config` and `known_hosts`, gpg's keyring,
     an rc file, a tool's cache or config under `~/.cache` / `~/.config` / `~/.local`. Give the
@@ -347,7 +356,14 @@ contract's output when it is used.
   `SESSION_MANAGER` (it embeds the hostname) or `ICEAUTHORITY`. Pass more with **`--pass-env
   NAME`** or **`--pass-env PREFIX_*`** (repeatable; a bare `*` is refused; a scrubbed socket
   name is refused, and a prefix pass cannot bring one back). A nested call honours only its
-  OWN `--pass-env`. The same allowlist is what pid 1 starts with.
+  OWN `--pass-env`. ⛔ **The privileged halves get LESS** — `unshare`, pid 1's bash, the inner
+  node (namespace root, full caps, before any mask), `mount`/`ip`, `setpriv`/`unshare -U`: only
+  `PATH HOME USER LOGNAME LANG LC_* TERM TZ TMPDIR WEBCTL_*`. Measured by the review of 5773fb8:
+  a `NODE_OPTIONS=--require` preload ran in the inner node with a full CapEff, and a passed
+  `LD_*` reached every C binary of the chain. The command's env travels in a pipe and is
+  applied by the helper that spawns it, after the drop — the command still gets it all.
+  ⚠ Under the release gate the OUTER call passes no extras: a nested `--pass-env X` finds only
+  an `X` your contract sets; a toggle exported on the host is absent there.
 * ⭐ **pid 1 reaps orphans.** pid 1 of the namespace (fresh and nested) is a small bash that
   runs the real work in the background and `wait`s on it, forwarding INT/TERM/HUP and exiting
   with its status. ⛔ node as pid 1 left a re-parented, exited grandchild as a **zombie** —
