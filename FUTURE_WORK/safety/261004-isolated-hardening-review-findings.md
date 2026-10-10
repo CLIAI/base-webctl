@@ -4,9 +4,33 @@
 > --norc -p`; 56cbbb0 early-signal window; 65bb06c AppArmor / `WEBCTL_UNSHARE_BIN`; d10716b
 > whole home hidden + `--keep-ro`; f51aa66 stripped markers + version skew; ec0739c). Every
 > numbered finding 1–8 and every ruling is implemented, armed, mutation-checked and in the
-> CHANGELOG. **Still open:** finding 9 (`/var/tmp`, `/dev/shm`, `/sys/class/net` — listed under
-> "does NOT cover"), and the release steps under **Then** below (integrate, bump, gate both
+> CHANGELOG. **A second review (of 5773fb8, below) is also fixed.** **Still open:** finding 9
+> (`/var/tmp`, `/dev/shm`, `/sys/class/net` — "does NOT cover", planned for v0.34.0), and the
+> release steps under **Then** below (integrate, bump, gate both
 > registries, tag, tell `perplexity` and `webctl:mgr`). Delete this note when those are done.
+
+## Second review, of 5773fb8 (2026-10-10): Ship-with-fixes — status
+
+Probes kept outside the repo. All fixed on `isolated-hardening` with a failing arm first, a
+control, and sabotages logged in `scripts/contract-harness.mjs.DEV_NOTES.md`:
+
+* **1 DONE (6d30097)** — NODE_OPTIONS / passed LD_* reached the privileged halves (a preload ran
+  in the inner node, CapEff full). Privileged halves get `PRIVILEGED_PASS_ENV` only; the
+  command's env travels in a pipe to the `__isolated-pid1` helper (now on the fresh path too).
+* **2 DONE (137838b)** — the verdict listed every `~/…` PATH re-bind. Now: named paths only,
+  PATH entries counted, `WEBCTL_ISOLATED_VERBOSE=1` for all. Headline softened (717066a).
+* **5 DONE (cc40757)** — forwarders installed before their child, signals buffered. Logic arm;
+  the ordering itself is reasoned (cannot be widened from outside; old orders survive).
+* **6 DOCUMENTED (717066a)** — PDEATHSIG race: closed by util-linux ≥ 2.39 (pidfd poll after
+  the prctl, read in its source); open on 2.38; under "does NOT cover".
+* **7 DONE (717066a)** — CHANGELOG line: under the gate a host-exported toggle is absent.
+* **8a DONE (18babed)** — nested keep under the outer's hidden home says so (exit 3).
+* **8b DONE (83d16e8)** — a cwd at/under a hidden dir is refused; the read-back exempts only
+  explicit `--keep`s.
+* **Deferred to v0.34.0 (ib4k shared arm set), documented only:** shared session keyring, no UTS
+  ns, `/sys/class/net` MACs, `/etc/machine-id`, `/var/tmp` + `/dev/shm` (first review's 9).
+
+## First review (2026-10-04)
 
 Review verdict: **Ship-with-fixes** (code reviewer subagent of the base lane, 2026-10-04).
 Paused for a token freeze; resume here. All MEASURED unless marked reasoned.
