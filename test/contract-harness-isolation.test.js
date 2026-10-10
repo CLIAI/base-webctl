@@ -3119,6 +3119,46 @@ test('⛔ TERM ×3 (60 ms apart) → the command\'s trap code 7, never death by 
   }
 });
 
+// ⛔ PID1_REAPER lost the command's status to a LATE signal (measured: `TERM ×3` → 127 in 1 of 150
+// runs under load; `wait: pid 2 is not a child of this shell`). Traced with strace: the blocking
+// wait4 inside bash's `wait` RETURNED the child (7) just as a trapped TERM arrived; the trap
+// handler jumped out of `wait` before bash recorded the status — `wait` said 143, the child was
+// already reaped, and the 7 existed nowhere. The window is inside bash, so no splice can widen
+// it; a BURST of TERMs hits it often: 30 TERMs 1 ms apart at a child that traps TERM and exits 7
+// → 8 of 100 runs wrong (127 or 143) with the old loop, here, sequential. Plain bash, no
+// namespace: what is under test is the reaper's own logic.
+const { PID1_REAPER } = await import(pathToFileURL(TOOL).href);
+/** Run PID1_REAPER over `cmd`; once it prints READY, `n` TERMs `gap` ms apart. @returns {Promise<{status: string, out: string}>} */
+const reaperBurst = (/** @type {string[]} */ cmd, /** @type {number} */ n, /** @type {number} */ gap) => new Promise((resolve) => {
+  const c = spawn('/bin/bash', ['--norc', '-p', '-c', PID1_REAPER, 'webctl-isolated-pid1', ...cmd], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = ''; let sent = false;
+  c.stderr?.on('data', (d) => { out += d; });
+  c.stdout?.on('data', async (d) => {
+    out += d;
+    if (sent || !/READY/.test(out)) return;
+    sent = true;
+    for (let k = 0; k < n; k++) { try { c.kill('SIGTERM'); } catch { /* gone */ } await new Promise((r) => setTimeout(r, gap)); }
+  });
+  c.on('close', (code, sig) => resolve({ status: String(sig || code), out }));
+});
+
+test('⛔ pid 1\'s reaper: a BURST of TERMs as the child exits never loses its status — 150 runs, every one the child\'s 7 (never 127 or 143)', async () => {
+  /** @type {Record<string, number>} */ const tally = {};
+  let odd = '';
+  for (let i = 0; i < 150; i++) {
+    const r = await reaperBurst(['sh', '-c', 'trap "exit 7" TERM; echo READY; while :; do sleep 0.01; done'], 30, 1);
+    tally[r.status] = (tally[r.status] || 0) + 1;
+    if (r.status !== '7' && !odd) odd = r.out;
+  }
+  assert.deepEqual(tally, { 7: 150 }, `the reaper lost the child's status (before the fix: ~8% of runs):\n${odd}`);
+});
+
+test('pid 1\'s reaper: the child\'s status as is (no signal), and its sleep fd (9) is NOT inherited by the child', async () => {
+  const r = await reaperBurst(['sh', '-c', 'echo READY; if [ -e /proc/$$/fd/9 ]; then echo FD9-LEAKED; fi; exit 5'], 0, 0);
+  assert.equal(r.status, '5', r.out);
+  assert.doesNotMatch(r.out, /FD9-LEAKED/, r.out);
+});
+
 const { userNamespaceRefusal } = await import(pathToFileURL(TOOL).href);
 const UID_MAP_EPERM = 'unshare: write failed /proc/self/uid_map: Operation not permitted';
 

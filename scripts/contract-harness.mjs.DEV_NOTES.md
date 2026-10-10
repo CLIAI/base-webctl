@@ -1186,6 +1186,49 @@ the trap by up to 100 ms).
   the old "no child ⇒ early" → the logic arm; no `loudAgain()` before a re-raise → the
   early-TERM and Ctrl-C arms (5 red: the harness no longer dies by the signal).
 
+### ⛔ pid 1's `wait` lost the command's status to a late signal (bash; v0.33.0, pre-existing)
+
+Seen as a flake of the `TERM ×3 (60 ms apart)` arm: `127` in 1 of 6 runs; reproduced 1 of 150
+under 6× parallel load, stderr `webctl-isolated-pid1: line 7: wait: pid 2 is not a child of this
+shell`. In plain bash too (no namespace, a node child: 13 of 240), so not pid-1 specific.
+* **Not the window first assumed.** "wait completes, a trap runs after it, the loop waits again
+  on a forgotten pid" is harmless on bash 5.3: a collected pid's status is kept, and `wait`
+  answers it again (measured: three `wait`s in a row → 7, 7, 7). A splice-a-`sleep`-after-`wait`
+  arm built on that theory PASSED on the old code — dropped.
+* **Traced (strace -f, a failing run):** two TERMs interrupted `wait` (`wait4 … ERESTARTSYS`,
+  each forwarded); the third wait4 RETURNED the child (`WEXITSTATUS == 7`) and SIGTERM was
+  delivered in the same instant; bash's trap handler jumped out of the `wait` builtin before the
+  status was recorded → `wait` said 143, the trap's `kill` got ESRCH, the next `wait` →
+  `wait4(-1, WNOHANG) = ECHILD` → "not a child" → `exit_group(127)`. The 7 existed nowhere.
+  ⇒ the proposed check — `kill -0 "$c"` after each `wait`, break when gone — would turn the 127
+  into 143: the child IS gone, its status with it. Logged per wait: `143 t=1` ×3, then `127`.
+  A burst also made a RE-`wait` of an already-recorded status come back 143 (`W rc=7`, then
+  `W rc=143` with no trap logged in between).
+* ⇒ **pid 1 never blocks in `wait` while a signal can arrive.** It POLLS: `kill -0 "$c"`, then
+  `read -t 0.02 -u 9` on its own read-write end of `<(:)` (a pipe nobody writes: a sleep with no
+  fork; fd 9 opened AFTER the child was forked, so the child never has it). A trapped signal
+  interrupts the read, so forwarding stays prompt. The child's exit is reaped by bash's SIGCHLD
+  handler — outside `wait` — and recorded. When `kill -0` fails (a zombie still passes; only
+  bash reaps it, so failing means bash holds the status) there is nothing left to forward:
+  `trap '' INT TERM HUP`, then ONE `wait`, which nothing can interrupt. `trap : CHLD` does NOT
+  wake `read -t` (measured: the full timeout), hence the 20 ms poll. No /dev/fd → the old loop.
+  Bash ≥ 5.1 (`wait -p`) is NOT required.
+* ⚠ **pid reuse:** in our PID namespace pid 1 is the only reaper and pids are allocated upward,
+  so `$c` can name another process only after bash reaped it AND pids wrapped (pid_max); even
+  then the poll lasts only while that process lives. Same in plain bash.
+* **Arm (deterministic in effect, statistical in form):** PID1_REAPER in plain bash over a child
+  that traps TERM → `exit 7`; once it is READY, 30 TERMs 1 ms apart; 150 runs, all must be 7.
+  The window is inside bash, so no splice can widen it; the burst hits it. **Before: 8 of 100**
+  wrong sequentially (3× 127, 5× 143); 2–6% under load. After: 0/100 sequential, 0/1200 under
+  5× load (sh and node children), 150/150 in the arm. A false pass of the old code ≈ 0.92^150.
+  End to end (`isolated -- sh -c <trapper>`, TERM ×3 60 ms apart, 6× parallel): before 1/150
+  wrong, after **0/300**.
+  Second arm: no signal → the status as is (5), and fd 9 absent in the child.
+* **Cost:** ≈ 6 ms more per run (100 sequential: 2.16 s → 2.57 s, the old one also losing 8).
+* **Sabotage (all caught):** the old loop restored → the burst arm; the poll replaced by
+  `wait` (traps still ignored after) → the burst arm (`not a child`); `trap ''` dropped → the
+  burst arm; fd 9 opened before the fork → the fd arm.
+
 ### ⛔ The 0555 hide answered a write CHECK with EACCES (gate regression, v0.33.0)
 
 Measured by the lead on the release gate — 8 of a consumer lane's 10 failures (earlier blamed

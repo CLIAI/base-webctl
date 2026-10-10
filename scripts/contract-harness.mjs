@@ -1352,10 +1352,27 @@ const HIDE_MODE = '0755';
  *   * fds 3/4 (the fresh path's status and plan pipes) pass to the background child, which
  *     needs them; bash then closes its OWN copies.
  *   * INT/TERM/HUP are trapped (pid 1 receives nothing it has no handler for) and forwarded to
- *     the child; a trapped signal interrupts `wait` (>128), so it waits AGAIN until the child
- *     itself ended — bash keeps a reaped child's status for a second `wait` (measured) — and
- *     exits with the CHILD's status. A signal after the traps but before the child exists ends
- *     pid 1 at once (128+n), and the namespace with it.
+ *     the child. A signal after the traps but before the child exists ends pid 1 at once
+ *     (128+n), and the namespace with it.
+ *   * ⛔ pid 1 NEVER BLOCKS IN THE `wait` BUILTIN WHILE A SIGNAL CAN ARRIVE. It used to (`wait`,
+ *     interrupted by a trap → >128 → wait again) and LOST the child's status: `TERM ×3` → 127 in
+ *     1 of 150 runs under load, `wait: pid 2 is not a child of this shell`. Traced (strace, bash
+ *     5.3): the blocking wait4 inside `wait` RETURNED the child (status 7) as a trapped TERM
+ *     arrived; bash's trap handler jumped out of `wait` before the status was recorded, `wait`
+ *     said 143, and the kernel had already reaped the child — so the 7 existed nowhere, and the
+ *     next `wait` answered 127. (A `kill -0` check after each wait cannot recover it: the child is
+ *     gone either way.) A burst also made a re-`wait` of an already-recorded status say 143.
+ *     ⇒ pid 1 POLLS: `kill -0` the child, then `read -t 0.02` on a pipe nobody writes (fd 9, our
+ *     own read-write end of `<(:)`, opened AFTER the child was forked so it never inherits it) —
+ *     a sleep with no fork, which a trapped signal interrupts so forwarding stays prompt. The
+ *     child's exit is REAPED meanwhile by bash's SIGCHLD handler, outside `wait`, and recorded;
+ *     once `kill -0` fails (a zombie still passes; only bash reaps it, so failing means bash has
+ *     its status), there is nothing left to forward: INT/TERM/HUP are IGNORED and ONE `wait`
+ *     collects the recorded status, uninterruptibly. Cost ≈ 10 ms of exit latency on average.
+ *     ⚠ `kill -0` and pid reuse: inside our PID namespace pid 1 is the only reaper and allocates
+ *     upward, so $c cannot name another process until bash reaped it AND pids wrapped (pid_max);
+ *     even then the poll only lasts while that process lives. Plain bash (the arms) the same.
+ *     Fallback, no /dev/fd: the old interrupted-`wait` loop (correct but for that race).
  *   * ⛔ A signal BEFORE the traps is LOST, not handled: pid 1 ignores what it has no handler for.
  *     (This comment used to claim "nothing starts after the caller gave up" — measured false by
  *     the review: 24 of 40 early TERMs lost, the command ran to exit 0.) The window is closed
@@ -1365,15 +1382,20 @@ const HIDE_MODE = '0755';
  *     which is why the node helper stays between this pid 1 and the command on BOTH paths.
  * Fail closed: no bash in the system dirs → refused (privilegedTools), never a non-reaping pid 1.
  */
-const PID1_REAPER = [
-  'c=; t=',
-  'f() { t=1; if [ -n "$c" ]; then kill -s "$1" "$c" 2>/dev/null; else exit "$2"; fi; }',
+export const PID1_REAPER = [
+  'c=',
+  'f() { if [ -n "$c" ]; then kill -s "$1" "$c" 2>/dev/null; else exit "$2"; fi; }',
   "trap 'f INT 130' INT; trap 'f TERM 143' TERM; trap 'f HUP 129' HUP",
   '"$@" <&0 &',
   'c=$!',
   'exec 3>&- 4<&-',
-  'while :; do t=; wait "$c"; rc=$?; [ -n "$t" ] || break; done',
-  'exit "$rc"',
+  'if { exec 9<> <(:); } 2>/dev/null; then',
+  '  while kill -0 "$c" 2>/dev/null; do read -t 0.02 -u 9 -r _; done',
+  'else',
+  '  while kill -0 "$c" 2>/dev/null; do wait "$c"; done',
+  'fi',
+  "trap '' INT TERM HUP",
+  'wait "$c"',
 ].join('\n');
 
 /** The AppArmor knob that makes an unprivileged `unshare -r` fail with uid_map EPERM (Ubuntu ≥ 23.10). */

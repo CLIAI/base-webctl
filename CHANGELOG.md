@@ -466,6 +466,13 @@ per path with pid 1 held trapless for 300 ms; 0 lost.
   chain, and 127 reads "command not found" (review F3; the fresh path's unshare spawn already
   failed 1). The pid-1 helper that spawns the COMMAND had no catch at all: an env var over
   128 KiB (MAX_ARG_STRLEN; the env pipe has no such limit) → E2BIG rejected it — now FAIL, 1.
+* Fixed (pre-existing): a signal landing as the command exited could LOSE its exit status —
+  `127` (`wait: pid 2 is not a child of this shell`) or `143` instead of the command's own
+  code; 1 of 150 under load with TERM ×3, ~8% with a 1 ms burst. A bash race: the blocking
+  `wait` reaped the child as a trapped signal arrived and returned before recording its status.
+  pid 1 now never blocks in `wait` while a signal can arrive: it polls (`kill -0` + a 20 ms
+  fork-free `read -t`), lets bash's SIGCHLD handler reap, then ignores INT/TERM/HUP for one
+  final `wait`. About 6 ms more per `isolated` call; no newer bash required.
 * Fixed (pre-existing): TERM ×3 in quick succession after the command's trap came back **143**
   instead of the trap's code (measured: 9–10/25 with the TERMs 60 ms apart). A late TERM killed a
   node half during its own exit, after it had dropped its forwarder. Now 150/150 return the
