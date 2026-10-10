@@ -2725,8 +2725,9 @@ test('⛔ STRIPPED markers under an outer that re-bound paths under the home: th
     assert.match(r.stderr, /ALREADY INSIDE an isolated namespace whose markers were stripped/, 'premise: the inner call took the fresh path');
     assert.deepEqual(probeOf(r.stdout), { 'RW-READ': 'ok', 'RW-WRITE': 'ok', 'RO-READ': 'ok', 'RO-WRITE': 'EROFS', SSH: 'ENOENT', SUB: 'ENOENT' },
       `${r.stdout}${r.stderr}`);
-    // ⚠ by COUNT, never the path (the gate tees stderr into logs)
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: [^;]*\b1 outer re-bind\b[^;]*; writable: [^;]*\b1 outer re-bind\b/m, r.stderr);
+    // ⚠ by COUNT, never the path (the gate tees stderr into logs). Writable: ~/keep-rw AND the outer's cwd —
+    // outside the home, counted since re-review item 4 (it was carried before too, just not shown)
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: [^;]*\b1 outer re-bind\b[^;]*; writable: [^;]*\b2 outer re-binds\b/m, r.stderr);
     assert.ok(!/keep-r[ow]/.test(r.stderr.split('\n').filter((l) => /ALREADY INSIDE/.test(l)).join('\n')), r.stderr);
   } finally { for (const d of [home, scratch]) fs.rmSync(d, { recursive: true, force: true }); }
 });
