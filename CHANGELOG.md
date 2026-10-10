@@ -254,7 +254,7 @@ by default:**
   # chatgpt
   node "$H" isolated --pass-env 'CGWC_*' --pass-env CLIAI_CHATGPT_WEBCTL_TESTS_HOST_NETWORK -- …
   # substack
-  node "$H" isolated --pass-env SUBSTACK_WEBCTL_TESTS_HOST_PID -- …
+  node "$H" isolated --pass-env SUBSTACK_WEBCTL_TESTS_HOST_PID --pass-env UV_CACHE_DIR -- …
   # perplexity
   node "$H" isolated --pass-env FIXTURE_PARENT_NETNS -- …
   # aliexpress
@@ -264,6 +264,12 @@ by default:**
   ⚠ **Under the release gate**, the gate's own (outer) `isolated` call passes no extra env, so
   your nested `--pass-env X` only finds an `X` your contract sets itself: a toggle exported on
   the host (`…_TESTS_HOST_NETWORK=1` in your shell) is ABSENT under the gate.
+
+  ⚠ **A lane that runs `uv` inside must pass its uv knobs:** `--pass-env UV_CACHE_DIR` (or
+  `--pass-env 'UV_*'` if it sets several, e.g. `UV_NO_CACHE`). Dropped by the allowlist, uv falls
+  back to `~/.cache/uv` — under the HIDDEN home — and fails `ENOENT` / `EROFS`. Measured by a
+  consumer lane: its contract set `UV_CACHE_DIR=/tmp/uv-cache`, the allowlist dropped it, and a
+  cwd test failed.
 
 * ⛔ **Stay green on BOTH your current pin and v0.33.0.** A v0.32 harness (generation 5)
   REFUSES `--pass-env` as an unknown option (usage, exit 3) — so pass it only when the vendored
