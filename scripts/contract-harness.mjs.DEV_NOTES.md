@@ -887,6 +887,23 @@ the capabilities it is about to drop).
   chain given `env`; NODE_OPTIONS + LD_* added to PRIVILEGED_PASS_ENV; the helper spawning
   without `env` (the CONTROL half: the command no longer sees NODE_OPTIONS).
 
+### ⛔ The verdict line named every PATH re-bind (review of 5773fb8, v0.33.0)
+
+`isolated: home HIDDEN; re-bound read-only: …` listed EVERY `~/…` re-bind — ~95 PATH entries
+on an operator host, private repo names among them — and the gate tees stderr into its logs.
+base is public; verdicts carry COUNTS. ⇒ `verdictLine`: listed by path only what the caller
+NAMED (`Bind.named`: cwd, `--keep`, `--keep-ro`); PATH entries COUNTED (`N PATH entries`); the
+other implicit re-binds by LABEL (base's repo root, node, the command, WEBCTL_UNSHARE_BIN); a
+pointer `— WEBCTL_ISOLATED_VERBOSE=1 lists every path` whenever something was counted. The
+opt-in restores the full `~/…` list. ⚠ A named path an implicit re-bind CONTAINS is merged into
+it by planKeeps and is then counted, not listed.
+* **Arm:** a PATH dir `~/private-repo-zq7x/bin` (and `~/bin`) under a fake home: by default
+  neither name is on stderr and the line reads `~/data, 2 PATH entries`; CONTROL with the
+  opt-in: both listed. The base-root arm now expects `base's repo root` (its label).
+* **Sabotage:** verbose always on → 3 arms; the named filter ignored → 3 arms; the cwd not
+  marked named → SURVIVED at first (no arm looked at a cwd's verdict) — the cwd-under-home arm
+  now asserts `writable: ~/…<cwd>`, and catches it.
+
 ### Host policy: AppArmor, and `WEBCTL_UNSHARE_BIN` (v0.33.0)
 
 `kernel.apparmor_restrict_unprivileged_userns=1` (reported from an Ubuntu 24.04 host) makes

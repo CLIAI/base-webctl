@@ -1066,6 +1066,9 @@ test('⭐ a cwd under home is writable; `..` out of it is EROFS — the cwd is r
     assert.equal(fs.readFileSync(path.join(cwd, 'in-cwd.txt'), 'utf8'), 'x');
     assert.match(r.stdout, /^UP EROFS$/m, 'a relative path out of the cwd reached the writable tree');
     assert.equal(fs.existsSync(path.join(dir, name)), false);
+    // the cwd is a path the CALLER named: the verdict lists it (as ~/…), it is not merely counted
+    const rel = `~/${path.relative(PW_HOME, fs.realpathSync(cwd))}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(r.stderr, new RegExp(`^isolated: home HIDDEN; .*; writable: ${rel}( — |$)`, 'm'), r.stderr);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1346,7 +1349,7 @@ test('⭐ CONTROL: the same probe WITHOUT `isolated` (same fake home) reads ever
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
-test('⭐ a PATH dir under the hidden home is re-bound read-only: a script in it RUNS inside; the verdict lists re-binds as ~/… only', needsIsolation, async (t) => {
+test('⭐ a PATH dir under the hidden home is re-bound read-only: a script in it RUNS inside; the verdict lists NAMED re-binds as ~/… only', needsIsolation, async (t) => {
   const home = fakeWholeHome();
   try {
     const r = await underFakeHome(home, ['env', `PATH=${path.join(home, 'bin')}:${process.env.PATH}`, process.execPath, TOOL, 'isolated',
@@ -1355,12 +1358,39 @@ test('⭐ a PATH dir under the hidden home is re-bound read-only: a script in it
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /^HELLO from a PATH dir under the home$/m, r.stderr);
     assert.match(r.stdout, /^BIN-RO$/m, 'a PATH dir under the home was re-bound WRITABLE');
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/bin, ~\/data; writable: ~\/work$/m, r.stderr);
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 1 PATH entry; writable: ~\/work — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
     assert.ok(!r.stderr.includes(home), 'the verdict printed the home path');
     // CONTROL: without the PATH entry the same name is not found inside
     const c = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--', 'sh', '-c', 'hello-from-home || echo "NOT-FOUND $?"']);
     assert.ok(c);
     assert.match(c.stdout, /^NOT-FOUND 127$/m, c.stdout + c.stderr);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+// ⛔ The verdict line used to list EVERY `~/…` PATH re-bind — ~95 on an operator host, naming
+// private repos — and the gate tees it into logs; base is PUBLIC and its rule is that verdicts
+// carry COUNTS, never paths. ⇒ implicit re-binds are COUNTED; only what the caller NAMED (cwd,
+// --keep, --keep-ro) is listed; WEBCTL_ISOLATED_VERBOSE=1 lists everything (review of 5773fb8).
+test('⛔ the verdict COUNTS implicit PATH re-binds — a distinctive PATH dir name never reaches stderr by default; CONTROL: WEBCTL_ISOLATED_VERBOSE=1 lists it', needsIsolation, async (t) => {
+  const home = fakeWholeHome();
+  const secretName = 'private-repo-zq7x';
+  fs.mkdirSync(path.join(home, secretName, 'bin'), { recursive: true });
+  try {
+    const argv = (/** @type {string[]} */ pre) => [...pre, 'env', `PATH=${path.join(home, secretName, 'bin')}:${path.join(home, 'bin')}:${process.env.PATH}`,
+      process.execPath, TOOL, 'isolated', '--keep-ro', path.join(home, 'data'), '--keep', path.join(home, 'work'), '--', 'sh', '-c', 'hello-from-home'];
+    const r = await underFakeHome(home, argv([]));
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^HELLO from a PATH dir under the home$/m, 'the PATH dir was not re-bound (the count would be vacuous)');
+    assert.ok(!r.stderr.includes(secretName), `an implicit PATH re-bind was NAMED on stderr:\n${r.stderr}`);
+    assert.ok(!r.stderr.includes('~/bin'), `an implicit PATH re-bind was NAMED on stderr:\n${r.stderr}`);
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 2 PATH entries; writable: ~\/work — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    // CONTROL: the opt-in lists every path (so the default's silence is the fix, not a missing bind)
+    const v = await underFakeHome(home, argv(['env', 'WEBCTL_ISOLATED_VERBOSE=1']));
+    assert.ok(v);
+    assert.equal(v.status, 0, v.stdout + v.stderr);
+    assert.match(v.stderr, new RegExp(`^isolated: home HIDDEN; re-bound read-only: ~/bin, ~/data, ~/${secretName}/bin; writable: ~/work$`, 'm'), v.stderr);
+    assert.ok(!v.stderr.includes(home), 'even verbose, the home itself is printed as ~');
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -1375,7 +1405,8 @@ test('⛔ base\'s root UNDER the hidden home is re-bound READ-ONLY (the harness 
     if (!r) { t.skip(NO_FAKE_HOME); return; }
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.equal(writeOf(r.stdout), 'EROFS', 'base\'s root under the home is writable inside');
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/base-copy; writable: nothing$/m, r.stderr);
+    // base's root is not a path the caller named: it is named by its LABEL, never by its path
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: base's repo root; writable: nothing — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
     assert.equal(fs.existsSync(path.join(base, 'x')), false);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
@@ -1836,7 +1867,7 @@ test('⛔ STRIPPED markers inside `isolated` → the call isolates AGAIN, fully 
   const inner = (r.stdout.match(/^INNER (\S+)$/m) || [])[1];
   assert.ok(inner && inner !== outer, `the stripped call did not make its own network namespace (only inherited):\n${r.stdout}`);
   assert.match(r.stdout, /^PROOF-OK$/m, `the kernel proof failed after a stripped re-isolation:\n${r.stderr}`);
-  assert.match(r.stderr, /^isolated: home HIDDEN; .*; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully$/m, r.stderr);
+  assert.match(r.stderr, /^isolated: home HIDDEN; .*; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully( — WEBCTL_ISOLATED_VERBOSE=1 lists every path)?$/m, r.stderr);
   // CONTROL: from the host the verdict does not claim it
   const c = await run(['isolated', '--', 'true']);
   assert.equal(c.status, 0, c.stderr);

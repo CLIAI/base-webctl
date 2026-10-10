@@ -1801,7 +1801,7 @@ function runIsolated(a) {
     return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${prot.refuse}. The command was NOT started.`, { command }));
   }
   const plan = planKeeps(keeps, [
-    { p: process.cwd(), label: 'the working directory', rw: true },
+    { p: process.cwd(), label: 'the working directory', rw: true, named: true },
     // ⛔ READ-ONLY: under the release gate ONE base checkout serves every consumer in turn,
     // so a mutant writing into it would change what the NEXT consumer is judged against —
     // and it is the harness's own code. base's own suite runs with cwd = its root, which
@@ -1830,15 +1830,12 @@ function runIsolated(a) {
   const bash = bashOnPath();
   if (!bash) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${NO_BASH}. The command was NOT started.`, { command }));
   for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
-  // ⭐ the verdict on the home: what is re-bound on top of the hidden home, as ~/… ONLY
-  const rebound = (/** @type {boolean} */ rw) => plan.binds.filter((b) => b.rw === rw && isWithin(b.p, prot.home))
-    .map((b) => (b.p === prot.home ? '~' : `~/${path.relative(prot.home, b.p)}`)).sort().join(', ') || 'nothing';
   // ⭐ STRIPPED MARKERS: no HOST_NETNS, yet the KERNEL says we are inside one of ours — our tmpfs
   // tag on /run and /tmp and a lo-only network. Measured: such a call isolates AGAIN, fully
   // (its own netns and pidns, the home hidden again); never "only inherited". Say so.
   const inside = unmaskedDirs().length === 0 && extraInterfaces() === 0
     ? '; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully' : '';
-  process.stderr.write(`isolated: home HIDDEN; re-bound read-only: ${rebound(false)}; writable: ${rebound(true)}${inside}\n`);
+  process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', inside)}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
   // the COMMAND's env: the allowlist + our markers. It travels in the plan (fd 4) and is applied
@@ -1891,6 +1888,40 @@ function runIsolated(a) {
         { command }));
     });
   });
+}
+
+/** `1`: the verdict line lists EVERY re-bound path (as `~/…`), implicit ones included. */
+const VERBOSE_ENV = 'WEBCTL_ISOLATED_VERBOSE';
+
+/**
+ * The verdict on the hidden home: `isolated: home HIDDEN; re-bound read-only: …; writable: …`.
+ *
+ * ⛔ It used to list EVERY re-bind under the home as `~/…` — on an operator host ~95 PATH
+ * entries, naming private repos — and the gate tees this line into logs (review of 5773fb8).
+ * base is PUBLIC; its rule is that verdicts carry COUNTS, never paths. ⇒ Listed by path: only
+ * what the caller NAMED (cwd, --keep, --keep-ro). Implicit re-binds are COUNTED (`N PATH
+ * entries`) or named by LABEL (base's repo root, node, the command, WEBCTL_UNSHARE_BIN), with a
+ * pointer to the opt-in. `verbose` (WEBCTL_ISOLATED_VERBOSE=1): every path, as `~/…`, as before.
+ * @param {Bind[]} binds @param {string} home @param {boolean} verbose @param {string} [more] appended before the pointer
+ * @returns {string}
+ */
+function verdictLine(binds, home, verbose, more = '') {
+  const tilde = (/** @type {string} */ p) => (p === home ? '~' : `~/${path.relative(home, p)}`);
+  let counted = false;
+  const list = (/** @type {boolean} */ rw) => {
+    const under = binds.filter((b) => b.rw === rw && isWithin(b.p, home));
+    if (verbose) return under.map((b) => tilde(b.p)).sort().join(', ') || 'nothing';
+    const named = under.filter((b) => b.named).map((b) => tilde(b.p)).sort();
+    const paths = under.filter((b) => !b.named && /^PATH entry #/.test(b.label || '')).length;
+    const labels = [...new Set(under.filter((b) => !b.named && !/^PATH entry #/.test(b.label || '')).map((b) => b.label || 'a re-bind'))].sort();
+    const implicit = [...(paths ? [`${paths} PATH entr${paths === 1 ? 'y' : 'ies'}`] : []), ...labels];
+    if (implicit.length) counted = true;
+    return [...named, ...implicit].join(', ') || 'nothing';
+  };
+  const ro = list(false);
+  const rw = list(true);
+  return `isolated: home HIDDEN; re-bound read-only: ${ro}; writable: ${rw}${more}`
+    + (counted ? ` — ${VERBOSE_ENV}=1 lists every path` : '');
 }
 
 /** @param {unknown} e */
@@ -2439,8 +2470,10 @@ function makeTreeReadOnly(root, rbindFirst) {
 }
 
 /**
- * @typedef {{p: string, rw: boolean}} Bind a real path re-exposed by its own mount;
- *   rw=false is READ-ONLY (base's repo root, node, the command: the arm reads them only)
+ * @typedef {{p: string, rw: boolean, label?: string, named?: boolean}} Bind a real path re-exposed by
+ *   its own mount; rw=false is READ-ONLY (base's repo root, node, the command: the arm reads them
+ *   only). `label` names it in messages; `named`: the CALLER named this path (cwd, --keep,
+ *   --keep-ro) — only those are listed by path in the verdict (verdictLine).
  */
 
 /**
@@ -2460,7 +2493,7 @@ function makeTreeReadOnly(root, rbindFirst) {
  * ⚠ Only `--keep` (writable) paths are EXEMPT from the socket check — a socket on a read-only
  * mount still answers a connect.
  * @param {string[]} explicit `--keep` paths
- * @param {{p: string, label: string, rw: boolean, rule?: boolean}[]} implicit
+ * @param {{p: string, label: string, rw: boolean, rule?: boolean, named?: boolean}[]} implicit
  * @param {Prot} prot
  * @param {string[]} [explicitRo] `--keep-ro` paths
  * @returns {{binds: Bind[], exempt: string[], notes: string[], usage?: string, refuse?: string}}
@@ -2473,9 +2506,9 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
   /** @type {Bind[]} */ const binds = [];
   /** @type {string[]} */ const exempt = [];
   /** @type {string[]} */ const notes = [];
-  const items = [...explicit.map((p, i) => ({ p, label: `--keep #${i + 1}`, explicit: true, rw: true, rule: false })),
-    ...explicitRo.map((p, i) => ({ p, label: `--keep-ro #${i + 1}`, explicit: true, rw: false, rule: true })),
-    ...implicit.map((k) => ({ rule: false, ...k, explicit: false }))];
+  const items = [...explicit.map((p, i) => ({ p, label: `--keep #${i + 1}`, explicit: true, rw: true, rule: false, named: true })),
+    ...explicitRo.map((p, i) => ({ p, label: `--keep-ro #${i + 1}`, explicit: true, rw: false, rule: true, named: true })),
+    ...implicit.map((k) => ({ rule: false, named: false, ...k, explicit: false }))];
   for (const k of items) {
     let real = '';
     try { real = fs.realpathSync(path.resolve(k.p)); } catch {
@@ -2539,7 +2572,7 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
     const underHidden = prot.hidden.some((h) => isWithin(real, h));
     const keepRo = k.explicit && !k.rw;
     if ((isWithin(real, tmp) && real !== tmp) || underHome || (underRoot && k.rw) || underHidden || (keepRo && !underRoot)) {
-      binds.push({ p: real, rw: k.rw });
+      binds.push({ p: real, rw: k.rw, label: k.label, named: k.named });
     }
     if (k.explicit && k.rw) exempt.push(real);
   }
