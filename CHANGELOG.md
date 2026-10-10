@@ -346,6 +346,11 @@ except a contract that matches the new verdict field or a refusal's tail.
     the outer, and a nested call cannot widen that) — keep it in the outer call;
   * a cwd that CONTAINS a masked dir (`/`, `/var`) is now refused: its writable bind would undo the
     mask. Run from a test-owned directory.
+  * ⛔ **a `git worktree` whose gitdir lies outside the cwd and every keep** — the case lanes hit:
+    the worktree's `.git` is a FILE pointing into the MAIN repo's `.git/worktrees/<name>`, which is
+    now read-only, so `git add` and `git commit` fail with **EROFS on `index.lock`** (and `HEAD`,
+    refs). Fix: **`--keep <the main repo>`** (or its `.git`). A gitdir under `/tmp` or the home was
+    already unusable before R1 (the scratch mask and the hidden home put it out of reach).
 
 ### New refusals (fail closed)
 
