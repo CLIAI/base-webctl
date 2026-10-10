@@ -1293,6 +1293,62 @@ const PID1_REAPER = [
   'exit "$rc"',
 ].join('\n');
 
+/** The AppArmor knob that makes an unprivileged `unshare -r` fail with uid_map EPERM (Ubuntu ≥ 23.10). */
+const APPARMOR_USERNS_SYSCTL = '/proc/sys/kernel/apparmor_restrict_unprivileged_userns';
+/** An absolute path to the `unshare` EVERY invocation uses (default: `unshare` on PATH). */
+const UNSHARE_BIN_ENV = 'WEBCTL_UNSHARE_BIN';
+
+/**
+ * The HOST-POLICY refusal for an unprivileged user namespace the kernel refused, or ''.
+ *
+ * Measured on an Ubuntu 24.04 host: `kernel.apparmor_restrict_unprivileged_userns=1` makes
+ * `unshare -r` fail writing uid_map (EPERM). That is the host's policy, not the lane's code —
+ * and the generic "user namespaces may be disabled" reason sent people hunting the wrong
+ * sysctl. ⇒ When `stderr` (unshare's) shows an EPERM on uid_map/gid_map/setgroups/unshare AND
+ * the sysctl reads 1, say so and give both fixes; otherwise '' (the caller's reason stands).
+ * ⚠ `sysctlPath` is a parameter so the arms never read (or depend on) the host's setting.
+ * @param {string} stderr @param {string} [sysctlPath] @returns {string}
+ */
+export function userNamespaceRefusal(stderr, sysctlPath = APPARMOR_USERNS_SYSCTL) {
+  const eperm = /\b(uid_map|gid_map|setgroups|unshare)\b[^\n]*(Operation not permitted|EPERM|Permission denied)/i.test(String(stderr || ''));
+  if (!eperm) return '';
+  let v = '';
+  try { v = fs.readFileSync(sysctlPath, 'utf8').trim(); } catch { return ''; }
+  if (v !== '1') return '';
+  return 'HOST POLICY, not a fault of this lane: the kernel refused an unprivileged user namespace (uid_map '
+    + 'EPERM) because kernel.apparmor_restrict_unprivileged_userns = 1 — AppArmor restricts them on this host. '
+    + 'Fix ONE of: (1) `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (host-wide; persist it under '
+    + '/etc/sysctl.d); (2) an AppArmor profile granting `userns,` to a DEDICATED copy of unshare, and '
+    + `${UNSHARE_BIN_ENV}=<its absolute path> (used for every unshare isolation runs)`;
+}
+
+/**
+ * The `unshare` to run: WEBCTL_UNSHARE_BIN when set — VALIDATED: an absolute path to an
+ * executable regular file — else `unshare` on PATH. `why` names the rule broken, never the path.
+ * @returns {{bin: string, why: string}}
+ */
+function unshareBin() {
+  const v = process.env[UNSHARE_BIN_ENV];
+  if (v === undefined || v === '') return { bin: 'unshare', why: '' };
+  const rule = `${UNSHARE_BIN_ENV} must be an ABSOLUTE path to an EXECUTABLE regular file`;
+  if (!path.isAbsolute(v)) return { bin: '', why: `${rule} — it is not absolute` };
+  /** @type {fs.Stats} */ let st;
+  try { st = fs.statSync(v); } catch { return { bin: '', why: `${rule} — it does not exist` }; }
+  if (!st.isFile()) return { bin: '', why: `${rule} — it is not a regular file` };
+  try { fs.accessSync(v, fs.constants.X_OK); } catch { return { bin: '', why: `${rule} — it is not executable` }; }
+  return { bin: v, why: '' };
+}
+
+/**
+ * Why `bin -r true` fails here, if it is the AppArmor policy (userNamespaceRefusal), else ''.
+ * Run only AFTER a failure: the fresh path's unshare shares the caller's stderr, so its own
+ * message cannot be read back. @param {string} bin
+ */
+function diagnoseUserNamespace(bin) {
+  const r = spawnSync(bin, ['-r', 'true'], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
+  return r.status === 0 ? '' : userNamespaceRefusal(String(r.stderr || ''));
+}
+
 /**
  * How pid 1's bash is started: `--norc -p -c PID1_REAPER`.
  *
@@ -1605,6 +1661,8 @@ function runIsolated(a) {
         + 'display, address or state root) — set it inside the command instead', command));
     }
   }
+  const ub = unshareBin();
+  if (ub.why) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${ub.why}. The command was NOT started.`, { command }));
   // ⛔ NESTED CALL: "already inside" is proven from the KERNEL. The marker alone is
   // trusted input — set on the host it would skip isolation entirely — so a marker
   // whose proof fails is REFUSED (no verdict, exit 2) before anything runs.
@@ -1666,6 +1724,8 @@ function runIsolated(a) {
     { p: SELF_ROOT, label: "base's repo root", rw: false },
     ...(path.isAbsolute(command[0]) ? [{ p: command[0], label: 'the command', rw: false }] : []),
     { p: process.execPath, label: 'node', rw: false },
+    // the inner half and every nested call run it again, from INSIDE the masks
+    ...(ub.bin !== 'unshare' ? [{ p: ub.bin, label: UNSHARE_BIN_ENV, rw: false }] : []),
     // a throwaway HOME under /tmp is the arm's own (the family's sandboxes isolate HOME)
     ...(throwawayHome(ident.home) ? [{ p: throwawayHome(ident.home), label: 'HOME', rw: true }] : []),
   ], prot);
@@ -1691,7 +1751,7 @@ function runIsolated(a) {
     /** @type {import('node:child_process').ChildProcess} */
     let child;
     try {
-      child = spawn('unshare',
+      child = spawn(ub.bin,
         // --pid --fork --mount-proc: a private PID namespace with its own /proc, so no host
         // process can be signalled or even seen. --kill-child: if unshare dies, so does
         // everything inside (pid 1 is the reaping bash, PID1_REAPER; the inner half runs under it).
@@ -1722,7 +1782,7 @@ function runIsolated(a) {
       dieByForwarded(fwd);
       const why = fail ? fail[1]
         : spawnErr ? `unshare could not be started (${spawnErr}) — is util-linux installed`
-          : `unshare exited ${code ?? signal} before the isolated side reported in — unprivileged `
+          : diagnoseUserNamespace(ub.bin) || `unshare exited ${code ?? signal} before the isolated side reported in — unprivileged `
             + 'user namespaces may be disabled (kernel.unprivileged_userns_clone / '
             + 'user.max_user_namespaces); unshare\'s own message, if any, is above';
       resolve(report('isolated', EXIT.fail,
@@ -2571,8 +2631,10 @@ function privilegeDrop(ids, { pidns = false } = {}) {
   // pidns (the NESTED path): a fresh PID namespace too, so the command cannot see or signal
   // its CALLER's processes either. -m only to mount that namespace's /proc: inherited mounts
   // stay locked, and the command (a non-root uid after exec) holds no capabilities in it.
+  const ub = unshareBin();
+  if (ub.why) return { prefix: [], why: ub.why };
   const pid = pidns ? ['-m', '--pid', '--fork', '--mount-proc', '--kill-child'] : [];
-  const prefix = ['setpriv', '--no-new-privs', '--', 'unshare', '-U', '--map-user', String(ids.uid),
+  const prefix = ['setpriv', '--no-new-privs', '--', ub.bin, '-U', '--map-user', String(ids.uid),
     '--map-group', String(ids.gid), ...pid, '--'];
   const r = spawnSync(prefix[0], [...prefix.slice(1), process.execPath, '-e',
     'const f = require("fs"); process.stdout.write(JSON.stringify({ status: f.readFileSync("/proc/self/status", "utf8"),'
@@ -2589,6 +2651,8 @@ function privilegeDrop(ids, { pidns = false } = {}) {
       : errMsg(err)}; the command would run as namespace root with every capability (it could unmount the masks)` };
   }
   if (r.status !== 0) {
+    const policy = userNamespaceRefusal(String(r.stderr || ''));
+    if (policy) return { prefix, why: `cannot enter ${ns}: ${policy}` };
     return { prefix, why: `cannot enter ${ns}: \`setpriv --no-new-privs -- unshare -U --map-user …\` exited `
       + `${r.status ?? r.signal} (${tail()}) — util-linux ≥ 2.38 (unshare --map-user) is required` };
   }

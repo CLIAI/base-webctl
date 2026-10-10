@@ -2141,6 +2141,82 @@ test('⛔ fail closed: no `bash` on PATH (pid 1 must reap) → FAIL naming it, c
   } finally { for (const d of [dir, binHome]) fs.rmSync(d, { recursive: true, force: true }); }
 });
 
+// ── HOST POLICY: AppArmor's userns restriction, and WEBCTL_UNSHARE_BIN ───────
+//
+// Measured on an Ubuntu 24.04 host: kernel.apparmor_restrict_unprivileged_userns=1 makes
+// `unshare -r` fail with uid_map EPERM. That is the HOST's policy, not a lane fault — the
+// refusal must say so and give the two fixes. ⚠ The sysctl path is a function PARAMETER, so
+// these arms never depend on (or change) the host's real setting.
+
+const { userNamespaceRefusal } = await import(pathToFileURL(TOOL).href);
+const UID_MAP_EPERM = 'unshare: write failed /proc/self/uid_map: Operation not permitted';
+
+test('⭐ logic: uid_map EPERM + apparmor_restrict_unprivileged_userns=1 → a HOST-POLICY refusal naming the sysctl and both fixes', () => {
+  const dir = tmpdir();
+  const sysctl = path.join(dir, 'apparmor_restrict_unprivileged_userns');
+  try {
+    fs.writeFileSync(sysctl, '1\n');
+    const why = userNamespaceRefusal(UID_MAP_EPERM, sysctl);
+    assert.match(why, /HOST POLICY/);
+    assert.match(why, /not a fault of this lane/);
+    assert.match(why, /kernel\.apparmor_restrict_unprivileged_userns = 1/);
+    assert.match(why, /sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0/);
+    assert.match(why, /AppArmor profile/);
+    assert.match(why, /WEBCTL_UNSHARE_BIN/);
+    // ⚠ the other EPERM shapes unshare prints
+    for (const e of ['unshare: write failed /proc/self/gid_map: Operation not permitted',
+      'unshare: setgroups failed: Operation not permitted', 'unshare: unshare failed: Operation not permitted']) {
+      assert.match(userNamespaceRefusal(e, sysctl), /HOST POLICY/, e);
+    }
+    // CONTROLS: sysctl 0, sysctl absent, and a different failure → '' (the caller's generic reason stands)
+    fs.writeFileSync(sysctl, '0\n');
+    assert.equal(userNamespaceRefusal(UID_MAP_EPERM, sysctl), '');
+    assert.equal(userNamespaceRefusal(UID_MAP_EPERM, path.join(dir, 'absent')), '');
+    fs.writeFileSync(sysctl, '1\n');
+    assert.equal(userNamespaceRefusal("unshare: unrecognized option '--map-user'", sysctl), '');
+    assert.equal(userNamespaceRefusal('', sysctl), '');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ a bad WEBCTL_UNSHARE_BIN (relative, missing, a directory, not executable) → FAIL naming the rule, no path, nothing run', async () => {
+  const dir = tmpdir();
+  const noexec = path.join(dir, 'unshare-noexec');
+  fs.writeFileSync(noexec, '#!/bin/sh\nexec unshare "$@"\n', { mode: 0o644 });
+  const marker = path.join(dir, 'RAN');
+  try {
+    for (const bin of ['unshare', path.join(dir, 'missing'), dir, noexec]) {
+      const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`],
+        { WEBCTL_UNSHARE_BIN: bin });
+      assert.equal(r.status, 1, `${bin === dir ? '<dir>' : path.basename(bin)}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file/m);
+      assert.ok(!r.stderr.includes(dir), 'the refusal printed the path');
+      assert.equal(fs.existsSync(marker), false);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⭐ WEBCTL_UNSHARE_BIN is used for EVERY unshare: the outer namespace, the privilege drop and the nested call', needsIsolation, async () => {
+  const dir = tmpdir(); // the wrapper (re-bound read-only inside) and its log (kept)
+  const log = path.join(dir, 'log');
+  fs.mkdirSync(log);
+  const wrapper = path.join(dir, 'unshare-wrapper');
+  fs.writeFileSync(wrapper, `#!/bin/sh\necho "USED $1" >> "$WEBCTL_TEST_UNSHARE_LOG"\nexec ${JSON.stringify(which('unshare'))} "$@"\n`, { mode: 0o755 });
+  try {
+    const r = await run(['isolated', '--keep', log, '--', process.execPath, TOOL, 'isolated', '--', 'true'],
+      { WEBCTL_UNSHARE_BIN: wrapper, WEBCTL_TEST_UNSHARE_LOG: path.join(log, 'used') });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const used = fs.readFileSync(path.join(log, 'used'), 'utf8').trim().split('\n');
+    assert.equal(used.filter((l) => l === 'USED -rnm').length, 1, `the outer namespace did not use it:\n${used.join('\n')}`);
+    // outer: the drop's probe + the command; nested: its drop's probe + its command
+    assert.equal(used.filter((l) => l === 'USED -U').length, 4, `the privilege drops did not all use it:\n${used.join('\n')}`);
+    // CONTROL: without the var, the wrapper is never called
+    fs.rmSync(path.join(log, 'used'));
+    const c = await run(['isolated', '--keep', log, '--', 'true'], { WEBCTL_TEST_UNSHARE_LOG: path.join(log, 'used') });
+    assert.equal(c.status, 0, c.stderr);
+    assert.equal(fs.existsSync(path.join(log, 'used')), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ── every refusal is a tagged report line (what the gate greps for) ──────────
 
 /** The release gate's own grep for an isolation refusal (test-all-consumers.sh). */
