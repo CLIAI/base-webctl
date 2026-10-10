@@ -461,8 +461,9 @@ const HOST_MNT = fs.readlinkSync('/proc/self/ns/mnt');
  * tmpfs (the neutral copies are made there).
  */
 const { NEUTRAL_MACHINE_ID: NEUTRAL_ID } = await import(pathToFileURL(TOOL).href);
-const V034_MASKS = ' && { [ ! -d /var/tmp ] || mount -t tmpfs webctl-isolated /var/tmp; }'
-  + ' && { [ ! -d /dev/shm ] || mount -t tmpfs webctl-isolated /dev/shm; }'
+const V034_SCRATCH = ' && { [ ! -d /var/tmp ] || mount -t tmpfs webctl-isolated /var/tmp; }'
+  + ' && { [ ! -d /dev/shm ] || mount -t tmpfs webctl-isolated /dev/shm; }';
+const V034_MASKS = V034_SCRATCH
   + ' && hostname webctl-isolated && mount -t sysfs webctl-isolated-sysfs /sys'
   + ` && printf '%s\\n' ${NEUTRAL_ID} > /run/.mid && printf '%s\\n' webctl-isolated > /run/.hn`
   + ' && { [ ! -f /etc/machine-id ] || mount --bind /run/.mid "$(realpath /etc/machine-id)"; }'
@@ -3148,9 +3149,9 @@ test('⛔ nesting: every other fact satisfied (full mask, ro home) but the HOST 
 });
 
 test('⛔ VERSION SKEW (v0.34): every v0.33 fact satisfied but /var/tmp, /dev/shm and the host identity NOT hidden → refused rc 2 saying "upgrade the outer", nothing run — CONTROL: hidden, it runs', needsIsolation, async () => {
-  const stage = (/** @type {boolean} */ scratch) => 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
+  const stage = (/** @type {boolean | string} */ scratch) => 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
     + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
-    + ` && mount -t tmpfs webctl-isolated /tmp${scratch ? V034_MASKS : ''} && mkdir -p "$0" && mount --move /run/k "$0"`
+    + ` && mount -t tmpfs webctl-isolated /tmp${typeof scratch === 'string' ? scratch : scratch ? V034_MASKS : ''} && mkdir -p "$0" && mount --move /run/k "$0"`
     + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift && exec "$@"';
   const env = { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: '[]',
     WEBCTL_HOST_IDS: JSON.stringify({ uid: process.getuid?.(), gid: process.getgid?.() }) };
@@ -3163,6 +3164,13 @@ test('⛔ VERSION SKEW (v0.34): every v0.33 fact satisfied but /var/tmp, /dev/sh
     'mnt:[1]', env);
   assert.doesNotMatch(c.stderr, /older than v0\.34|REFUSED/, `CONTROL: with the scratch masks the proof should pass:\n${c.stderr}`);
   assert.equal(c.ran, true, `CONTROL: with the scratch masks the nested call should RUN:\n${c.stdout}${c.stderr}`);
+  // …and the identity fact ALONE: scratch masked, identity the host's → still refused, naming only it
+  const i = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(V034_SCRATCH), ROOT, PW_HOME],
+    'mnt:[1]', env);
+  assert.equal(i.status, 2, i.stdout + i.stderr);
+  assert.equal(i.ran, false, 'a nested call ran with the host\'s identity visible');
+  assert.match(i.stderr, /older than v0\.34\.0: the hostname/);
+  assert.doesNotMatch(i.stderr, /older than v0\.34\.0: [^\n]*(\/var\/tmp|\/dev\/shm)/);
 });
 
 test('⛔ nesting: every other fact satisfied (full mask, ro home, own PIDs) but a recorded hidden dir NOT masked → refused by the hidden fact alone — CONTROL: masked, that fact passes', needsIsolation, async () => {
