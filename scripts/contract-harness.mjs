@@ -1960,8 +1960,12 @@ function runIsolated(a) {
   const { all: maskedAll, tmp: maskedTmp } = maskedDirs();
   const mi = readMountinfo();
   const outer = mi && extraInterfaces() === 0 && uidMapKind() === 'mapped' ? outerRebinds(mi, prot.home, maskedAll, maskedTmp) : null;
-  const atHidden = (outer || []).filter((b) => prot.hideRule.includes(b.p)).length;
-  const carried = (outer || []).filter((b) => !prot.hideRule.includes(b.p)).filter((b) => {
+  // ⛔ AT or WITHIN a hidden dir: not carried. Equality alone (≤ review F2) dropped `--keep ~/.ssh`
+  // with a note but carried an outer `--keep ~/.ssh/<sub>` WRITABLE, silently. Only THIS call's
+  // own explicit --keep may re-expose a hidden dir.
+  const inHidden = (/** @type {{p: string}} */ b) => prot.hideRule.some((h) => isWithin(b.p, h));
+  const atHidden = (outer || []).filter(inHidden).length;
+  const carried = (outer || []).filter((b) => !inHidden(b)).filter((b) => {
     try { const st = fs.statSync(b.p); return st.isDirectory() || st.isFile(); } catch { return false; } // not a /dev/null cover
   });
   // ⛔ xq's checkout (read-only; xq ONLY — xqRoot), and never one found through a WRITABLE place
@@ -2008,7 +2012,7 @@ function runIsolated(a) {
       + 're-bound, so xq will not run inside; install xq from a checkout outside the hidden dirs\n');
   }
   if (atHidden) {
-    process.stderr.write(`isolated: note: ${atHidden} outer re-bind(s) AT a hidden dir (~/.ssh, a state root, …) not carried — `
+    process.stderr.write(`isolated: note: ${atHidden} outer re-bind(s) AT or WITHIN a hidden dir (~/.ssh, a state root, …) not carried — `
       + '--keep it again in this call\n');
   }
   const inside = outer ? '; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, '

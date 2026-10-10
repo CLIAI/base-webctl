@@ -430,8 +430,9 @@ per path with pid 1 held trapless for 300 ms; 0 lost.
   `/tmp`, our read-only hide AT the home, a lo-only netns, a mapped uid_map — every mount a path
   lookup reaches under the home or `/tmp` is re-bound with its SAME mode (rw stays rw, ro stays
   ro); counted in the verdict as `N outer re-binds`. Never wider: only what is visible inside,
-  never a parent, the hidden dirs hidden again; an outer re-bind exactly AT a hidden dir is not
-  carried (noted; `--keep` it again). Without the proof nothing is carried.
+  never a parent, the hidden dirs hidden again; an outer re-bind AT **or WITHIN** a hidden dir
+  is not carried (noted by count; `--keep` it again — review F2: one strictly inside, an outer
+  `--keep ~/.ssh/<sub>`, was carried writable, silently). Without the proof nothing is carried.
 * A read-only re-bind at a path where the outer call already had a mount (base's root, when the
   outer's cwd was base's root) was FALSELY reported "still WRITABLE" — the outer's stack, shadowed
   by the re-masked `/tmp`, was checked too. Only the stack path resolution reaches is checked now.

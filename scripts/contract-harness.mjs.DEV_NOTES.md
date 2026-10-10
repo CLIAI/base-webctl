@@ -1071,6 +1071,15 @@ nothing, so it did not break.
 * **Sabotage (all caught):** the hide-at-home proof dropped → logic; every carry `rw: true` →
   logic + the integration arm; the resolveMount (visible) filter off → logic; hides not excluded
   → logic; the carry not passed to planKeeps → the integration arm.
+* ⛔ **AT or WITHIN (review F2, reasoned).** The drop was `hideRule.includes(b.p)` — equality —
+  while planKeeps's rules use isWithin: an outer `--keep ~/.ssh` was dropped with a note, an
+  outer explicit `--keep ~/.ssh/<sub>` (or `~/.config/webctl/<sub>`) was CARRIED rw, silently,
+  into a call that never asked for it. ⇒ `inHidden` = isWithin any hideRule dir, for the drop
+  AND the note's count (`N outer re-bind(s) AT or WITHIN a hidden dir … not carried`).
+  **Arm** (fake home; outer `--keep ~/.ssh/sub --keep ~/.config/webctl/sub --keep ~/plain`, inner
+  stripped): before, inner `ok ok ok`; after `ENOENT ENOENT ok` (CONTROL: `~/plain` still
+  carried), the note with `2`, no path. **Sabotage (caught):** the carry by equality → the arm;
+  the note's count by equality → the arm.
 
 ### ⛔ xq could not run inside (gate regression, v0.33.0)
 

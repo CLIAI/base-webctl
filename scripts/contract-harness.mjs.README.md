@@ -431,7 +431,8 @@ contract's output when it is used.
     mode (counted: `N outer re-binds`) — hiding them again broke a consumer suite under the gate
     (`Cannot find module '<repo under ~/.cache>/…'`). Only with the kernel's proof of the outer
     sandbox (our masks, our hide AT the home, lo only, a mapped uid_map); never a parent, never a
-    hidden dir (one kept exactly AT a hidden dir is not carried — keep it again).
+    hidden dir (one kept AT or WITHIN a hidden dir — `--keep ~/.ssh/sub` — is not carried,
+    a note counts them; keep it again).
   *(A lane's
   own `…_IN_NETNS=1` marker, set on the host, skipped isolation for a whole suite. The id
   alone can be fabricated; uid_map alone proves only a USER namespace — `unshare -r`
