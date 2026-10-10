@@ -1733,6 +1733,26 @@ test('⭐ logic: EVERY reachable submount under the home is selected for the ro 
   assert.equal(reachableMountsUnder(mounts, '/home/v'), null, 'nothing mounted at a root → null, not []');
 });
 
+// ⛔ Measured while fixing the stripped-markers carry: a call nested in `isolated` masks /tmp AGAIN,
+// and a re-bind at a path the OUTER call had a mount at leaves TWO stacks at that path — the
+// outer's, under the old (now shadowed) /tmp, and ours, under the new one. Walking both reported
+// the unreachable outer one as "still WRITABLE": a false FAIL of base's own read-only root.
+test('⭐ logic: a stack at the same path whose ANCESTOR is shadowed (a re-masked /tmp) is not reachable — only the live one is checked', () => {
+  const mounts = parseMountinfo([
+    mi(1, 0, '/'),
+    mi(10, 1, '/tmp'), // the OUTER call's /tmp mask
+    mi(20, 10, '/tmp/x/root'), // the outer's writable re-bind — shadowed once /tmp is masked again
+    mi(30, 10, '/tmp'), // OUR /tmp mask, stacked on the outer's
+    mi(40, 30, '/tmp/x/root', 'ro,relatime'), // our read-only re-bind, moved in under the new /tmp
+    mi(41, 40, '/tmp/x/root/sub'), // a writable submount of OURS — reachable, and a gap
+  ].join('\n'));
+  assert.deepEqual(reachableMountsUnder(mounts, '/tmp/x/root').map((/** @type {any} */ m) => m.id), ['40', '41']);
+  assert.deepEqual(readOnlyGaps(mounts, ['/tmp/x/root'], []), [{ root: '/tmp/x/root', at: '/tmp/x/root/sub' }]);
+  // CONTROL: with OUR /tmp mask gone, the outer's stack is the live one again
+  const noRemask = mounts.filter((/** @type {any} */ m) => !['30', '40', '41'].includes(m.id));
+  assert.deepEqual(reachableMountsUnder(noRemask, '/tmp/x/root').map((/** @type {any} */ m) => m.id), ['20']);
+});
+
 test('⭐ logic: readOnlyGaps names every writable reachable mount, exempts writable keeps, and passes an all-ro tree', () => {
   const allRw = parseMountinfo(MOUNTINFO);
   assert.equal(readOnlyGaps(allRw, ['/home/u'], []).length, 6);

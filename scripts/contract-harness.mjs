@@ -2487,8 +2487,16 @@ export function reachableMountsUnder(mounts, root) {
   };
   const atRoot = mounts.filter((m) => m.at === root);
   // the bottom of the stack at root: a mount whose parent is NOT another mount at root
-  const bottom = atRoot.filter((m) => !atRoot.some((o) => o.id === m.parent));
+  let bottom = atRoot.filter((m) => !atRoot.some((o) => o.id === m.parent));
   if (bottom.length === 0) return null;
+  // ⛔ Two stacks at one path happen when an ANCESTOR was mounted over in between: a call nested
+  // in `isolated` masks /tmp again, so the OUTER call's mount at a path and ours at the same path
+  // both appear — the outer's unreachable under the new /tmp. Walking it too reported it "still
+  // WRITABLE" (measured: a false FAIL of base's read-only root). ⇒ keep the stack path resolution
+  // LANDS on (resolveMount); only when none matches, over-cover with all of them, as before.
+  const live = resolveMount(mounts, root);
+  const reached = bottom.filter((b) => live && topOf(b).id === live.id);
+  if (reached.length) bottom = reached;
   /** @type {MountRow[]} */
   const out = [];
   /** @param {MountRow} m */

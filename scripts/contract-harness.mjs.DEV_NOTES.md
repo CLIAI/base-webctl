@@ -1024,6 +1024,20 @@ run N+1 executes it.
   in `privilegedEnv` → arm red (`HIT ip` ×3); the caller's PATH in `privilegedEnv` ALONE →
   SURVIVES, by construction: no privileged half resolves a name any more — it is the second layer.
 
+### A shadowed stack at a re-bound path read as "still WRITABLE" (found fixing the carry below)
+
+A call nested in `isolated` masks /tmp AGAIN. A read-only re-bind at a path where the OUTER call
+already had a mount (base's root, which the outer re-bound writable as its cwd) then leaves TWO
+stacks at that path in mountinfo: the outer's, whose parent is the old /tmp mask — unreachable
+now — and ours, under the new /tmp. `reachableMountsUnder` walked every bottom ("over-covering
+is safe"), and `readOnlyGaps` reported the outer's rw mount as a gap: the stripped-markers call
+FAILed "1 mount(s) … still WRITABLE" whenever its cwd was not base's root (measured: the carry
+arm below, before the carry existed). ⇒ keep the stack `resolveMount` lands on; over-cover with
+all bottoms only when none matches.
+* **Logic arm** (explicit mountinfo): the re-masked case selects only ours (and flags our rw
+  submount); CONTROL: without our re-mask, the outer stack is the live one. Red before.
+* **Sabotage:** the filter off → the logic arm red.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
