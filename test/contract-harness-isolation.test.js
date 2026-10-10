@@ -1796,10 +1796,113 @@ test('⭐ SIGTERM to the harness reaches the command inside (its trap runs, its 
   assert.equal(r.status, 7, r.stdout);
 });
 
+test('⭐ SIGTERM reaches the command\'s OWN trap through a NESTED call too (rc 7) — not a SIGKILL of the namespace', needsIsolation, async () => {
+  // Once the nested pid-1 helper has reported `started`, a TERM must be FORWARDED (the trap
+  // runs), not turned into the early-window SIGKILL.
+  const r = await termAfterReady([process.execPath, TOOL, 'isolated', '--', process.execPath, TOOL, 'isolated', '--', 'sh', '-c', TRAPPER]);
+  assert.match(r.stdout, /GOT-TERM/, `the nested command's trap never ran:\n${r.stdout}${r.stderr}`);
+  assert.equal(r.status, 7, `${r.status} ${r.signal}`);
+});
+
 test('⭐ CONTROL: the same trapper WITHOUT `isolated` → GOT-TERM, rc 7', async () => {
   const r = await termAfterReady(['sh', '-c', TRAPPER]);
   assert.match(r.stdout, /GOT-TERM/);
   assert.equal(r.status, 7);
+});
+
+// ── the EARLY-signal window: a TERM before pid 1 has its traps is not lost ──
+//
+// ⛔ Measured by the review: a TERM sent the moment unshare's child appears was LOST in 24 of 40
+// runs (v0.32.0: 15/40) — pid 1 of a new PID namespace IGNORES a signal it has no handler for,
+// and bash installs its traps a moment after it starts — so the command RAN and exited 0 after
+// the caller gave up. ⇒ Until the inner side reports `started` (fd 3), a forwarded signal
+// SIGKILLs unshare instead, and `--kill-child` takes the namespace with it; the harness then
+// dies by the signal. Nested path: the pid-1 helper reports `started` the same way.
+
+/**
+ * argv[2] = N, argv[3…] = a harness invocation. N times: start it, poll /proc until the
+ * `unshare` that carries pid 1's reaper (its argv names `webctl-isolated-pid1`) HAS A CHILD,
+ * TERM the harness at once, and classify the end. Prints one line:
+ * `EARLY term=<n> notrun=<n> bad=<n> other=<n> missed=<n>` — bad = the command RAN and the
+ * harness exited 0; missed = the moment was never seen (the run finished first).
+ */
+const EARLY_PROBE = `
+const fs = require('fs'); const { spawn } = require('child_process');
+const [n, ...argv] = process.argv.slice(2);
+const kids = (p) => { try { return fs.readFileSync('/proc/' + p + '/task/' + p + '/children', 'utf8').trim().split(/\\s+/).filter(Boolean).map(Number); } catch { return []; } };
+const cmd = (p) => { try { return fs.readFileSync('/proc/' + p + '/cmdline', 'utf8'); } catch { return ''; } };
+const desc = (p) => { const out = []; const q = [p]; while (q.length) { const x = q.shift(); for (const k of kids(x)) { out.push(k); q.push(k); } } return out; };
+const tally = { term: 0, notrun: 0, bad: 0, other: 0, missed: 0 };
+const once = () => new Promise((resolve) => {
+  const c = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = ''; let err = ''; let sent = false; let done = false;
+  c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; });
+  const poll = () => {
+    if (done || sent) return;
+    const u = desc(c.pid).find((p) => cmd(p).startsWith('unshare') && cmd(p).includes('webctl-isolated-pid1') && kids(p).length > 0);
+    if (u) { sent = true; c.kill('SIGTERM'); return; }
+    setImmediate(poll);
+  };
+  poll();
+  c.on('close', (code, sig) => {
+    done = true;
+    if (!sent) tally.missed++;
+    else if (sig === 'SIGTERM') tally.term++;
+    else if (/NOT RUN/.test(err)) tally.notrun++;
+    else if (code === 0 && /^RAN$/m.test(out)) tally.bad++;
+    else { tally.other++; process.stderr.write('OTHER code=' + code + ' sig=' + sig + ' ' + err.slice(-300) + '\\n'); }
+    resolve();
+  });
+});
+(async () => { for (let i = 0; i < Number(n); i++) await once();
+  console.log('EARLY ' + Object.entries(tally).map(([k, v]) => k + '=' + v).join(' ')); })();
+`;
+/** @param {string} out */
+const earlyOf = (out) => Object.fromEntries([...(out.match(/^EARLY (.*)$/m) || ['', ''])[1].matchAll(/(\w+)=(\d+)/g)].map((m) => [m[1], Number(m[2])]));
+/** Runs per path. With SLOW_BASH the window is ~300 ms wide, so every run lands in it. */
+const EARLY_N = 8;
+const EARLY_CMD = ['sh', '-c', 'echo RAN; sleep 1'];
+/**
+ * A dir holding EARLY_PROBE and a `bash` that sleeps 0.3 s before exec'ing the real one — pid 1
+ * then sits WITHOUT its traps for 300 ms, as on a loaded host. ⚠ Without it the window is a race
+ * this host hit in 4/40 fresh runs (the review: 24/40) — too rare for a 8-run arm to be sure
+ * of failing; with it, 16/20 fresh and 20/20 nested runs were lost before the fix (measured).
+ */
+function earlyDir() {
+  const dir = tmpdir();
+  fs.writeFileSync(path.join(dir, 'early.cjs'), EARLY_PROBE);
+  fs.mkdirSync(path.join(dir, 'slow'));
+  fs.writeFileSync(path.join(dir, 'slow', 'bash'), `#!/bin/sh\nsleep 0.3\nexec ${JSON.stringify(which('bash'))} "$@"\n`, { mode: 0o755 });
+  return dir;
+}
+
+test('⛔ EARLY TERM, fresh path: a TERM the moment unshare\'s child appears → the harness DIES BY TERM — never "ran and exited 0"', needsIsolation, async () => {
+  const dir = earlyDir();
+  try {
+    const r = await runRaw([process.execPath, path.join(dir, 'early.cjs'), String(EARLY_N), process.execPath, TOOL, 'isolated', '--', ...EARLY_CMD],
+      { cwd: ROOT, env: cleanEnv({ PATH: `${path.join(dir, 'slow')}:${process.env.PATH}` }) });
+    const t = earlyOf(r.stdout);
+    assert.equal(t.bad, 0, `the command RAN after the caller's TERM in ${t.bad} of ${EARLY_N} runs:\n${r.stdout}${r.stderr}`);
+    assert.equal(t.other, 0, `${r.stdout}${r.stderr}`);
+    assert.ok(t.term + t.notrun >= EARLY_N / 2, `the window was hit too rarely to judge (missed ${t.missed}):\n${r.stdout}`);
+    // ⭐ and it DIES BY the signal (no verdict), as a Ctrl-C must — a NOT RUN exit 1 would be a lane FAIL upstream
+    assert.equal(t.notrun, 0, `a caller's TERM became an ordinary NOT RUN exit:\n${r.stdout}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ EARLY TERM, NESTED path: the same, for an `isolated` called inside `isolated`', needsIsolation, async () => {
+  const dir = earlyDir();
+  try {
+    const r = await run(['isolated', '--keep', dir, '--', 'env', `PATH=${path.join(dir, 'slow')}:${process.env.PATH}`,
+      process.execPath, path.join(dir, 'early.cjs'), String(EARLY_N), process.execPath, TOOL, 'isolated', '--', ...EARLY_CMD]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const t = earlyOf(r.stdout);
+    assert.equal(t.bad, 0, `the nested command RAN after the caller's TERM in ${t.bad} of ${EARLY_N} runs:\n${r.stdout}`);
+    assert.equal(t.other, 0, `${r.stdout}${r.stderr}`);
+    assert.ok(t.term + t.notrun >= EARLY_N / 2, `the window was hit too rarely to judge (missed ${t.missed}):\n${r.stdout}`);
+    // ⭐ and it DIES BY the signal (no verdict), as a Ctrl-C must — a NOT RUN exit 1 would be a lane FAIL upstream
+    assert.equal(t.notrun, 0, `a caller's TERM became an ordinary NOT RUN exit:\n${r.stdout}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('isolated: a command killed by a signal → 128+signal (143 for SIGTERM)', needsIsolation, async () => {

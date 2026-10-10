@@ -1271,8 +1271,13 @@ const HIDE_SOURCE = 'webctl-isolated-hidden';
  *   * INT/TERM/HUP are trapped (pid 1 receives nothing it has no handler for) and forwarded to
  *     the child; a trapped signal interrupts `wait` (>128), so it waits AGAIN until the child
  *     itself ended — bash keeps a reaped child's status for a second `wait` (measured) — and
- *     exits with the CHILD's status. A signal before the child exists ends pid 1 at once
- *     (128+n), and the namespace with it: nothing starts after the caller gave up.
+ *     exits with the CHILD's status. A signal after the traps but before the child exists ends
+ *     pid 1 at once (128+n), and the namespace with it.
+ *   * ⛔ A signal BEFORE the traps is LOST, not handled: pid 1 ignores what it has no handler for.
+ *     (This comment used to claim "nothing starts after the caller gave up" — measured false by
+ *     the review: 24 of 40 early TERMs lost, the command ran to exit 0.) The window is closed
+ *     from OUTSIDE: until the half under pid 1 reports `started` on fd 3 — which it can only do
+ *     after pid 1 trapped and started it — the harness SIGKILLs unshare (forwardSignalsPastUnshare).
  *   * ⚠ A background job ignores SIGINT; node resets its signal dispositions at start (measured),
  *     which is why the node helper stays between this pid 1 and the command on BOTH paths.
  * Fail closed: no bash on PATH → refused (bashOnPath), never a non-reaping pid 1.
@@ -1323,8 +1328,9 @@ const NO_BASH = "'bash' not found on PATH — pid 1 of the isolated PID namespac
 const FORWARDED_SIGNALS = /** @type {NodeJS.Signals[]} */ (Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP']));
 
 /**
- * @typedef {{last: () => NodeJS.Signals | null, remove: () => void}} Forwarder
- * `last`: the most recent signal forwarded (null: none); `remove`: uninstall the handlers.
+ * @typedef {{last: () => NodeJS.Signals | null, remove: () => void, early?: () => boolean}} Forwarder
+ * `last`: the most recent signal forwarded (null: none); `remove`: uninstall the handlers;
+ * `early` (forwardSignalsPastUnshare only): a signal came before `started`, so unshare was KILLED.
  */
 
 /**
@@ -1404,28 +1410,84 @@ function childrenOf(pid) {
  * its child exits — measured: a SIGTERM to it never reached the child, which ran to the
  * end. So the signal goes to unshare's CHILD, the reaping bash (pid 1 of the new namespace;
  * it traps them, which a namespace init needs to receive anything) and on to the node half
- * (PID1_REAPER). No child yet ⇒
- * SIGKILL unshare, and `--kill-child` takes the namespace with it — nothing has started.
- * @param {import('node:child_process').ChildProcess} unshare @returns {Forwarder}
+ * (PID1_REAPER).
+ *
+ * ⛔ THE EARLY WINDOW (measured by the review: 24 of 40 TERMs lost; v0.32.0 15/40). pid 1 of a
+ * new PID namespace IGNORES any signal it has no handler for, and bash installs its traps a
+ * moment AFTER unshare's child exists — so "a child exists" is not "pid 1 can hear us": the
+ * TERM vanished and the command ran to exit 0 after the caller gave up. ⇒ Until `started()`
+ * (the inner side's report on fd 3 — written only once pid 1's traps are certainly in place,
+ * because pid 1 started it), a signal SIGKILLs unshare and `--kill-child` takes the namespace
+ * with it; `early()` then tells the caller to die by that signal. No child at all ⇒ the same.
+ * @param {import('node:child_process').ChildProcess} unshare
+ * @param {() => boolean} started has the inner side reported `started`?
+ * @returns {Forwarder}
  */
-function forwardSignalsPastUnshare(unshare) {
-  return installForwarder((s) => {
+function forwardSignalsPastUnshare(unshare, started) {
+  let early = false;
+  const fwd = installForwarder((s) => {
     const kids = unshare.pid ? childrenOf(unshare.pid) : [];
-    if (kids.length === 0) { try { unshare.kill('SIGKILL'); } catch { /* gone */ } return; }
+    if (kids.length === 0 || !started()) {
+      early = true;
+      try { unshare.kill('SIGKILL'); } catch { /* gone */ }
+      return;
+    }
     for (const k of kids) { try { process.kill(k, s); } catch { /* gone */ } }
   });
+  return { ...fwd, early: () => early };
 }
 
 /**
- * The node helper under a nested call's reaping pid 1 (`__isolated-pid1 -- <cmd…>`): spawn the
- * command with the env it was given (already scrubbed) and default signal dispositions, forward
- * termination signals to it, and return its exit code (128+n when killed; the caller re-raises).
+ * Die by the signal that was forwarded (if any), after uninstalling our handlers — for a run
+ * that ended because WE killed it early (Forwarder.early) or before anything started. Returns
+ * only if there was no signal or the kill did not end us.
+ * @param {Forwarder} fwd
+ */
+function dieByForwarded(fwd) {
+  const sig = fwd.last();
+  fwd.remove();
+  if (sig) { try { process.kill(process.pid, sig); } catch { /* the caller reports */ } }
+}
+
+/**
+ * Collect `started` from a status pipe (fd 3 of a child). @param {import('node:child_process').ChildProcess} child
+ * @returns {{started: () => boolean, text: () => string}}
+ */
+function statusChannel(child) {
+  let status = '';
+  const pipe = /** @type {import('node:stream').Readable | null | undefined} */ (child.stdio[3]);
+  pipe?.on('data', (d) => { status += String(d); });
+  pipe?.on('error', () => { /* the other side closed it */ });
+  return { started: () => /^started$/m.test(status), text: () => status };
+}
+
+/**
+ * The node helper under a nested call's reaping pid 1 (`__isolated-pid1 [--status] -- <cmd…>`):
+ * spawn the command with the env it was given (already allowlisted) and default signal
+ * dispositions, forward termination signals to it, and return its exit code (128+n when killed;
+ * the caller re-raises). `--status`: first write `started` on fd 3 (the nested caller's status
+ * pipe) and close it — the early-signal window (forwardSignalsPastUnshare) ends there.
  * ⚠ Internal: reached only through the nested path's prefix, never documented as a verb.
  * @param {string[]} a @returns {Promise<number>}
  */
 function runPid1(a) {
-  const command = a[0] === '--' ? a.slice(1) : [];
+  // `--status`: fd 3 is the nested path's status pipe — write `started` on it, then close it
+  const status = a[0] === '--status';
+  const rest = status ? a.slice(1) : a;
+  const command = rest[0] === '--' ? rest.slice(1) : [];
   if (command.length === 0) return Promise.resolve(report('isolated', EXIT.fail, 'internal: malformed pid-1 invocation'));
+  if (status) {
+    // ⚠ only a pipe/socket is ours: an fd 3 node opened for itself must never be written to
+    let ours = false;
+    try { const st = fs.fstatSync(3); ours = st.isSocket() || st.isFIFO(); } catch { /* absent */ }
+    // ⛔ BEFORE the command starts, so it never inherits fd 3. Our handlers are installed in the
+    // same tick as the spawn below, and pid 1 (bash) trapped its signals before starting us —
+    // so from `started` on, a forwarded signal is HEARD (forwardSignalsPastUnshare).
+    if (ours) {
+      try { fs.writeSync(3, 'started\n'); } catch { /* the caller then never sees `started` */ }
+      try { fs.closeSync(3); } catch { /* already gone */ }
+    }
+  }
   return new Promise((resolve) => {
     const child = spawn(command[0], command.slice(1), { stdio: 'inherit' });
     const fwd = forwardSignals(child);
@@ -1571,7 +1633,7 @@ function runIsolated(a) {
     // signal dispositions (a bash background job would IGNORE SIGINT)
     const bash = bashOnPath();
     if (!bash) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${NO_BASH}. The command was NOT started.`, { command }));
-    return runCommand([bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', process.execPath, SELF, PID1_INNER, '--', ...command],
+    return runCommand([bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', process.execPath, SELF, PID1_INNER, '--status', '--', ...command],
       priv.prefix, { pastUnshare: true, pass });
   }
   let hostNs = '';
@@ -1645,23 +1707,19 @@ function runIsolated(a) {
       resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
       return;
     }
-    const fwd = forwardSignalsPastUnshare(child);
+    const st = statusChannel(child);
+    const fwd = forwardSignalsPastUnshare(child, st.started);
     const planPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[4]);
     planPipe?.on('error', () => { /* the inner side refused or never started */ });
     planPipe?.end(payload);
-    let status = '';
-    child.stdio[3]?.on('data', (d) => { status += String(d); });
-    child.stdio[3]?.on('error', () => { /* inner closed it */ });
     let spawnErr = '';
     child.on('error', (e) => { spawnErr = errMsg(e); });
     child.on('close', (code, signal) => {
-      const started = /^started$/m.test(status);
+      const status = st.text();
       const fail = status.match(/^fail (.*)$/m);
-      if (started) { resolve(exitOrDieBy(fwd, code, signal)); return; }
-      // signalled before the command started: die by it too (nothing ran, so no verdict)
-      const sig = fwd.last();
-      fwd.remove();
-      if (sig) { try { process.kill(process.pid, sig); } catch { /* report below */ } }
+      if (st.started() && !fwd.early?.()) { resolve(exitOrDieBy(fwd, code, signal)); return; }
+      // signalled before the command started (or we killed it then): die by it too — no verdict
+      dieByForwarded(fwd);
       const why = fail ? fail[1]
         : spawnErr ? `unshare could not be started (${spawnErr}) — is util-linux installed`
           : `unshare exited ${code ?? signal} before the isolated side reported in — unprivileged `
@@ -2566,13 +2624,18 @@ function runCommand(command, prefix = [], { pastUnshare = false, pass = /** @typ
   const env = isolatedEnv(process.env, pass);
   const argv = [...prefix, ...command];
   return new Promise((resolve) => {
-    const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', env });
+    // pastUnshare (the nested path): fd 3 is the pid-1 helper's status pipe (`started`)
+    const child = spawn(argv[0], argv.slice(1), { stdio: pastUnshare ? ['inherit', 'inherit', 'inherit', 'pipe'] : 'inherit', env });
     // through `unshare --fork` a signal must go to unshare's CHILD (see forwardSignalsPastUnshare)
-    const fwd = pastUnshare ? forwardSignalsPastUnshare(child) : forwardSignals(child);
+    const fwd = pastUnshare ? forwardSignalsPastUnshare(child, statusChannel(child).started) : forwardSignals(child);
     child.on('error', (e) => {
+      fwd.remove();
       resolve(report('isolated', 127, `NOT RUN: cannot start '${argv[0]}': ${errMsg(e)}`));
     });
-    child.on('close', (code, signal) => resolve(exitOrDieBy(fwd, code, signal)));
+    child.on('close', (code, signal) => {
+      if (fwd.early?.()) dieByForwarded(fwd); // killed before pid 1 could hear it: die by the signal
+      resolve(exitOrDieBy(fwd, code, signal));
+    });
   });
 }
 
