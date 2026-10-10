@@ -209,53 +209,130 @@ is the strongest form: it names the ownership in the function that reads it.
 
 ## v0.33.0 — (unreleased)
 
-**Headline: `isolated` HIDES the home's secrets, its pid 1 REAPS orphans, and eight more
-env vars are scrubbed** — three gaps measured by `perplexity` (xrl4 §"Mutation arms run with
-no host network, no host unix sockets and a read-only home"). Harness only; no `lib/` change.
+**Headline: `isolated` HIDES the whole home, passes an env ALLOWLIST, its pid 1 is `bash --norc
+-p` and REAPS orphans, and a signal can no longer slip in before it is heard.** Measured gaps
+from `perplexity` and from the review of this branch; scope ruled by `webctl:mgr` (2026-10-07).
+xrl4 §"Mutation arms run with no host network, no host unix sockets and a hidden home".
+Harness only; no `lib/` change.
 
-### ⛔ BREAKING — `~/.ssh`, `~/.gnupg` and the state roots are HIDDEN inside `isolated`
+### ⛔ BREAKING — the env is an ALLOWLIST
 
-The read-only home still let a mutated test READ and print the operator's ssh keys, live
-ControlMaster socket paths, an install salt and target configs naming remote hosts.
+37 vars matching `*_API_KEY`, `*_TOKEN`, `*SECRET` reached the arm on an operator host
+(measured by the review), and the gate passes its full env. **Only these reach the command
+by default** (and pid 1, and the inner half):
 
-* `~/.ssh`, `~/.gnupg`, `~/.cache/CLIAI`, `~/.config/CLIAI`, `~/.local/state/CLIAI` and
-  `~/.config/webctl` — each that exists, at its real path — get an **empty, read-only**
-  tmpfs on top, after the read-only step (so nested calls inherit them, locked). Inside, each
-  lists nothing, a read is `ENOENT`, a create `EROFS` (measured).
-* **A test that reads one of these dirs now fails.** Give it a fixture under a throwaway
-  `HOME` instead, or keep the path: `--keep <path>` at or beneath a hidden dir re-exposes
-  **that path only** (writable, named on stderr as before). A keep that merely CONTAINS one
-  (`--keep ~/.config`) does **not** unhide it.
-* The cwd, base's repo root, node and an absolute command beneath a hidden dir are bound
-  back, as before. Read back from mountinfo before the command starts (else FAIL, nothing
-  run); a nested call additionally needs each dir recorded in `WEBCTL_HIDDEN_DIRS` to carry
-  the mask (nesting fact 8).
+* `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TZ`, `NODE_OPTIONS`,
+  `NODE_PATH`, `npm_config_*`, `WEBCTL_*` — plus `TMPDIR=/tmp` and `isolated`'s own markers
+  (`WEBCTL_HOST_NETNS`, `WEBCTL_HOST_MNTNS`, `WEBCTL_HOST_PIDNS`, `WEBCTL_RO_ROOTS`,
+  `WEBCTL_HIDDEN_DIRS`, `WEBCTL_HOST_IDS`), on the fresh and the nested path.
+* **`CLIAI_*` is NOT passed by default** (`CLIAI_<TOOL>_BROWSER_{SSH_,}TARGET` name remote
+  targets), nor `SESSION_MANAGER` (it embeds the hostname) or `ICEAUTHORITY`.
+* **Pass more:** `--pass-env NAME` or `--pass-env PREFIX_*` (repeatable; letters, digits, `_`;
+  a prefix ends in `_*`; a bare `*` is refused). The socket/display/address names isolation
+  removes (`DISPLAY`, `SSH_AUTH_SOCK`, `XDG_RUNTIME_DIR`, …) are refused by name and stripped
+  even from a prefix pass. A nested call honours only its OWN `--pass-env`.
+* **Declare yours** — ready to copy into each lane's `isolated` call (`webctl:mgr`'s pre-check):
 
-### pid 1 reaps orphans (fresh and nested paths)
+  ```bash
+  # chatgpt
+  node "$H" isolated --pass-env 'CGWC_*' --pass-env CLIAI_CHATGPT_WEBCTL_TESTS_HOST_NETWORK -- …
+  # substack
+  node "$H" isolated --pass-env SUBSTACK_WEBCTL_TESTS_HOST_PID -- …
+  # perplexity
+  node "$H" isolated --pass-env FIXTURE_PARENT_NETNS -- …
+  # aliexpress
+  node "$H" isolated --pass-env ALIEXPRESS_WEBCTL_ARM_REAL_HARNESS -- …
+  ```
+
+* The release gate's own `isolated` call passes **no** extras: a contract gets the default
+  list (its `WEBCTL_*` included). base's gate tests now name their fake-contract knobs
+  `WEBCTL_TEST_FAKE_*`.
+
+### ⛔ BREAKING — the WHOLE passwd home is HIDDEN
+
+Read-only still let a mutated test READ and print the operator's ssh keys, ControlMaster
+socket paths, an install salt and remote target configs (`perplexity`); hiding a fixed list
+of dirs missed every secret nobody listed. ⇒ the passwd home (not `$HOME`) gets an **empty
+read-only tmpfs**: a read of anything in it is `ENOENT`, a create `EROFS`. Re-bound on top:
+
+* **read-only** — base's repo root, node, the command if absolute, `WEBCTL_UNSHARE_BIN`,
+  **every PATH entry under the home**, and each **`--keep-ro <path>`** (new, repeatable; e.g.
+  uv's managed python: `--keep-ro ~/.local/share/uv/python`);
+* **writable** — the cwd and each `--keep <path>`, as before.
+
+`~/.ssh`, `~/.gnupg`, `~/.cache/CLIAI`, `~/.config/CLIAI`, `~/.local/state/CLIAI` and
+`~/.config/webctl` stay hidden under any re-bind that contains them (`--keep ~/.config` does not
+unhide `~/.config/webctl`); `--keep` at or beneath one re-exposes that path only.
+
+* **Refused**, naming the rule and no path: a PATH entry (FAIL) or `--keep-ro` (usage, exit 3)
+  that IS the home, or contains or lies inside one of those dirs.
+* **A verdict line** on stderr names what came back, home-relative only:
+  `isolated: home HIDDEN; re-bound read-only: ~/bin, ~/data; writable: ~/work`.
+* ⛔ **What now breaks: anything that reads the home INDIRECTLY** — git's `~/.gitconfig` (and
+  commit signing with `gpg.format=ssh`, which reads the key under `~/.ssh`), ssh or git-over-ssh
+  reading `~/.ssh/config` / `known_hosts`, gpg's keyring and config, shell rc files, a tool's
+  own cache or config under `~/.cache` / `~/.config` / `~/.local`. Give the arm a throwaway
+  `HOME` holding what it needs, or `--keep-ro` the one dir it must read.
+* A PATH entry that reaches the home through a symlink OUTSIDE it is re-bound at its real path
+  only. Cost measured on the operator host (~100 PATH entries under the home): `isolated --
+  true` 1.29 s → 1.46 s.
+* Read back from mountinfo by RESOLVING each path through the mount tree, so a later mount on
+  an ancestor that shadows a hide is caught (review finding 7). A nested `unshare -rm` cannot
+  peel the hide (tested).
+
+### pid 1 is `bash --norc -p`, and reaps orphans (fresh and nested paths)
 
 * node as pid 1 left a re-parented, exited grandchild as a **zombie** (state `Z`, `kill -0`
   succeeds), so "my daemonised helper is gone" failed only under `isolated`. pid 1 is now a
   small **bash** that runs the node half in the background, forwards INT/TERM/HUP and exits
-  with its status; the orphan disappears (measured, on both paths).
-* **`bash` must be on PATH**, else FAIL, nothing run (fail closed). Exit codes, SIGTERM and
-  Ctrl-C behave as before; stdin still reaches the command.
+  with its status; the orphan disappears (measured, on both paths). **`bash` must be on PATH**,
+  else FAIL, nothing run.
+* ⛔ As `bash -c` it honoured the CALLER's shell config as pid 1 — with every namespace
+  capability, before any mask (review): a `BASH_ENV` script ran; `SHELLOPTS=xtrace` traced it;
+  an exported `wait()` replaced it; `SHELLOPTS=errexit` + TERM killed the namespace before the
+  command's trap (143, not its 7). And with `SHLVL` unset and stdin a socket, bash sourced
+  `~/.bashrc` as if rshd had started it. ⇒ `--norc -p`. A HUP arm is added.
 
-### More env scrubbed
+### ⛔ A signal before the command starts is no longer lost
 
-* `TMUX`, `TMUX_PANE`, `XAUTHORITY`, `SSH_AGENT_PID`, `DOCKER_CONTEXT`, and
-  `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_TTY` (these three carry the operator's addresses) no
-  longer reach the command, on the fresh and the nested path. A test that relied on one of
-  them inside `isolated` must set it itself.
+The old comment said "a signal before the child exists ends pid 1, nothing starts". Measured
+false by the review: a TERM sent the moment unshare's child appeared was **lost** in 24 of 40
+runs (v0.32.0: 15/40) — pid 1 ignores a signal it has no handler for until bash has trapped —
+and the command **ran to exit 0** after the caller gave up. Here: 4/40 fresh, 40/40 nested.
+⇒ Until the half under pid 1 reports `started`, a forwarded signal SIGKILLs unshare (the
+namespace dies with it) and `isolated` **dies by the signal** — fresh and nested. Arm: 8 runs
+per path with pid 1 held trapless for 300 ms; 0 lost.
+
+### Host policy: AppArmor, and `WEBCTL_UNSHARE_BIN`
+
+* On a host with `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu ≥ 23.10; reported
+  from 24.04) an unprivileged `unshare -r` fails with uid_map `EPERM`. The refusal now says it
+  is a **HOST-POLICY fault, not the lane's**, and gives the fixes: `sysctl -w
+  kernel.apparmor_restrict_unprivileged_userns=0`, or an AppArmor profile granting `userns,`
+  to a dedicated copy of `unshare`.
+* **`WEBCTL_UNSHARE_BIN=<absolute path>`** names that binary; `isolated` uses it for EVERY
+  unshare (outer, privilege drop, nested). It must be an absolute path to an executable regular
+  file — else FAIL naming the rule. Re-bound read-only inside.
+
+### Nesting
+
+* **Version skew:** a v0.33 call nested under a ≤ v0.32 outer is still refused (exit 2, the
+  outer recorded no `WEBCTL_HIDDEN_DIRS` and hid nothing) — the message now says **upgrade the
+  outer**, rather than looking like a forged marker.
+* **Stripped markers** (`env -u WEBCTL_…`, `env -i`) inside `isolated`: measured to isolate
+  AGAIN, fully (fresh path: its own netns and pidns, the home hidden again), never "only
+  inherited"; the verdict line says `ALREADY INSIDE … isolated AGAIN, fully`.
 
 ### ⛔ What this does NOT cover
 
-* The hidden list is **fixed**. Another secret elsewhere in the home is only read-only, and
-  readable. A profile or config outside the home (and not via a symlinked dot-dir) is not
-  covered at all.
-* `WEBCTL_HIDDEN_DIRS`, like `WEBCTL_RO_ROOTS`, is recorded input: `[]` satisfies the new
-  nesting fact. The other facts still require a real masked namespace.
-* The reaper's "signal before the child exists" branch has no test (a race, as for the inner
-  half's early handlers).
+* What a re-bind brings back is visible: a secret inside the cwd, a keep, a PATH dir or base's
+  root (other than the six hidden dirs) is readable. A profile or config OUTSIDE the home (and
+  not via a symlinked dot-dir) is not covered at all.
+* `/var/tmp` and `/dev/shm` are writable and shared with the host; `/sys/class/net` lists the
+  host's interface names.
+* `WEBCTL_RO_ROOTS` and `WEBCTL_HIDDEN_DIRS` are recorded input; the other nesting facts still
+  require a real masked namespace.
+* The AppArmor message is tested by its logic (the sysctl path is a parameter), not end to end.
 
 ## v0.32.0 — 2026-10-03
 

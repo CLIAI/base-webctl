@@ -677,7 +677,7 @@ every caller WITHOUT a trap (lane scripts). A command that HANDLES the signal ke
 code (the rc-7 trapper arm); `exit 130` without a signal stays 130 (CONTROL). Sabotage: no
 re-raise → the three no-trap arms red.
 
-### ⛔ The home's SECRETS were readable — read-only is not hidden (`perplexity`, v0.33.0)
+### ⛔ The home's SECRETS were readable — read-only is not hidden (`perplexity`, v0.33.0; superseded below by hiding the WHOLE home)
 
 *Measured by a consumer lane:* under the read-only home a mutated test could still READ and
 print `~/.ssh` keys, live ControlMaster socket paths, an install salt and target configs
@@ -739,8 +739,9 @@ handler reaps ANY child, re-parented orphans included (measured: the orphan's
 * INT/TERM/HUP trapped and forwarded. A trapped signal interrupts `wait` (returns >128), so it
   waits AGAIN until the child itself ended; **bash keeps a reaped child's status for a second
   `wait`** (measured: `wait` → 138 by a USR1 trap, `wait` again → 5, the child's). It then
-  exits with the child's status. A signal before the child exists: `exit 128+n` — pid 1 goes,
-  the namespace with it, nothing starts;
+  exits with the child's status. A signal after the traps but before the child exists:
+  `exit 128+n` — pid 1 goes, the namespace with it. ⛔ A signal BEFORE the traps was LOST
+  (pid 1 ignores what it has no handler for) — see "The early-signal window" below;
 * ⚠ **a background job ignores SIGINT** (`SigIgn 0x6` on a `sleep &`), so the command is never
   bash's direct child: node resets its dispositions at start (measured: its SigIgn has no
   INT), and node spawns the command with defaults — which is why the nested path keeps the
@@ -752,15 +753,132 @@ handler reaps ANY child, re-parented orphans included (measured: the orphan's
   is still running, and the namespace dies with it); a trap that does not forward → the
   SIGTERM arms red; each bash check removed → the no-bash arm red. The Ctrl-C arms stay green
   under a non-forwarding trap: Ctrl-C signals the whole group, so the command gets INT anyway.
-* Not tested: the pre-child `exit 128+n` branch (a race, as for the inner half's early handlers).
+* The pre-child window is now closed from OUTSIDE and tested (below).
 
-### More env scrubbed (`perplexity`, v0.33.0)
+### More env scrubbed (`perplexity`, v0.33.0; now applied AFTER the allowlist, below)
 
 `TMUX`, `TMUX_PANE` (send-keys into the human's panes), `XAUTHORITY`, `SSH_AGENT_PID`,
 `DOCKER_CONTEXT` (a possibly remote daemon), and `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_TTY` —
 the last three carry the operator's ADDRESSES, which a mutated test can print into a public
 log. The arm and its control iterate the same list; the hostile values use the documentation
 address range. Sabotage: dropping `SSH_CLIENT` from the list → the arm red.
+
+### ⛔ The WHOLE home is hidden — a fixed list misses what nobody listed (v0.33.0, `webctl:mgr` ruling)
+
+The fixed `HIDDEN_DIRS` hide still left every other secret in the home READABLE. Ruling
+(2026-10-07): an empty read-only tmpfs over the passwd home; re-bind on top only what the arm
+needs — READ-ONLY base's root, node, an absolute command, `WEBCTL_UNSHARE_BIN`, EVERY PATH
+entry under the home, each new `--keep-ro`; WRITABLE the cwd and each `--keep`.
+
+* **The home is a hide op, not a root.** It joins the outer-before-inner sequence as the
+  shortest path, so every re-bind under it is moved back ON TOP. A hidden dir under the home
+  gets its own hide only where a re-bind strictly CONTAINS it — elsewhere the home's tmpfs
+  hides it, and its mount point would not even exist. One outside the home (a symlinked
+  dot-dir's real path) is always hidden; that real path is still a read-only ROOT.
+* **`mount` vanished mid-masking** (measured: the no-`setpriv` arm's PATH dir lives under the
+  home). From the home's tmpfs until that dir's re-bind moves back, `spawnSync('mount')` found
+  nothing. ⇒ right after `/run` is covered, `mount --bind -o ro <real mount> /run/.webctl-bin/mount`,
+  and every later step runs that (MOUNT.bin). It stays visible inside, read-only.
+* **Mount points only where MISSING.** The hide loop used to `writeFileSync(b.p, '')` for a FILE
+  bind beneath the hide. If a hide silently fails (the fake-`mount` arm), `b.p` is the REAL file
+  — node's binary, say — and that would truncate it. Same guard as the move-back already had.
+* **Read back by RESOLVING the path** (review finding 7). `hiddenGaps` looked at the top of the
+  stack AT each path; a later mount on an ANCESTOR shadows a hide that is still on top of its
+  own stack. `resolveMount` walks the mount tree the way path lookup does (of two children of
+  one parent covering the path, the shallower was mounted later and shadows the deeper), and
+  the home and each hidden dir must land on our ro tmpfs. Logic-tested from explicit mountinfo,
+  with a CONTROL showing the old per-path check passes the shadowed case.
+* **Fact 6 vs the home.** Recording the home in `WEBCTL_RO_ROOTS` failed every nested call:
+  under the 0555 tmpfs `access(W_OK)` is `EACCES` (mode bits first), not `EROFS`. The home is
+  recorded only in `WEBCTL_HIDDEN_DIRS` (first); fact 8 accepts the hide at the dir or an ancestor.
+* **The rule** (planKeeps `rule`): a PATH entry or `--keep-ro` that IS the home, contains it,
+  or contains / lies inside a hidden dir (nominal AND real paths, existing or not) is refused —
+  a PATH entry as FAIL (the caller's env), `--keep-ro` as usage. Messages carry the label and
+  position, never the path.
+* **Cost** (measured, ~100 PATH entries under the home on the operator host): 1.29 s → 2.27 s
+  per `isolated -- true` with stage + move + remount per entry; staging read-only binds
+  `--rbind -o ro` and skipping already-ro mounts in makeTreeReadOnly → 1.46 s.
+* **Existing arms changed meaning:** a write under the real home is `ENOENT` now, not `EROFS`
+  (the dir is not there); the hidden-dir arm's dirs are absent, not empty; the fake-`mount`
+  arm skips the hide of `~/.config/webctl` under `--keep ~/.config` (`~/.ssh` gets no mount of
+  its own any more); the submount arm re-binds its dir `--keep-ro`.
+* **Sabotage (9, all caught):** home not hidden → 8 arms red; PATH entries not re-bound → the
+  PATH-dir and refusal arms; the rule off → the refusal arm; `--keep-ro` writable → 3 arms;
+  `hiddenGaps` back to top-of-stack → 9 red (incl. the shadow logic arm); `mount` not pinned →
+  the no-setpriv arm; under-home hidden dirs never re-hidden → keep-containing + fake-`mount`;
+  nesting fact 8 off → its arm; verdict with absolute paths → 2 arms. base's root re-bound rw
+  → the base-under-home arm.
+
+### ⛔ pid 1 honoured the CALLER's shell config (review, v0.33.0)
+
+`bash -c PID1_REAPER` as pid 1, with every namespace capability and before any mask: a
+`BASH_ENV` script ran; `SHELLOPTS=xtrace` traced the reaper; an exported `wait()`
+(`BASH_FUNC_wait%%`) replaced it, losing the exit code; `SHELLOPTS=errexit` + TERM ended the
+namespace before the command's trap (143, not 7). ⇒ `-p` (privileged mode). ⛔ Then, while
+fixing it: with the env ALLOWLIST `SHLVL` is unset, and with stdin a SOCKET (node's stdio pipes
+are socketpairs) bash concludes rshd started it and sources `~/.bashrc` — the operator's real
+rc ran as pid 1 (strace: `yarn global bin`, PATH grown by 109 entries). `-p` does not stop
+that branch; `--norc` does (measured, all four flag combinations). ⇒ `bash --norc -p -c`.
+* The BASH_ENV arm passed VACUOUSLY at first: the rshd branch sources `~/.bashrc` and RETURNS
+  before BASH_ENV. It passes `SHLVL=5` now. Every arm uses `--pass-env` for its var — without
+  it the allowlist alone stops the var and the arm passes whatever pid 1 is.
+* **Sabotage:** no `-p` → BASH_ENV, xtrace/wait, errexit arms red; no `--norc` → the bashrc
+  and allowlist arms; plain `-c` on the nested path only → 3 nested arms; on the fresh only → 5.
+
+### ⛔ The early-signal window (review, v0.33.0)
+
+pid 1 of a new PID namespace ignores a signal it has no handler for; bash traps a moment after
+unshare's child exists. A TERM in that gap vanished and the command ran to exit 0 — 24/40
+(review), here 4/40 fresh and **40/40 nested**. ⇒ forwardSignalsPastUnshare takes `started()`:
+until the half under pid 1 reports `started` (fresh: the inner half; nested: the pid-1 helper
+with `--status`, writing fd 3 only if it is a pipe/socket, then closing it BEFORE spawning the
+command), a signal SIGKILLs unshare (`--kill-child`) and the harness dies by it (`early()`).
+* **Arm design:** at 4/40 an 8-run arm would often pass a broken fix. A `bash` first on PATH
+  that sleeps 0.3 s before exec holds pid 1 trapless for 300 ms — 16/20 fresh and 20/20 nested
+  lost before the fix, 0 after (every run dies by TERM). Plus a nested trap arm (TERM after
+  `started` must be FORWARDED: rc 7), which is what catches a helper that never reports.
+* **Sabotage:** `started()` ignored → both early arms; helper never reports → the nested trap
+  arm; nested early kill without dying by the signal → nested early arm; the fresh not-started
+  branch exiting NOT RUN instead of dying → fresh early arm (it now requires death by TERM).
+
+### ⛔ The env is an ALLOWLIST (review, v0.33.0)
+
+37 vars matching `*_API_KEY`/`*_TOKEN`/`*SECRET` reached the arm; `SESSION_MANAGER` carries the
+hostname; `CLIAI_<TOOL>_BROWSER_{SSH_,}TARGET` name remote targets. ⇒ `DEFAULT_PASS_ENV` +
+`--pass-env NAME|PREFIX_*` (`PASS_ENV_RE`; a bare `*` refused; a SCRUBBED name refused), then
+SCRUBBED_ENV removed again. Applied at the unshare spawn too (pid 1 and the inner half never
+see more than the command), and in runCommand (nested: its own `--pass-env`). The plan carries
+`pass` to the inner half, validated again there.
+* **The gate's tests** read `WEBCTL_TEST_FAKE_*` (world().env() renames `FAKE_*`): the gate's
+  production call passes no `--pass-env`. Without the rename: 7 gate tests red.
+* **Sabotage:** the command env back to the full env → the nested arm red (the fresh path is
+  still filtered at the spawn — two layers, by design); `--pass-env` ignored → 2 arms; scrub
+  only before → the `XDG_*` prefix assertion; validation off → the validation arm (×2).
+
+### Host policy: AppArmor, and `WEBCTL_UNSHARE_BIN` (v0.33.0)
+
+`kernel.apparmor_restrict_unprivileged_userns=1` (reported from an Ubuntu 24.04 host) makes
+`unshare -r` fail on uid_map with EPERM. `userNamespaceRefusal(stderr, sysctlPath)` names it a
+HOST POLICY with both fixes; the sysctl path is a PARAMETER so the logic arm never reads the
+host. The fresh path cannot read unshare's message (its stderr is the caller's), so after a
+failure it probes `<bin> -r true`; privilegeDrop has the stderr already. `WEBCTL_UNSHARE_BIN`:
+validated (absolute, regular file, X_OK; the refusal names the rule, not the path), used for
+the outer spawn, the privilege drop and its probe, and every nested call; re-bound read-only.
+* **Not integration-tested:** the AppArmor branch end to end (it needs the host sysctl at 1).
+* **Sabotage:** fresh spawn ignoring the bin / the drop ignoring it / no re-bind → the wrapper
+  arm (it counts 1 `-rnm` and 4 `-U` invocations); no validation → the bad-bin arm; sysctl
+  ignored → the logic arm.
+
+### Stripped markers, and version skew (v0.33.0)
+
+* **Measured:** inside `isolated`, `env -u` of all six markers, then `isolated` → the FRESH
+  path runs, inside: a new netns and pidns, the home hidden again (realIdentity accepts the
+  hidden home: its tmpfs is owned by the outer root = our uid), `isolation-check` PASSes. Never
+  "only inherited". The verdict states it from the kernel alone (MASK_SOURCE on /run and /tmp,
+  only `lo`). Sabotage: detection off → the arm red.
+* **Skew:** a ≤ v0.32.0 outer records no `WEBCTL_HIDDEN_DIRS`. Still refused (rc 2); when that
+  is the ONLY failing fact the reason says "upgrade the outer". On the host (other facts fail
+  too) it does not. Sabotage: message off, or shown whenever the var is absent → the arm red.
 
 ### The import guard
 
@@ -779,9 +897,13 @@ deliberately not re-indented, to keep the guard a two-line diff against concurre
 * **`WEBCTL_RO_ROOTS` and `WEBCTL_HIDDEN_DIRS` are recorded input.** `[]` would satisfy the
   nested home / hidden fact; the other facts still require being inside a real masked
   namespace, so it does not let the host pass as "inside".
-* **Hidden dirs are a fixed list** (`HIDDEN_DIRS`). A secret kept elsewhere in home is only
-  read-only, not hidden. Absent at start → not hidden (nothing to hide; it cannot appear later,
-  the home is read-only).
+* **The home is hidden whole**, but what a re-bind brings back is visible: a PATH entry, the
+  cwd, a keep, base's root. A secret INSIDE one of those (other than the six HIDDEN_DIRS) is
+  exposed. A secret OUTSIDE the home (and not via a symlinked dot-dir) is not covered at all.
+* **`/var/tmp` and `/dev/shm`** are writable and shared with the host, and `/sys/class/net`
+  lists the host's interface names (review, minor 9 — not addressed).
+* **The env allowlist trusts `NODE_OPTIONS`** (default-passed): a caller's `--require` runs in
+  the inner half too, before masking, as v0.32 did. The caller is trusted; the command is not.
 * **`bash` is required** (pid 1, the reaper). Absent → FAIL.
 
 * **The real uid, no capabilities.** The command runs as the caller's own uid/gid in a

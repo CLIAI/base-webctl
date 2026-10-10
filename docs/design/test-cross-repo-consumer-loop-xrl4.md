@@ -3,7 +3,7 @@ id: xrl4
 title: "Cross-Repo Consumer Test Loop & test-against-base Contract"
 category: test
 created: "2026-06-22"
-updated: "2026-10-03"
+updated: "2026-10-10"
 status: draft
 tags: [cross-repo, ci, test-loop, contract, headless, exit-codes, jsonl, drift-canary, semver-gate, gate-validity, vacuous-green, mutation-testing]
 tech:
@@ -407,7 +407,7 @@ RECOVERABILITY, and the two come apart exactly where an argument is malformed.
 When the only options are a loud stop and an irreversible one, prefer the loud
 stop even where a silence argument otherwise holds.
 
-### ⛔ Mutation arms run with no host network, no host unix sockets and a read-only home — sandboxes isolated everything but the network
+### ⛔ Mutation arms run with no host network, no host unix sockets and a hidden home — sandboxes isolated everything but the network
 
 *INCIDENT, 2026-10-02 18:43 UTC (verified with docker inspect by `webctl:mgr`):* a lane's
 mutation control planted "the default port is a location". The arms then ATTACHED to the
@@ -422,11 +422,12 @@ network namespace (`unshare -rn`) works, and inside it `127.0.0.1:<live browser 
 *Network is unreachable* — a fresh namespace has its own loopback and none of the host's
 listeners. The harness provides:
 
-* **`isolated [--keep <path>]… -- <cmd…>`** — runs the command in a private network
-  namespace with its OWN loopback brought up (local fakes and stubs still work; the host's
-  listeners are absent) **and with no host unix sockets** (below). Unavailable isolation
-  **fails closed** (exit non-zero), never silently runs on the host. Every runner-spawning
-  mutation arm runs under it.
+* **`isolated [--keep <path>]… [--keep-ro <path>]… [--pass-env <NAME|PREFIX_*>]… -- <cmd…>`**
+  — runs the command in a private network namespace with its OWN loopback brought up (local
+  fakes and stubs still work; the host's listeners are absent), **with no host unix sockets**,
+  **a hidden home** and **an env allowlist** (below). Unavailable isolation **fails closed**
+  (exit non-zero), never silently runs on the host. Every runner-spawning mutation arm runs
+  under it.
 * **`sandbox-port`** — binds port 0, reads it, closes it, asserts nothing listens: a port the
   lane exports into its PORT variable so any port derived from it is dead.
 * **`guard-live-port <port> [--pin-verified]`** — defence in depth where isolation is not
@@ -478,6 +479,22 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
   reads `/dev/null`), traps and forwards INT/TERM/HUP, re-waits after a trapped signal and
   exits with the child's status. Its SIGCHLD handler reaps ANY child: the orphan's
   `/proc/<pid>` disappears (measured). No `bash` ⇒ refused.
+  ⛔ **`bash --norc -p`** (v0.33.0, review): as `bash -c`, pid 1 honoured the caller's shell
+  config WITH every namespace capability, BEFORE any mask — a `BASH_ENV` script ran,
+  `SHELLOPTS=xtrace` traced the reaper, an exported `wait()` replaced it, `SHELLOPTS=errexit`
+  + TERM ended the namespace before the command's own trap (143, not its 7). `-p` ignores all
+  three. `--norc`: with `SHLVL` unset and stdin a socket, bash sources `~/.bashrc` as if rshd
+  had started it, and `-p` does not stop that branch (measured while fixing it).
+* **The early-signal window** (v0.33.0, review). pid 1 of a new PID namespace IGNORES a
+  signal it has no handler for, and bash installs its traps a moment after unshare's child
+  exists: a TERM in that gap was lost and the command ran to exit 0 — 24 of 40 runs (v0.32.0:
+  15/40); measured here 4/40 fresh and 40/40 nested. ⇒ The half under pid 1 reports `started`
+  on a status pipe — it can only do so once pid 1 has trapped and started it — and until then
+  the harness turns a forwarded signal into a SIGKILL of unshare (`--kill-child` takes the
+  namespace) and dies by the signal. On the nested path the pid-1 node helper reports
+  `started` (and closes the pipe) before it starts the command. *Arm:* a probe TERMs the
+  harness the moment the reaper's unshare has a child, with a `bash` that sleeps 0.3 s before
+  exec (16/20 fresh, 20/20 nested lost before; 0 after, every run dies by TERM).
 * **No capabilities.** *Measured by the final review:* the command was namespace root with
   **every** capability, so `umount -l /tmp` or unmounting a `/dev/null` cover re-exposed host
   sockets (ENOENT/ECONNREFUSED → CONNECTED). ⇒ It runs in a **child user namespace as the
@@ -506,13 +523,22 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
 * **Ctrl-C stops the caller.** A forwarded signal that ended the command is re-raised, so
   `isolated` dies BY it and bash's cooperative-exit rule stops a trap-less parent (before:
   it carried on with `$? = 130`).
-* **Env scrub** on the fresh and the nested path: `DISPLAY`, `WAYLAND_DISPLAY`,
-  `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `XDG_RUNTIME_DIR` unset, and the
-  state roots `XDG_{CACHE,CONFIG,STATE,DATA}_HOME` too (they beat `$HOME` in `v59v`, so a
-  temp HOME was silently bypassed); and (v0.33.0, `perplexity`) `TMUX`, `TMUX_PANE`,
-  `XAUTHORITY`, `SSH_AGENT_PID`, `DOCKER_CONTEXT`, `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_TTY` —
-  the last three carry the operator's addresses, which a mutated test can print into a log;
-  `TMPDIR=/tmp`, so an inherited value cannot name a directory the mask hid.
+* **Env ALLOWLIST** (v0.33.0, BREAKING) on the fresh and the nested path — and for pid 1 and
+  the inner half too. *Measured by the review:* 37 vars matching `*_API_KEY`, `*_TOKEN`,
+  `*SECRET` reached the arm on an operator host, and the gate passes its full env; a denylist
+  cannot keep up. Default: `PATH HOME USER LOGNAME SHELL LANG LC_* TERM TZ NODE_OPTIONS
+  NODE_PATH npm_config_* WEBCTL_*`, plus `TMPDIR=/tmp` (an inherited one may name a directory
+  the mask hid) and the markers; more with `--pass-env NAME` or `--pass-env PREFIX_*`
+  (validated; a bare `*` is refused). `CLIAI_*` is not default (`CLIAI_<TOOL>_BROWSER_{SSH_,}TARGET`
+  name remote targets), nor `SESSION_MANAGER` (embeds the hostname) or `ICEAUTHORITY`. The
+  older denylist is still applied AFTER the allowlist, so no prefix pass brings back
+  `DISPLAY`, `WAYLAND_DISPLAY`, `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`,
+  `XDG_RUNTIME_DIR`, the state roots `XDG_{CACHE,CONFIG,STATE,DATA}_HOME` (they beat `$HOME`
+  in `v59v`, so a temp HOME was silently bypassed), `TMUX`, `TMUX_PANE`, `XAUTHORITY`,
+  `SSH_AGENT_PID`, `DOCKER_CONTEXT`, `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_TTY` (the last three
+  carry the operator's addresses); naming one of them in `--pass-env` is a usage error. A
+  nested call honours only its OWN `--pass-env`. *The gate's own call passes none:* its
+  tests' fake-contract knobs travel as `WEBCTL_TEST_FAKE_*`.
 * **A nested call still gets its own PID namespace.** Network and masks are inherited (the
   mounts stay locked), but the process table is not: a lane that runs its suite through
   `isolated`, under the gate's own `isolated`, must not let the suite signal the contract
@@ -522,44 +548,100 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
 * **Nesting.** "Already inside" now also needs `/proc/self/ns/mnt` ≠ `WEBCTL_HOST_MNTNS`
   and our tmpfs **on top of** `/run` and `/tmp` in `/proc/self/mountinfo` — "a tmpfs at
   /run" alone is a proxy, the host's already is one. The old net-only namespace is refused.
+* **Stripped markers** (v0.33.0, measured). The markers are the only thing that makes a call
+  take the nested path. With all of them stripped (`env -u …`, `env -i`) the call takes the
+  FRESH path, inside, and isolates AGAIN, fully — its own netns and pidns, the home hidden
+  again, the kernel proof holds — never "only inherited". The kernel alone tells it where it
+  is (our tmpfs tag on `/run` and `/tmp` + a lo-only network), and the verdict says
+  `ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully`.
+* **Version skew** (v0.33.0). A v0.33 call nested under a ≤ v0.32.0 outer finds no
+  `WEBCTL_HIDDEN_DIRS` (and a home that is not hidden): still refused, exit 2 — and when
+  that is the only failing fact, the refusal says *upgrade the outer*, instead of reading
+  like a forged marker.
+* **Host policy — AppArmor** (v0.33.0; reported by `webctl:mgr` from an Ubuntu 24.04 host).
+  `kernel.apparmor_restrict_unprivileged_userns=1` makes an unprivileged `unshare -r` fail
+  with uid_map `EPERM` — the host's policy, not the lane's code, though the old refusal read
+  "user namespaces may be disabled". ⇒ On that `EPERM` with the sysctl at 1, the refusal says
+  **HOST POLICY, not a fault of this lane**, and gives both fixes: the sysctl, or an AppArmor
+  profile granting `userns,` to a DEDICATED copy of `unshare`, named by
+  **`WEBCTL_UNSHARE_BIN`** (absolute path to an executable regular file, validated, re-bound
+  read-only inside) — used for EVERY unshare: the outer namespace, the privilege drop, the
+  nested call. The fresh path's unshare shares the caller's stderr, so its message is read
+  back from a `-r true` probe after the failure. *Tested* by its logic, with the sysctl path
+  a function parameter (the arms never read the host's setting).
 
 *Limits.* A socket created on the host **after** start-up is not in the list (it is still
 masked if it lives under `/run` or `/tmp`). Sockets that are bound in other network
 namespaces are not in this netns's `/proc/net/unix`. `/proc/<host-pid>/root/…` was
 measured as permission-denied from inside the user namespace.
 
-#### ⛔ The home directory is READ-ONLY — no network is needed to corrupt a profile
+#### ⛔ The home directory is HIDDEN — no network is needed to corrupt a profile, or to read a key
 
 *Raised and measured by `webctl:mgr`, 2026-10-03:* with the network and the sockets gone,
 the real user's home was still **writable** from inside. It holds the signed-in browser
 **profiles** (`~/.cache/<tool>/…`), the family's config (`~/.config/webctl`) and `~/.ssh`.
 A mutant that restores a **literal** path — the same shape as the port incident — corrupts
-a live profile with no network at all.
+a live profile with no network at all. ⇒ v0.32.0 made it **read-only**. Then (v0.33.0,
+measured by `perplexity`) read-only still let a mutated test READ and print ssh keys and the
+state roots — so a fixed list of dirs was hidden — and a fixed list misses every secret
+nobody listed. ⇒ **v0.33.0 (BREAKING; ruled by `webctl:mgr`, 2026-10-07): the WHOLE home is
+hidden.**
 
 ⇒ Inside `isolated`, the **passwd** home (`os.userInfo().homedir`, realpath'd — **not**
-`$HOME`, which the gate points at a throwaway directory) is read-only, and only these are
-re-opened writable on top of it:
+`$HOME`, which the gate points at a throwaway directory) gets an **empty, read-only** tmpfs
+(source `webctl-isolated-hidden`); inside, a read of anything in it is `ENOENT`, a create
+`EROFS`. Re-bound on top, at the same paths:
 
-* the **cwd**, when it is under home;
-* every **`--keep`** under home.
+* **read-only** — base's repo root, node, the command if absolute, `WEBCTL_UNSHARE_BIN`,
+  **every PATH entry under the home** (else the tools there vanish), and each
+  **`--keep-ro <path>`** (e.g. uv's managed python under `~/.local/share/uv/python`);
+* **writable** — the **cwd**, when it is under home, and every **`--keep`** under home.
 
-**Not** base's repo root, node or the command: the arm only *reads* them. ⛔ base's root
-in particular stays read-only (under `/tmp` as well): under the release gate **one** base
-checkout serves every consumer in turn, so a mutant writing into it would change what the
-**next** consumer is judged against — and it is the harness's own code. base's own suite
-runs with cwd = its root, which re-opens it through the cwd.
+⛔ base's root in particular stays read-only (under `/tmp` as well): under the release gate
+**one** base checkout serves every consumer in turn, so a mutant writing into it would change
+what the **next** consumer is judged against — and it is the harness's own code. base's own
+suite runs with cwd = its root, which re-opens it through the cwd.
+
+* **The hidden list still matters.** `~/.ssh`, `~/.gnupg`, `~/.cache/CLIAI`,
+  `~/.config/CLIAI`, `~/.local/state/CLIAI` and `~/.config/webctl` get their **own** empty
+  tmpfs wherever a re-bind contains them (a `--keep ~/.config` does not unhide
+  `~/.config/webctl`), and at their real path when it lies outside the home. An explicit
+  `--keep` at or beneath one re-exposes **that path only** (named on stderr).
+* **A re-bind must not expose what is hidden.** A PATH entry (FAIL) or `--keep-ro` (usage)
+  that IS the home, or **contains** or **lies inside** a hidden dir, is refused, naming the
+  rule and no path.
+* **The verdict** lists what came back, home-relative only:
+  `isolated: home HIDDEN; re-bound read-only: ~/…; writable: ~/…`.
+* **`mount` is pinned.** Once the home's tmpfs is up, a PATH dir under the home is gone until
+  its re-bind moves back — and a `mount` living there with it (measured: an arm's PATH was such
+  a dir). ⇒ right after `/run` is covered, the real `mount` is bound read-only under the new
+  `/run` and run from there. Mount points are created only where MISSING: if a hide silently
+  failed, an existing file at a keep's path is the REAL file, and creating it would truncate it.
+* **Read back by RESOLVING.** The home and each hidden dir must resolve — by path, through the
+  mount tree — to our read-only tmpfs (its own, or an ancestor's), else refused with a count.
+  ⚠ "the top of the stack AT the path" (review finding 7) misses a later mount on an
+  ANCESTOR, which shadows a hide that is still on top of its own stack (logic-tested).
+* **A nested `unshare -rm` cannot peel it** (tested): the mounts are locked there.
+* **What breaks** (reasoned): anything reading the home INDIRECTLY — git's `~/.gitconfig`,
+  `gpg.format=ssh` commit signing, ssh's `~/.ssh/config` and `known_hosts`, gpg, rc files,
+  a tool's own cache or config. Give the arm a throwaway `HOME`, or `--keep-ro` the one dir.
+* *Cost, measured:* ~100 PATH entries under the home on the operator host — each re-bind is
+  staged already `-o ro` — took one `isolated -- true` from 1.29 s to 1.46 s.
 
 * **The submount rule.** `mount -o remount,bind,ro` on an rbind hits only its **top**
-  mount. *Measured:* after a top-only remount, `touch` into a submount **succeeded**. ⇒ The
-  home is rbound onto itself, and it **and every reachable submount** (read from
-  `/proc/self/mountinfo`; stacked and shadowed mounts are unreachable and skipped) are
-  remounted read-only. A submount that cannot be remounted ⇒ **refused**.
-* **The order.** The keeps are staged **before** the read-only step, so the staged copies
-  keep the host's modes (submounts included); then the home goes read-only; then the keeps
-  are moved back **on top**, outer before inner. Re-binding a keep afterwards would copy the
-  read-only submounts beneath it.
-* **Read back, fail closed.** Before `started`, every reachable mount under the home outside
-  a writable keep must show `ro` in mountinfo; any gap ⇒ refused, with a **count**.
+  mount. *Measured:* after a top-only remount, `touch` into a submount **succeeded**. ⇒ Every
+  read-only re-bind (and each sensitive dot-dir's real path outside the home), **and every
+  reachable submount of it** (read from `/proc/self/mountinfo`; stacked and shadowed mounts
+  are unreachable and skipped), is remounted read-only. A submount that cannot be remounted ⇒
+  **refused**. *(Through v0.32.0 the rule applied to the home itself, rbound onto itself.)*
+* **The order.** The keeps are staged **before** anything is hidden or made read-only, so
+  the staged copies keep the host's modes (submounts included); then the read-only roots;
+  then, outer before inner, the home's tmpfs, the keeps moved back **on top**, and each
+  hidden dir's own tmpfs (before a keep at the same path). Re-binding a keep afterwards would
+  copy the read-only submounts beneath it.
+* **Read back, fail closed.** Before `started`, every reachable mount under a read-only root
+  or re-bind outside a writable keep must show `ro` in mountinfo; any gap ⇒ refused, with a
+  **count**.
 * **What a keep may not do.** A cwd that **is or contains** the home is refused (it would
   re-open all of it); a `--keep` that contains it is a usage error. Every keep is
   **realpath'd first**, so a symlink to home is refused as containing it. A writable keep in
@@ -572,9 +654,13 @@ runs with cwd = its root, which re-opens it through the cwd.
   socket check above is what closes those.
 * **Nesting.** "Already inside" also needs each root recorded in `WEBCTL_RO_ROOTS` to answer
   `access(W_OK)` with `EROFS` — so the previous `isolated` (every other fact satisfied, home
-  writable) is refused. The roots are recorded, not re-derived: inside the user namespace
-  we are uid 0, and the passwd lookup answers root's home.
-* **⛔ Read-only is not HIDDEN** (v0.33.0, measured by `perplexity`). A mutated test could
+  writable) is refused — and each dir in `WEBCTL_HIDDEN_DIRS` (the home first) to have our
+  read-only hide AT it or at an ANCESTOR. The roots are recorded, not re-derived: inside the
+  user namespace we are uid 0, and the passwd lookup answers root's home. ⚠ The home is in
+  `WEBCTL_HIDDEN_DIRS`, not `WEBCTL_RO_ROOTS`: under its 0555 tmpfs `access(W_OK)` answers
+  `EACCES` (mode bits are checked before the read-only mount), measured.
+* **⛔ Read-only is not HIDDEN** (the first v0.33.0 step, measured by `perplexity`; since
+  superseded by hiding the whole home, above). A mutated test could
   still READ and print `~/.ssh` keys, live ControlMaster socket paths, an install salt and
   target configs naming remote hosts. ⇒ `~/.ssh`, `~/.gnupg`, `~/.cache/CLIAI`,
   `~/.config/CLIAI`, `~/.local/state/CLIAI` and `~/.config/webctl` — each that exists, at its
@@ -588,7 +674,7 @@ runs with cwd = its root, which re-opens it through the cwd.
   `WEBCTL_HIDDEN_DIRS` carries the mask. **BREAKING** for a test that reads these dirs.
   *Tested* with a fake passwd home (a fake `/etc/passwd` bound in a throwaway `unshare -rm`),
   never by planting in the real `~/.ssh`.
-* **Callers' caches.** *Measured with npm 12:* `npm test` under a read-only home behaves
+* **Callers' caches.** *Measured with npm 12:* `npm test` under a read-only (now hidden) home behaves
   exactly as on the host (rc 0 / rc 1); npm only skips its debug logfile (`EROFS` on
   `~/.npm/_logs`), printing *"Log files were not written …"* on error. No harness change
   needed; a lane that wants those logs sets `npm_config_cache` to a directory under `/tmp`.
