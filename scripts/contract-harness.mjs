@@ -1449,6 +1449,94 @@ function unshareBin() {
 }
 
 /**
+ * The env var that PINS one isolation backend (ib4k §2): `unshare`, `bwrap` or `docker`.
+ * Unset/empty: the first AVAILABLE backend in ISOLATION_BACKENDS order. ⛔ A pinned backend that
+ * cannot be used is a REFUSAL — never a silent fallback to another one.
+ */
+const BACKEND_ENV = 'WEBCTL_ISOLATION_BACKEND';
+/** The backends, in the order they are tried (ib4k §2). After the last: REFUSE — never unisolated. */
+export const ISOLATION_BACKENDS = Object.freeze(['unshare', 'bwrap', 'docker']);
+
+/**
+ * @typedef {{backend: string, why: string}} Skipped  a backend not used, and the NAMED reason
+ * @typedef {{backend: string, skipped: Skipped[], refuse: string}} BackendChoice
+ *   `backend` '' when none can be used; then `refuse` says why, naming every backend tried.
+ */
+
+/**
+ * Choose the isolation backend (ib4k §2, §4). `probes` are tried IN ORDER; each answers '' when its
+ * backend can be used here, else the reason it cannot. ⛔ Probing is side-effect free and a probe
+ * that THROWS is a recorded reason, never a crash. ⛔ `pinned` (WEBCTL_ISOLATION_BACKEND): only that
+ * backend is probed, and when it cannot be used the answer is a REFUSAL naming why — another backend
+ * is never substituted. A pin that names no known backend is refused by RULE, its value never printed
+ * (it is caller input and the refusal is logged).
+ * @param {string | undefined} pinned @param {{name: string, probe: () => string}[]} probes
+ * @returns {BackendChoice}
+ */
+export function selectBackend(pinned, probes) {
+  /** @type {Skipped[]} */
+  const skipped = [];
+  const names = probes.map((p) => p.name);
+  const reasonOf = (/** @type {{name: string, probe: () => string}} */ p) => {
+    try { return String(p.probe() ?? ''); } catch (e) { return `its probe failed (${errMsg(e)})`; }
+  };
+  const said = () => skipped.map((s) => `${s.backend}: ${s.why}`).join('; ');
+  if (pinned !== undefined && pinned !== '') {
+    const p = probes.find((x) => x.name === pinned);
+    if (!p) {
+      return { backend: '', skipped, refuse: `${BACKEND_ENV} must name one isolation backend — ${names.join(', ')} — or be `
+        + 'unset (the first available one is used)' };
+    }
+    const why = reasonOf(p);
+    if (!why) return { backend: p.name, skipped, refuse: '' };
+    skipped.push({ backend: p.name, why });
+    return { backend: '', skipped, refuse: `${BACKEND_ENV} pins the ${p.name} backend, which cannot be used here — ${said()} `
+      + '(a pinned backend never falls back to another; unset it to let isolation choose)' };
+  }
+  for (const p of probes) {
+    const why = reasonOf(p);
+    if (!why) return { backend: p.name, skipped, refuse: '' };
+    skipped.push({ backend: p.name, why });
+  }
+  return { backend: '', skipped, refuse: `no isolation backend can be used here — ${said()} (the command is never run `
+    + 'unisolated)' };
+}
+
+/**
+ * The verdict-line clause for the chosen backend: `backend: unshare`, plus each backend tried and
+ * skipped before it with its reason. @param {BackendChoice} c @returns {string}
+ */
+function backendClause(c) {
+  return `backend: ${c.backend}${c.skipped.length ? ` (skipped ${c.skipped.map((s) => `${s.backend}: ${s.why}`).join('; ')})` : ''}`;
+}
+
+/** Phase-1 placeholders: these backends are specified (ib4k §3) but not implemented yet. */
+const NOT_IMPLEMENTED = Object.freeze({ bwrap: 'not implemented yet (v0.34 phase 2)', docker: 'not implemented yet (v0.34 phase 3)' });
+
+/**
+ * Can the `unshare` backend run here? '' when yes, else the NAMED reason (ib4k §2): an invalid
+ * WEBCTL_UNSHARE_BIN, a tool missing from the system dirs, or the kernel refusing the namespaces —
+ * with the AppArmor sysctl named as HOST POLICY (userNamespaceRefusal), as v0.33 refused.
+ * ⛔ Side-effect free: the namespaces are made around `true` and gone when it exits.
+ * @param {{bin: string, why: string}} ub @returns {string}
+ */
+function probeUnshare(ub) {
+  if (ub.why) return ub.why;
+  const { why } = privilegedTools(ub, false);
+  if (why) return why;
+  const r = spawnSync(ub.bin, ['-rnm', '--uts', '--pid', '--fork', SYSTEM_TRUE()], { encoding: 'utf8',
+    stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
+  if (r.error) return `cannot run unshare (${errMsg(r.error)})`;
+  if (r.status === 0) return '';
+  const tail = String(r.stderr || '').trim().split('\n').pop()?.slice(0, 200) || `exit ${r.status ?? r.signal}`;
+  return userNamespaceRefusal(String(r.stderr || ''))
+    || `the kernel refused the namespaces (\`unshare -rnm --uts --pid\`: ${tail}) — unprivileged user namespaces `
+      + 'may be disabled (kernel.unprivileged_userns_clone / user.max_user_namespaces)';
+}
+/** `true` from the system dirs (the probe's whole payload); '/bin/true' as the last resort. */
+const SYSTEM_TRUE = () => systemTool('true') || '/bin/true';
+
+/**
  * @typedef {{unshare: string, bash: string, setpriv: string, mount: string, lo: [string, string[]][]}} Tools
  *   every binary a privileged half runs, by ABSOLUTE path (SYSTEM_TOOL_DIRS / WEBCTL_UNSHARE_BIN).
  *   `lo`: how to bring the loopback up — `ip`, then `ifconfig`, whichever exist. The NESTED path
@@ -1924,11 +2012,18 @@ function runIsolated(a) {
     }
   }
   const ub = unshareBin();
-  if (ub.why) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${ub.why}. The command was NOT started.`, { command }));
   // ⛔ NESTED CALL: "already inside" is proven from the KERNEL. The marker alone is
   // trusted input — set on the host it would skip isolation entirely — so a marker
   // whose proof fails is REFUSED (no verdict, exit 2) before anything runs.
   if (process.env[HOST_NETNS_ENV] !== undefined) {
+    // ⚠ a nested call makes no sandbox of its own backend: it runs INSIDE its outer call's. A pin is
+    // still validated (an unknown name is refused everywhere), but it selects nothing here.
+    const pin = process.env[BACKEND_ENV];
+    if (pin && !ISOLATION_BACKENDS.includes(pin)) {
+      return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${selectBackend(pin, ISOLATION_BACKENDS.map((name) => ({ name, probe: () => '' }))).refuse}. `
+        + 'The command was NOT started.', { command }));
+    }
+    if (ub.why) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${ub.why}. The command was NOT started.`, { command }));
     const proof = kernelInsideProof();
     if (!proof.inside) {
       return Promise.resolve(report('isolated', EXIT.noVerdict,
@@ -2018,7 +2113,7 @@ function runIsolated(a) {
     ...(path.isAbsolute(command[0]) ? [{ p: command[0], label: 'the command', rw: false }] : []),
     { p: process.execPath, label: 'node', rw: false },
     // the inner half and every nested call run it again, from INSIDE the masks
-    ...(ub.override ? [{ p: ub.bin, label: UNSHARE_BIN_ENV, rw: false }] : []),
+    ...(ub.override && ub.bin ? [{ p: ub.bin, label: UNSHARE_BIN_ENV, rw: false }] : []),
     // a throwaway HOME under /tmp is the arm's own (the family's sandboxes isolate HOME)
     ...(throwawayHome(ident.home) ? [{ p: throwawayHome(ident.home), label: 'HOME', rw: true }] : []),
     // ⛔ the HIDDEN home: every PATH entry under it is re-bound READ-ONLY, or tools vanish
@@ -2038,9 +2133,20 @@ function runIsolated(a) {
       'NOT RUN: /proc/self/net/unix is unreadable, so the host\'s unix sockets cannot be listed and '
       + 'their masking cannot be PROVEN. The command was NOT started.', { command }));
   }
+  // ⭐ THE BACKEND (ib4k §2): unshare → bwrap → docker → REFUSE; WEBCTL_ISOLATION_BACKEND pins one.
+  // Each probe answers '' or a NAMED reason; a pinned one that cannot run is refused, never replaced.
+  const choice = selectBackend(process.env[BACKEND_ENV], [
+    { name: 'unshare', probe: () => probeUnshare(ub) },
+    { name: 'bwrap', probe: () => NOT_IMPLEMENTED.bwrap },
+    { name: 'docker', probe: () => NOT_IMPLEMENTED.docker },
+  ]);
+  if (choice.refuse) {
+    return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${choice.refuse}. The command was NOT started.`,
+      { command, backend: null, skipped: choice.skipped }));
+  }
   // ⛔ every tool the privileged halves run: from the SYSTEM dirs, resolved HERE, passed on by path
-  const { tools, why: noTool } = privilegedTools(ub, false);
-  if (noTool) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${noTool}. The command was NOT started.`, { command }));
+  // (the unshare probe has already required every one of them)
+  const { tools } = privilegedTools(ub, false);
   for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
   // ⚠ by LABEL: the planted link's location and target are exactly what must not be printed
   if (xq.ignored) process.stderr.write(`isolated: note: xq ignored: ${xq.ignored} — its root is NOT re-bound\n`);
@@ -2054,7 +2160,7 @@ function runIsolated(a) {
   }
   const inside = outer ? '; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, '
     + 'keeping what the outer call re-bound (same modes)' : '';
-  process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', inside)}\n`);
+  process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', `${inside}; ${backendClause(choice)}`)}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
   // the COMMAND's env: the allowlist + our markers. It travels in the plan (fd 4) and is applied
@@ -2110,7 +2216,7 @@ function runIsolated(a) {
             + 'user.max_user_namespaces); unshare\'s own message, if any, is above';
       resolve(report('isolated', EXIT.fail,
         `NOT RUN: ${why}. The command was NOT started, and is never run on the host as a fallback.`,
-        { command }));
+        { command, backend: choice.backend, skipped: choice.skipped }));
     });
   });
 }

@@ -242,7 +242,7 @@ test('⛔ fail closed: no `unshare` in the system dirs → FAIL, reason printed,
       `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: 'unshare' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install util-linux, or name one with WEBCTL_UNSHARE_BIN/);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: no isolation backend can be used here — unshare: 'unshare' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install util-linux, or name one with WEBCTL_UNSHARE_BIN/);
     assert.match(r.stdout, /"check":"isolated","result":"fail"/);
     assert.equal(fs.existsSync(marker), false, 'the command ran although isolation was unavailable');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -274,7 +274,7 @@ test('⛔ fail closed: neither `ip` nor `ifconfig` in the system dirs → FAIL n
       process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /NOT RUN: cannot bring the namespace loopback up: neither 'ip' nor 'ifconfig' found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install iproute2/);
+    assert.match(r.stderr, /NOT RUN: no isolation backend can be used here — unshare: cannot bring the namespace loopback up: neither 'ip' nor 'ifconfig' found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install iproute2/);
     assert.equal(fs.existsSync(marker), false, 'the command ran without a working loopback');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -287,7 +287,7 @@ test('⛔ fail closed: no `mount` in the system dirs → FAIL naming it, command
       `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /NOT RUN: cannot mask the host's sockets: 'mount' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install util-linux/);
+    assert.match(r.stderr, /NOT RUN: no isolation backend can be used here — unshare: cannot mask the host's sockets: 'mount' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install util-linux/);
     assert.equal(fs.existsSync(marker), false, 'the command ran with the host\'s unix sockets unmasked');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -2259,7 +2259,7 @@ test('⛔ fail closed: no `setpriv` in the system dirs → FAIL naming it, comma
     const r = await markerRun(dir, overTool(noexecFile(dir), 'setpriv'));
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot enter the uid-mapped child user namespace: 'setpriv' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin/);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: no isolation backend can be used here — unshare: cannot enter the uid-mapped child user namespace: 'setpriv' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin/);
     assert.equal(r.ran, false, 'the command ran with capabilities');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -3059,12 +3059,14 @@ test('⛔ fail closed: no `bash` in the system dirs (pid 1 must reap) → FAIL n
   // ⚠ a non-executable file bound over the system bash (PATH is never consulted for pid 1)
   const dir = tmpdir();
   const none = noexecFile(dir);
-  const NO_BASH_RE = /FAIL {2}isolated: NOT RUN: 'bash' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — pid 1/;
+  const NO_BASH_RE = /FAIL {2}isolated: NOT RUN: (?:no isolation backend can be used here — unshare: )?'bash' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — pid 1/;
   try {
     const r = await markerRun(dir, overTool(none, 'bash'));
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stderr, NO_BASH_RE);
+    // the FRESH path probes its backend: the reason is unshare's skip reason (ib4k §2)
+    assert.match(r.stderr, /NOT RUN: no isolation backend can be used here — unshare: 'bash' not found/);
     assert.equal(r.ran, false, 'the command ran without a reaping pid 1');
     // nested: the outer call is ordinary; inside it, a throwaway `unshare -rm` hides bash from the inner one
     const marker = path.join(dir, 'RAN-NESTED');
@@ -3259,7 +3261,7 @@ test('⛔ a bad WEBCTL_UNSHARE_BIN (relative, missing, a directory, not executab
       const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`],
         { WEBCTL_UNSHARE_BIN: bin });
       assert.equal(r.status, 1, `${bin === dir ? '<dir>' : path.basename(bin)}: ${r.stdout}${r.stderr}`);
-      assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file/m);
+      assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: no isolation backend can be used here — unshare: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file/m);
       assert.ok(!r.stderr.includes(dir), 'the refusal printed the path');
       assert.equal(fs.existsSync(marker), false);
     }
@@ -3277,7 +3279,8 @@ test('⭐ WEBCTL_UNSHARE_BIN is used for EVERY unshare: the outer namespace, the
       { WEBCTL_UNSHARE_BIN: wrapper, WEBCTL_TEST_UNSHARE_LOG: path.join(log, 'used') });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     const used = fs.readFileSync(path.join(log, 'used'), 'utf8').trim().split('\n');
-    assert.equal(used.filter((l) => l === 'USED -rnm').length, 1, `the outer namespace did not use it:\n${used.join('\n')}`);
+    // the backend probe (side-effect free: `-rnm --uts --pid --fork true`) and the outer namespace
+    assert.equal(used.filter((l) => l === 'USED -rnm').length, 2, `the probe and the outer namespace did not both use it:\n${used.join('\n')}`);
     // outer: the drop's probe + the command; nested: its drop's probe + its command
     assert.equal(used.filter((l) => l === 'USED -U').length, 4, `the privilege drops did not all use it:\n${used.join('\n')}`);
     // CONTROL: without the var, the wrapper is never called
