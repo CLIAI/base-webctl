@@ -98,6 +98,58 @@ async function fakeCdp() {
 function tmpdir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'harness-iso-')); }
 
 /**
+ * ⛔ Since the re-review of v0.33.0 a privileged half's tools come from FIXED system dirs, never
+ * PATH — so an arm puts a FAKE tool where the harness looks: bind-mounted over the system copy,
+ * in a throwaway `unshare -rm` (nothing outside it changes). These are those dirs; `overTool`
+ * gives one bind per distinct real copy of `name` (on a merged-/usr host they are all one file).
+ */
+const TOOL_DIRS = ['/usr/sbin', '/usr/bin', '/sbin', '/bin'];
+/** @param {string} src @param {string} name @returns {[string, string][]} */
+function overTool(src, name) {
+  const reals = new Set();
+  for (const d of TOOL_DIRS) { try { reals.add(fs.realpathSync(path.join(d, name))); } catch { /* absent */ } }
+  return [...reals].map((r) => /** @type {[string, string]} */ ([src, r]));
+}
+/** A NON-executable empty file in `dir`: bound over a tool, the harness no longer finds it. @param {string} dir */
+function noexecFile(dir) {
+  const f = path.join(dir, 'noexec');
+  fs.writeFileSync(f, '', { mode: 0o644 });
+  return f;
+}
+/** An empty file bound onto by `[realTool, it]`: a path the REAL tool stays reachable at once a fake covers it. @param {string} dir @param {string} name */
+function realCopyAt(dir, name) {
+  const at = path.join(dir, `real-${name}`);
+  fs.writeFileSync(at, '');
+  return at;
+}
+const MOUNT_BIN = TOOL_DIRS.map((d) => path.join(d, 'mount')).find((p) => fs.existsSync(p)) || 'mount';
+/**
+ * Run `argv` in a throwaway `unshare -rm` after bind-mounting each [src, dst] IN ORDER (a bind
+ * over `mount` itself must come last). With `home`, the real uid's passwd home is pointed at it
+ * first (as underFakeHome). Resolves null when this host cannot make the binds (skip by name).
+ * @param {[string, string][]} binds @param {string[]} argv @param {{home?: string, cwd?: string, env?: NodeJS.ProcessEnv}} [o]
+ */
+async function withBinds(binds, argv, o = {}) {
+  const dir = tmpdir();
+  /** @type {[string, string][]} */
+  const all = [];
+  if (o.home) {
+    const pw = path.join(dir, 'passwd');
+    fs.writeFileSync(pw, `x:x:${process.getuid?.()}:${process.getgid?.()}::${o.home}:/bin/sh\n`);
+    all.push([pw, '/etc/passwd']);
+  }
+  all.push(...binds);
+  try {
+    const r = await runRaw(['unshare', '-rm', '--propagation=private', 'sh', '-c',
+      'm=$0; h=$1; u=$2; shift 2; while [ "$1" != -- ]; do "$m" --bind "$1" "$2" || exit 97; shift 2; done; shift; '
+        + '[ -z "$h" ] || [ "$(getent passwd "$u" | cut -d: -f6)" = "$h" ] || exit 98; exec "$@"',
+      MOUNT_BIN, o.home || '', String(process.getuid?.()), ...all.flat(), '--', ...argv], { cwd: o.cwd || ROOT, env: o.env });
+    return r.status === 97 || r.status === 98 ? null : r;
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+const NO_BINDS = 'SKIP (host): cannot bind a fake tool (or passwd) in a throwaway `unshare -rm` here';
+
+/**
  * The MUTANT: connects to 127.0.0.1:<port> from argv — the shape of an arm that
  * re-derived the default port. Exit 0 = it reached something, 1 = it did not.
  */
@@ -181,71 +233,61 @@ test('isolated: propagates the command\'s exit code (0 and 3), argv passed as an
   assert.ok(!/contract-check/.test(ok.stdout + three.stdout + lit.stdout));
 });
 
-test('⛔ fail closed: no `unshare` on PATH → FAIL, reason printed, the command NOT run', async () => {
+test('⛔ fail closed: no `unshare` in the system dirs → FAIL, reason printed, the command NOT run', needsIsolation, async (t) => {
+  // ⚠ a throwaway `unshare -rm` hides the system unshare (PATH is never consulted for it)
   const dir = tmpdir();
   const marker = path.join(dir, 'RAN');
-  const emptyBin = path.join(dir, 'bin');
-  fs.mkdirSync(emptyBin);
-  // bash only (pid 1's reaper is looked up first): the missing piece is unshare
-  fs.symlinkSync(spawnSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim(), path.join(emptyBin, 'bash'));
   try {
-    const r = await run(['isolated', '--', process.execPath, '-e',
-      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: emptyBin });
+    const r = await withBinds(overTool(noexecFile(dir), 'unshare'), [process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
+      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
+    if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: unshare could not be started/);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: 'unshare' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install util-linux, or name one with WEBCTL_UNSHARE_BIN/);
     assert.match(r.stdout, /"check":"isolated","result":"fail"/);
     assert.equal(fs.existsSync(marker), false, 'the command ran although isolation was unavailable');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('⛔ fail closed: an `unshare` that does NOT isolate → FAIL, command NOT run (the property is checked, not the exit)', async () => {
+test('⛔ fail closed: an `unshare` that does NOT isolate → FAIL, command NOT run (the property is checked, not the exit)', needsIsolation, async (t) => {
   const dir = tmpdir();
   const marker = path.join(dir, 'RAN');
-  const bin = path.join(dir, 'bin');
-  fs.mkdirSync(bin);
-  // A fake `unshare`: drops its flags and execs the rest ON THE HOST.
-  fs.writeFileSync(path.join(bin, 'unshare'),
-    '#!/bin/sh\nwhile [ "${1#-}" != "$1" ]; do shift; done\nexec "$@"\n', { mode: 0o755 });
+  // A fake `unshare` over the system one: drops its flags and execs the rest ON THE "HOST" (here:
+  // the throwaway namespace the fake is bound in — the caller's network namespace)
+  const fake = path.join(dir, 'unshare');
+  fs.writeFileSync(fake, '#!/bin/sh\nwhile [ "${1#-}" != "$1" ]; do shift; done\nexec "$@"\n', { mode: 0o755 });
   try {
-    const r = await run(['isolated', '--', process.execPath, '-e',
-      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: `${bin}:/usr/bin:/bin` });
+    const r = await withBinds(overTool(fake, 'unshare'), [process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
+      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
+    if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /NOT RUN: still in the CALLER'S network namespace/);
     assert.equal(fs.existsSync(marker), false, 'the command ran on the host');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('⛔ fail closed: neither `ip` nor `ifconfig` → FAIL naming it, command NOT run', needsIsolation, async () => {
+test('⛔ fail closed: neither `ip` nor `ifconfig` in the system dirs → FAIL naming it, command NOT run', needsIsolation, async (t) => {
   const dir = tmpdir();
   const marker = path.join(dir, 'RAN');
-  const bin = path.join(dir, 'bin');
-  fs.mkdirSync(bin);
-  const realUnshare = spawnSync('sh', ['-c', 'command -v unshare'], { encoding: 'utf8' }).stdout.trim();
-  fs.symlinkSync(realUnshare, path.join(bin, 'unshare'));
-  fs.symlinkSync(spawnSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim(), path.join(bin, 'bash')); // pid 1
+  const none = noexecFile(dir);
   try {
-    const r = await run(['isolated', '--', process.execPath, '-e',
-      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: bin });
+    const r = await withBinds([...overTool(none, 'ip'), ...overTool(none, 'ifconfig')], [process.execPath, TOOL, 'isolated', '--',
+      process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
+    if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /cannot bring the namespace loopback up \(ip: not found; ifconfig: not found\)/);
+    assert.match(r.stderr, /NOT RUN: cannot bring the namespace loopback up: neither 'ip' nor 'ifconfig' found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install iproute2/);
     assert.equal(fs.existsSync(marker), false, 'the command ran without a working loopback');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('⛔ fail closed: no `mount` → FAIL naming it, command NOT run (no socket masking, no run)', needsIsolation, async () => {
+test('⛔ fail closed: no `mount` in the system dirs → FAIL naming it, command NOT run (no socket masking, no run)', needsIsolation, async (t) => {
   const dir = tmpdir();
   const marker = path.join(dir, 'RAN');
-  const bin = path.join(dir, 'bin');
-  fs.mkdirSync(bin);
-  const which = (/** @type {string} */ b) => spawnSync('sh', ['-c', `command -v ${b}`], { encoding: 'utf8' }).stdout.trim();
-  fs.symlinkSync(which('unshare'), path.join(bin, 'unshare'));
-  fs.symlinkSync(which('ip') || which('ifconfig'), path.join(bin, which('ip') ? 'ip' : 'ifconfig'));
-  fs.symlinkSync(which('bash'), path.join(bin, 'bash')); // pid 1
   try {
-    const r = await run(['isolated', '--', process.execPath, '-e',
-      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH: bin });
+    const r = await withBinds(overTool(noexecFile(dir), 'mount'), [process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
+      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
+    if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /NOT RUN: cannot cover \/run with a fresh tmpfs: 'mount' not found/);
+    assert.match(r.stderr, /NOT RUN: cannot mask the host's sockets: 'mount' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install util-linux/);
     assert.equal(fs.existsSync(marker), false, 'the command ran with the host\'s unix sockets unmasked');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -891,6 +933,78 @@ test('⛔ `--pass-env LD_*` never reaches a privileged half (unshare, pid 1 bash
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+// ── PATH never picks the binary a PRIVILEGED half runs (re-review of v0.33.0) ──
+//
+// ⛔ Measured by the re-review: a fake `ip` in the cwd + `PATH=":$PATH" isolated -- true` → the
+// fake ran as namespace root, CapEff full, BEFORE the masks, listing the real home. A command can
+// write ./ip (or node_modules/.bin/ip — npm PREPENDS that absolute dir) into its writable cwd, and
+// the NEXT run executes it privileged. ⇒ every tool a privileged half runs comes from a FIXED
+// system dir list, resolved on the host; the COMMAND still gets the caller's PATH.
+
+/** The fixed dirs the harness takes its privileged tools from (SYSTEM_TOOL_DIRS). */
+const SYSTEM_DIRS = ['/usr/sbin', '/usr/bin', '/sbin', '/bin'];
+/** Every tool a privileged half runs, today or plausibly tomorrow. */
+const PRIV_TOOLS = ['unshare', 'bash', 'mount', 'umount', 'ip', 'ifconfig', 'setpriv', 'getent'];
+/** The real system copy of `name`, or ''. @param {string} name */
+const systemCopy = (name) => SYSTEM_DIRS.map((d) => path.join(d, name)).find((p) => fs.existsSync(p)) || '';
+
+/**
+ * Plant, in `dir`, a fake of every PRIV_TOOLS name that appends `HIT <name>` to `log` and then
+ * execs the real one (so a run that uses it still works — and says so), plus `caller-tool`: the
+ * CALLER's own tool, which the COMMAND must still find through its PATH.
+ * @param {string} dir @param {string} log
+ */
+function plantFakeTools(dir, log) {
+  fs.mkdirSync(dir, { recursive: true });
+  for (const t of PRIV_TOOLS) {
+    const real = systemCopy(t);
+    fs.writeFileSync(path.join(dir, t), `#!/bin/sh\necho "HIT ${t}" >> ${JSON.stringify(log)}\n`
+      + `${real ? `exec ${JSON.stringify(real)} "$@"` : 'exit 127'}\n`, { mode: 0o755 });
+  }
+  fs.writeFileSync(path.join(dir, 'caller-tool'), '#!/bin/sh\necho CALLER-TOOL-RAN\n', { mode: 0o755 });
+}
+
+/** argv[1] = the PATH the caller gave: `PATH-SAME` when the command got exactly it; then runs `caller-tool` by PATH. */
+const CALLER_PATH_PROBE = `const { spawnSync } = require('child_process');
+console.log(process.env.PATH === process.argv[1] ? 'PATH-SAME' : 'PATH-CHANGED');
+const r = spawnSync('caller-tool', { encoding: 'utf8' });
+process.stdout.write(r.stdout || ('CALLER-TOOL-MISSING ' + (r.error && r.error.code) + '\\n'));`;
+
+test('⛔ a tool planted in the cwd (empty / relative PATH entry) or in an absolute dir FIRST on PATH is never run by a privileged half — fresh AND nested; CONTROL: the command still gets the caller\'s PATH and runs its tools', needsIsolation, async () => {
+  const dir = tmpdir();
+  const log = path.join(dir, 'log', 'hits');
+  fs.mkdirSync(path.dirname(log));
+  plantFakeTools(path.join(dir, 'work'), log); // the cwd
+  plantFakeTools(path.join(dir, 'bin'), log); // an absolute dir (npm's node_modules/.bin shape)
+  const hits = () => { try { return fs.readFileSync(log, 'utf8').split('\n').filter(Boolean); } catch { return []; } };
+  const cases = /** @type {[string, string, string][]} */ ([
+    ['empty entry + fakes in the cwd', `:${process.env.PATH}`, path.join(dir, 'work')],
+    ['relative entry', `bin:${process.env.PATH}`, dir],
+    ['absolute dir first', `${path.join(dir, 'bin')}:${process.env.PATH}`, ROOT],
+  ]);
+  /** @type {string[]} */
+  const ranPlanted = [];
+  try {
+    for (const [what, PATH, cwd] of cases) {
+      for (const nested of [false, true]) {
+        fs.rmSync(log, { force: true });
+        const label = `${what}, ${nested ? 'nested' : 'fresh'}`;
+        // nested: the OUTER call runs with the ordinary PATH; only the inner one gets the planted PATH
+        const r = nested
+          ? await run(['isolated', '--keep', dir, '--', 'sh', '-c', 'cd "$1" && PATH="$2" exec "$0" "$3" isolated --keep "$4" -- "$0" -e "$5" "$2"',
+            process.execPath, cwd, PATH, TOOL, dir, CALLER_PATH_PROBE])
+          : await run(['isolated', '--keep', dir, '--', process.execPath, '-e', CALLER_PATH_PROBE, PATH], { PATH }, process.execPath, cwd);
+        assert.equal(r.status, 0, `${label}: ${r.stdout}${r.stderr}`);
+        if (hits().length) ranPlanted.push(`${label}: ${[...new Set(hits())].join(', ')}`);
+        // CONTROL: the command sees the caller's PATH, unchanged, and runs the caller's own tool by it
+        assert.match(r.stdout, /^PATH-SAME$/m, `${label}: ${r.stdout}`);
+        assert.match(r.stdout, /^CALLER-TOOL-RAN$/m, `${label}: ${r.stdout}${r.stderr}`);
+      }
+    }
+    assert.deepEqual(ranPlanted, [], `a privileged half ran a PATH-planted tool:\n${ranPlanted.join('\n')}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('⛔ a planted XDG_CACHE_HOME cannot redirect base\'s storage paths out of a temp HOME under `isolated`', needsIsolation, async () => {
   // base's storage paths PREFER XDG_*_HOME over $HOME: a test that set a temp HOME but
   // inherited an exported XDG_CACHE_HOME resolved to the REAL dirs (`perplexity`).
@@ -1312,18 +1426,21 @@ test('⛔ fail closed: a `mount` that silently SKIPS one hide → refused by the
   // ⚠ v0.33.0: under the hidden home, ~/.ssh gets no mount of its own unless a re-bind contains it —
   // so keep ~/.config, whose ~/.config/webctl IS hidden by its own tmpfs on top, and skip THAT
   const skip = path.join(home, '.config', 'webctl');
-  // pretends to hide ~/.config/webctl (exit 0, nothing mounted) and to make that non-mask read-only
-  fs.writeFileSync(path.join(bin, 'mount'), `#!/bin/sh
+  // pretends to hide ~/.config/webctl (exit 0, nothing mounted) and to make that non-mask read-only;
+  // bound over the system `mount` (PATH is never consulted), the real one reachable at a copy
+  const real = realCopyAt(bin, 'mount');
+  const fake = path.join(bin, 'mount');
+  fs.writeFileSync(fake, `#!/bin/sh
 for a in "$@"; do last="$a"; done
 [ "$last" = ${JSON.stringify(skip)} ] && exit 0
-exec ${JSON.stringify(spawnSync('sh', ['-c', 'command -v mount'], { encoding: 'utf8' }).stdout.trim())} "$@"
+exec ${JSON.stringify(real)} "$@"
 `, { mode: 0o755 });
   const marker = path.join(binHome, 'RAN');
   try {
-    const r = await underFakeHome(home, ['env', `PATH=${bin}:${process.env.PATH}`, process.execPath, TOOL, 'isolated', '--keep', binHome,
+    const r = await withBinds([[MOUNT_BIN, real], ...overTool(fake, 'mount')], [process.execPath, TOOL, 'isolated', '--keep', binHome,
       '--keep', path.join(home, '.config'), '--',
-      process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
-    if (!r) { t.skip(NO_FAKE_HOME); return; }
+      process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { home });
+    if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: after hiding, 1 of 7 hidden dir\(s\) \(the home, ~\/\.ssh, ~\/\.gnupg, the state roots\) do not resolve to the read-only 'webctl-isolated-hidden' tmpfs/);
     assert.equal(fs.existsSync(marker), false, 'the command ran with ~/.config/webctl visible');
@@ -1847,55 +1964,56 @@ test('⭐ ARM: a chmod-000 file is NOT readable inside (no CAP_DAC_OVERRIDE: no 
   } finally { fs.chmodSync(f, 0o600); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-/** Run `isolated --keep <dir> -- <write a marker>` with PATH set; resolve with the result + whether it ran. */
-async function markerRun(/** @type {string} */ dir, /** @type {string} */ PATH) {
+/**
+ * Run `isolated --keep <dir> -- <write a marker>` after the `binds` (fake tools over the system
+ * ones, withBinds); resolve with the result + whether it ran, or null (skip) when binds are impossible.
+ * @param {string} dir @param {[string, string][]} binds
+ */
+async function markerRun(dir, binds) {
   const marker = path.join(dir, 'RAN');
-  const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e',
-    `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { PATH });
-  return { ...r, ran: fs.existsSync(marker) };
+  const r = await withBinds(binds, [process.execPath, TOOL, 'isolated', '--keep', dir, '--', process.execPath, '-e',
+    `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
+  return r && { ...r, ran: fs.existsSync(marker) };
 }
 const which = (/** @type {string} */ b) => spawnSync('sh', ['-c', `command -v ${b}`], { encoding: 'utf8' }).stdout.trim();
 
-test('⛔ fail closed: no `setpriv` → FAIL naming it, command NOT run (never with capabilities)', needsIsolation, async () => {
-  // ⚠ the PATH dir lives in a throwaway HOME dir: one under /tmp vanishes while /tmp is
-  // masked, and `mount` itself would go missing first (measured)
+test('⛔ fail closed: no `setpriv` in the system dirs → FAIL naming it, command NOT run (never with capabilities)', needsIsolation, async (t) => {
   const dir = tmpdir();
-  const binHome = homeTmpdir();
-  const bin = path.join(binHome, 'bin');
-  fs.mkdirSync(bin);
-  for (const b of ['unshare', 'mount', 'bash', which('ip') ? 'ip' : 'ifconfig']) fs.symlinkSync(which(b), path.join(bin, b));
   try {
-    const r = await markerRun(dir, bin);
+    const r = await markerRun(dir, overTool(noexecFile(dir), 'setpriv'));
+    if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot enter the uid-mapped child user namespace: 'setpriv' not found/);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot enter the uid-mapped child user namespace: 'setpriv' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin/);
     assert.equal(r.ran, false, 'the command ran with capabilities');
-  } finally { for (const d of [dir, binHome]) fs.rmSync(d, { recursive: true, force: true }); }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('⛔ fail closed: a `setpriv` that ignores its flags (runs its argv as-is) → FAIL naming NoNewPrivs, command NOT run', needsIsolation, async () => {
+test('⛔ fail closed: a `setpriv` that ignores its flags (runs its argv as-is) → FAIL naming NoNewPrivs, command NOT run', needsIsolation, async (t) => {
   const dir = tmpdir();
-  const bin = path.join(dir, 'bin');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'setpriv'), '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done; shift\nexec "$@"\n', { mode: 0o755 });
+  const fake = path.join(dir, 'setpriv');
+  fs.writeFileSync(fake, '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done; shift\nexec "$@"\n', { mode: 0o755 });
   try {
-    const r = await markerRun(dir, `${bin}:${process.env.PATH}`);
+    const r = await markerRun(dir, overTool(fake, 'setpriv'));
+    if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /after entering the uid-mapped child user namespace, NoNewPrivs is not set/);
     assert.equal(r.ran, false, 'the command ran without no_new_privs');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('⛔ fail closed: a too-old `unshare` (no --map-user) → FAIL naming util-linux, command NOT run, no id printed', needsIsolation, async () => {
-  // the fake passes every OTHER call (the outer -rnm) to the real unshare
+test('⛔ fail closed: a too-old `unshare` (no --map-user) → FAIL naming util-linux, command NOT run, no id printed', needsIsolation, async (t) => {
+  // the fake (over the system unshare) passes every OTHER call — the outer -rnm, made on the host
+  // side before any mask — to the real one, reachable at a copy
   const dir = tmpdir();
-  const bin = path.join(dir, 'bin');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'unshare'), `#!/bin/sh
+  const real = realCopyAt(dir, 'unshare');
+  const fake = path.join(dir, 'unshare');
+  fs.writeFileSync(fake, `#!/bin/sh
 for a in "$@"; do case "$a" in --map-user*) echo "unshare: unrecognized option '$a'" >&2; exit 1;; --) break;; esac; done
-exec ${JSON.stringify(which('unshare'))} "$@"
+exec ${JSON.stringify(real)} "$@"
 `, { mode: 0o755 });
   try {
-    const r = await markerRun(dir, `${bin}:${process.env.PATH}`);
+    const r = await markerRun(dir, [[systemCopy('unshare'), real], ...overTool(fake, 'unshare')]);
+    if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot enter the uid-mapped child user namespace: .* exited 1 .*util-linux ≥ 2\.38/);
     assert.ok(!new RegExp(`\\b${process.getuid?.()}\\b`).test(r.stderr), 'the refusal printed the real uid');
@@ -1903,16 +2021,17 @@ exec ${JSON.stringify(which('unshare'))} "$@"
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('⛔ fail closed: an `unshare` that accepts --map-user but makes NO child namespace → FAIL (the property is read back)', needsIsolation, async () => {
+test('⛔ fail closed: an `unshare` that accepts --map-user but makes NO child namespace → FAIL (the property is read back)', needsIsolation, async (t) => {
   const dir = tmpdir();
-  const bin = path.join(dir, 'bin');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'unshare'), `#!/bin/sh
+  const real = realCopyAt(dir, 'unshare');
+  const fake = path.join(dir, 'unshare');
+  fs.writeFileSync(fake, `#!/bin/sh
 case " $* " in *" --map-user "*) while [ "$1" != "--" ]; do shift; done; shift; exec "$@";; esac
-exec ${JSON.stringify(which('unshare'))} "$@"
+exec ${JSON.stringify(real)} "$@"
 `, { mode: 0o755 });
   try {
-    const r = await markerRun(dir, `${bin}:${process.env.PATH}`);
+    const r = await markerRun(dir, [[systemCopy('unshare'), real], ...overTool(fake, 'unshare')]);
+    if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /after entering the uid-mapped child user namespace, it would still hold CapPrm, CapEff; its uid\/gid are not the real ones; its uid_map\/gid_map are not exactly the one expected mapping/);
     assert.equal(r.ran, false, 'the command ran as namespace root');
@@ -2244,7 +2363,7 @@ const once = () => new Promise((resolve) => {
   c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; });
   const poll = () => {
     if (done || sent) return;
-    const u = desc(c.pid).find((p) => cmd(p).startsWith('unshare') && cmd(p).includes('webctl-isolated-pid1') && kids(p).length > 0);
+    const u = desc(c.pid).find((p) => /^(?:[^\\0]*\\/)?unshare\\0/.test(cmd(p)) && cmd(p).includes('webctl-isolated-pid1') && kids(p).length > 0);
     if (u) { sent = true; c.kill('SIGTERM'); return; }
     setImmediate(poll);
   };
@@ -2266,26 +2385,32 @@ const once = () => new Promise((resolve) => {
 const earlyOf = (out) => Object.fromEntries([...(out.match(/^EARLY (.*)$/m) || ['', ''])[1].matchAll(/(\w+)=(\d+)/g)].map((m) => [m[1], Number(m[2])]));
 /** Runs per path. With SLOW_BASH the window is ~300 ms wide, so every run lands in it. */
 const EARLY_N = 8;
-const EARLY_CMD = ['sh', '-c', 'echo RAN; sleep 1'];
+// ⚠ node, not `sh`: `sh` is bash on some hosts, and bash is the slowed shim below
+const EARLY_CMD = [process.execPath, '-e', 'console.log("RAN"); setTimeout(() => {}, 1000)'];
 /**
  * A dir holding EARLY_PROBE and a `bash` that sleeps 0.3 s before exec'ing the real one — pid 1
  * then sits WITHOUT its traps for 300 ms, as on a loaded host. ⚠ Without it the window is a race
  * this host hit in 4/40 fresh runs (the review: 24/40) — too rare for a 8-run arm to be sure
  * of failing; with it, 16/20 fresh and 20/20 nested runs were lost before the fix (measured).
+ * ⚠ pid 1's bash comes from the SYSTEM dirs, never PATH: `slowBinds(dir)` binds the shim over it
+ * (withBinds), the real bash reachable at a copy — which is also the shim's interpreter, since
+ * `/bin/sh` may itself be bash.
  */
 function earlyDir() {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, 'early.cjs'), EARLY_PROBE);
-  fs.mkdirSync(path.join(dir, 'slow'));
-  fs.writeFileSync(path.join(dir, 'slow', 'bash'), `#!/bin/sh\nsleep 0.3\nexec ${JSON.stringify(which('bash'))} "$@"\n`, { mode: 0o755 });
+  const real = realCopyAt(dir, 'bash');
+  fs.writeFileSync(path.join(dir, 'slow-bash'), `#!${real}\nsleep 0.3\nexec ${JSON.stringify(real)} "$@"\n`, { mode: 0o755 });
   return dir;
 }
+/** @param {string} dir an earlyDir() @returns {[string, string][]} */
+const slowBinds = (dir) => [[systemCopy('bash'), path.join(dir, 'real-bash')], ...overTool(path.join(dir, 'slow-bash'), 'bash')];
 
-test('⛔ EARLY TERM, fresh path: a TERM the moment unshare\'s child appears → the harness DIES BY TERM — never "ran and exited 0"', needsIsolation, async () => {
+test('⛔ EARLY TERM, fresh path: a TERM the moment unshare\'s child appears → the harness DIES BY TERM — never "ran and exited 0"', needsIsolation, async (tt) => {
   const dir = earlyDir();
   try {
-    const r = await runRaw([process.execPath, path.join(dir, 'early.cjs'), String(EARLY_N), process.execPath, TOOL, 'isolated', '--', ...EARLY_CMD],
-      { cwd: ROOT, env: cleanEnv({ PATH: `${path.join(dir, 'slow')}:${process.env.PATH}` }) });
+    const r = await withBinds(slowBinds(dir), [process.execPath, path.join(dir, 'early.cjs'), String(EARLY_N), process.execPath, TOOL, 'isolated', '--', ...EARLY_CMD]);
+    if (!r) { tt.skip(NO_BINDS); return; }
     const t = earlyOf(r.stdout);
     assert.equal(t.bad, 0, `the command RAN after the caller's TERM in ${t.bad} of ${EARLY_N} runs:\n${r.stdout}${r.stderr}`);
     assert.equal(t.other, 0, `${r.stdout}${r.stderr}`);
@@ -2298,7 +2423,10 @@ test('⛔ EARLY TERM, fresh path: a TERM the moment unshare\'s child appears →
 test('⛔ EARLY TERM, NESTED path: the same, for an `isolated` called inside `isolated`', needsIsolation, async () => {
   const dir = earlyDir();
   try {
-    const r = await run(['isolated', '--keep', dir, '--', 'env', `PATH=${path.join(dir, 'slow')}:${process.env.PATH}`,
+    // inside the outer call: a throwaway `unshare -rm` binds the slow shim over the system bash
+    const binds = slowBinds(dir);
+    const r = await run(['isolated', '--keep', dir, '--', 'unshare', '-rm', '--propagation=private', 'sh', '-c',
+      'm=$0; while [ "$1" != -- ]; do "$m" --bind "$1" "$2" || exit 97; shift 2; done; shift; exec "$@"', MOUNT_BIN, ...binds.flat(), '--',
       process.execPath, path.join(dir, 'early.cjs'), String(EARLY_N), process.execPath, TOOL, 'isolated', '--', ...EARLY_CMD]);
     assert.equal(r.status, 0, r.stdout + r.stderr);
     const t = earlyOf(r.stdout);
@@ -2517,35 +2645,34 @@ test('⭐ stdin reaches the command through the reaping pid 1 — fresh AND nest
   assert.match(r.stdout, /^NESTED line-two$/m, r.stdout);
 });
 
-test('⛔ fail closed: no `bash` on PATH (pid 1 must reap) → FAIL naming it, command NOT run — fresh AND nested', needsIsolation, async () => {
-  // ⚠ the PATH dir lives in a throwaway HOME dir, as for the setpriv arm: everything ELSE the
-  // fresh path needs is there, so the only missing piece is bash
+test('⛔ fail closed: no `bash` in the system dirs (pid 1 must reap) → FAIL naming it, command NOT run — fresh AND nested', needsIsolation, async (t) => {
+  // ⚠ a non-executable file bound over the system bash (PATH is never consulted for pid 1)
   const dir = tmpdir();
-  const binHome = homeTmpdir();
-  const bin = path.join(binHome, 'bin');
-  fs.mkdirSync(bin);
-  for (const b of ['unshare', 'mount', 'setpriv', which('ip') ? 'ip' : 'ifconfig']) fs.symlinkSync(which(b), path.join(bin, b));
+  const none = noexecFile(dir);
+  const NO_BASH_RE = /FAIL {2}isolated: NOT RUN: 'bash' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — pid 1/;
   try {
-    const r = await markerRun(dir, bin);
+    const r = await markerRun(dir, overTool(none, 'bash'));
+    if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: 'bash' not found on PATH/);
+    assert.match(r.stderr, NO_BASH_RE);
     assert.equal(r.ran, false, 'the command ran without a reaping pid 1');
-    // nested: the outer call is ordinary; the inner one gets a PATH without bash
+    // nested: the outer call is ordinary; inside it, a throwaway `unshare -rm` hides bash from the inner one
     const marker = path.join(dir, 'RAN-NESTED');
-    // ⚠ v0.33.0: the bin dir is under the (hidden) home — the outer call re-binds it with --keep-ro
-    const n = await run(['isolated', '--keep', dir, '--keep-ro', bin, '--', 'sh', '-c',
-      'PATH="$2" "$0" "$1" isolated -- "$0" -e "require(\'fs\').writeFileSync(process.argv[1], \'x\')" "$3"; echo "NESTED-RC $?"',
-      process.execPath, TOOL, bin, marker]);
+    const n = await run(['isolated', '--keep', dir, '--', 'sh', '-c',
+      'n=$0; h=$1; mk=$2; m=$3; shift 3; '
+        + 'unshare -rm --propagation=private sh -c \'m=$0; while [ "$1" != -- ]; do "$m" --bind "$1" "$2" || exit 97; shift 2; done; shift; exec "$@"\' '
+        + '"$m" "$@" -- "$n" "$h" isolated -- "$n" -e "require(\'fs\').writeFileSync(process.argv[1], \'x\')" "$mk"; echo "NESTED-RC $?"',
+      process.execPath, TOOL, marker, MOUNT_BIN, ...overTool(none, 'bash').flat()]);
     assert.equal(n.status, 0, n.stdout + n.stderr);
     assert.match(n.stdout, /^NESTED-RC 1$/m, n.stdout + n.stderr);
-    assert.match(n.stderr, /FAIL {2}isolated: NOT RUN: 'bash' not found on PATH/);
+    assert.match(n.stderr, NO_BASH_RE);
     assert.equal(fs.existsSync(marker), false, 'the nested command ran without a reaping pid 1');
-    // CONTROL: the same bin WITH bash runs the command (the arm's refusal is the missing bash)
-    fs.symlinkSync(which('bash'), path.join(bin, 'bash'));
-    const c = await markerRun(dir, bin);
+    // CONTROL: the same run WITHOUT the bind runs the command (the arm's refusal is the missing bash)
+    const c = await markerRun(dir, []);
+    assert.ok(c, NO_BINDS);
     assert.equal(c.status, 0, c.stdout + c.stderr);
-    assert.equal(c.ran, true, 'CONTROL: with bash added the command should run');
-  } finally { for (const d of [dir, binHome]) fs.rmSync(d, { recursive: true, force: true }); }
+    assert.equal(c.ran, true, 'CONTROL: with bash present the command should run');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 // ── HOST POLICY: AppArmor's userns restriction, and WEBCTL_UNSHARE_BIN ───────

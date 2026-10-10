@@ -233,10 +233,11 @@ by default:**
   a prefix ends in `_*`; a bare `*` is refused). The socket/display/address names isolation
   removes (`DISPLAY`, `SSH_AUTH_SOCK`, `XDG_RUNTIME_DIR`, …) are refused by name and stripped
   even from a prefix pass. A nested call honours only its OWN `--pass-env`.
-* ⛔ **Loader vars never reach a PRIVILEGED half.** Everything that runs before the command's
-  capability drop — `unshare`, pid 1's bash, the inner node (namespace root, full caps, before
-  any mask), the `mount`/`ip` it runs, `setpriv`/`unshare -U` — gets only `PATH HOME USER LOGNAME
-  LANG LC_* TERM TZ TMPDIR WEBCTL_*`. Measured by the review of 5773fb8: `NODE_OPTIONS=--require
+* ⛔ **Loader vars — and the caller's PATH — never reach a PRIVILEGED half.** Everything that runs
+  before the command's capability drop — `unshare`, pid 1's bash, the inner node (namespace root,
+  full caps, before any mask), the `mount`/`ip` it runs, `setpriv`/`unshare -U` — gets only `HOME
+  USER LOGNAME LANG LC_* TERM TZ TMPDIR WEBCTL_*` and `PATH=/usr/sbin:/usr/bin:/sbin:/bin` (next
+  section). Measured by the review of 5773fb8: `NODE_OPTIONS=--require
   <preload>` ran the preload in the inner node with a FULL CapEff, the real home readable; a
   `--pass-env 'LD_*'` reached every C binary of the chain. The command's env travels in a pipe
   and is applied by the small node helper that spawns it, after the drop — so the command still
@@ -304,13 +305,31 @@ unhide `~/.config/webctl`); `--keep` at or beneath one re-exposes that path only
   an ancestor that shadows a hide is caught (review finding 7). A nested `unshare -rm` cannot
   peel the hide (tested).
 
+### ⛔ PATH never picks the binary a PRIVILEGED half runs
+
+Measured by the re-review: a fake `ip` in the cwd + `PATH=":$PATH" isolated -- true` → the fake
+ran as namespace root, CapEff full, **before the masks**, listing the real home. `ip`, `mount` and
+`setpriv` were run by name (the caller's PATH, empty and relative entries included); `unshare` and
+pid 1's `bash` by PATH too. The cwd is writable inside, so a mutated test plants `./ip` — or
+`node_modules/.bin/ip`, a dir npm PREPENDS as an absolute path — and the NEXT run executes it
+privileged. Here, before the fix, a planted fake ran on every path tried: fresh (`unshare`, `bash`,
+`ip`, `mount`, `setpriv`) and nested (`setpriv`, `unshare`, `bash`).
+
+* ⇒ **Every tool a privileged half runs comes from `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin` only**
+  — `unshare`, `bash` (pid 1), `mount`, `ip`/`ifconfig`, `setpriv` — resolved ON THE HOST before
+  `unshare` and passed on as absolute paths; the privileged halves' own `PATH` is that list.
+  `WEBCTL_UNSHARE_BIN` stays the one explicit override. A tool in none of them → FAIL naming the
+  tool (and the dirs), nothing run. **The command still gets your PATH, unchanged.**
+* ⚠ A host whose util-linux, bash or iproute2 live ONLY elsewhere (e.g. under `/usr/local`, or
+  a Nix profile) now fails closed; `WEBCTL_UNSHARE_BIN` covers `unshare` alone.
+
 ### pid 1 is `bash --norc -p`, and reaps orphans (fresh and nested paths)
 
 * node as pid 1 left a re-parented, exited grandchild as a **zombie** (state `Z`, `kill -0`
   succeeds), so "my daemonised helper is gone" failed only under `isolated`. pid 1 is now a
   small **bash** that runs the node half in the background, forwards INT/TERM/HUP and exits
-  with its status; the orphan disappears (measured, on both paths). **`bash` must be on PATH**,
-  else FAIL, nothing run.
+  with its status; the orphan disappears (measured, on both paths). **`bash` must be in the system
+  dirs** (above), else FAIL, nothing run.
 * ⛔ As `bash -c` it honoured the CALLER's shell config as pid 1 — with every namespace
   capability, before any mask (review): a `BASH_ENV` script ran; `SHELLOPTS=xtrace` traced it;
   an exported `wait()` replaced it; `SHELLOPTS=errexit` + TERM killed the namespace before the

@@ -282,7 +282,8 @@ contract's output when it is used.
   unshare / user namespaces.)*
 * ⛔ **`isolated` fails CLOSED.** No `unshare`, unprivileged user namespaces disabled (or refused
   by AppArmor — named as **HOST POLICY**, below), a bad `WEBCTL_UNSHARE_BIN`, no
-  `ip`/`ifconfig`, no `mount`, no `setpriv`, no `bash` (pid 1), an `unshare` without `--map-user` (or a child
+  `ip`/`ifconfig`, no `mount`, no `setpriv`, no `bash` (pid 1) — each looked up in
+  `/usr/sbin:/usr/bin:/sbin:/bin` ONLY, never on your PATH (below) — an `unshare` without `--map-user` (or a child
   namespace that leaves a capability), a loopback that will not come up, a mask that fails, a home
   that cannot be hidden, a re-bind (or any submount of it) that cannot be made read-only, a hidden
   dir that does not resolve to its mask, a PATH entry that would expose a hidden dir, a host
@@ -358,17 +359,25 @@ contract's output when it is used.
   name is refused, and a prefix pass cannot bring one back). A nested call honours only its
   OWN `--pass-env`. ⛔ **The privileged halves get LESS** — `unshare`, pid 1's bash, the inner
   node (namespace root, full caps, before any mask), `mount`/`ip`, `setpriv`/`unshare -U`: only
-  `PATH HOME USER LOGNAME LANG LC_* TERM TZ TMPDIR WEBCTL_*`. Measured by the review of 5773fb8:
+  `HOME USER LOGNAME LANG LC_* TERM TZ TMPDIR WEBCTL_*`, and **not your PATH**:
+  `PATH=/usr/sbin:/usr/bin:/sbin:/bin`. Measured by the review of 5773fb8:
   a `NODE_OPTIONS=--require` preload ran in the inner node with a full CapEff, and a passed
   `LD_*` reached every C binary of the chain. The command's env travels in a pipe and is
   applied by the helper that spawns it, after the drop — the command still gets it all.
+  ⛔ **And PATH never picks a privileged tool** (re-review): `ip`, `mount`, `setpriv`, `unshare`
+  and pid 1's `bash` were found on the caller's PATH — empty and relative entries (the cwd)
+  included, and npm prepends an absolute `node_modules/.bin`. A fake `ip` planted in the cwd
+  ran as namespace root, full caps, before the masks. Now each is resolved on the host from
+  `/usr/sbin:/usr/bin:/sbin:/bin` only and passed on by absolute path; missing → FAIL naming it.
+  `WEBCTL_UNSHARE_BIN` remains the explicit override for `unshare`. The COMMAND keeps your PATH.
   ⚠ Under the release gate the OUTER call passes no extras: a nested `--pass-env X` finds only
   an `X` your contract sets; a toggle exported on the host is absent there.
 * ⭐ **pid 1 reaps orphans.** pid 1 of the namespace (fresh and nested) is a small bash that
   runs the real work in the background and `wait`s on it, forwarding INT/TERM/HUP and exiting
   with its status. ⛔ node as pid 1 left a re-parented, exited grandchild as a **zombie** —
   `kill -0` succeeded and `/proc` showed state `Z` (measured by `perplexity`), so "my
-  daemonised helper is gone" failed only under `isolated`. `bash` must be on PATH (else FAIL).
+  daemonised helper is gone" failed only under `isolated`. `bash` must be in
+  `/usr/sbin:/usr/bin:/sbin:/bin` (else FAIL) — never taken from PATH.
   stdin reaches the command as before.
   ⛔ It is **`bash --norc -p`**: as `bash -c` it honoured the caller's shell config — as pid 1,
   with every namespace capability, before any mask (measured by the review): a `BASH_ENV`

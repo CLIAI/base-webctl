@@ -1231,20 +1231,61 @@ const PASS_ENV_RE = /^(?:[A-Za-z_][A-Za-z0-9_]*|[A-Za-z][A-Za-z0-9_]*_\*)$/;
  * ENV, PERL5OPT, PYTHONSTARTUP, …) — so the privileged env is this short allowlist instead, and
  * the COMMAND's full env (isolatedEnv) travels in a pipe and is applied only by the helper that
  * spawns it (runPid1 `--env <fd>`), after the drop.
- * PATH stays: the halves find bash, mount, ip, setpriv by it (the caller's PATH is trusted the
- * same way on the host). WEBCTL_* carries the markers and WEBCTL_UNSHARE_BIN.
+ * ⛔ PATH is NOT the caller's (re-review of v0.33.0): it is SYSTEM_PATH, the fixed system dirs
+ * every privileged tool is taken from (systemTool) — a PATH entry the command can write into (its
+ * cwd via an empty or relative entry, npm's absolute node_modules/.bin) must never pick a binary
+ * that runs with these capabilities. WEBCTL_* carries the markers and WEBCTL_UNSHARE_BIN.
  */
-const PRIVILEGED_PASS_ENV = Object.freeze(['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_*', 'TERM', 'TZ', 'TMPDIR', 'WEBCTL_*']);
+const PRIVILEGED_PASS_ENV = Object.freeze(['HOME', 'USER', 'LOGNAME', 'LANG', 'LC_*', 'TERM', 'TZ', 'TMPDIR', 'WEBCTL_*']);
 
 /**
- * The privileged halves' env: `env` (already the command's allowlisted env) cut to PRIVILEGED_PASS_ENV.
+ * The privileged halves' env: `env` (already the command's allowlisted env) cut to
+ * PRIVILEGED_PASS_ENV, with PATH = SYSTEM_PATH (never the caller's).
  * @param {NodeJS.ProcessEnv} env @returns {NodeJS.ProcessEnv}
  */
 function privilegedEnv(env) {
   /** @type {NodeJS.ProcessEnv} */
   const out = {};
   for (const [k, v] of Object.entries(env)) if (v !== undefined && passEnvMatches(k, PRIVILEGED_PASS_ENV)) out[k] = v;
-  return out;
+  return { ...out, PATH: SYSTEM_PATH };
+}
+
+/**
+ * ⛔ The ONLY dirs a tool run BEFORE the command's capability drop comes from (re-review of v0.33.0).
+ *
+ * Measured: `ip`, `mount` and `setpriv` were run by name — searched on the CALLER's PATH, empty and
+ * relative entries included — and `unshare`/`bash` by PATH too (absolute entries only, which npm's
+ * prepended `<pkg>/node_modules/.bin` defeats). A fake `ip` in the cwd + `PATH=":$PATH"` ran as
+ * namespace root, CapEff full, BEFORE the masks, listing the real home. The cwd is WRITABLE inside,
+ * so a mutated test plants `./ip` and the NEXT run executes it privileged. ⇒ unshare, pid 1's bash,
+ * mount, ip/ifconfig and setpriv are resolved ON THE HOST, before unshare, from these dirs only, and
+ * passed on as ABSOLUTE paths (the fresh path's plan carries them); the privileged halves' own env
+ * PATH is this list too. WEBCTL_UNSHARE_BIN stays the one explicit, validated override.
+ * ⚠ The COMMAND still gets the caller's PATH, unchanged, and runs its tools by it.
+ */
+const SYSTEM_TOOL_DIRS = Object.freeze(['/usr/sbin', '/usr/bin', '/sbin', '/bin']);
+/** The privileged halves' PATH. */
+const SYSTEM_PATH = SYSTEM_TOOL_DIRS.join(':');
+
+/**
+ * The first `<dir>/<name>` in `dirs` (default SYSTEM_TOOL_DIRS) that is an executable regular file
+ * (symlinks followed), as that path — NOT realpath'd: a multi-call binary (busybox) dispatches on
+ * the name it was run as. '' when none. Never consults PATH.
+ * @param {string} name @param {readonly string[]} [dirs] @returns {string}
+ */
+export function systemTool(name, dirs = SYSTEM_TOOL_DIRS) {
+  for (const d of dirs) {
+    if (!path.isAbsolute(d)) continue;
+    const p = path.join(d, name);
+    try { if (fs.statSync(p).isFile()) { fs.accessSync(p, fs.constants.X_OK); return p; } } catch { /* next */ }
+  }
+  return '';
+}
+
+/** The refusal for a privileged tool that is in none of the system dirs. @param {string} name @param {string} why */
+function noSystemTool(name, why) {
+  return `'${name}' not found in ${SYSTEM_TOOL_DIRS.join(', ')} — ${why} (tools that run before the command's `
+    + 'capability drop are never taken from the caller\'s PATH)';
 }
 
 /** @param {string} name @param {readonly string[]} patterns */
@@ -1316,7 +1357,7 @@ const HIDE_SOURCE = 'webctl-isolated-hidden';
  *     after pid 1 trapped and started it — the harness SIGKILLs unshare (forwardSignalsPastUnshare).
  *   * ⚠ A background job ignores SIGINT; node resets its signal dispositions at start (measured),
  *     which is why the node helper stays between this pid 1 and the command on BOTH paths.
- * Fail closed: no bash on PATH → refused (bashOnPath), never a non-reaping pid 1.
+ * Fail closed: no bash in the system dirs → refused (privilegedTools), never a non-reaping pid 1.
  */
 const PID1_REAPER = [
   'c=; t=',
@@ -1360,19 +1401,66 @@ export function userNamespaceRefusal(stderr, sysctlPath = APPARMOR_USERNS_SYSCTL
 
 /**
  * The `unshare` to run: WEBCTL_UNSHARE_BIN when set — VALIDATED: an absolute path to an
- * executable regular file — else `unshare` on PATH. `why` names the rule broken, never the path.
- * @returns {{bin: string, why: string}}
+ * executable regular file — else the system one (systemTool, never PATH). `why` names the rule
+ * broken, never the path; `override`: it came from WEBCTL_UNSHARE_BIN (re-bound read-only inside).
+ * @returns {{bin: string, why: string, override: boolean}}
  */
 function unshareBin() {
   const v = process.env[UNSHARE_BIN_ENV];
-  if (v === undefined || v === '') return { bin: 'unshare', why: '' };
+  if (v === undefined || v === '') {
+    const bin = systemTool('unshare');
+    return { bin, why: bin ? '' : noSystemTool('unshare', `install util-linux, or name one with ${UNSHARE_BIN_ENV}`), override: false };
+  }
   const rule = `${UNSHARE_BIN_ENV} must be an ABSOLUTE path to an EXECUTABLE regular file`;
-  if (!path.isAbsolute(v)) return { bin: '', why: `${rule} — it is not absolute` };
+  if (!path.isAbsolute(v)) return { bin: '', why: `${rule} — it is not absolute`, override: true };
   /** @type {fs.Stats} */ let st;
-  try { st = fs.statSync(v); } catch { return { bin: '', why: `${rule} — it does not exist` }; }
-  if (!st.isFile()) return { bin: '', why: `${rule} — it is not a regular file` };
-  try { fs.accessSync(v, fs.constants.X_OK); } catch { return { bin: '', why: `${rule} — it is not executable` }; }
-  return { bin: v, why: '' };
+  try { st = fs.statSync(v); } catch { return { bin: '', why: `${rule} — it does not exist`, override: true }; }
+  if (!st.isFile()) return { bin: '', why: `${rule} — it is not a regular file`, override: true };
+  try { fs.accessSync(v, fs.constants.X_OK); } catch { return { bin: '', why: `${rule} — it is not executable`, override: true }; }
+  return { bin: v, why: '', override: true };
+}
+
+/**
+ * @typedef {{unshare: string, bash: string, setpriv: string, mount: string, lo: [string, string[]][]}} Tools
+ *   every binary a privileged half runs, by ABSOLUTE path (SYSTEM_TOOL_DIRS / WEBCTL_UNSHARE_BIN).
+ *   `lo`: how to bring the loopback up — `ip`, then `ifconfig`, whichever exist. The NESTED path
+ *   needs no mount or lo (it makes no netns and masks nothing): '' / [] there.
+ */
+
+/**
+ * Resolve, ON THE HOST and before anything runs, every tool a privileged half needs — from the
+ * system dirs only (SYSTEM_TOOL_DIRS). `why` names the first missing one (no path).
+ * @param {{bin: string}} ub unshareBin()'s answer @param {boolean} nested
+ * @returns {{tools: Tools, why: string}}
+ */
+function privilegedTools(ub, nested) {
+  const bash = systemTool('bash');
+  const setpriv = systemTool('setpriv');
+  const mount = nested ? '' : systemTool('mount');
+  /** @type {[string, string[]][]} */
+  const lo = nested ? [] : /** @type {[string, string[]][]} */ ([[systemTool('ip'), ['link', 'set', 'lo', 'up']],
+    [systemTool('ifconfig'), ['lo', 'up']]]).filter(([b]) => b);
+  const tools = { unshare: ub.bin, bash, setpriv, mount, lo };
+  if (!bash) return { tools, why: NO_BASH };
+  if (!setpriv) {
+    return { tools, why: `cannot enter the uid-mapped child user namespace: ${noSystemTool('setpriv', 'install util-linux')}; `
+      + 'the command would run as namespace root with every capability (it could unmount the masks)' };
+  }
+  if (!nested && !mount) return { tools, why: `cannot mask the host's sockets: ${noSystemTool('mount', 'install util-linux')}` };
+  if (!nested && lo.length === 0) {
+    return { tools, why: 'cannot bring the namespace loopback up: neither \'ip\' nor \'ifconfig\' found in '
+      + `${SYSTEM_TOOL_DIRS.join(', ')} — install iproute2 (never taken from the caller's PATH)` };
+  }
+  return { tools, why: '' };
+}
+
+/** @param {unknown} x @returns {x is Tools} every path absolute (the plan's `tools`, re-validated inside) */
+function isTools(x) {
+  const t = /** @type {Record<string, unknown>} */ (x);
+  const abs = (/** @type {unknown} */ p) => typeof p === 'string' && path.isAbsolute(p);
+  return !!t && typeof t === 'object' && abs(t.unshare) && abs(t.bash) && abs(t.setpriv) && abs(t.mount)
+    && Array.isArray(t.lo) && t.lo.length > 0
+    && t.lo.every((e) => Array.isArray(e) && e.length === 2 && abs(e[0]) && Array.isArray(e[1]) && e[1].every((a) => typeof a === 'string'));
 }
 
 /**
@@ -1399,22 +1487,9 @@ function diagnoseUserNamespace(bin) {
  */
 const PID1_BASH_FLAGS = Object.freeze(['--norc', '-p', '-c']);
 
-/**
- * The absolute path of `bash` on PATH, or '' — pid 1 must be the reaping bash (PID1_REAPER).
- * @returns {string}
- */
-function bashOnPath() {
-  for (const d of String(process.env.PATH || '').split(':')) {
-    if (!path.isAbsolute(d)) continue;
-    const p = path.join(d, 'bash');
-    try { fs.accessSync(p, fs.constants.X_OK); if (fs.statSync(p).isFile()) return p; } catch { /* next */ }
-  }
-  return '';
-}
-
-/** The refusal when bashOnPath() finds none. */
-const NO_BASH = "'bash' not found on PATH — pid 1 of the isolated PID namespace is a bash that REAPS "
-  + 'orphans (node as pid 1 leaves them as zombies), and isolation does not run without it';
+/** The refusal when systemTool('bash') finds none — pid 1 must be the reaping bash (PID1_REAPER). */
+const NO_BASH = noSystemTool('bash', 'pid 1 of the isolated PID namespace is a bash that REAPS orphans (node as '
+  + 'pid 1 leaves them as zombies), and isolation does not run without it');
 
 /** The termination signals the harness forwards. */
 const FORWARDED_SIGNALS = /** @type {NodeJS.Signals[]} */ (Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP']));
@@ -1808,16 +1883,17 @@ function runIsolated(a) {
     // pid outside cannot be signalled from inside") failed ONLY under the gate, where their
     // `isolated` is nested in the gate's (measured on the v0.32.0 gate run). The network and
     // the masks are inherited (already isolated); the process table is not.
-    const priv = privilegeDrop(recordedHostIds(), { pidns: true });
+    // ⛔ setpriv, unshare and pid 1's bash from the SYSTEM dirs, never the caller's PATH
+    const nt = privilegedTools(ub, true);
+    if (nt.why) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${nt.why}. The command was NOT started.`, { command }));
+    const priv = privilegeDrop(recordedHostIds(), nt.tools, { pidns: true });
     if (priv.why) {
       return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${priv.why}. The command was NOT started.`, { command }));
     }
     // pid 1 is the reaping bash (PID1_REAPER); the node helper under it gives the command default
     // signal dispositions (a bash background job would IGNORE SIGINT)
-    const bash = bashOnPath();
-    if (!bash) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${NO_BASH}. The command was NOT started.`, { command }));
     // fd 3: the helper's `started`; fd 4: the command's env (the chain itself gets privilegedEnv)
-    return runCommand([bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', ...pid1HelperArgv(command, 4, true)],
+    return runCommand([nt.tools.bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', ...pid1HelperArgv(command, 4, true)],
       priv.prefix, { pastUnshare: true, env: isolatedEnv(process.env, pass) });
   }
   let hostNs = '';
@@ -1851,7 +1927,7 @@ function runIsolated(a) {
     ...(path.isAbsolute(command[0]) ? [{ p: command[0], label: 'the command', rw: false }] : []),
     { p: process.execPath, label: 'node', rw: false },
     // the inner half and every nested call run it again, from INSIDE the masks
-    ...(ub.bin !== 'unshare' ? [{ p: ub.bin, label: UNSHARE_BIN_ENV, rw: false }] : []),
+    ...(ub.override ? [{ p: ub.bin, label: UNSHARE_BIN_ENV, rw: false }] : []),
     // a throwaway HOME under /tmp is the arm's own (the family's sandboxes isolate HOME)
     ...(throwawayHome(ident.home) ? [{ p: throwawayHome(ident.home), label: 'HOME', rw: true }] : []),
     // ⛔ the HIDDEN home: every PATH entry under it is re-bound READ-ONLY, or tools vanish
@@ -1868,8 +1944,9 @@ function runIsolated(a) {
       'NOT RUN: /proc/self/net/unix is unreadable, so the host\'s unix sockets cannot be listed and '
       + 'their masking cannot be PROVEN. The command was NOT started.', { command }));
   }
-  const bash = bashOnPath();
-  if (!bash) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${NO_BASH}. The command was NOT started.`, { command }));
+  // ⛔ every tool the privileged halves run: from the SYSTEM dirs, resolved HERE, passed on by path
+  const { tools, why: noTool } = privilegedTools(ub, false);
+  if (noTool) return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${noTool}. The command was NOT started.`, { command }));
   for (const n of plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
   // ⭐ STRIPPED MARKERS: no HOST_NETNS, yet the KERNEL says we are inside one of ours — our tmpfs
   // tag on /run and /tmp and a lo-only network. Measured: such a call isolates AGAIN, fully
@@ -1887,7 +1964,7 @@ function runIsolated(a) {
     [RO_ROOTS_ENV]: JSON.stringify(prot.roots), [HIDDEN_ENV]: JSON.stringify([prot.home, ...prot.hidden]),
     [HOST_IDS_ENV]: JSON.stringify(ids) });
   const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
-    home: prot.home, exempt: plan.exempt, sockets, ids, env: cmdEnv });
+    home: prot.home, exempt: plan.exempt, sockets, ids, env: cmdEnv, tools });
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
     let child;
@@ -1901,7 +1978,7 @@ function runIsolated(a) {
         // process can be signalled or even seen. --kill-child: if unshare dies, so does
         // everything inside (pid 1 is the reaping bash, PID1_REAPER; the inner half runs under it).
         ['-rnm', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
-          bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1',
+          tools.bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1',
           process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         // ⛔ the PRIVILEGED env: unshare, pid 1 and the inner half (namespace root, full caps, before
         // any mask) never see NODE_OPTIONS, LD_*, or any --pass-env (PRIVILEGED_PASS_ENV)
@@ -2045,7 +2122,7 @@ async function runIsolatedInner(a) {
 
   // ⇩ only now, provably off the host network, read the plan. (On the host the
   // proofs above refuse first, so an unrelated fd 4 is never read.)
-  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, env: Record<string, string>}} */
+  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, env: Record<string, string>, tools: Tools}} */
   let plan;
   try {
     // node's stdio 'pipe' is a socketpair, not a FIFO; anything else is not ours
@@ -2059,7 +2136,7 @@ async function runIsolatedInner(a) {
     if (typeof plan.hostMnt !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
       || typeof plan.home !== 'string' || !path.isAbsolute(plan.home)
       || !strs(plan.roots) || !strs(plan.hidden) || !strs(plan.exempt) || !strs(plan.sockets) || !hostIdsOf(plan.ids)
-      || !isEnvObject(plan.env)) throw new Error('malformed');
+      || !isEnvObject(plan.env) || !isTools(plan.tools)) throw new Error('malformed');
   } catch (e) {
     return refuse(`internal: no masking plan on fd 4 (${errMsg(e)}) — run via \`isolated\``);
   }
@@ -2072,7 +2149,9 @@ async function runIsolatedInner(a) {
       + 'create one, so the host\'s unix sockets cannot be masked');
   }
 
-  const up = bringLoUp();
+  // ⛔ the tools resolved on the HOST from the system dirs — never looked up on PATH in here
+  MOUNT.bin = plan.tools.mount;
+  const up = bringLoUp(plan.tools.lo);
   if (up) return refuse(up);
   try { await loopbackSelfTest(); } catch (e) {
     return refuse(`the namespace loopback does not work after bringing it up (${errMsg(e)})`);
@@ -2118,7 +2197,7 @@ async function runIsolatedInner(a) {
 
   // ⛔ LAST, after every mount: the command runs as the real uid in a child user namespace —
   // NO capabilities, so it cannot undo them, yet free to make namespaces of its own.
-  const priv = privilegeDrop(hostIdsOf(plan.ids));
+  const priv = privilegeDrop(hostIdsOf(plan.ids), plan.tools);
   if (priv.why) return refuse(priv.why);
 
   if (!tell('started')) return refuse('internal: the status channel (fd 3) is missing — run via `isolated`');
@@ -2664,27 +2743,14 @@ function hostPathSockets() {
 }
 
 /**
- * The `mount` every masking step runs: `mount` on PATH until maskSocketDirs PINS it.
- * ⛔ Once the home tmpfs is up, a PATH dir under the home is gone until its re-bind moves back —
- * and with it a `mount` that lives there (measured: the no-setpriv arm's PATH is such a dir). ⇒
- * right after /run is covered, the real `mount` is bound READ-ONLY at MOUNT_PIN and run from
- * there. It stays visible inside: a read-only view of a binary already on PATH.
+ * The `mount` every masking step runs: the ABSOLUTE path the host resolved from the system dirs
+ * (plan.tools.mount, set at the top of the inner half). '' until then — a mountOrWhy before it is
+ * an internal error, never a PATH lookup.
+ * ⚠ It used to be `mount` on PATH, then PINNED read-only under the new /run because a PATH dir
+ * under the hidden home vanished mid-masking. A system dir never vanishes, so the pin is gone —
+ * and so is the PATH lookup that let a planted `mount` run as namespace root (re-review of v0.33.0).
  */
-const MOUNT = { bin: 'mount' };
-/** Where maskSocketDirs pins `mount` (inside the NEW /run). */
-const MOUNT_PIN = '.webctl-bin/mount';
-
-/**
- * The real path of `name` on PATH (absolute entries only), or ''. @param {string} name
- */
-function toolOnPath(name) {
-  for (const d of String(process.env.PATH || '').split(':')) {
-    if (!path.isAbsolute(d)) continue;
-    const p = path.join(d, name);
-    try { fs.accessSync(p, fs.constants.X_OK); if (fs.statSync(p).isFile()) return fs.realpathSync(p); } catch { /* next */ }
-  }
-  return '';
-}
+const MOUNT = { bin: '' };
 
 /**
  * Run `mount` (util-linux) with an argv ARRAY. @param {string[]} argv
@@ -2692,6 +2758,7 @@ function toolOnPath(name) {
  * @returns {string} '' on success, else the reason
  */
 function mountOrWhy(argv, what, redact = []) {
+  if (!path.isAbsolute(MOUNT.bin)) return `cannot ${what}: internal: no system 'mount' was resolved`;
   const r = spawnSync(MOUNT.bin, argv, { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
   if (r.error) {
     const err = /** @type {NodeJS.ErrnoException} */ (r.error);
@@ -2748,16 +2815,6 @@ function maskSocketDirs(binds, roots, hidden = [], home = '') {
   };
   try {
     for (const d of all.filter((x) => x !== tmp)) { const e = cover(d); if (e) return e; }
-    // ⛔ pin `mount` before anything it may live under is hidden (MOUNT)
-    const mbin = toolOnPath('mount');
-    if (mbin) {
-      const pin = path.join(run, MOUNT_PIN);
-      fs.mkdirSync(path.dirname(pin));
-      fs.writeFileSync(pin, '');
-      const e = mountOrWhy(['--bind', '-o', 'ro', mbin, pin], 'pin the mount binary read-only', secret);
-      if (e) return e;
-      MOUNT.bin = pin;
-    }
     fs.mkdirSync(stage);
     const isDir = binds.map((b) => fs.statSync(b.p).isDirectory());
     for (const [i, b] of binds.entries()) {
@@ -2948,7 +3005,7 @@ function singleMapping(map, inside, outside) {
  * @param {{uid: number, gid: number} | null} ids the REAL uid/gid (host namespace)
  * @returns {{prefix: string[], why: string}}
  */
-function privilegeDrop(ids, { pidns = false } = {}) {
+function privilegeDrop(ids, tools, { pidns = false } = {}) {
   if (!ids) return { prefix: [], why: 'internal: the real uid/gid were not recorded at entry — run via `isolated`' };
   if (ids.uid === 0) {
     return { prefix: [], why: 'the real uid is 0 (root): a child user namespace mapped onto it would keep every '
@@ -2957,16 +3014,15 @@ function privilegeDrop(ids, { pidns = false } = {}) {
   // pidns (the NESTED path): a fresh PID namespace too, so the command cannot see or signal
   // its CALLER's processes either. -m only to mount that namespace's /proc: inherited mounts
   // stay locked, and the command (a non-root uid after exec) holds no capabilities in it.
-  const ub = unshareBin();
-  if (ub.why) return { prefix: [], why: ub.why };
+  // ⛔ both by ABSOLUTE path from the system dirs (privilegedTools) — never the caller's PATH
   const pid = pidns ? ['-m', '--pid', '--fork', '--mount-proc', '--kill-child'] : [];
-  const prefix = ['setpriv', '--no-new-privs', '--', ub.bin, '-U', '--map-user', String(ids.uid),
+  const prefix = [tools.setpriv, '--no-new-privs', '--', tools.unshare, '-U', '--map-user', String(ids.uid),
     '--map-group', String(ids.gid), ...pid, '--'];
   const r = spawnSync(prefix[0], [...prefix.slice(1), process.execPath, '-e',
     'const f = require("fs"); process.stdout.write(JSON.stringify({ status: f.readFileSync("/proc/self/status", "utf8"),'
       + ' uidMap: f.readFileSync("/proc/self/uid_map", "utf8"), gidMap: f.readFileSync("/proc/self/gid_map", "utf8"),'
       + ' uid: process.getuid(), gid: process.getgid() }))'],
-  { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: privilegedEnv(process.env) });
   // ⚠ strip the ids from anything quoted back (a getopt error may echo an argument)
   const redact = (/** @type {string} */ s) => s.replace(new RegExp(`\\b(${ids.uid}|${ids.gid})\\b`, 'g'), '<id>');
   const tail = () => redact(String(r.stderr || '').trim().split('\n').pop() || '');
@@ -3269,24 +3325,27 @@ function connectOutcome(port, ms = 800) {
 }
 
 /**
- * Bring the namespace's loopback up. `ip` (iproute2), else `ifconfig` (net-tools);
- * neither → refuse. @returns {string} '' on success, else the reason
+ * Bring the namespace's loopback up: each of `lo` in turn — `ip` (iproute2), then `ifconfig`
+ * (net-tools), by the ABSOLUTE paths the host resolved from the system dirs (privilegedTools);
+ * ⛔ never by name: that searched the caller's PATH, its cwd included (re-review of v0.33.0).
+ * @param {[string, string[]][]} lo @returns {string} '' on success, else the reason
  */
-function bringLoUp() {
+function bringLoUp(lo) {
   /** @type {string[]} */
   const tried = [];
-  for (const [bin, argv] of /** @type {[string, string[]][]} */ ([
-    ['ip', ['link', 'set', 'lo', 'up']], ['ifconfig', ['lo', 'up']]])) {
+  for (const [bin, argv] of lo) {
+    const name = path.basename(bin);
+    if (!path.isAbsolute(bin)) { tried.push(`${name}: internal: not an absolute path`); continue; }
     try {
       execFileSync(bin, argv, { stdio: ['ignore', 'ignore', 'pipe'] });
       return '';
     } catch (e) {
       const err = /** @type {NodeJS.ErrnoException & {stderr?: Buffer}} */ (e);
-      tried.push(err.code === 'ENOENT' ? `${bin}: not found`
-        : `${bin}: ${String(err.stderr || err.message).trim()}`);
+      tried.push(err.code === 'ENOENT' ? `${name}: not found`
+        : `${name}: ${String(err.stderr || err.message).trim()}`);
     }
   }
-  return `cannot bring the namespace loopback up (${tried.join('; ')}) — install iproute2`;
+  return `cannot bring the namespace loopback up (${tried.join('; ') || 'no tool'}) — install iproute2`;
 }
 
 /** Listen on 127.0.0.1:0 and connect to it. @returns {Promise<void>} */

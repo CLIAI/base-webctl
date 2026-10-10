@@ -985,6 +985,45 @@ the outer spawn, the privilege drop and its probe, and every nested call; re-bou
   is the ONLY failing fact the reason says "upgrade the outer". On the host (other facts fail
   too) it does not. Sabotage: message off, or shown whenever the var is absent → the arm red.
 
+### ⛔ PATH picked the binary a PRIVILEGED half ran (re-review of v0.33.0)
+
+The loader-var fix cut the privileged env to an allowlist — but kept PATH, and the tools were
+still FOUND on it: `ip` (`execFileSync('ip')`), every `mount`, `setpriv` and the default
+`unshare` by name, through the caller's PATH, empty and relative entries included; pid 1's `bash`
+by an absolute-entries-only scan, which npm's prepended `<pkg>/node_modules/.bin` defeats. The
+re-review measured a fake `ip` in the cwd + `PATH=":$PATH"` running as namespace root, CapEff
+full, before any mask, listing the real home. The cwd is writable INSIDE, so run N plants it and
+run N+1 executes it.
+* **Arm, before the fix** (fakes that log `HIT <name>` and exec the real tool; 3 PATH shapes ×
+  fresh/nested): empty entry → fresh `unshare, ip, mount, setpriv`, nested `setpriv, unshare`;
+  relative `bin` → the same; absolute dir first → fresh `unshare, bash, ip, mount, setpriv`,
+  nested `setpriv, unshare, bash`. After: none, in all six. CONTROL in the same runs: the
+  command's PATH is byte-identical to the caller's and it runs the caller's `caller-tool` by it.
+* ⇒ `SYSTEM_TOOL_DIRS` = `/usr/sbin /usr/bin /sbin /bin`; `systemTool(name)` returns the first
+  executable regular file there, as that path — not realpath'd, a busybox `ip` dispatches on its
+  name. `privilegedTools()` resolves unshare (unless `WEBCTL_UNSHARE_BIN`), bash, setpriv, and on
+  the fresh path mount + ip/ifconfig, ON THE HOST before unshare; missing → FAIL naming the tool
+  and the dirs. The fresh plan carries them (`tools`, validated by `isTools`); the inner half
+  sets `MOUNT.bin` from it and passes `lo` to bringLoUp; privilegeDrop takes `tools`. And
+  `privilegedEnv` sets `PATH=SYSTEM_PATH` — the second layer.
+* **The `mount` pin is gone.** It bound PATH's `mount` read-only under the new /run because a
+  PATH dir under the home vanished mid-masking — and it was itself a PATH lookup run as
+  namespace root. A system dir never vanishes.
+* ⚠ **The fail-closed arms had to move.** Twelve of them faked a tool by putting a dir FIRST on
+  PATH (no setpriv, a flag-ignoring setpriv, a too-old unshare, no bash, the slow-bash early-TERM
+  shim, …) — the very mechanism this closes. They now bind the fake OVER the system copy in a
+  throwaway `unshare -rm` (`withBinds`, `overTool`; a non-executable file = "missing"; the real
+  tool stays reachable at a bound copy where the fake must exec it). The slow bash's interpreter
+  is that copy, since `/bin/sh` may be bash; EARLY_CMD is node for the same reason; the probe
+  matches `…/unshare` (argv[0] is now absolute).
+* ⚠ **Cost.** A host whose util-linux/bash/iproute2 live only under `/usr/local` or a Nix profile
+  now FAILs; `WEBCTL_UNSHARE_BIN` covers unshare alone. Not widened: every extra dir is one more
+  place a privileged binary can be planted.
+* **Sabotage:** `systemTool` scanning `process.env.PATH` → arm red (the absolute-dir case runs a
+  planted `mount` that vanishes with /tmp: the run FAILs); `bringLoUp` by name + the caller's PATH
+  in `privilegedEnv` → arm red (`HIT ip` ×3); the caller's PATH in `privilegedEnv` ALONE →
+  SURVIVES, by construction: no privileged half resolves a name any more — it is the second layer.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
