@@ -207,6 +207,79 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.34.0 — (unreleased)
+
+**Headline: `isolated` chooses its BACKEND — unshare → bwrap → docker → refuse, never unisolated
+— and is judged by ONE arm table (ib4k §1, rows 1–11); and it closes the three gaps v0.33 left
+open: a private `/var/tmp` and `/dev/shm`, a fresh session keyring, and the host's identity
+hidden.** Phase 1 of 3 (ib4k): only the **unshare** backend is implemented. Harness and gate
+only; no `lib/` change; `HARNESS_GENERATION` stays 6 (no new flag). No consumer change expected.
+
+### Backend selection (ib4k §2, §4)
+
+* Backends are probed in order — **unshare, bwrap, docker** — and the first that can run is used;
+  each one skipped before it is recorded with its NAMED reason. None → **refused**, naming all
+  three. A probe is side-effect free (unshare: `unshare -rnm --uts --pid --fork true` after its tool
+  checks) and a probe that throws is a reason, never a crash. Only a PROBE failure moves on: once a
+  backend is chosen, a failure inside it is a FAIL.
+* **`WEBCTL_ISOLATION_BACKEND=unshare|bwrap|docker`** pins one. A pinned backend that cannot be used
+  is a **refusal**, never a fallback; an unknown value is refused by rule. A nested call validates
+  it and selects nothing (it runs inside its outer call's sandbox).
+* ⚠ **Phase 1:** `bwrap` and `docker` answer `not implemented yet (v0.34 phase 2/3)`. So on a host
+  where unshare cannot run (the AppArmor sysctl — v0.33's HOST-POLICY text is kept as unshare's
+  reason) `isolated` still REFUSES; a pin to bwrap or docker is refused.
+* ⚠ **The refusal text changed shape** (same reasons): a fresh-path refusal for a missing tool,
+  a bad `WEBCTL_UNSHARE_BIN` or a refused user namespace now reads `NOT RUN: no isolation backend
+  can be used here — unshare: <the v0.33 reason>; bwrap: …; docker: …`. Still one
+  `FAIL  isolated: NOT RUN…` line + a JSONL record, which now carries `"backend"` and `"skipped"`.
+* **The verdict line ends `…; backend: unshare`.** ⚠ A test anchoring the verdict's END (after
+  `writable: …`) must allow it.
+* **The release gate** records the backend per consumer — read from its OWN `isolated` verdict, so
+  nothing a consumer prints changes: scratch-mode envelopes gain `"isolation": "<backend>"` (`none`
+  when refused), and the summary prints `----- isolation backends: unshare=N -----`.
+
+### The shared arm table (ib4k §1)
+
+* `test/isolation-arm-table.test.js`: rows 1–11 as ONE table, run per implemented backend, each row
+  on the fresh, nested and stripped-markers paths with its positive control, in a throwaway world
+  (a fake passwd home on a tmpfs, tmpfs "host" scratch dirs, a throwaway keyring; host identity
+  compared as digests — nothing touches the real host). A guard fails when the harness can run a
+  backend the table does not judge.
+
+### Rows 8–10 closed (unshare)
+
+* **Row 8 — `/var/tmp` and `/dev/shm` get a private tmpfs**, like `/tmp`. Measured before: a file
+  planted in the host's was readable inside, and a write inside landed on the host. Keep rules are
+  `/tmp`'s: a `--keep`/`--keep-ro` BENEATH one is re-bound with its mode; a keep that IS one (or an
+  ancestor) is usage 3; a cwd AT one fails, beneath one runs.
+* **Row 9 — a fresh session keyring.** Measured before: `keyctl show @s` listed the host's session
+  keyring (possessor `alswrv`), a host key was found. pid 1 now runs `keyctl new_session`; the
+  fresh path READS BACK the keyring id and refuses when it is still the host's. **keyctl not
+  installed:** the command runs and the verdict says `keyring: shared (keyctl not installed)`.
+* **Row 10 — host identity hidden.** Measured before: hostname, every interface name in
+  `/sys/class/net`, `/etc/machine-id`. Now: a UTS namespace named **`webctl-isolated`** (set with
+  the system `hostname` tool — without it the verdict says `hostname: the host's`); a **fresh
+  sysfs** listing only `lo` (the cgroup tree carried back; if the kernel refuses sysfs, an empty
+  mask over `/sys/class/net` and a note); a **neutral `/etc/machine-id`** (a fixed constant —
+  systemd-id128 and dbus-uuidgen keep working) and `/etc/hostname`. All READ BACK.
+* ⚠ **Nesting:** the kernel proof now requires the scratch masks and the hidden identity. A v0.34
+  call nested under a **v0.33 outer is refused** (exit 2) saying **"upgrade the outer"**. Under the
+  release gate the outer is base HEAD, so this bites only a lane whose own outer call is older.
+
+### ⛔ What this does NOT cover
+
+* **bwrap and docker backends** (phases 2 and 3, ib4k §3/§3a): not implemented. A host that forbids
+  unprivileged user namespaces is still refused — the lane blocked by AppArmor is NOT unblocked yet.
+* **Row 7 is OPEN for dirs outside the home**: a user-owned dir outside the home (an `/opt/x` of
+  one's own) is WRITABLE inside — `isolated` never remounts `/` read-only. Recorded as a `todo` arm;
+  needs a ruling.
+* **Identity not hidden:** `/etc/hosts` (may name the host), `/proc/sys/kernel/random/boot_id`, DMI
+  strings under `/sys/class/dmi/id`, the kernel release.
+* Two rulings flagged for review (ib4k §1a): keyctl present but its join refused FAILS closed; no
+  `hostname` tool runs with a note.
+* Everything under v0.33.x's "does NOT cover" that is not listed above still applies (what a
+  re-bind brings back is visible; the util-linux 2.38 PDEATHSIG window).
+
 ## v0.33.1 — 2026-10-10
 
 **Headline: `isolated` hardening from the last v0.33.0 review — which `xq` it trusts, and what

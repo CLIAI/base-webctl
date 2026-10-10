@@ -450,7 +450,11 @@ Path sockets are filesystem objects, not network: a mutant there can `docker sto
 ⇒ `isolated` is `unshare -rnm --propagation=private`, and before the command starts:
 
 * **Mask.** A fresh tmpfs (source `webctl-isolated`) over `/run` and `/tmp`, and over
-  `/var/run` when it is a real directory rather than a symlink into `/run`.
+  `/var/run` when it is a real directory rather than a symlink into `/run`. *Since v0.34.0*
+  also over `/var/tmp` and `/dev/shm` (a keep beneath them is re-bound as under `/tmp`), with a
+  fresh session keyring and the host's identity hidden — a neutral hostname, a sysfs showing only
+  `lo`, a neutral `/etc/machine-id` (`ib4k` §1a). Which backend makes the sandboxes, and the one
+  arm table every backend must pass: `ib4k`.
 * **Keep-binds — the /tmp trap.** The arm usually lives under `/tmp` itself (worktrees,
   the `--scratch` gate's clones, fixtures). The cwd, base's repo root, an absolute argv[0],
   node, a `$HOME` under `/tmp`, and every `--keep <path>` are rbound to staging points in
@@ -832,11 +836,14 @@ contract that calls **`require-generation <N>`** — a verb, so it exits non-zer
 harness that predates it — is protected. Arms and rationale: the harness README.
 
 **Output:** emit JSONL typed envelopes per the machine-interface spec (`lszd`),
-one per suite: `{type, ts, consumer, suite, result, reason?}` where `result ∈
+one per suite: `{type, ts, consumer, suite, result, reason?, isolation?}` where `result ∈
 {pass,fail,skip}` and `reason` is a human-readable string — the consumer's own
 last line for exit 2, the gate's own words only where the gate genuinely knows
 (not wired, repo absent, dirty pointer). Omitted rather than empty when there is
-none. The loop aggregates these.
+none. `isolation` (scratch mode, v0.34.0): the backend the gate's own `isolated` call used —
+read from its verdict line, not from anything the consumer prints — or `none` (refused) /
+`unknown`; the summary prints the mix (`----- isolation backends: unshare=N -----`, `ib4k` §4).
+The loop aggregates these.
 
 ### Example mappings (per current consumers)
 

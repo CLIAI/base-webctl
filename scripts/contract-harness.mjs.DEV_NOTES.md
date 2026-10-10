@@ -1348,6 +1348,77 @@ not help: this path runs only because the markers were stripped, and that var is
 * **Sabotage (both caught):** the carry ignoring `outerHides` → the arm; the outer's hide only
   where a re-bind CONTAINS the dir (as before) → the arm (nothing in mountinfo to read).
 
+### v0.34.0 phase 1 — backends, and rows 8–10 of the shared arm table (ib4k)
+
+**Selection.** `selectBackend(pinned, probes)` is pure and exported (logic-tested with injected
+probes); `runIsolated` hands it three probes: unshare (`probeUnshare`), and bwrap/docker as
+`not implemented yet (v0.34 phase 2/3)`. The unshare probe is everything that used to refuse
+before `unshare` was spawned — a bad `WEBCTL_UNSHARE_BIN`, a privileged tool missing from the
+system dirs — plus one side-effect-free `unshare -rnm --uts --pid --fork true`, whose stderr goes
+through `userNamespaceRefusal()` (so the AppArmor case keeps its v0.33 HOST-POLICY text). It is
+checked AFTER the usage/plan refusals, so a bad `--keep` still reads as usage on a host without
+user namespaces. The nested path makes no sandbox: it validates the pin's value and ignores it.
+Cost: one extra fork+exec of unshare per fresh call (not measurable against the ~1.5 s run).
+⚠ `ub.override && ub.bin` — with an invalid override, `ub.bin` is '' and `path.resolve('')` is the
+cwd: the old early return hid that; the plan now guards it.
+
+**Row 8 — scratch.** `maskedDirs()` now returns `scratch` (/tmp, /var/tmp, /dev/shm — real paths,
+existing dirs only, deduplicated against what is already listed) and `sockets` (the v0.33 set).
+Every rule that special-cased `tmp` (planKeeps' beneath-a-masked-dir refusal and its push
+condition, throwawayHome, the mount mode 1777, the "cover after staging" order) now reads
+`scratch`. `outerRebinds` keeps keying its PROOF on `sockets` (so a stripped-markers call under an
+outer that lacks only the new masks still carries) and carries from every scratch dir.
+
+**Row 9 — keyring.** Measured with keyutils 1.6.3: `keyctl session - <cmd>` joins a new
+anonymous keyring but prints `Joined session keyring: N` to stderr — the COMMAND's stderr. ⇒ pid 1
+runs `keyctl new_session` instead (KEYCTL_JOIN then KEYCTL_SESSION_TO_PARENT onto bash itself,
+which works because bash is single-threaded — a node half cannot be the parent; measured: rc 0,
+id changed, also as pid 1 of a new PID namespace). PID1_REAPER takes keyctl (or '') as `$1`; the
+join runs after the traps, before the child. Read back in the inner half: `keyctl show @s`'s first
+key id vs the id the outer half read on the host. The user keyring: measured per user namespace on
+this kernel (`@u` id differs inside the child userns) — Linux ≥ 5.3 moved it into the userns.
+
+**Row 10 — identity.** Measured: `echo … > /proc/sys/kernel/hostname` as namespace root →
+`Permission denied` (the uts sysctls are owned by the host's root; only net sysctls follow the
+namespace owner), and node has no sethostname ⇒ the system `hostname` tool, run by the inner half
+after `--uts`. **sysfs:** `mount -t sysfs` from inside our own netns works unprivileged (the netns
+belongs to our userns) and shows only `lo` in `/sys/class/net` and `/sys/devices/virtual/net`. It
+covers every host submount of /sys — mounting ON TOP of locked mounts is allowed, removing them is
+not — so `/sys/fs/cgroup` is rbind-staged under the new /run and `--move`d back (measured: works;
+`process.constrainedMemory()` still answers inside). Fallback when sysfs is refused: an empty ro
+tmpfs over `/sys/class/net` + a note (tested with a fake `mount` that fails `-t sysfs`; the real
+mount reached through a bind on /mnt, because /tmp is masked mid-run). We MOUNT (fresh sysfs) rather
+than mask, because a mask over /sys/class/net alone leaves `/sys/devices/pci…/net/<name>` readable.
+**machine-id:** a fixed constant, `NEUTRAL_MACHINE_ID` (hex of `webctl-isolated\0`), bound read-only
+over `/etc/machine-id` (and `/var/lib/dbus/machine-id` when it is a separate file) and a neutral
+`/etc/hostname`. Measured what breaks: `systemd-id128 machine-id` and `dbus-uuidgen --get` answer
+the neutral id and exit 0 inside (an arm). An absent or all-zero id was rejected: systemd/dbus read
+both as "no machine id". **Nesting:** `identityGaps()` is the read-back AND a kernel-proof fact; a
+v0.33 outer fails it (and the scratch fact) alone → "older than v0.34.0 — upgrade the outer".
+
+**The arm table** (`test/isolation-arm-table.test.js`, helpers `isolation-arm-world.cjs` /
+`isolation-arm-probe.cjs`): one world per backend — `keyctl session - unshare -rm` (throwaway keyring
+and mount ns; host netns and pidns so rows 1 and 3 have a host side), a tmpfs over a neutral dir
+(/mnt) holding a fake passwd home, tmpfs over /dev/shm and /var/tmp with planted files. One run
+reads every row outside (controls) and inside on three paths; ~7 s. Measured red before the fixes:
+exactly rows 8, 9, 10 (failing for the named reason: planted /dev/shm file visible; host key named
+by `keyctl show @s`; hostname not neutral); every other row and every control green.
+
+**Sabotages** (each applied by hand to the committed code, the focused tests run, then reverted):
+
+| # | sabotage | caught by |
+|---|---|---|
+| S1 | no /var/tmp, /dev/shm masks (`SCRATCH_DIRS = []`) | 4 red: table row 8, both keep-rule arms, the skew arm |
+| S2 | pid 1 skips `keyctl new_session` | 3 red: every fresh run refused by the read-back ("still the HOST's"), table row 9 |
+| S3 | S2 + no keyring read-back | 1 red: table row 9 (the host key is named by `keyctl show @s`) |
+| S4 | no `--uts` | 1 red: table row 10 (`hostname` → EPERM in the host's UTS ns, refused — never renamed the host) |
+| S5 | no fresh sysfs (and so no fallback either) | 2 red: table row 10, the refused-sysfs arm |
+| S6 | machine-id / hostname files not bound | 1 red: table row 10 (read-back refuses) |
+| S7 | a pinned backend falls back to unshare | 3 red: the pin logic arm, the bwrap/docker pin arm, the table's coverage guard |
+| S8 | the unshare probe ignores the kernel's refusal | 1 red: the AppArmor end-to-end arm |
+| S9 | the nesting proof ignores identity | **survived** at first (the skew arm also failed the scratch fact); an identity-only fake outer was added — now 1 red |
+| S10 | the gate never tallies a backend | 2 red: the byte-identical and the isolation-unavailable gate arms |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
