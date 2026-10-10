@@ -355,7 +355,8 @@ unhide `~/.config/webctl`); `--keep` at or beneath one re-exposes that path only
   The first `xq` on PATH is ignored (`xq ignored: found in a writable location` / `…: not named
   xq`, by label) when its PATH entry, any link of its symlink chain or its real file lies in the
   cwd, a `--keep` / `--keep-ro`, `/tmp`, `TMPDIR`, `/var/tmp` or `/dev/shm`, or its real file is
-  not named exactly `xq`.
+  not named exactly `xq`. ⚠ Also in any dir OUTSIDE the home you can write (a user-owned `/opt/x`):
+  an `xq` installed through one is ignored — install it from a dir only root can write.
 * A PATH entry that reaches the home through a symlink OUTSIDE it is re-bound at its real path
   only. Cost measured on the operator host (~100 PATH entries under the home): `isolated --
   true` 1.29 s → 1.46 s.

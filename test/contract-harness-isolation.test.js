@@ -1674,10 +1674,10 @@ const SECRET_PROBE = `const fs = require('fs'); const p = require('path');
 let r; try { fs.readFileSync(p.join(process.argv[1], 'lib', 'data.txt')); r = 'ok'; } catch (e) { r = e.code; }
 console.log('SECRET-READ ' + r);`;
 
-test('⛔ xq: a planted `xq` in a WRITABLE place (cwd node_modules/.bin, a --keep, /tmp, an intermediate link in /tmp) or not named xq → NOT re-bound, the repo it points into stays HIDDEN, a note by LABEL — CONTROL: the ~/.local/bin shape re-binds it', needsIsolation, async (t) => {
+test('⛔ xq: a planted `xq` in a WRITABLE place (cwd node_modules/.bin, a --keep — relative too, /tmp, an intermediate link in /tmp, a user-writable dir outside the home, `..` through a link) or not named xq → NOT re-bound, the repo it points into stays HIDDEN, a note by LABEL — CONTROL: the ~/.local/bin shape re-binds it', needsIsolation, async (t) => {
   const scratch = tmpdir();
   try {
-    /** @type {[string, (home: string, target: string) => {path: string, cwd?: string, keep?: string[]}, string][]} */
+    /** @type {[string, (home: string, target: string) => {path: string, cwd?: string, keep?: string[], pre?: string}, string][]} */
     const cases = [
       ['cwd node_modules/.bin', (home, target) => {
         const bin = path.join(home, 'proj', 'node_modules', '.bin');
@@ -1709,6 +1709,40 @@ test('⛔ xq: a planted `xq` in a WRITABLE place (cwd node_modules/.bin, a --kee
         fs.symlinkSync(path.join(hop, 'xq'), path.join(home, '.local', 'bin', 'xq'));
         return { path: xqPath(home) };
       }, 'found in a writable location'],
+      // F1: a RELATIVE --keep is bound read-write at path.resolve() — it is writable all the same
+      ['a RELATIVE --keep dir', (home, target) => {
+        const bin = path.join(home, 'sibling', 'bin');
+        fs.mkdirSync(bin, { recursive: true });
+        fs.mkdirSync(path.join(home, 'proj'));
+        fs.symlinkSync(target, path.join(bin, 'xq'));
+        return { path: `${bin}:/usr/bin:/bin`, cwd: path.join(home, 'proj'), keep: ['--keep', '../sibling'] };
+      }, 'found in a writable location'],
+      // F3: a dir OUTSIDE the home the real uid can write (a user-owned /opt/x, /mnt/data) — here
+      // a tmpfs over /mnt in the throwaway namespace only, owned by the mapped real uid
+      ['a user-writable dir outside the home', (home, target) => ({ path: '/mnt/webctl-test-bin:/usr/bin:/bin',
+        pre: `mount -t tmpfs webctl-test-w /mnt && mkdir /mnt/webctl-test-bin && ln -s '${target}' /mnt/webctl-test-bin/xq` }),
+      'found in a writable location'],
+      // F4: `..` after a symlink resolves PHYSICALLY (the kernel), not lexically (path.resolve): the
+      // link below is judged as itself lexically, but resolves through /tmp
+      ['a link target with `..` through a symlink into /tmp', (home, target) => {
+        const w = fs.mkdtempSync(path.join(scratch, 'dotdot-'));
+        fs.mkdirSync(path.join(w, 'd'));
+        fs.symlinkSync(target, path.join(w, 'xq'));
+        const lb = path.join(home, '.local', 'bin');
+        fs.mkdirSync(lb, { recursive: true });
+        fs.symlinkSync(path.join(w, 'd'), path.join(lb, 'sym'));
+        fs.symlinkSync('sym/../xq', path.join(lb, 'xq'));
+        return { path: xqPath(home) };
+      }, 'found in a writable location'],
+      ['a PATH entry with `..` through a symlink into /tmp', (home, target) => {
+        const w = fs.mkdtempSync(path.join(scratch, 'dotdot-'));
+        fs.mkdirSync(path.join(w, 'd'));
+        fs.symlinkSync(target, path.join(w, 'xq'));
+        const lb = path.join(home, '.local', 'bin');
+        fs.mkdirSync(lb, { recursive: true });
+        fs.symlinkSync(path.join(w, 'd'), path.join(lb, 'sym'));
+        return { path: `${path.join(lb, 'sym')}/..:/usr/bin:/bin` };
+      }, 'found in a writable location'],
       ['a link named xq whose target is not', (home, target) => {
         fs.mkdirSync(path.join(home, '.local', 'bin'), { recursive: true });
         fs.symlinkSync(target, path.join(home, '.local', 'bin', 'xq'));
@@ -1727,7 +1761,7 @@ test('⛔ xq: a planted `xq` in a WRITABLE place (cwd node_modules/.bin, a --kee
         const exe = path.join(repo, 'bin', label === 'not named xq' ? 'some-tool' : 'xq');
         fs.writeFileSync(exe, '#!/bin/sh\necho hi\n', { mode: 0o755 });
         const pl = plant(home, exe);
-        const r = await underFakeHome(home, ['sh', '-c', 'cd "$0" && exec "$@"', pl.cwd || ROOT, 'env', `PATH=${pl.path}`,
+        const r = await underFakeHome(home, ['sh', '-c', `${pl.pre || ':'} && cd "$0" && exec "$@"`, pl.cwd || ROOT, 'env', `PATH=${pl.path}`,
           process.execPath, TOOL, 'isolated', ...(pl.keep || []), '--', process.execPath, '-e', SECRET_PROBE, repo]);
         if (!r) { t.skip(NO_FAKE_HOME); return; }
         assert.equal(r.status, 0, `${what}: ${r.stdout}${r.stderr}`);
@@ -2398,6 +2432,32 @@ test('⛔ STRIPPED markers: an outer --keep strictly INSIDE a hidden dir (~/.ssh
     assert.match(innerOut || '', /^KEPT 0 ENOENT\nKEPT 1 ENOENT\nKEPT 2 ok$/m,
       `an outer re-bind INSIDE a hidden dir was carried (or the control was not):\n${r.stdout}${r.stderr}`);
     assert.match(r.stderr, /^isolated: note: 2 outer re-bind\(s\) AT or WITHIN a hidden dir .* not carried/m, r.stderr);
+    assert.ok(!r.stderr.split('\n').filter((l) => /not carried/.test(l)).join('\n').includes(home), `the note printed a path:\n${r.stderr}`);
+  } finally { for (const d of [home, scratch]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+// ⛔ Review F2 (v0.33.0, round 4): with ~/.ssh a SYMLINK (dotfiles) to a dir elsewhere under the home,
+// an outer `--keep ~/.ssh/sub` is bound at its REAL path. Inside, the hidden home makes ~/.ssh
+// unresolvable, so hideRule held only the nominal path and the carry kept `sub` writable, silently.
+// The recorded WEBCTL_HIDDEN_DIRS cannot help: it is stripped with the rest of the markers.
+test('⛔ STRIPPED markers: an outer --keep beneath a SYMLINKED ~/.ssh (bound at its real path) is NOT carried — CONTROL: an outer keep outside the hidden dirs still is', needsIsolation, async (t) => {
+  const home = homeTmpdir();
+  const subs = [path.join(home, 'dotfiles', 'ssh', 'sub'), path.join(home, 'plain')];
+  for (const d of subs) { fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'f'), 'x'); }
+  fs.symlinkSync(path.join('dotfiles', 'ssh'), path.join(home, '.ssh'));
+  const scratch = tmpdir(); // the inner call's cwd: kept by the outer, NOT under the home
+  try {
+    const r = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--keep', path.join(home, '.ssh', 'sub'), '--keep', subs[1],
+      '--keep', scratch, '--', 'sh', '-c', `"$0" -e "$3" "$4" "$5"; echo INNER; cd "$1" && env ${STRIP} "$0" "$2" isolated -- "$0" -e "$3" "$4" "$5"`,
+      process.execPath, scratch, TOOL, KEPT_PROBE, ...subs]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stderr, /ALREADY INSIDE an isolated namespace whose markers were stripped/, 'premise: the inner call took the fresh path');
+    const [outerOut, innerOut] = r.stdout.split(/^INNER$/m);
+    assert.match(outerOut, /^KEPT 0 ok\nKEPT 1 ok$/m, `premise: the OUTER call re-bound both:\n${r.stdout}${r.stderr}`);
+    assert.match(innerOut || '', /^KEPT 0 ENOENT\nKEPT 1 ok$/m,
+      `an outer re-bind beneath a symlinked hidden dir was carried (or the control was not):\n${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /^isolated: note: 1 outer re-bind\(s\) AT or WITHIN a hidden dir .* not carried/m, r.stderr);
     assert.ok(!r.stderr.split('\n').filter((l) => /not carried/.test(l)).join('\n').includes(home), `the note printed a path:\n${r.stderr}`);
   } finally { for (const d of [home, scratch]) fs.rmSync(d, { recursive: true, force: true }); }
 });
