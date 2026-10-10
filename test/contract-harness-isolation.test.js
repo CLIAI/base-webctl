@@ -2342,15 +2342,15 @@ const NEUTRAL_MNT = ['/mnt', '/srv', '/media'].find((d) => {
   try { return fs.statSync(d).isDirectory() && !ROOT.startsWith(`${d}/`); } catch { return false; }
 }) || '';
 
-test('⛔ no `hostname` tool → the command still runs, the verdict says `hostname: the host\'s (no \`hostname\` tool)` — CONTROL: with it, the hostname is the neutral one', needsIsolation, async (t) => {
+test('⛔ fail closed (ruling R2): no `hostname` tool → NOT RUN, naming the packages that provide it — never a run under the host\'s hostname — CONTROL: with it, the hostname is the neutral one', needsIsolation, async (t) => {
   const dir = tmpdir();
   try {
-    const r = await withBinds(overTool(noexecFile(dir), 'hostname'), [process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
-      'console.log("RAN " + (require("os").hostname() === "webctl-isolated" ? "NEUTRAL" : "HOSTS"))']);
+    const r = await markerRun(dir, overTool(noexecFile(dir), 'hostname'));
     if (!r) { t.skip(NO_BINDS); return; }
-    assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.match(r.stdout, /^RAN HOSTS$/m, 'without the tool the hostname cannot have been set');
-    assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: unshare.*; hostname: the host's \(no `hostname` tool\)/m);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot set the neutral hostname: 'hostname' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install inetutils or hostname/);
+    assert.doesNotMatch(r.stderr, /hostname: the host's/, 'the phase-1 "run with a note" path is back');
+    assert.equal(r.ran, false, 'the command ran under the host\'s hostname');
     const c = await run(['isolated', '--', process.execPath, '-e', 'console.log("RAN " + (require("os").hostname() === "webctl-isolated" ? "NEUTRAL" : "HOSTS"))']);
     assert.equal(c.status, 0, c.stderr);
     assert.match(c.stdout, /^RAN NEUTRAL$/m);

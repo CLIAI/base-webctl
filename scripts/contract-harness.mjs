@@ -1580,6 +1580,7 @@ const SYSTEM_TRUE = () => systemTool('true') || '/bin/true';
  * @typedef {{unshare: string, bash: string, setpriv: string, mount: string, lo: [string, string[]][], keyctl: string, hostname: string}} Tools
  *   every binary a privileged half runs, by ABSOLUTE path (SYSTEM_TOOL_DIRS / WEBCTL_UNSHARE_BIN).
  *   `keyctl`: OPTIONAL — '' when not installed (the session keyring is then the host's, and said so).
+ *   `hostname`: REQUIRED on the fresh path (ruling R2); '' on the nested one (it sets none).
  *   `lo`: how to bring the loopback up — `ip`, then `ifconfig`, whichever exist. The NESTED path
  *   needs no mount or lo (it makes no netns and masks nothing): '' / [] there.
  */
@@ -1596,9 +1597,10 @@ function privilegedTools(ub, nested) {
   // OPTIONAL (v0.34.0): without keyctl the command keeps the host's session keyring — the run goes
   // ahead and the verdict says so (ib4k row 9 ruling); '' then
   const keyctl = systemTool('keyctl');
-  // OPTIONAL (v0.34.0, ib4k row 10): sets the neutral hostname in the fresh path's UTS namespace — the
-  // only way to call sethostname(2) (node has none, and /proc/sys/kernel/hostname belongs to the
-  // host's root). Without it the hostname stays the host's, and the verdict says so. Fresh path only.
+  // ⛔ REQUIRED (ruling R2; v0.34.0, ib4k row 10): sets the neutral hostname in the fresh path's UTS
+  // namespace — the only way to call sethostname(2) (node has none, and /proc/sys/kernel/hostname
+  // belongs to the host's root: measured). Without it the hostname would be the host's: refused (phase 1
+  // ran with a note). No raw syscall number instead (ruling). Fresh path only.
   const hostname = nested ? '' : systemTool('hostname');
   const mount = nested ? '' : systemTool('mount');
   /** @type {[string, string[]][]} */
@@ -1611,6 +1613,10 @@ function privilegedTools(ub, nested) {
       + 'the command would run as namespace root with every capability (it could unmount the masks)' };
   }
   if (!nested && !mount) return { tools, why: `cannot mask the host's sockets: ${noSystemTool('mount', 'install util-linux')}` };
+  if (!nested && !hostname) {
+    return { tools, why: `cannot set the neutral hostname: ${noSystemTool('hostname', 'install inetutils or hostname (the package '
+      + 'is named either way, by distribution); without it the command would see the host\'s hostname')}` };
+  }
   if (!nested && lo.length === 0) {
     return { tools, why: 'cannot bring the namespace loopback up: neither \'ip\' nor \'ifconfig\' found in '
       + `${SYSTEM_TOOL_DIRS.join(', ')} — install iproute2 (never taken from the caller's PATH)` };
@@ -1623,7 +1629,7 @@ function isTools(x) {
   const t = /** @type {Record<string, unknown>} */ (x);
   const abs = (/** @type {unknown} */ p) => typeof p === 'string' && path.isAbsolute(p);
   return !!t && typeof t === 'object' && abs(t.unshare) && abs(t.bash) && abs(t.setpriv) && abs(t.mount)
-    && (t.keyctl === '' || abs(t.keyctl)) && (t.hostname === '' || abs(t.hostname))
+    && (t.keyctl === '' || abs(t.keyctl)) && abs(t.hostname)
     && Array.isArray(t.lo) && t.lo.length > 0
     && t.lo.every((e) => Array.isArray(e) && e.length === 2 && abs(e[0]) && Array.isArray(e[1]) && e[1].every((a) => typeof a === 'string'));
 }
@@ -2224,8 +2230,7 @@ function runIsolated(a) {
   // ⚠ only a DEVIATION is named: without keyctl the session keyring stays the host's (ib4k row 9 ruling);
   // ⛔ with keyctl but no host reading, the join still runs (and fails closed) but cannot be READ BACK —
   // said, never a silent skip (review F5)
-  const keyringNote = (!tools.keyctl ? '; keyring: shared (keyctl not installed)' : keyring ? '' : '; keyring: unverified (keyctl show failed)')
-    + (tools.hostname ? '' : '; hostname: the host\'s (no `hostname` tool)');
+  const keyringNote = !tools.keyctl ? '; keyring: shared (keyctl not installed)' : keyring ? '' : '; keyring: unverified (keyctl show failed)';
   process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', `${inside}; ${backendClause(choice)}${keyringNote}`)}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
@@ -2471,7 +2476,7 @@ async function runIsolatedInner(a) {
   // /etc/machine-id and /etc/hostname — then READ BACK (identityGaps), not trusted
   const idr = maskIdentity(plan.tools);
   if (idr.why) return refuse(idr.why);
-  const idGaps = identityGaps(!!plan.tools.hostname);
+  const idGaps = identityGaps();
   if (idGaps.length) return refuse(`after masking the host's identity, ${idGaps.join(', ')} still show(s) the HOST's`);
   const res = await closeResidualSockets(plan.sockets, plan.exempt);
   if (res.still > 0) {
@@ -2561,8 +2566,8 @@ const IDENTITY_FILES = Object.freeze([['/etc/machine-id', `${NEUTRAL_MACHINE_ID}
  * Hide the HOST's identity inside the fresh namespaces (ib4k §1 row 10). Measured open in v0.33: the
  * hostname, /sys/class/net (every host interface name — and MAC) and /etc/machine-id were the host's.
  *
- *   1. hostname: `hostname NEUTRAL_HOSTNAME` in our own UTS namespace (`unshare --uts`); without the
- *      tool it stays the host's (noted in the verdict, outer half).
+ *   1. hostname: `hostname NEUTRAL_HOSTNAME` in our own UTS namespace (`unshare --uts`); the tool is
+ *      REQUIRED (privilegedTools refuses without it — ruling R2).
  *   2. /sys: a FRESH sysfs, mounted from inside our network namespace, lists only that namespace's
  *      interfaces — `lo` — in /sys/class/net (and /sys/devices/virtual/net). It covers every host
  *      submount of /sys, so the cgroup tree (node reads its memory limit there) is staged first and
@@ -2574,10 +2579,8 @@ const IDENTITY_FILES = Object.freeze([['/etc/machine-id', `${NEUTRAL_MACHINE_ID}
  * @param {Tools} tools @returns {{why: string}}
  */
 function maskIdentity(tools) {
-  if (tools.hostname) {
-    const r = spawnSync(tools.hostname, [NEUTRAL_HOSTNAME], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
-    if (r.status !== 0) return { why: `cannot set the neutral hostname: \`hostname\` exited ${r.status ?? r.signal ?? r.error?.message}` };
-  }
+  const h = spawnSync(tools.hostname, [NEUTRAL_HOSTNAME], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
+  if (h.status !== 0) return { why: `cannot set the neutral hostname: \`hostname\` exited ${h.status ?? h.signal ?? h.error?.message}` };
   const mounts = readMountinfo() || [];
   const cg = '/sys/fs/cgroup';
   const stage = '/run/.webctl-cgroup';
@@ -2641,12 +2644,12 @@ const SYSFS_SOURCE = 'webctl-isolated-sysfs';
  * What of the HOST's identity is visible HERE — read from the kernel and the files, not from what
  * was mounted (ib4k §1 row 10). [] when nothing. Used by the fresh path after masking and by the
  * nesting proof. ⚠ Names only WHAT is visible, never the value: refusals get pasted into logs.
- * @param {boolean} hostnameTool the hostname can be set here (else it is not judged — see the verdict)
+ * ⛔ The hostname is ALWAYS judged (ruling R2: no fresh call runs without setting it).
  * @returns {string[]}
  */
-function identityGaps(hostnameTool) {
+function identityGaps() {
   /** @type {string[]} */ const gaps = [];
-  if (hostnameTool && os.hostname() !== NEUTRAL_HOSTNAME) gaps.push('the hostname');
+  if (os.hostname() !== NEUTRAL_HOSTNAME) gaps.push('the hostname');
   // ⛔ both dirs (review F3): the class dir links to the devices; a virtual interface is listed in
   // /sys/devices/virtual/net even where /sys/class/net was masked
   for (const d of ['/sys/class/net', '/sys/devices/virtual/net']) {
@@ -3884,9 +3887,9 @@ function kernelInsideProof() {
     fails.push(`no '${MASK_SOURCE}' tmpfs on top of ${unmasked.join(', ')} (the host's unix sockets there are reachable)`);
     if (unmasked.every((d) => newScratch.includes(d))) v034++;
   }
-  // ⛔ v0.34.0 (ib4k row 10): the host's identity must not be visible (the hostname judged only where a
-  // `hostname` tool exists — without one the outer could not set it, and said so in its verdict)
-  const idGaps = identityGaps(!!systemTool('hostname'));
+  // ⛔ v0.34.0 (ib4k row 10): the host's identity must not be visible — the hostname included (ruling
+  // R2: an outer without the `hostname` tool refuses, so it never leaves the host's for us to inherit)
+  const idGaps = identityGaps();
   if (idGaps.length) { fails.push(`the HOST's identity is visible: ${idGaps.join(', ')}`); v034++; }
   if (!pidns) fails.push('/proc/self/ns/pid is unreadable');
   if (!recordedPid) fails.push(`${HOST_PIDNS_ENV} is not set, so there is no recorded host PID namespace to differ from`);

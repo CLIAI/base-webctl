@@ -1517,6 +1517,16 @@ the record; each phase removes the guard for its backend when its runner lands. 
 the harness (a scratch tree, so its SELF_ROOT is its own) whose bwrap probe answers '' — RED before
 (it ran, verdict `backend: bwrap`), GREEN after. Sabotage (guard removed) → that arm red.
 
+**R2 — the `hostname` tool is REQUIRED (ruling).** Phase 1 ran without it, with the verdict note
+`hostname: the host's (no \`hostname\` tool)` — flagged for review. Writing `/proc/sys/kernel/hostname`
+was measured not feasible (the uts sysctls belong to the host's root), and a raw syscall number was
+ruled out. ⇒ `privilegedTools` refuses on the fresh path: `cannot set the neutral hostname: 'hostname'
+not found in /usr/sbin, … — install inetutils or hostname …`; `isTools` requires it; the note is gone;
+`identityGaps()` judges the hostname always (its "tool exists" parameter is gone — the nesting proof
+had to guess it from the nested call's own system dirs). Arm: the tool covered by a non-executable
+file → NOT RUN, command not run; RED before (it ran with the note), GREEN after. Sabotage (the refusal
+removed) → the arm red (the run is then refused only by the inner plan check, with the wrong reason).
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
