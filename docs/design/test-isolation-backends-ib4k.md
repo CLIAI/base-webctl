@@ -3,7 +3,7 @@ id: ib4k
 title: "Isolation backends — one contract, unshare → bwrap → docker → refuse"
 category: test
 created: "2026-10-07"
-updated: "2026-10-07"
+updated: "2026-10-10"
 status: draft
 tags: [isolation, sandbox, unshare, bubblewrap, docker, apparmor, mutation-arms, gate, portability]
 tech:
@@ -48,6 +48,12 @@ each with its positive control (`k3wn`). A backend that passes fewer arms is not
 | 5 | no privilege | CapEff 0, NoNewPrivs 1; umount / remount refused | — |
 | 6 | env allowlist | a planted unknown var absent | `--pass-env` passes it |
 | 7 | writable only where declared | cwd and `--keep` writable | everything else EROFS/absent |
+| 8 | no host-shared scratch | a file planted in the host's `/dev/shm` and `/var/tmp` → absent; a write there is not visible outside | a file made inside is readable inside |
+| 9 | no host keyring | `keyctl show @s` names no host keyring; a key added inside is gone outside | a key added inside is readable inside |
+| 10 | no host identity | hostname ≠ the host's; `/sys/class/net` lists only `lo`; `/etc/machine-id` absent or neutral | the same reads outside show the host's values |
+| 11 | no loader injection into the privileged half | `NODE_OPTIONS` / `LD_*` preloads never run before the masks | the command itself sees its allowed env |
+
+Rows 8–10 come from the v0.33.0 review of the namespace backend. They were MEASURED open there (deferred because they are not regressions and change keep-refusal rules), so v0.34.0 closes them in the shared arm set, for every backend at once. Row 11 is fixed in v0.33.0 and must stay fixed for every backend.
 
 The coordinator's cross-backend escape script (an independent python driver used against
 v0.31.0) is run against every backend as an extra, independent check.
