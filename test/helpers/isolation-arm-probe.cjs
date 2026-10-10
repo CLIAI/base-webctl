@@ -119,6 +119,21 @@ const tamper = (target) => {
   // oom_score_adj and a nested userns's uid_map) and a nested user namespace
   out.procWrite = errOf(() => fs.writeFileSync('/proc/self/oom_score_adj', fs.readFileSync('/proc/self/oom_score_adj', 'utf8')));
   out.nestedUserns = run(['unshare', '-rn', 'true']).status;
+  if (inside) {
+    // 7 (R1, ruling on F2): the read-only root must not lock anything over /proc or /sys — a new procfs
+    // or sysfs in a child userns needs a FULLY VISIBLE one (mnt_already_visible). So: the nested path's
+    // prefix, the stripped-markers path's prefix, and the fresh sysfs row 10 mounts, all rc 0
+    out.nestedProc = run(['unshare', '-U', '-m', '--pid', '--fork', '--mount-proc', 'true']).status;
+    out.strippedPrefix = run(['unshare', '-rnm', '--uts', '--ipc', '--pid', '--fork', '--mount-proc', 'true']).status;
+    out.nestedSysfs = run(['unshare', '-rnm', 'sh', '-c', 'mount -t sysfs arm-sysfs /sys']).status;
+    const at = fs.readFileSync('/proc/self/mountinfo', 'utf8').split('\n').filter(Boolean).map((l) => l.split(' ')[4]
+      .replace(/\\([0-7]{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8))));
+    // ⚠ the kernel's rule: a locked mount over a NON-directory blocks a new procfs/sysfs (one over an
+    // empty dir does not — the host's own binfmt_misc on /proc/sys/fs/binfmt_misc is such a dir)
+    const nonDir = (/** @type {string} */ p) => { try { return !fs.statSync(p).isDirectory(); } catch { return true; } };
+    out.overProcNonDir = at.filter((p) => p.startsWith('/proc/')).filter(nonDir).length;
+    out.overSysNonDir = at.filter((p) => p.startsWith('/sys/')).filter(nonDir).length;
+  }
   // 8 — no host-shared scratch: the world's planted files; a file made here, read back here
   out.shmPlanted = errOf(() => fs.readFileSync(path.join('/dev/shm', cfg.planted)));
   out.vartmpPlanted = errOf(() => fs.readFileSync(path.join('/var/tmp', cfg.planted)));

@@ -1584,6 +1584,14 @@ The description stays readable by id inside — a diagnostic, never a pass. Sabo
 `keyctl new_session` and the read-back is dropped → 9b red (`READ`), shown with the other row-9
 assertions removed from a copy so 9b alone is judged; with the read-back kept, the run is refused.
 
+**R1 vs. nesting (ruling on F2, point 3).** Row 7's arm now also asserts, on all three paths, that no
+mount lies over a `/proc` or `/sys` FILE (mounts over empty dirs are allowed by the kernel — the host's
+own binfmt_misc on `/proc/sys/fs/binfmt_misc` is one), and that the nested path's
+`unshare -U -m --pid --fork --mount-proc true`, the stripped path's `unshare -rnm --uts --ipc --pid
+--fork --mount-proc true` and a nested `mount -t sysfs` all exit 0. GREEN with R1. Sabotage: the
+rejected F2 mask (a `/dev/null` bind over `/proc/keys`) → row 7 red (`unshare: mount /proc failed:
+Operation not permitted`).
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

@@ -82,7 +82,10 @@ three paths (the table's rows 8–10).
   lookup can reach (EACCES — measured: docker's overlay rootfs under a root-owned 0710 dir) is
   skipped: the capless command, the same uid, cannot reach it either. A stripped-markers call
   carries an R1 outer's writable mounts wherever they are. ⚠ Lanes lose writes outside the declared
-  set (CHANGELOG v0.34.0 lists them).
+  set (CHANGELOG v0.34.0 lists them). ⛔ It locks nothing over a `/proc` or `/sys` FILE (the kernel
+  then refuses any new procfs/sysfs in a child userns): an arm runs the nested path's
+  `unshare -U -m --pid --fork --mount-proc`, the stripped path's `unshare -rnm --uts --ipc --pid --fork
+  --mount-proc` and a nested sysfs mount inside, each rc 0, on all three paths.
 * **Row 8 — `/dev/shm` and `/var/tmp` get a fresh private tmpfs (mode 1777), as `/tmp` does.**
   ⇒ The keep rules are `/tmp`'s, NOT a new refusal: a `--keep` / `--keep-ro` BENEATH one is staged
   and re-bound with its mode (the write lands on the host); a keep that IS one, or an ancestor, is a
@@ -263,5 +266,6 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.34.0.
   (§2), the gate's last-match parse (§4), generation 7, `hostname` required (R2).
 * **Row 7 closed (R1):** the read-only root (§1a), on the fresh, nested and stripped paths.
 * **Residual by ruling (F2, option c):** key descriptions and ids enumerable (§1a row 9) — no mask.
+  The read-only root is proved not to block nested procfs/sysfs mounts (an arm in row 7).
 * **Phase 2 — bwrap; phase 3 — docker (§3, §3a):** not started. Each lands by adding its probe,
   its run path, and its name to the table's IMPLEMENTED list — the guard test fails until it does.

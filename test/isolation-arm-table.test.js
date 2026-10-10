@@ -209,6 +209,12 @@ const ROWS = [
       for (const k of ['home', 'keepRo', 'baseRoot']) assert.equal(r.writes[k], 'EROFS', ctx(w, `${p}: ${k} is writable (${r.writes[k]})`));
       // ⛔ R1: EVERYTHING else — a user-owned dir outside the home, the cwd, the keeps and /tmp
       assert.equal(r.writes.outsideHome, 'EROFS', ctx(w, `${p}: a user-owned dir outside the home is writable (${r.writes.outsideHome})`));
+      // ⛔ …and it locks nothing over /proc or /sys: nested procfs/sysfs mounts still work (ruling on F2)
+      assert.equal(r.overProcNonDir, 0, ctx(w, `${p}: ${r.overProcNonDir} mount(s) lie over /proc FILES (a new procfs would be refused)`));
+      assert.equal(r.overSysNonDir, 0, ctx(w, `${p}: a mount lies over a /sys FILE (a new sysfs would be refused)`));
+      assert.equal(r.nestedProc, 0, ctx(w, `${p}: the nested path's \`unshare -U -m --pid --fork --mount-proc\` fails`));
+      assert.equal(r.strippedPrefix, 0, ctx(w, `${p}: the stripped-markers path's \`unshare -rnm --uts --ipc --pid --fork --mount-proc\` fails`));
+      assert.equal(r.nestedSysfs, 0, ctx(w, `${p}: a fresh sysfs in a nested user+net namespace (row 10's) is refused`));
     },
     control: (w) => {
       for (const p of PATHS) {

@@ -259,7 +259,9 @@ except a contract that matches the new verdict field or a refusal's tail.
   `/sys/devices/virtual/net` lists only `lo`, and the neutral `/etc/machine-id` cannot be rewritten
   through its backing copy (`chmod` + write; control: the same routine changes such a bind made
   outside); **row 9** is a named SKIP where `keyctl show @s` fails, and **9b**: a host key's
-  possessor-only payload → EACCES inside by id (control: readable outside).
+  possessor-only payload → EACCES inside by id (control: readable outside); **row 7**: the read-only
+  root locks nothing over `/proc` or `/sys` files — the nested and stripped paths' `--mount-proc`
+  prefixes and a nested sysfs mount still work inside.
 
 ### Rows 8–10 closed (unshare)
 
