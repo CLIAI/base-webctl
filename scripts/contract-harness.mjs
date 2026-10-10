@@ -1381,11 +1381,22 @@ const HIDE_MODE = '0755';
  *   * ⚠ A background job ignores SIGINT; node resets its signal dispositions at start (measured),
  *     which is why the node helper stays between this pid 1 and the command on BOTH paths.
  * Fail closed: no bash in the system dirs → refused (privilegedTools), never a non-reaping pid 1.
+ *
+ *   * ⛔ $1 is `keyctl` (an absolute path from the system dirs, or '' when it is not installed), and
+ *     the rest is the work. v0.34.0 (ib4k §1 row 9): the command shared the HOST's session keyring
+ *     (measured: `keyctl show @s` listed it, possessor `alswrv`). So pid 1 — after its traps, before
+ *     its child — runs `keyctl new_session`: a fresh ANONYMOUS session keyring installed on ITSELF
+ *     (KEYCTL_JOIN_SESSION_KEYRING in keyctl, then KEYCTL_SESSION_TO_PARENT — which needs a
+ *     single-threaded parent of the same creds: this bash, not node), inherited by everything it
+ *     starts. Not `keyctl session -`: that prints "Joined session keyring: N" on the COMMAND's
+ *     stderr. Its failure is not judged here: the fresh path READS BACK the keyring (inner half).
  */
 export const PID1_REAPER = [
+  'k=$1; shift',
   'c=',
   'f() { if [ -n "$c" ]; then kill -s "$1" "$c" 2>/dev/null; else exit "$2"; fi; }',
   "trap 'f INT 130' INT; trap 'f TERM 143' TERM; trap 'f HUP 129' HUP",
+  'if [ -n "$k" ]; then "$k" new_session >/dev/null 2>&1 || :; fi',
   '"$@" <&0 &',
   'c=$!',
   'exec 3>&- 4<&-',
@@ -1537,8 +1548,9 @@ function probeUnshare(ub) {
 const SYSTEM_TRUE = () => systemTool('true') || '/bin/true';
 
 /**
- * @typedef {{unshare: string, bash: string, setpriv: string, mount: string, lo: [string, string[]][]}} Tools
+ * @typedef {{unshare: string, bash: string, setpriv: string, mount: string, lo: [string, string[]][], keyctl: string}} Tools
  *   every binary a privileged half runs, by ABSOLUTE path (SYSTEM_TOOL_DIRS / WEBCTL_UNSHARE_BIN).
+ *   `keyctl`: OPTIONAL — '' when not installed (the session keyring is then the host's, and said so).
  *   `lo`: how to bring the loopback up — `ip`, then `ifconfig`, whichever exist. The NESTED path
  *   needs no mount or lo (it makes no netns and masks nothing): '' / [] there.
  */
@@ -1552,11 +1564,14 @@ const SYSTEM_TRUE = () => systemTool('true') || '/bin/true';
 function privilegedTools(ub, nested) {
   const bash = systemTool('bash');
   const setpriv = systemTool('setpriv');
+  // OPTIONAL (v0.34.0): without keyctl the command keeps the host's session keyring — the run goes
+  // ahead and the verdict says so (ib4k row 9 ruling); '' then
+  const keyctl = systemTool('keyctl');
   const mount = nested ? '' : systemTool('mount');
   /** @type {[string, string[]][]} */
   const lo = nested ? [] : /** @type {[string, string[]][]} */ ([[systemTool('ip'), ['link', 'set', 'lo', 'up']],
     [systemTool('ifconfig'), ['lo', 'up']]]).filter(([b]) => b);
-  const tools = { unshare: ub.bin, bash, setpriv, mount, lo };
+  const tools = { unshare: ub.bin, bash, setpriv, mount, lo, keyctl };
   if (!bash) return { tools, why: NO_BASH };
   if (!setpriv) {
     return { tools, why: `cannot enter the uid-mapped child user namespace: ${noSystemTool('setpriv', 'install util-linux')}; `
@@ -1575,6 +1590,7 @@ function isTools(x) {
   const t = /** @type {Record<string, unknown>} */ (x);
   const abs = (/** @type {unknown} */ p) => typeof p === 'string' && path.isAbsolute(p);
   return !!t && typeof t === 'object' && abs(t.unshare) && abs(t.bash) && abs(t.setpriv) && abs(t.mount)
+    && (t.keyctl === '' || abs(t.keyctl))
     && Array.isArray(t.lo) && t.lo.length > 0
     && t.lo.every((e) => Array.isArray(e) && e.length === 2 && abs(e[0]) && Array.isArray(e[1]) && e[1].every((a) => typeof a === 'string'));
 }
@@ -2058,7 +2074,7 @@ function runIsolated(a) {
     // pid 1 is the reaping bash (PID1_REAPER); the node helper under it gives the command default
     // signal dispositions (a bash background job would IGNORE SIGINT)
     // fd 3: the helper's `started`; fd 4: the command's env (the chain itself gets privilegedEnv)
-    return runCommand([nt.tools.bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', ...pid1HelperArgv(command, 4, true)],
+    return runCommand([nt.tools.bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', nt.tools.keyctl, ...pid1HelperArgv(command, 4, true)],
       priv.prefix, { pastUnshare: true, env: isolatedEnv(process.env, pass) });
   }
   let hostNs = '';
@@ -2160,7 +2176,9 @@ function runIsolated(a) {
   }
   const inside = outer ? '; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, '
     + 'keeping what the outer call re-bound (same modes)' : '';
-  process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', `${inside}; ${backendClause(choice)}`)}\n`);
+  // ⚠ only a DEVIATION is named: without keyctl the session keyring stays the host's (ib4k row 9 ruling)
+  const keyringNote = tools.keyctl ? '' : '; keyring: shared (keyctl not installed)';
+  process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', `${inside}; ${backendClause(choice)}${keyringNote}`)}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
   // the COMMAND's env: the allowlist + our markers. It travels in the plan (fd 4) and is applied
@@ -2171,8 +2189,10 @@ function runIsolated(a) {
     // (With 0555 it answered EACCES and the home had been dropped from this list.)
     [RO_ROOTS_ENV]: JSON.stringify([prot.home, ...prot.roots]), [HIDDEN_ENV]: JSON.stringify([prot.home, ...prot.hidden]),
     [HOST_IDS_ENV]: JSON.stringify(ids) });
+  // the HOST's session keyring id, for the inner half's read-back ('' = keyctl absent or no keyring answer)
+  const keyring = tools.keyctl ? sessionKeyringId(tools.keyctl) : '';
   const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
-    home: prot.home, exempt: plan.exempt, sockets, ids, env: cmdEnv, tools });
+    home: prot.home, exempt: plan.exempt, sockets, ids, env: cmdEnv, tools, keyring });
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
     let child;
@@ -2186,7 +2206,7 @@ function runIsolated(a) {
         // process can be signalled or even seen. --kill-child: if unshare dies, so does
         // everything inside (pid 1 is the reaping bash, PID1_REAPER; the inner half runs under it).
         ['-rnm', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
-          tools.bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1',
+          tools.bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', tools.keyctl,
           process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         // ⛔ the PRIVILEGED env: unshare, pid 1 and the inner half (namespace root, full caps, before
         // any mask) never see NODE_OPTIONS, LD_*, or any --pass-env (PRIVILEGED_PASS_ENV)
@@ -2337,7 +2357,7 @@ async function runIsolatedInner(a) {
 
   // ⇩ only now, provably off the host network, read the plan. (On the host the
   // proofs above refuse first, so an unrelated fd 4 is never read.)
-  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, env: Record<string, string>, tools: Tools}} */
+  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, env: Record<string, string>, tools: Tools, keyring: string}} */
   let plan;
   try {
     // node's stdio 'pipe' is a socketpair, not a FIFO; anything else is not ours
@@ -2351,7 +2371,7 @@ async function runIsolatedInner(a) {
     if (typeof plan.hostMnt !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
       || typeof plan.home !== 'string' || !path.isAbsolute(plan.home)
       || !strs(plan.roots) || !strs(plan.hidden) || !strs(plan.exempt) || !strs(plan.sockets) || !hostIdsOf(plan.ids)
-      || !isEnvObject(plan.env) || !isTools(plan.tools)) throw new Error('malformed');
+      || !isEnvObject(plan.env) || !isTools(plan.tools) || typeof plan.keyring !== 'string') throw new Error('malformed');
   } catch (e) {
     return refuse(`internal: no masking plan on fd 4 (${errMsg(e)}) — run via \`isolated\``);
   }
@@ -2410,6 +2430,17 @@ async function runIsolatedInner(a) {
     return refuse(`cannot re-enter the working directory after masking (${errMsg(e).split(plan.cwd).join('<cwd>')})`);
   }
 
+  // ⛔ THE SESSION KEYRING (v0.34.0, ib4k row 9): pid 1 joined a fresh anonymous one before starting us
+  // (PID1_REAPER) — READ BACK, not trusted: still the host's id, or none where the host had one → refuse.
+  if (plan.tools.keyctl && plan.keyring) {
+    const here = sessionKeyringId(plan.tools.keyctl);
+    if (!here || here === plan.keyring) {
+      return refuse(here ? 'the session keyring inside is still the HOST\'s (`keyctl new_session` in pid 1 did not take) — '
+        + 'the command could read the host\'s session keys' : 'cannot read the session keyring inside (`keyctl show @s` failed), '
+        + 'so a fresh one cannot be PROVEN');
+    }
+  }
+
   // ⛔ LAST, after every mount: the command runs as the real uid in a child user namespace —
   // NO capabilities, so it cannot undo them, yet free to make namespaces of its own.
   const priv = privilegeDrop(hostIdsOf(plan.ids), plan.tools);
@@ -2425,6 +2456,18 @@ async function runIsolatedInner(a) {
   const ran = runCommand(pid1HelperArgv(command, 3, false), priv.prefix, { env: plan.env });
   for (const s of SIGS) process.off(s, early);
   return ran;
+}
+
+/**
+ * The id of the caller's SESSION keyring, from `keyctl show @s` (its first key line), or '' when
+ * keyctl fails or answers nothing parseable. ⚠ An id, never a description: those can name things.
+ * @param {string} keyctl absolute path (privilegedTools) @returns {string}
+ */
+function sessionKeyringId(keyctl) {
+  const r = spawnSync(keyctl, ['show', '@s'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: privilegedEnv(process.env) });
+  if (r.status !== 0) return '';
+  const m = String(r.stdout).split('\n').slice(1).map((l) => l.trim().match(/^(\d+)\s/)).find(Boolean);
+  return m ? m[1] : '';
 }
 
 /**

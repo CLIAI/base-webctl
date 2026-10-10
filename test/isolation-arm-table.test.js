@@ -273,7 +273,7 @@ const ROWS = [
  * them empties the entry. ⛔ Never add a row here to get a suite green: it is the record of a gap.
  * @type {Record<string, number[]>}
  */
-const OPEN_ROWS = { unshare: [9, 10] };
+const OPEN_ROWS = { unshare: [10] };
 
 for (const backend of IMPLEMENTED) {
   for (const row of ROWS) {

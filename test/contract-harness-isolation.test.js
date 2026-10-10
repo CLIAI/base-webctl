@@ -933,7 +933,7 @@ test('⛔ `--pass-env LD_*` never reaches a privileged half (unshare, pid 1 bash
       { LD_DEBUG: 'files', LD_DEBUG_OUTPUT: path.join(dir, 'ld') });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     const progs = ldPrograms(dir);
-    for (const p of ['unshare', 'bash', 'setpriv', 'mount', 'ip', 'ifconfig']) {
+    for (const p of ['unshare', 'bash', 'setpriv', 'mount', 'ip', 'ifconfig', 'keyctl']) {
       assert.ok(!progs.includes(p), `LD_* reached ${p} (a privileged half): ${[...new Set(progs)].join(' ')}`);
     }
     // the harness itself (the caller's own process) loads it; no OTHER node does
@@ -954,7 +954,7 @@ test('⛔ `--pass-env LD_*` never reaches a privileged half (unshare, pid 1 bash
 /** The fixed dirs the harness takes its privileged tools from (SYSTEM_TOOL_DIRS). */
 const SYSTEM_DIRS = ['/usr/sbin', '/usr/bin', '/sbin', '/bin'];
 /** Every tool a privileged half runs, today or plausibly tomorrow. */
-const PRIV_TOOLS = ['unshare', 'bash', 'mount', 'umount', 'ip', 'ifconfig', 'setpriv', 'getent'];
+const PRIV_TOOLS = ['unshare', 'bash', 'mount', 'umount', 'ip', 'ifconfig', 'setpriv', 'getent', 'keyctl'];
 /** The real system copy of `name`, or ''. @param {string} name */
 const systemCopy = (name) => SYSTEM_DIRS.map((d) => path.join(d, name)).find((p) => fs.existsSync(p)) || '';
 
@@ -2320,6 +2320,48 @@ async function markerRun(dir, binds) {
 }
 const which = (/** @type {string} */ b) => spawnSync('sh', ['-c', `command -v ${b}`], { encoding: 'utf8' }).stdout.trim();
 
+// ── the session keyring (v0.34.0, ib4k §1 row 9) ────────────────────────────
+//
+// ⛔ Measured open in v0.33: the command shared the HOST's session keyring (`keyctl show @s` listed
+// it, possessor `alswrv`). pid 1 now joins a fresh anonymous one (`keyctl new_session`), and the
+// fresh path READS IT BACK. The property itself (host key invisible, a key added inside gone
+// outside, fresh/nested/stripped) is row 9 of isolation-arm-table.test.js, in a throwaway keyring.
+// RULING (ib4k row 9): keyctl NOT INSTALLED → the run goes ahead, the verdict says
+// `keyring: shared (keyctl not installed)`, and row 9 is a named SKIP — untested, never a pass.
+
+const KEYCTL_SYS = ['/usr/sbin', '/usr/bin', '/sbin', '/bin'].map((d) => path.join(d, 'keyctl')).find((p) => fs.existsSync(p)) || '';
+const NO_KEYCTL = 'SKIP (host): keyctl not installed here';
+
+test('⛔ keyctl NOT installed → the command still runs, and the verdict says `keyring: shared (keyctl not installed)` — CONTROL: installed, the verdict says nothing of it', needsIsolation, async (t) => {
+  if (!KEYCTL_SYS) { t.skip(NO_KEYCTL); return; }
+  const dir = tmpdir();
+  try {
+    const r = await markerRun(dir, overTool(noexecFile(dir), 'keyctl'));
+    if (!r) { t.skip(NO_BINDS); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(r.ran, true, 'the command did not run without keyctl (the ruling: it runs, and says so)');
+    assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: unshare; keyring: shared \(keyctl not installed\)/m);
+    const c = await run(['isolated', '--', 'true']);
+    assert.equal(c.status, 0, c.stderr);
+    assert.doesNotMatch(c.stderr, /keyring:/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ fail closed: a `keyctl` whose new_session silently does NOTHING → refused by the read-back ("still the HOST\'s"), command NOT run', needsIsolation, async (t) => {
+  if (!KEYCTL_SYS) { t.skip(NO_KEYCTL); return; }
+  const dir = tmpdir();
+  try {
+    const real = realCopyAt(dir, 'keyctl');
+    const fake = path.join(dir, 'keyctl-fake');
+    fs.writeFileSync(fake, `#!/bin/sh\ncase "$1" in new_session) exit 0;; esac\nexec ${JSON.stringify(real)} "$@"\n`, { mode: 0o755 });
+    const r = await markerRun(dir, [[KEYCTL_SYS, real], ...overTool(fake, 'keyctl')]);
+    if (!r) { t.skip(NO_BINDS); return; }
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: the session keyring inside is still the HOST's/);
+    assert.equal(r.ran, false, 'the command ran in the host\'s session keyring');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('⛔ fail closed: no `setpriv` in the system dirs → FAIL naming it, command NOT run (never with capabilities)', needsIsolation, async (t) => {
   const dir = tmpdir();
   try {
@@ -3277,7 +3319,8 @@ test('⛔ TERM ×3 (60 ms apart) → the command\'s trap code 7, never death by 
 const { PID1_REAPER } = await import(pathToFileURL(TOOL).href);
 /** Run PID1_REAPER over `cmd`; once it prints READY, `n` TERMs `gap` ms apart. @returns {Promise<{status: string, out: string}>} */
 const reaperBurst = (/** @type {string[]} */ cmd, /** @type {number} */ n, /** @type {number} */ gap) => new Promise((resolve) => {
-  const c = spawn('/bin/bash', ['--norc', '-p', '-c', PID1_REAPER, 'webctl-isolated-pid1', ...cmd], { stdio: ['ignore', 'pipe', 'pipe'] });
+  // '' = no keyctl ($1 of the reaper): what is under test here is the reaping, not the keyring
+  const c = spawn('/bin/bash', ['--norc', '-p', '-c', PID1_REAPER, 'webctl-isolated-pid1', '', ...cmd], { stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; let sent = false;
   c.stderr?.on('data', (d) => { out += d; });
   c.stdout?.on('data', async (d) => {
