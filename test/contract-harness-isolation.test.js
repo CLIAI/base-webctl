@@ -3043,6 +3043,6 @@ test('⛔ importing the harness runs NO verb, even when the importer\'s argv nam
   });
   const res = /** @type {{status:number, stdout:string, stderr:string}} */ (r);
   assert.equal(res.status, 0, res.stdout + res.stderr);
-  assert.equal(res.stdout.trim(), 'IMPORTED 5', 'a verb ran on import');
+  assert.equal(res.stdout.trim(), 'IMPORTED 6', 'a verb ran on import');
   assert.equal(res.stderr, '');
 });
