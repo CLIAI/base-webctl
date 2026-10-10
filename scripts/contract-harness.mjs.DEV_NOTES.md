@@ -1509,6 +1509,14 @@ record is unchanged (`backend: null`, `skipped: [...]`). Arm: a fake `WEBCTL_UNS
 and unshare's message before it. RED on the phase-1 harness (the regex did not match), GREEN after;
 also checked with the review's rig (fake unshare in a throwaway world): matches.
 
+**F7 — a selected backend with no runner.** Everything after `selectBackend` is unshare's runner. A
+backend whose PROBE lands before its RUNNER (phase 2's natural midpoint) would have run there — on
+unshare — with the verdict saying `backend: bwrap`. Now `choice.backend !== 'unshare'` is refused,
+`internal: backend <x> has no runner yet — backend: <x> (skipped …)`, the skips kept in the message and
+the record; each phase removes the guard for its backend when its runner lands. Arm: a MUTANT copy of
+the harness (a scratch tree, so its SELF_ROOT is its own) whose bwrap probe answers '' — RED before
+(it ran, verdict `backend: bwrap`), GREEN after. Sabotage (guard removed) → that arm red.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

@@ -2196,6 +2196,13 @@ function runIsolated(a) {
     return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${refusalText(choice, process.env[BACKEND_ENV], seen.stderr)}. `
       + 'The command was NOT started.', { command, backend: null, skipped: choice.skipped }));
   }
+  // ⛔ THE ONLY RUNNER BELOW IS UNSHARE'S (review F7). A backend whose probe lands before its runner
+  // would otherwise run here, on unshare, under its own name — refused until each backend has its runner.
+  // The choice (and every skip's reason) is kept in the message and the record.
+  if (choice.backend !== 'unshare') {
+    return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: internal: backend ${choice.backend} has no runner yet — `
+      + `${backendClause(choice)}. The command was NOT started.`, { command, backend: null, skipped: choice.skipped }));
+  }
   // ⛔ every tool the privileged halves run: from the SYSTEM dirs, resolved HERE, passed on by path
   // (the unshare probe has already required every one of them)
   const { tools } = privilegedTools(ub, false);

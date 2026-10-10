@@ -234,3 +234,27 @@ test('⛔ v0.33\'s refusal text is KEPT (review F4): a fake WEBCTL_UNSHARE_BIN p
     assert.deepEqual(rec?.skipped.map((/** @type {{backend: string}} */ s) => s.backend), ['unshare', 'bwrap', 'docker']);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('⛔ a selected backend with NO RUNNER is refused (review F7) — never run on unshare\'s runner under another name: a mutant whose bwrap probe passes', needsNs, async () => {
+  // the MUTANT: a copy of the harness (in a scratch tree, so its SELF_ROOT is the copy's) whose bwrap
+  // probe answers '' — the state phase 2 is in between "probe lands" and "runner lands"
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), 'ib-norunner-'));
+  try {
+    fs.mkdirSync(path.join(tree, 'scripts'));
+    const src = fs.readFileSync(TOOL, 'utf8');
+    const mutant = src.replace("{ name: 'bwrap', probe: () => NOT_IMPLEMENTED.bwrap }", "{ name: 'bwrap', probe: () => '' }");
+    assert.notEqual(mutant, src, 'the mutation did not apply — the probe list changed shape');
+    const tool = path.join(tree, 'scripts', 'contract-harness.mjs');
+    fs.writeFileSync(tool, mutant);
+    const marker = path.join(tree, 'RAN');
+    const r = await runRaw([process.execPath, tool, 'isolated', '--keep', tree, '--', process.execPath, '-e',
+      `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`], { env: cleanEnv({ WEBCTL_ISOLATION_BACKEND: 'bwrap' }) });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: internal: backend bwrap has no runner yet — backend: bwrap\. The command was NOT started\.$/m);
+    assert.doesNotMatch(r.stderr, /^isolated: home HIDDEN/m, 'a verdict was printed, so something ran');
+    assert.equal(fs.existsSync(marker), false, 'the command ran (on unshare\'s runner, named bwrap)');
+    const rec = recordOf(r.stdout);
+    assert.equal(rec?.backend, null);
+    assert.deepEqual(rec?.skipped, []);
+  } finally { fs.rmSync(tree, { recursive: true, force: true }); }
+});
