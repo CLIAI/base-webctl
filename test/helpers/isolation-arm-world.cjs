@@ -5,7 +5,8 @@
 //   * a tmpfs over a neutral dir (cfg.neutral, e.g. /mnt) holds a FAKE passwd home with planted
 //     secrets, and a user-owned dir OUTSIDE that home; /etc/passwd is bound to point the real uid there;
 //   * a tmpfs over /dev/shm and over /var/tmp — the "host's" scratch — each holding a planted file;
-//   * a key planted in the (throwaway) session keyring.
+//   * a key planted in the (throwaway) session keyring;
+//   * a SysV shm segment and a POSIX mqueue planted in the world's OWN IPC namespace (`--ipc`).
 // Then: the probe OUTSIDE (the controls), the probe INSIDE `isolated` on the fresh, nested and
 // stripped-markers paths (the arms), and the read-backs on this side after it exits.
 // Prints `WORLD {json}` on stdout; exit 97 = this host cannot build the world (the table skips).
@@ -41,6 +42,26 @@ if (cfg.keyctl) {
   const k = run(['keyctl', 'add', 'user', cfg.keyName, 'planted-by-test', '@s']);
   if (k.status !== 0) fail(`keyctl add: ${String(k.stderr).trim()}`);
 }
+// row 8 (SysV IPC, POSIX mqueues): this world has its OWN IPC namespace (`unshare --ipc`, the test)
+// and a fresh mqueue on /dev/mqueue — so the "host's" segment and queue below are throwaway too
+/** @type {{shmid: number, key: number, mq: string} | null} */
+let ipc = null;
+if (cfg.ipcmk) {
+  if (fs.existsSync('/dev/mqueue') && run([cfg.mount, '-t', 'mqueue', 'arm-world-mqueue', '/dev/mqueue']).status !== 0) fail('mqueue over /dev/mqueue');
+  // two decoys first: a fresh IPC namespace numbers its segments from 0 too, so a segment made
+  // INSIDE must never share the planted one's id (an attach by id would then hit its own)
+  for (let i = 0; i < 2; i++) run([cfg.ipcmk, '-M', '64']);
+  const m = String(run([cfg.ipcmk, '-M', '64']).stdout).match(/(\d+)\s*$/);
+  if (!m) fail('ipcmk -M');
+  const shmid = Number(/** @type {RegExpMatchArray} */ (m)[1]);
+  const row = fs.readFileSync('/proc/sysvipc/shm', 'utf8').split('\n').slice(1).map((l) => l.trim().split(/\s+/))
+    .find((f) => f[1] === String(shmid));
+  if (!row) fail('the planted segment is not in /proc/sysvipc/shm');
+  const mq = fs.existsSync('/dev/mqueue') ? `${cfg.planted}-mq` : '';
+  if (mq) fs.closeSync(fs.openSync(path.join('/dev/mqueue', mq), 'w'));
+  ipc = { shmid, key: Number(/** @type {string[]} */ (row)[0]) >>> 0, mq };
+  fs.writeFileSync(cfg.ipcFile, JSON.stringify(ipc));
+}
 
 /** ARM-RESULT lines of `out`, by mode. @param {string} out */
 const results = (out) => Object.fromEntries(String(out).split('\n').filter((l) => l.startsWith('ARM-RESULT '))
@@ -49,6 +70,8 @@ const results = (out) => Object.fromEntries(String(out).split('\n').filter((l) =
 // ── the controls: the same probe, outside ──
 const env = { ...process.env, ARM_UNKNOWN_VAR: 'planted', ARM_PASSED_VAR: 'passed', NODE_OPTIONS: `--require ${cfg.preload}` };
 const outside = run([process.execPath, cfg.probe, 'outside', cfg.self], { cwd: cfg.cwd, env });
+// the shmat control's read-back, taken BEFORE any arm runs (an arm that leaks must not hide the control)
+const shmAfterOutside = ipc && cfg.python ? String(run([cfg.python, '-I', '-c', cfg.shmPy, String(ipc.shmid), 'r']).stdout).trim() : undefined;
 
 // ── the arms: fresh, nested, stripped markers ──
 const strip = ['WEBCTL_HOST_NETNS', 'WEBCTL_HOST_MNTNS', 'WEBCTL_HOST_PIDNS', 'WEBCTL_RO_ROOTS', 'WEBCTL_HIDDEN_DIRS', 'WEBCTL_HOST_IDS']
@@ -70,6 +93,10 @@ const post = {
   shmControl: fs.existsSync('/dev/shm/arm-inside-outside'),
   ...(cfg.keyctl ? { keysLeft: ['fresh', 'nested', 'stripped']
     .filter((m) => run(['keyctl', 'search', '@s', 'user', `${cfg.keyName}-inside-${m}`]).status === 0) } : {}),
+  // the planted segment's bytes, after every probe: `outside` (the control wrote it) — never `inside-*`
+  ...(ipc && cfg.python ? { shmAfterOutside, shmNow: String(run([cfg.python, '-I', '-c', cfg.shmPy, String(ipc.shmid), 'r']).stdout).trim() } : {}),
+  ...(ipc && ipc.mq ? { mqLeft: fs.readdirSync('/dev/mqueue').filter((f) => f.startsWith('arm-inside-') && f !== 'arm-inside-outside-mq'),
+    mqControl: fs.existsSync('/dev/mqueue/arm-inside-outside-mq') } : {}),
   hostnameHere: require('node:crypto').createHash('sha256').update(require('node:os').hostname()).digest('hex').slice(0, 16),
 };
 

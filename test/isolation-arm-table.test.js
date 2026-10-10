@@ -45,6 +45,15 @@ const digest = (s) => crypto.createHash('sha256').update(String(s)).digest('hex'
 const sysTool = (/** @type {string} */ n) => ['/usr/sbin', '/usr/bin', '/sbin', '/bin'].map((d) => path.join(d, n)).find((p) => fs.existsSync(p)) || '';
 const KEYCTL = sysTool('keyctl');
 const MOUNT = sysTool('mount');
+const IPCMK = sysTool('ipcmk');
+const PYTHON = sysTool('python3');
+/** shmat(argv[1]); `w`: write argv[3] at its start, `r`: print what is there. Prints `wrote`, the text, or `failed <errno>`. */
+const SHM_PY = ['import ctypes, sys', 'libc = ctypes.CDLL(None, use_errno=True)', 'libc.shmat.restype = ctypes.c_void_p',
+  'p = libc.shmat(int(sys.argv[1]), None, 0)',
+  'if p in (None, ctypes.c_void_p(-1).value): print("failed", ctypes.get_errno()); sys.exit(1)',
+  'buf = (ctypes.c_char * 32).from_address(p)',
+  'if sys.argv[2] == "w": buf.value = sys.argv[3].encode(); print("wrote")',
+  'else: print(buf.value.decode())'].join('\n');
 
 /** A dir to put the fake home under: exists, and is not (an ancestor of) anything the run needs. */
 function neutralDir() {
@@ -95,11 +104,12 @@ let cap = ''; try { cap = (fs.readFileSync('/proc/self/status', 'utf8').match(/^
 try { fs.appendFileSync(${JSON.stringify(hits)}, JSON.stringify({ pid: process.pid, ppid: process.ppid, cap, argv: process.argv }) + '\\n'); } catch {}\n`);
     const cfg = { neutral, home, keepRo: path.join(home, 'data'), outsideHome: path.join(neutral, 'outside-home'), keep, cwd,
       planted: `arm-planted-${process.pid}`, uid: process.getuid?.(), gid: process.getgid?.(), mount: MOUNT,
+      ipcmk: IPCMK, python: PYTHON, shmPy: SHM_PY, ipcFile: path.join(keep, 'ipc.json'),
       keyctl: !!KEYCTL, keyName: `webctl-arm-${process.pid}`, port: /** @type {net.AddressInfo} */ (listener.address()).port,
       sockets, hostPid: process.pid, baseRoot: ROOT, probe: PROBE, harness: TOOL, preload, backend,
       self: path.join(keep, 'cfg.json') };
     fs.writeFileSync(cfg.self, JSON.stringify(cfg));
-    const argv = [...(KEYCTL ? [KEYCTL, 'session', '-'] : []), 'unshare', '-rm', '--propagation=private', process.execPath, WORLD, cfg.self];
+    const argv = [...(KEYCTL ? [KEYCTL, 'session', '-'] : []), 'unshare', '-rm', '--ipc', '--propagation=private', process.execPath, WORLD, cfg.self];
     const env = { ...process.env };
     delete env.NODE_TEST_CONTEXT;
     delete env.WEBCTL_ISOLATION_BACKEND;
@@ -204,14 +214,20 @@ const ROWS = [
       assert.equal(w.outside.outside.writes.home, 'ok', 'control: the (fake) home is not writable outside');
     },
     deeper: '"⭐ ARM: creating a new file directly under the passwd home → EROFS", "⛔ base\'s repo root is READ-ONLY …", the submount arms' },
-  { n: 8, property: 'no host-shared scratch (/dev/shm, /var/tmp)',
+  { n: 8, property: 'no host-shared scratch (/dev/shm, /var/tmp, SysV IPC, POSIX mqueues)',
     arm: (r, w, p) => {
       assert.equal(r.shmPlanted, 'ENOENT', ctx(w, `${p}: a file planted in the host's /dev/shm is visible inside`));
       assert.equal(r.vartmpPlanted, 'ENOENT', ctx(w, `${p}: a file planted in the host's /var/tmp is visible inside`));
       assert.deepEqual(w.post.shmLeft, [], ctx(w, `${p}: a write to /dev/shm inside is visible outside`));
       assert.deepEqual(w.post.vartmpLeft, [], ctx(w, `${p}: a write to /var/tmp inside is visible outside`));
+      if (!w.cfg.ipcmk) return; // no ipcmk: the IPC half is UNTESTED here (the control says so)
+      assert.equal(r.shmListed, false, ctx(w, `${p}: the host's SysV shm segment is listed by \`ipcs -m\` inside`));
+      if (w.cfg.python) assert.match(String(r.shmAttach), /^failed /, ctx(w, `${p}: shmat of the host's segment by id succeeded (${r.shmAttach})`));
+      if (w.post.shmNow !== undefined) assert.equal(w.post.shmNow, 'outside', ctx(w, `${p}: a write through shmat inside reached the host's segment`));
+      if (r.mqPlanted !== undefined) assert.equal(r.mqPlanted, 'ENOENT', ctx(w, `${p}: the host's POSIX mqueue is visible in /dev/mqueue`));
+      if (w.post.mqLeft) assert.deepEqual(w.post.mqLeft, [], ctx(w, `${p}: a POSIX mqueue made inside is in the host's /dev/mqueue`));
     },
-    control: (w) => {
+    control: (w, t) => {
       assert.equal(w.outside.outside.shmPlanted, 'ok', 'control: the planted /dev/shm file is not readable outside');
       assert.equal(w.outside.outside.vartmpPlanted, 'ok', 'control: the planted /var/tmp file is not readable outside');
       assert.equal(w.post.shmControl, true, 'control: a write to /dev/shm OUTSIDE did not stay (the read-back cannot see)');
@@ -219,6 +235,18 @@ const ROWS = [
         assert.equal(w.arm[p].shmSelf, 'ok', `${p}: a file made in /dev/shm inside is not readable inside`);
         assert.equal(w.arm[p].vartmpSelf, 'ok', `${p}: a file made in /var/tmp inside is not readable inside`);
       }
+      if (!w.cfg.ipcmk) { t.diagnostic('control: no ipcmk in the system dirs — the SysV IPC / mqueue arms are UNTESTED here'); return; }
+      const o = w.outside.outside;
+      assert.equal(o.shmListed, true, 'control: the planted segment is not listed by `ipcs -m` outside');
+      if (w.cfg.python) {
+        assert.equal(o.shmAttach, 'wrote', 'control: shmat + write of the planted segment fails outside');
+        assert.equal(w.post.shmAfterOutside, 'outside', 'control: the read-back does not see the write made outside');
+      } else t.diagnostic('control: no python3 in the system dirs — the shmat write arm is UNTESTED here');
+      for (const p of PATHS) assert.equal(w.arm[p].shmSegSelf, true, `${p}: a segment made inside is not listed inside`);
+      if (o.mqPlanted === undefined) { t.diagnostic('control: no /dev/mqueue here — the POSIX mqueue arm is UNTESTED'); return; }
+      assert.equal(o.mqPlanted, 'ok', 'control: the planted mqueue is not visible outside');
+      assert.equal(w.post.mqControl, true, 'control: an mqueue made OUTSIDE did not stay (the read-back cannot see)');
+      for (const p of PATHS) assert.equal(w.arm[p].mqSelf, 'ok', `${p}: an mqueue made inside is not visible inside`);
     },
     deeper: '"⛔ a --keep under /dev/shm or /var/tmp is re-bound" (contract-harness-isolation.test.js)' },
   { n: 9, property: 'no host keyring',

@@ -1535,13 +1535,13 @@ function probeUnshare(ub) {
   if (ub.why) return ub.why;
   const { why } = privilegedTools(ub, false);
   if (why) return why;
-  const r = spawnSync(ub.bin, ['-rnm', '--uts', '--pid', '--fork', SYSTEM_TRUE()], { encoding: 'utf8',
+  const r = spawnSync(ub.bin, ['-rnm', '--uts', '--ipc', '--pid', '--fork', SYSTEM_TRUE()], { encoding: 'utf8',
     stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
   if (r.error) return `cannot run unshare (${errMsg(r.error)})`;
   if (r.status === 0) return '';
   const tail = String(r.stderr || '').trim().split('\n').pop()?.slice(0, 200) || `exit ${r.status ?? r.signal}`;
   return userNamespaceRefusal(String(r.stderr || ''))
-    || `the kernel refused the namespaces (\`unshare -rnm --uts --pid\`: ${tail}) — unprivileged user namespaces `
+    || `the kernel refused the namespaces (\`unshare -rnm --uts --ipc --pid\`: ${tail}) — unprivileged user namespaces `
       + 'may be disabled (kernel.unprivileged_userns_clone / user.max_user_namespaces)';
 }
 /** `true` from the system dirs (the probe's whole payload); '/bin/true' as the last resort. */
@@ -2084,10 +2084,12 @@ function runIsolated(a) {
   let hostNs = '';
   let hostMnt = '';
   let hostPid = '';
+  let hostIpc = '';
   try {
     hostNs = fs.readlinkSync('/proc/self/ns/net');
     hostMnt = fs.readlinkSync('/proc/self/ns/mnt');
     hostPid = fs.readlinkSync('/proc/self/ns/pid');
+    hostIpc = fs.readlinkSync('/proc/self/ns/ipc');
   } catch (e) {
     return Promise.resolve(report('isolated', EXIT.fail,
       `cannot read this process's namespaces (${errMsg(e)}), so isolation cannot be PROVEN; `
@@ -2196,7 +2198,7 @@ function runIsolated(a) {
     [HOST_IDS_ENV]: JSON.stringify(ids) });
   // the HOST's session keyring id, for the inner half's read-back ('' = keyctl absent or no keyring answer)
   const keyring = tools.keyctl ? sessionKeyringId(tools.keyctl) : '';
-  const payload = JSON.stringify({ hostMnt, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
+  const payload = JSON.stringify({ hostMnt, hostIpc, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
     home: prot.home, exempt: plan.exempt, sockets, ids, env: cmdEnv, tools, keyring });
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
@@ -2210,8 +2212,9 @@ function runIsolated(a) {
         // --pid --fork --mount-proc: a private PID namespace with its own /proc, so no host
         // process can be signalled or even seen. --kill-child: if unshare dies, so does
         // everything inside (pid 1 is the reaping bash, PID1_REAPER; the inner half runs under it).
-        // --uts (v0.34.0, ib4k row 10): a hostname of its own, set to NEUTRAL_HOSTNAME by the inner half
-        ['-rnm', '--uts', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
+        // --uts (v0.34.0, ib4k row 10): a hostname of its own, set to NEUTRAL_HOSTNAME by the inner half.
+        // --ipc (v0.34.0, ib4k row 8): SysV IPC and POSIX mqueues of its own (the inner half mounts /dev/mqueue)
+        ['-rnm', '--uts', '--ipc', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
           tools.bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', tools.keyctl,
           process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         // ⛔ the PRIVILEGED env: unshare, pid 1 and the inner half (namespace root, full caps, before
@@ -2363,7 +2366,7 @@ async function runIsolatedInner(a) {
 
   // ⇩ only now, provably off the host network, read the plan. (On the host the
   // proofs above refuse first, so an unrelated fd 4 is never read.)
-  /** @type {{hostMnt: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, env: Record<string, string>, tools: Tools, keyring: string}} */
+  /** @type {{hostMnt: string, hostIpc: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, env: Record<string, string>, tools: Tools, keyring: string}} */
   let plan;
   try {
     // node's stdio 'pipe' is a socketpair, not a FIFO; anything else is not ours
@@ -2374,7 +2377,7 @@ async function runIsolatedInner(a) {
     const strs = (/** @type {unknown} */ x) => Array.isArray(x) && x.every((s) => typeof s === 'string');
     const binds = (/** @type {unknown} */ x) => Array.isArray(x)
       && x.every((b) => b && typeof b.p === 'string' && typeof b.rw === 'boolean');
-    if (typeof plan.hostMnt !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
+    if (typeof plan.hostMnt !== 'string' || typeof plan.hostIpc !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
       || typeof plan.home !== 'string' || !path.isAbsolute(plan.home)
       || !strs(plan.roots) || !strs(plan.hidden) || !strs(plan.exempt) || !strs(plan.sockets) || !hostIdsOf(plan.ids)
       || !isEnvObject(plan.env) || !isTools(plan.tools) || typeof plan.keyring !== 'string') throw new Error('malformed');
@@ -2424,6 +2427,9 @@ async function runIsolatedInner(a) {
     return refuse(`after hiding, ${shown.length} of ${allHidden.length} hidden dir(s) (the home, ~/.ssh, ~/.gnupg, the `
       + `state roots) do not resolve to the read-only '${HIDE_SOURCE}' tmpfs`);
   }
+  // ⛔ HOST IPC (v0.34.0, ib4k row 8): our own IPC namespace, and a /dev/mqueue of it — READ BACK
+  const ipcr = maskIpc(plan.hostIpc);
+  if (ipcr) return refuse(ipcr);
   // ⛔ HOST IDENTITY (v0.34.0, ib4k row 10): a neutral hostname, a sysfs of THIS netns (only lo), neutral
   // /etc/machine-id and /etc/hostname — then READ BACK (identityGaps), not trusted
   const idr = maskIdentity(plan.tools);
@@ -2469,6 +2475,37 @@ async function runIsolatedInner(a) {
   const ran = runCommand(pid1HelperArgv(command, 3, false), priv.prefix, { env: plan.env });
   for (const s of SIGS) process.off(s, early);
   return ran;
+}
+
+/** The source tag of the fresh mqueue on /dev/mqueue (ib4k §1 row 8). */
+const MQUEUE_SOURCE = 'webctl-isolated-mqueue';
+
+/**
+ * No host SysV IPC and no host POSIX mqueues (ib4k §1 row 8). ⛔ Measured open in v0.34 phase 1: a
+ * segment made on the host (`ipcmk -M`) was listed by `ipcs -m` inside, a shmat write inside landed
+ * in the host's segment, and a queue in the host's /dev/mqueue was visible — `unshare` without --ipc
+ * shares the caller's IPC namespace. ⇒ The fresh path runs `unshare --ipc`; here we PROVE it (the ns
+ * id differs from the caller's) and mount a fresh mqueue on /dev/mqueue — the host's mqueue mount
+ * shows the HOST namespace's queues whatever namespace reads it — then read that back.
+ * A host with no /dev/mqueue gets none (nothing to hide). '' on success, else why.
+ * @param {string} hostIpc the caller's /proc/self/ns/ipc @returns {string}
+ */
+function maskIpc(hostIpc) {
+  let ipc = '';
+  try { ipc = fs.readlinkSync('/proc/self/ns/ipc'); } catch (e) { return `cannot read the IPC namespace id inside (${errMsg(e)})`; }
+  if (!hostIpc || ipc === hostIpc) {
+    return 'still in the CALLER\'S IPC namespace — its SysV shared memory, semaphores and message queues are reachable';
+  }
+  let dir = false;
+  try { dir = fs.statSync('/dev/mqueue').isDirectory(); } catch { /* absent: nothing to hide */ }
+  if (!dir) return '';
+  const e = mountOrWhy(['-t', 'mqueue', '-o', 'nosuid,nodev,noexec', MQUEUE_SOURCE, '/dev/mqueue'], 'mount a fresh /dev/mqueue');
+  if (e) return e;
+  const m = resolveMount(readMountinfo() || [], '/dev/mqueue');
+  if (!m || m.at !== '/dev/mqueue' || m.fstype !== 'mqueue' || m.source !== MQUEUE_SOURCE) {
+    return 'after mounting a fresh /dev/mqueue, it does not resolve to it — the host\'s POSIX message queues are visible';
+  }
+  return '';
 }
 
 /** The hostname every fresh `isolated` namespace gets (ib4k §1 row 10). */

@@ -49,7 +49,7 @@ const recordOf = (out) => {
   return l ? JSON.parse(l) : null;
 };
 
-const NS_OK = spawnSync('unshare', ['-rnm', '--uts', '--pid', '--fork', 'true']).status === 0;
+const NS_OK = spawnSync('unshare', ['-rnm', '--uts', '--ipc', '--pid', '--fork', 'true']).status === 0;
 const needsNs = NS_OK ? {} : { skip: 'SKIP (host): unprivileged user namespaces unavailable here' };
 
 // ── logic: selectBackend ─────────────────────────────────────────────────────

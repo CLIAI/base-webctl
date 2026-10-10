@@ -1419,6 +1419,30 @@ by `keyctl show @s`; hostname not neutral); every other row and every control gr
 | S9 | the nesting proof ignores identity | **survived** at first (the skew arm also failed the scratch fact); an identity-only fake outer was added — now 1 red |
 | S10 | the gate never tallies a backend | 2 red: the byte-identical and the isolation-unavailable gate arms |
 
+### v0.34.0 review fixes (F1–F9, R1–R4)
+
+The review of phase 1 (scratch rigs: a throwaway `unshare -rm` world with a fake passwd home, as the
+table builds) found the items below. Each arm was written first and shown RED on the phase-1 code;
+each sabotage below copies the tree, removes the fix with a `perl -0pi` edit, runs the table there.
+
+**F1 — host SysV IPC and POSIX mqueues (row 8).** Measured before (a throwaway `unshare -rm --ipc`
+"host" with an `ipcmk -M` segment and a queue in a fresh /dev/mqueue): inside `isolated` the segment
+was listed by `ipcs -m`, a python-ctypes `shmat` write inside LANDED in the host's segment, and the
+planted queue was visible. `unshare` without `--ipc` shares the caller's IPC namespace, and the
+host's mqueue mount shows the host namespace's queues whoever reads it. After: `--ipc` on the fresh
+spawn and the probe; the inner half proves the IPC ns id differs from the caller's (`plan.hostIpc`)
+and mounts a fresh mqueue (`webctl-isolated-mqueue`) on /dev/mqueue, read back by resolving it.
+Measured after: not listed, `shmat` → EINVAL (22), the host segment untouched, the queue absent.
+The world now runs `unshare -rm --ipc` with its own mqueue, so the planted segment is throwaway;
+two decoy segments come first because a fresh IPC ns numbers from 0 too (an inside segment must not
+share the planted id). The shmat control is read back BEFORE the arms run, so a leaking arm cannot
+turn the control red. The nested path makes no IPC ns of its own: it inherits its outer's.
+
+| # | sabotage | caught by |
+|---|---|---|
+| F1a | no `--ipc` on the spawn, no `maskIpc` | table row 8 (`ipcs -m` lists the host's segment) |
+| F1b | `--ipc` kept, the fresh /dev/mqueue mount and its read-back dropped | table row 8 (the host's queue is visible) |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

@@ -3499,7 +3499,7 @@ test('⭐ WEBCTL_UNSHARE_BIN is used for EVERY unshare: the outer namespace, the
       { WEBCTL_UNSHARE_BIN: wrapper, WEBCTL_TEST_UNSHARE_LOG: path.join(log, 'used') });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     const used = fs.readFileSync(path.join(log, 'used'), 'utf8').trim().split('\n');
-    // the backend probe (side-effect free: `-rnm --uts --pid --fork true`) and the outer namespace
+    // the backend probe (side-effect free: `-rnm --uts --ipc --pid --fork true`) and the outer namespace
     assert.equal(used.filter((l) => l === 'USED -rnm').length, 2, `the probe and the outer namespace did not both use it:\n${used.join('\n')}`);
     // outer: the drop's probe + the command; nested: its drop's probe + its command
     assert.equal(used.filter((l) => l === 'USED -U').length, 4, `the privilege drops did not all use it:\n${used.join('\n')}`);

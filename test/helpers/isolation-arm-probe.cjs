@@ -92,6 +92,25 @@ const run = (a) => spawnSync(a[0], a.slice(1), { encoding: 'utf8' });
   out.vartmpPlanted = errOf(() => fs.readFileSync(path.join('/var/tmp', cfg.planted)));
   out.shmSelf = errOf(() => { const f = path.join('/dev/shm', `arm-inside-${mode}`); fs.writeFileSync(f, 'x'); fs.readFileSync(f); });
   out.vartmpSelf = errOf(() => { const f = path.join('/var/tmp', `arm-inside-${mode}`); fs.writeFileSync(f, 'x'); fs.readFileSync(f); });
+  // 8 (IPC) — the world's SysV segment and POSIX mqueue (cfg.ipcFile): listed? attachable — and a write
+  // through an attach (python ctypes shmat) lands where? A segment and a queue made HERE, seen here.
+  let ipc = null;
+  try { ipc = JSON.parse(fs.readFileSync(cfg.ipcFile, 'utf8')); } catch { /* no ipcmk: the world planted none */ }
+  if (ipc) {
+    out.shmListed = String(run(['ipcs', '-m']).stdout).split('\n').map((l) => l.trim().split(/\s+/))
+      .some((f) => f[1] === String(ipc.shmid) && /^0x[0-9a-f]+$/i.test(f[0]) && (parseInt(f[0], 16) >>> 0) === ipc.key);
+    if (cfg.python) {
+      const w = run([cfg.python, '-I', '-c', cfg.shmPy, String(ipc.shmid), 'w', inside ? `inside-${mode}` : 'outside']);
+      out.shmAttach = String(w.stdout).trim() || `exit ${w.status}`;
+    }
+    const mk = String(run(['ipcmk', '-M', '64']).stdout).match(/(\d+)\s*$/);
+    out.shmSegSelf = !!mk && String(run(['ipcs', '-m']).stdout).split('\n').some((l) => l.trim().split(/\s+/)[1] === mk[1]);
+    if (mk) run(['ipcrm', '-m', mk[1]]);
+    if (ipc.mq) {
+      out.mqPlanted = errOf(() => fs.statSync(path.join('/dev/mqueue', ipc.mq)));
+      out.mqSelf = errOf(() => { const f = path.join('/dev/mqueue', `arm-inside-${mode}-mq`); fs.closeSync(fs.openSync(f, 'w')); fs.statSync(f); });
+    }
+  }
   // 9 — no host keyring (cfg.keyName was added to the WORLD's session keyring before any of this ran)
   if (cfg.keyctl) {
     const show = run(['keyctl', 'show', '@s']);
