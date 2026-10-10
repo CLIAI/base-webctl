@@ -1231,7 +1231,7 @@ test('⭐ KEEP EXCEPTION: `--keep <home>/.cache/CLIAI` re-exposes THAT dir (name
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
-test('⛔ a keep BENEATH a hidden dir shows only itself; a keep CONTAINING one does not unhide it; a command and cwd beneath one still work', needsIsolation, async (t) => {
+test('⛔ a keep BENEATH a hidden dir shows only itself; a keep CONTAINING one does not unhide it; a command beneath one still works', needsIsolation, async (t) => {
   const home = fakeSecretHome();
   const sub = path.join(home, '.config/webctl/fixture');
   const work = path.join(home, '.local/state/CLIAI/work');
@@ -1248,11 +1248,59 @@ test('⛔ a keep BENEATH a hidden dir shows only itself; a keep CONTAINING one d
     const reads = readsOf(r.stdout);
     assert.equal(reads['.config/webctl'], 'ENOENT', 'a keep BENEATH ~/.config/webctl re-exposed its siblings');
     assert.equal(reads['.config/CLIAI'], 'ENOENT', 'a keep CONTAINING ~/.config/CLIAI unhid it');
-    // an absolute command and a cwd beneath a hidden dir are re-exposed (read-only / writable), not hidden
-    const c = await underFakeHome(home, ['sh', '-c', 'cd "$0" && exec "$@"', work, process.execPath, TOOL, 'isolated', '--', tool]);
+    // an absolute command beneath a hidden dir is re-exposed read-only, not hidden (a cwd there is
+    // REFUSED — see the next arm; this one runs from an ordinary dir under the home)
+    const plain = path.join(home, 'plain');
+    fs.mkdirSync(plain);
+    const c = await underFakeHome(home, ['sh', '-c', 'cd "$0" && exec "$@"', plain, process.execPath, TOOL, 'isolated', '--', tool]);
     assert.ok(c);
     assert.equal(c.status, 0, c.stdout + c.stderr);
-    assert.equal(c.stdout.trim(), `TOOL ran in ${work}`);
+    assert.equal(c.stdout.trim(), `TOOL ran in ${plain}`);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+// ⛔ hiddenGaps exempted EVERY bind at a hidden dir, and the cwd is a WRITABLE bind: a cwd at
+// ~/.ssh re-exposed it writable; one beneath ~/.config/webctl re-exposed that subtree writable —
+// contrary to "only an explicit --keep re-exposes a hidden dir" (review of 5773fb8, finding 8b).
+test('⛔ a cwd AT or BENEATH a hidden dir → FAIL naming the rule and no path, nothing run — CONTROL: an ordinary cwd under the home runs', needsIsolation, async (t) => {
+  const home = fakeSecretHome();
+  const deep = path.join(home, '.config/webctl/fixture');
+  fs.mkdirSync(deep);
+  const plain = path.join(home, 'plain');
+  fs.mkdirSync(plain);
+  const cmd = [process.execPath, '-e', 'require("fs").writeFileSync("RAN-HERE", "x"); console.log("RAN")'];
+  try {
+    for (const cwd of [path.join(home, '.ssh'), deep]) {
+      const r = await underFakeHome(home, ['sh', '-c', 'cd "$0" && exec "$@"', cwd, process.execPath, TOOL, 'isolated', '--', ...cmd]);
+      if (!r) { t.skip(NO_FAKE_HOME); return; }
+      const what = path.relative(home, cwd);
+      assert.equal(r.status, 1, `${what}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: the working directory lies inside a HIDDEN dir /m, `${what}: ${r.stderr}`);
+      assert.ok(!r.stderr.includes(home), `${what}: the refusal printed a path`);
+      assert.doesNotMatch(r.stdout, /^RAN$/m, `${what}: ran`);
+      assert.equal(fs.existsSync(path.join(cwd, 'RAN-HERE')), false, `${what}: the command wrote into the hidden dir`);
+    }
+    const c = await underFakeHome(home, ['sh', '-c', 'cd "$0" && exec "$@"', plain, process.execPath, TOOL, 'isolated', '--', ...cmd]);
+    assert.ok(c);
+    assert.equal(c.status, 0, c.stdout + c.stderr);
+    assert.equal(fs.existsSync(path.join(plain, 'RAN-HERE')), true, 'CONTROL: an ordinary cwd under the home is not writable');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('⛔ the post-check exempts ONLY an explicit --keep: base\'s root AT a hidden dir (an implicit re-bind) → refused, nothing run', needsIsolation, async (t) => {
+  const home = fakeSecretHome();
+  const base = path.join(home, '.config/webctl');
+  fs.mkdirSync(path.join(base, 'scripts'), { recursive: true });
+  fs.copyFileSync(TOOL, path.join(base, 'scripts', 'contract-harness.mjs'));
+  const marker = path.join(home, 'RAN');
+  try {
+    const r = await underFakeHome(home, [process.execPath, path.join(base, 'scripts', 'contract-harness.mjs'), 'isolated', '--',
+      process.execPath, '-e', `require('fs').readdirSync(${JSON.stringify(base)}); console.log('SAW-HIDDEN')`]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: after hiding, 1 of \d+ hidden dir\(s\)/m, r.stderr);
+    assert.doesNotMatch(r.stdout, /^SAW-HIDDEN$/m, `an implicit re-bind exposed a hidden dir:\n${r.stdout}${r.stderr}`);
+    assert.equal(fs.existsSync(marker), false);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 

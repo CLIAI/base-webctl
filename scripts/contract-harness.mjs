@@ -1801,7 +1801,7 @@ function runIsolated(a) {
     return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${prot.refuse}. The command was NOT started.`, { command }));
   }
   const plan = planKeeps(keeps, [
-    { p: process.cwd(), label: 'the working directory', rw: true, named: true },
+    { p: process.cwd(), label: 'the working directory', rw: true, named: true, noHidden: true },
     // ⛔ READ-ONLY: under the release gate ONE base checkout serves every consumer in turn,
     // so a mutant writing into it would change what the NEXT consumer is judged against —
     // and it is the harness's own code. base's own suite runs with cwd = its root, which
@@ -2049,9 +2049,11 @@ async function runIsolatedInner(a) {
       + 'keep are still WRITABLE (or not mounted at all)');
   }
   // ⭐ …and the home and every hidden dir RESOLVE to our empty read-only tmpfs (their own, or an
-  // ancestor's), unless a keep is exactly there — a later mount on an ancestor shadows a hide
+  // ancestor's), unless an explicit `--keep` is exactly there — a later mount on an ancestor
+  // shadows a hide. ⛔ ONLY an explicit keep (plan.exempt): exempting every bind let a cwd (or
+  // any implicit re-bind) at a hidden dir through (review of 5773fb8)
   const allHidden = [plan.home, ...plan.hidden];
-  const shown = hiddenGaps(mounts, allHidden, plan.binds.map((b) => b.p));
+  const shown = hiddenGaps(mounts, allHidden, plan.exempt);
   if (shown.length) {
     return refuse(`after hiding, ${shown.length} of ${allHidden.length} hidden dir(s) (the home, ~/.ssh, ~/.gnupg, the `
       + `state roots) do not resolve to the read-only '${HIDE_SOURCE}' tmpfs`);
@@ -2493,7 +2495,7 @@ function makeTreeReadOnly(root, rbindFirst) {
  * ⚠ Only `--keep` (writable) paths are EXEMPT from the socket check — a socket on a read-only
  * mount still answers a connect.
  * @param {string[]} explicit `--keep` paths
- * @param {{p: string, label: string, rw: boolean, rule?: boolean, named?: boolean}[]} implicit
+ * @param {{p: string, label: string, rw: boolean, rule?: boolean, named?: boolean, noHidden?: boolean}[]} implicit
  * @param {Prot} prot
  * @param {string[]} [explicitRo] `--keep-ro` paths
  * @returns {{binds: Bind[], exempt: string[], notes: string[], usage?: string, refuse?: string}}
@@ -2544,6 +2546,13 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
           + (k.explicit ? 'keep a narrower path' : 'drop it from PATH for this call, or put a narrower dir there');
         return k.explicit ? { binds, exempt, notes, usage: why } : { binds, exempt, notes, refuse: why };
       }
+    }
+    // ⛔ The CWD at or beneath a hidden dir would be re-bound WRITABLE there — only an explicit
+    // `--keep` may re-expose a hidden dir (review of 5773fb8: a cwd at ~/.ssh ran with it writable)
+    if (k.noHidden && prot.hideRule.some((h) => isWithin(real, h))) {
+      return { binds, exempt, notes, refuse: `${k.label} lies inside a HIDDEN dir (~/.ssh, ~/.gnupg, ~/.cache/CLIAI, `
+        + '~/.config/CLIAI, ~/.local/state/CLIAI, ~/.config/webctl) — re-bound writable, it would EXPOSE what isolation '
+        + 'hides; run from a directory outside it (an explicit --keep of a path there is still allowed)' };
     }
     // ⛔ A WRITABLE keep that IS (or contains) the home or a protected root re-opens all of it.
     const contained = [...(prot.home ? [prot.home] : []), ...prot.roots].find((r) => isWithin(r, real));

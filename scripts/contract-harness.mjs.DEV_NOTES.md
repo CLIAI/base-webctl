@@ -904,6 +904,25 @@ it by planKeeps and is then counted, not listed.
   marked named → SURVIVED at first (no arm looked at a cwd's verdict) — the cwd-under-home arm
   now asserts `writable: ~/…<cwd>`, and catches it.
 
+### ⛔ A cwd at a hidden dir was re-exposed WRITABLE (review of 5773fb8, finding 8b)
+
+hiddenGaps exempted EVERY bind exactly at a hidden dir, and the cwd is a writable bind. Measured
+here before the fix: cwd = `~/.ssh` → the command ran, the verdict said `writable: ~/.ssh`;
+cwd beneath `~/.config/webctl` → ran, that subtree writable. The docs said only an explicit
+`--keep` re-exposes a hidden dir. ⇒ planKeeps REFUSES a cwd at or beneath a hidden dir
+(`noHidden`, FAIL, the rule named, no path) — the same hideRule the PATH/`--keep-ro` refusals
+use; and the post-check exempts only `plan.exempt` (explicit `--keep`s), so no implicit
+re-bind (base's root, a future one) can sit on a hide unnoticed.
+* The keep-beneath arm used to assert "a cwd beneath a hidden dir still works"; it now runs its
+  command-beneath-a-hidden-dir check from an ordinary cwd.
+* **Arms:** cwd = `~/.ssh` and cwd beneath `~/.config/webctl` → FAIL, nothing written (CONTROL:
+  an ordinary cwd under the home runs and writes); base's root AT `~/.config/webctl` → refused by
+  the post-check. ⚠ The latter arm first "failed" on `SAW-HIDDEN` — the JSONL record echoes the
+  command's argv; it matches the whole line now.
+* **Sabotage:** refusal off → 2 arms; the cwd not flagged → 2 arms; the post-check exempting
+  every bind again → the base-root arm. (⚠ The post-check narrowing was written before its arm;
+  the arm was then confirmed red against the old exemption by that sabotage.)
+
 ### Host policy: AppArmor, and `WEBCTL_UNSHARE_BIN` (v0.33.0)
 
 `kernel.apparmor_restrict_unprivileged_userns=1` (reported from an Ubuntu 24.04 host) makes
