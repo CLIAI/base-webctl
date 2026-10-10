@@ -680,3 +680,26 @@ test('CONTROL: in-place --against-head is unchanged — it runs IN the live tree
     assert.match(r.out, /PROBE fake-webctl — harness declined a verdict in the real swap window ✓/);
   } finally { w.cleanup(); }
 });
+
+test('⛔ the per-consumer backend is the verdict\'s OWN `; backend:` clause (review F8): a keep path containing "; backend: docker" does not win — CONTROL: a plain verdict', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'scripts', 'test-all-consumers.sh'), 'utf8');
+  const fn = src.match(/^isolation_backend_of\(\) \{\n[\s\S]*?\n\}\n/m);
+  assert.ok(fn, 'scripts/test-all-consumers.sh defines no isolation_backend_of() { … } — the parse is not a testable unit');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-backend-parse-'));
+  const start = 'WEBCTL-GATE-CONTRACT-STARTED x';
+  /** @param {string[]} lines */
+  const parse = (lines) => {
+    const log = path.join(dir, 'run.log');
+    fs.writeFileSync(log, `${lines.join('\n')}\n`);
+    return execFileSync('bash', ['-c', `${fn[0]}\nisolation_backend_of "$1" "$2"`, 'parse', log, start], { encoding: 'utf8' }).trim();
+  };
+  try {
+    // a named keep under the home is listed BY PATH in the verdict, before the backend clause
+    assert.equal(parse(['isolated: home HIDDEN; re-bound read-only: nothing; writable: ~/w/a; backend: docker; x; backend: unshare', start]), 'unshare');
+    assert.equal(parse(['isolated: home HIDDEN; re-bound read-only: ~/r; backend: docker; writable: ~/w; backend: unshare (skipped x: y); keyring: unverified (keyctl show failed)', start]), 'unshare');
+    // CONTROL: a plain verdict; the contract's own nested verdict AFTER the start line is not the gate's
+    assert.equal(parse(['isolated: home HIDDEN; re-bound read-only: nothing; writable: nothing; backend: unshare', start,
+      'isolated: home HIDDEN; re-bound read-only: nothing; writable: nothing; backend: docker']), 'unshare');
+    assert.equal(parse([start]), '');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

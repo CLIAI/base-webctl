@@ -89,3 +89,13 @@ worktree (submodule v0.3.0):
   (e.g. `vendor/base-webctl/lib/client-config.js`) → 12 suites FAIL →
   `BLOCKED: linkedin-webctl failed` → exit 1. This is the proof the gate is real:
   *base changes → one programmatic test catches a broken consumer.*
+
+## The per-consumer isolation backend: the verdict's LAST `; backend:` (v0.34.0, review F8)
+
+`isolation_backend_of()` reads the backend the gate's own `isolated` call named (ib4k §4) from its
+verdict line, the last one before the contract's start line. The phase-1 awk took the FIRST
+`; backend: [a-z]+` match on that line — but the verdict lists, BEFORE its backend clause, the paths
+the caller named (`writable: ~/…`), and a path may itself contain `; backend: docker`. Measured with
+the parser arm (`test/gate-scratch.test.js`, "review F8"): the first-match parse answered `docker` for
+a verdict whose clause said `unshare`. Now the LAST match on the line. The parse is a function so the
+arm runs exactly its text (extracted with a regex and run under `bash -c`), not a copy of it.

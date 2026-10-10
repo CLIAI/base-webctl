@@ -321,6 +321,16 @@ live_fingerprint() {
 }
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+# The isolation backend the gate's OWN `isolated` call named (ib4k §4): its verdict line
+# (`isolated: home HIDDEN; …; backend: <name>…`) is the last one BEFORE the start line; any later
+# ones are the contract's own nested calls. '' when none names one. $1 run log, $2 the start line.
+# ⛔ The LAST `; backend: ` on the line (review F8): the clause follows the paths the caller named, and
+# a named path can itself contain "; backend: docker" — the first match took it.
+isolation_backend_of() {
+  awk -v s="$2" '$0 == s { exit }
+    /^isolated: home HIDDEN; / { r = $0; while (match(r, /; backend: [a-z]+/)) { b = substr(r, RSTART + 11, RLENGTH - 11); r = substr(r, RSTART + RLENGTH) } }
+    END { print b }' "$1"
+}
 # lszd `error` record — for what is NOT a consumer verdict (the gate's own faults):
 # $1 code, $2 consumer, $3 message
 error_envelope() {
@@ -793,9 +803,7 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
     if [ -n "$isolation_refused" ]; then
       ENVELOPE_ISOLATION="none"
     else
-      ENVELOPE_ISOLATION="$(awk -v s="$started_line" '$0 == s { exit }
-        /^isolated: home HIDDEN; / && match($0, /; backend: [a-z]+/) { b = substr($0, RSTART + 11, RLENGTH - 11) }
-        END { print b }' "$run_log")"
+      ENVELOPE_ISOLATION="$(isolation_backend_of "$run_log" "$started_line")"
       [ -n "$ENVELOPE_ISOLATION" ] || ENVELOPE_ISOLATION="unknown"
     fi
     iso_mix[$ENVELOPE_ISOLATION]=$(( ${iso_mix[$ENVELOPE_ISOLATION]:-0} + 1 ))
