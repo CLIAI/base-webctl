@@ -108,7 +108,7 @@ try { fs.appendFileSync(${JSON.stringify(hits)}, JSON.stringify({ pid: process.p
       tamperSrc: path.join(neutral, 'tamper-src'), tamperDst: path.join(neutral, 'tamper-dst'),
       ipcmk: IPCMK, python: PYTHON, shmPy: SHM_PY, ipcFile: path.join(keep, 'ipc.json'),
       keyIdFile: path.join(keep, 'key-id'), keyctl: !!KEYCTL, keyName: `webctl-arm-${process.pid}`, port: /** @type {net.AddressInfo} */ (listener.address()).port,
-      sockets, hostPid: process.pid, baseRoot: ROOT, probe: PROBE, harness: TOOL, preload, backend,
+      sockets, hostPid: process.pid, cgroup: CGROUP, baseRoot: ROOT, probe: PROBE, harness: TOOL, preload, backend,
       self: path.join(keep, 'cfg.json') };
     fs.writeFileSync(cfg.self, JSON.stringify(cfg));
     const argv = [...(KEYCTL ? [KEYCTL, 'session', '-'] : []), 'unshare', '-rm', '--ipc', '--propagation=private', process.execPath, WORLD, cfg.self];
@@ -136,6 +136,10 @@ try { fs.appendFileSync(${JSON.stringify(hits)}, JSON.stringify({ pid: process.p
   }
 }
 
+/** Row 3: the caller's own cgroup files the command must not be able to open for write. */
+const CGROUP_FILES = ['cgroup.kill', 'cgroup.procs'];
+/** The test's cgroup v2 path ('' when none): the world and the arms run in it (re-review item 2). */
+const CGROUP = (() => { try { return (fs.readFileSync('/proc/self/cgroup', 'utf8').match(/^0::(\/.*)$/m) || [])[1] || ''; } catch { return ''; } })();
 /** @param {any} w @param {string} where */
 const ctx = (w, where) => `${where}\n--- arm stderr (tail) ---\n${w.armErr}`;
 const ZERO = /^0+$/;
@@ -170,8 +174,22 @@ const ROWS = [
     },
     deeper: '"⭐ QA: a self-made socket under an UNKEPT /tmp dir", "`--keep` EXEMPTS its sockets", "⭐ ARM: `umount -l /tmp` FAILS inside"' },
   { n: 3, property: 'no host processes',
-    arm: (r, w, p) => assert.equal(r.hostPid, 'ESRCH', ctx(w, `${p}: a host pid is signalable (${r.hostPid})`)),
-    control: (w) => assert.equal(w.outside.outside.hostPid, 'ok', 'control: the host pid is not alive outside'),
+    arm: (r, w, p, untested) => {
+      assert.equal(r.hostPid, 'ESRCH', ctx(w, `${p}: a host pid is signalable (${r.hostPid})`));
+      // …nor killable or movable through the cgroup tree: the CALLER's scope (re-review item 2)
+      for (const f of CGROUP_FILES) {
+        const o = w.outside.outside.cgroupOpen?.[f];
+        if (o !== 'ok') { untested.add(`the caller's ${f} does not open for write even outside (${o ?? 'no cgroup v2 path'}): that arm is UNTESTED`); continue; }
+        assert.ok(['EROFS', 'EACCES', 'ENOENT'].includes(r.cgroupOpen?.[f]),
+          ctx(w, `${p}: the caller's ${f} opens for WRITE inside (${r.cgroupOpen?.[f]}) — the command could kill or move the processes that called it`));
+      }
+    },
+    control: (w, t) => {
+      assert.equal(w.outside.outside.hostPid, 'ok', 'control: the host pid is not alive outside');
+      const o = w.outside.outside.cgroupOpen || {};
+      const bad = CGROUP_FILES.filter((f) => o[f] !== 'ok');
+      if (bad.length) t.skip(`SKIP (host): the caller's ${bad.join(' and ')} do(es) not open for write even outside — the cgroup arm is UNTESTED here`);
+    },
     deeper: '"⭐ ARM: a host process this test started → kill(pid, 0) is ESRCH inside", "⛔ a NESTED `isolated` gets its own PID namespace"' },
   { n: 4, property: 'the home HIDDEN',
     arm: (r, w, p) => {

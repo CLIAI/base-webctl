@@ -1564,7 +1564,7 @@ function probeUnshare(ub, seen = { stderr: '' }) {
   if (ub.why) return ub.why;
   const { why } = privilegedTools(ub, false);
   if (why) return why;
-  const r = spawnSync(ub.bin, ['-rnm', '--uts', '--ipc', '--pid', '--fork', SYSTEM_TRUE()], { encoding: 'utf8',
+  const r = spawnSync(ub.bin, ['-rnm', '--uts', '--ipc', '--cgroup', '--pid', '--fork', SYSTEM_TRUE()], { encoding: 'utf8',
     stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
   if (r.error) return `cannot run unshare (${errMsg(r.error)})`;
   if (r.status === 0) return '';
@@ -2129,11 +2129,13 @@ function runIsolated(a) {
   let hostMnt = '';
   let hostPid = '';
   let hostIpc = '';
+  let hostCgroup = '';
   try {
     hostNs = fs.readlinkSync('/proc/self/ns/net');
     hostMnt = fs.readlinkSync('/proc/self/ns/mnt');
     hostPid = fs.readlinkSync('/proc/self/ns/pid');
     hostIpc = fs.readlinkSync('/proc/self/ns/ipc');
+    hostCgroup = fs.readlinkSync('/proc/self/ns/cgroup');
   } catch (e) {
     return Promise.resolve(report('isolated', EXIT.fail,
       `cannot read this process's namespaces (${errMsg(e)}), so isolation cannot be PROVEN; `
@@ -2251,7 +2253,7 @@ function runIsolated(a) {
     // (With 0555 it answered EACCES and the home had been dropped from this list.)
     [RO_ROOTS_ENV]: JSON.stringify([prot.home, ...prot.roots]), [HIDDEN_ENV]: JSON.stringify([prot.home, ...prot.hidden]),
     [HOST_IDS_ENV]: JSON.stringify(ids) });
-  const payload = JSON.stringify({ hostMnt, hostIpc, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
+  const payload = JSON.stringify({ hostMnt, hostIpc, hostCgroup, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
     home: prot.home, exempt: plan.exempt, sockets, ids, env: cmdEnv, tools, keyring });
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
@@ -2267,7 +2269,8 @@ function runIsolated(a) {
         // everything inside (pid 1 is the reaping bash, PID1_REAPER; the inner half runs under it).
         // --uts (v0.34.0, ib4k row 10): a hostname of its own, set to NEUTRAL_HOSTNAME by the inner half.
         // --ipc (v0.34.0, ib4k row 8): SysV IPC and POSIX mqueues of its own (the inner half mounts /dev/mqueue)
-        ['-rnm', '--uts', '--ipc', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
+        // --cgroup (v0.34.0, re-review item 2): a cgroup namespace of its own (the tree itself is made read-only)
+        ['-rnm', '--uts', '--ipc', '--cgroup', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
           tools.bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', tools.keyctl,
           process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         // ⛔ the PRIVILEGED env: unshare, pid 1 and the inner half (namespace root, full caps, before
@@ -2417,7 +2420,7 @@ async function runIsolatedInner(a) {
 
   // ⇩ only now, provably off the host network, read the plan. (On the host the
   // proofs above refuse first, so an unrelated fd 4 is never read.)
-  /** @type {{hostMnt: string, hostIpc: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, env: Record<string, string>, tools: Tools, keyring: string}} */
+  /** @type {{hostMnt: string, hostIpc: string, hostCgroup: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, env: Record<string, string>, tools: Tools, keyring: string}} */
   let plan;
   try {
     // node's stdio 'pipe' is a socketpair, not a FIFO; anything else is not ours
@@ -2428,7 +2431,7 @@ async function runIsolatedInner(a) {
     const strs = (/** @type {unknown} */ x) => Array.isArray(x) && x.every((s) => typeof s === 'string');
     const binds = (/** @type {unknown} */ x) => Array.isArray(x)
       && x.every((b) => b && typeof b.p === 'string' && typeof b.rw === 'boolean');
-    if (typeof plan.hostMnt !== 'string' || typeof plan.hostIpc !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
+    if (typeof plan.hostMnt !== 'string' || typeof plan.hostIpc !== 'string' || typeof plan.hostCgroup !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
       || typeof plan.home !== 'string' || !path.isAbsolute(plan.home)
       || !strs(plan.roots) || !strs(plan.hidden) || !strs(plan.exempt) || !strs(plan.sockets) || !hostIdsOf(plan.ids)
       || !isEnvObject(plan.env) || !isTools(plan.tools) || typeof plan.keyring !== 'string') throw new Error('malformed');
@@ -2489,6 +2492,11 @@ async function runIsolatedInner(a) {
   // /etc/machine-id and /etc/hostname — then READ BACK (identityGaps), not trusted
   const idr = maskIdentity(plan.tools);
   if (idr.why) return refuse(idr.why);
+  // ⛔ THE CALLER'S CGROUPS (v0.34.0, re-review item 2): our own cgroup namespace, and the cgroup tree
+  // moved back by maskIdentity READ-ONLY — READ BACK, not trusted
+  const cgr = cgroupGaps(plan.hostCgroup);
+  if (cgr.length) return refuse(`after making the cgroup tree read-only, ${cgr.join(', ')} — the command could kill or move the `
+    + 'processes that called it (cgroup.kill, cgroup.procs)');
   const idGaps = identityGaps();
   if (idGaps.length) return refuse(`after masking the host's identity, ${idGaps.join(', ')} still show(s) the HOST's`);
   // ⭐ R1: READ BACK the read-only root — every mount reachable from / is ro, except the declared
@@ -2716,6 +2724,11 @@ function maskIdentity(tools) {
     if (hasCg) {
       const e = mountOrWhy(['--move', stage, cg], 'move the cgroup tree back onto the fresh sysfs');
       if (e) return { why: e };
+      // ⛔ READ-ONLY (re-review item 2): moved back read-write, the caller's own scope's cgroup.kill and
+      // cgroup.procs opened for write inside — a write there kills (or moves) the processes that called
+      // `isolated`, the release gate among them. node only READS its memory limit there. Read back by cgroupGaps.
+      const ro = makeTreeReadOnly(cg, false);
+      if (ro) return { why: `${ro} — the cgroup tree would stay WRITABLE` };
     }
     if (hasCg) { try { fs.rmdirSync(stage); } catch { /* gone: harmless */ } }
     const dir = '/run/.webctl-identity';
@@ -2778,6 +2791,28 @@ function identityGaps() {
     try { got = fs.readFileSync(f, 'utf8'); } catch { continue; } // absent (or unreadable): nothing shown
     if (got.trim() !== text.trim()) gaps.push(f);
   }
+  return gaps;
+}
+
+/**
+ * What of the CALLER's cgroups is writable HERE (re-review item 2) — read from the kernel. [] when
+ * nothing. Every cgroup (v1 or v2) mount path resolution reaches is read-only; with `hostCgroup`
+ * (the fresh path), the cgroup namespace differs from the caller's too. Used by the fresh path after
+ * maskIdentity and by the nesting proof. ⚠ Counts, never cgroup paths (they name the user's session).
+ * @param {string} [hostCgroup] the caller's /proc/self/ns/cgroup @returns {string[]}
+ */
+function cgroupGaps(hostCgroup) {
+  /** @type {string[]} */ const gaps = [];
+  if (hostCgroup !== undefined) {
+    let ns = '';
+    try { ns = fs.readlinkSync('/proc/self/ns/cgroup'); } catch (e) { gaps.push(`the cgroup namespace id is unreadable (${errMsg(e)})`); }
+    if (ns && (!hostCgroup || ns === hostCgroup)) gaps.push('the cgroup namespace is still the CALLER\'s');
+  }
+  const mounts = readMountinfo();
+  if (!mounts) return [...gaps, '/proc/self/mountinfo is unreadable'];
+  const rw = mounts.filter((m) => (m.fstype === 'cgroup2' || m.fstype === 'cgroup') && !m.opts.includes('ro')
+    && resolveMount(mounts, m.at)?.id === m.id).length;
+  if (rw) gaps.push(`${rw} cgroup mount(s) are still WRITABLE`);
   return gaps;
 }
 
@@ -4088,6 +4123,9 @@ function kernelInsideProof() {
   // ⛔ v0.34.0 (ib4k row 12): the host's /dev must not be visible — a nested call builds none of its own
   const dGaps = devGaps();
   if (dGaps.length) { fails.push(`the HOST's devices are visible: ${dGaps.join(', ')}`); v034++; }
+  // ⛔ v0.34.0 (re-review item 2): the caller's cgroups must not be writable
+  const cgGaps = cgroupGaps();
+  if (cgGaps.length) { fails.push(`the caller's cgroups are reachable: ${cgGaps.join(', ')}`); v034++; }
   if (!pidns) fails.push('/proc/self/ns/pid is unreadable');
   if (!recordedPid) fails.push(`${HOST_PIDNS_ENV} is not set, so there is no recorded host PID namespace to differ from`);
   else if (pidns === recordedPid) fails.push(`the current PID namespace ${pidns} EQUALS the recorded host one (host processes can be signalled)`);
@@ -4106,7 +4144,7 @@ function kernelInsideProof() {
   } else if (v034 > 0 && fails.length === v034) {
     // ⛔ …and a v0.33 outer masks /tmp but not /var/tmp or /dev/shm, and hides no identity (ib4k rows 8,
     // 10): when only THOSE fail, say so — refused all the same (the command would see the host's)
-    const what = [...(unmasked.length ? unmasked : []), ...idGaps, ...(dGaps.length ? ['/dev'] : [])];
+    const what = [...(unmasked.length ? unmasked : []), ...idGaps, ...(dGaps.length ? ['/dev'] : []), ...(cgGaps.length ? ['the cgroup tree'] : [])];
     fails.splice(0, fails.length, `the OUTER \`isolated\` is older than v0.34.0: ${what.join(', ')} ${what.length > 1 ? 'are' : 'is'} `
       + 'the HOST\'s there, and a nested call cannot hide them for its caller — upgrade the outer one to v0.34.0 or later');
   }
@@ -4115,7 +4153,7 @@ function kernelInsideProof() {
     facts: { netns, recorded: recorded ?? null, uidMap, extraInterfaces: extra,
       mntns, recordedMnt: recordedMnt ?? null, pidns, recordedPid: recordedPid ?? null, unmasked,
       roRoots: roRoots ? roRoots.length : null, writableRoRoots: writable,
-      hidden: hidden ? hidden.length : null, shownHidden: shown, identityShown: idGaps.length, devShown: dGaps.length } };
+      hidden: hidden ? hidden.length : null, shownHidden: shown, identityShown: idGaps.length, devShown: dGaps.length, cgroupWritable: cgGaps.length } };
 }
 
 /**

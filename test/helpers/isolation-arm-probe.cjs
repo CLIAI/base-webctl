@@ -98,6 +98,14 @@ const tamper = (target) => {
   try { fs.unlinkSync(selfSock); } catch { /* gone */ }
   // 3 — no host processes
   out.hostPid = errOf(() => process.kill(cfg.hostPid, 0));
+  // 3 — …nor through the cgroup tree: the CALLER's own cgroup.kill and cgroup.procs, OPENED for write
+  // and closed at once. ⛔ Never written: a write to cgroup.kill kills every process of the caller's scope.
+  if (cfg.cgroup) {
+    out.cgroupOpen = {};
+    for (const f of ['cgroup.kill', 'cgroup.procs']) {
+      out.cgroupOpen[f] = errOf(() => fs.closeSync(fs.openSync(path.join('/sys/fs/cgroup', cfg.cgroup, f), fs.constants.O_WRONLY)));
+    }
+  }
   // 4 — the home hidden; --keep-ro readable, not writable
   out.sshConfig = errOf(() => fs.readFileSync(path.join(cfg.home, '.ssh', 'config')));
   out.webctlConfig = errOf(() => fs.readFileSync(path.join(cfg.home, '.config', 'webctl', 'config.toml')));

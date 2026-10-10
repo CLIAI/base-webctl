@@ -1628,6 +1628,23 @@ except beneath a scratch dir there.
 | D1d | the same, no read-back | row 12 arm `fresh: /dev/pts is the HOST's devpts instance`; control `/dev/ptmx cannot be opened (EACCES)` |
 | D1e | the host's `/dev/uinput` bound into the fresh `/dev`, no read-back | row 12 arm: `fresh: /dev holds 1 entr(y/ies) beyond the minimal set` |
 
+**Item 2 — the caller's cgroups (a hole in every released `isolated`).** Measured by the re-review:
+no cgroup namespace and the cgroup2 tree moved back read-write under the fresh sysfs — the command
+could open its caller's scope's `cgroup.kill` / `cgroup.procs` for write. Now `unshare --cgroup` (fresh
+path and probe); `maskIdentity` runs `makeTreeReadOnly('/sys/fs/cgroup', false)` after the move;
+`cgroupGaps()` reads back (cgroupns ≠ the caller's; no reachable cgroup/cgroup2 mount writable), and
+`kernelInsideProof` requires the read-only tree. Arm (table row 3, all three paths): the caller's
+`cgroup.kill` and `cgroup.procs` (the TEST's cgroup path, passed in the world's config) → EROFS /
+EACCES / ENOENT on an open for write — opened and closed, never written; control: both open for write
+in the throwaway world (where they do not, the arm is a named SKIP). RED on 5e0a59a (`fresh: the
+caller's cgroup.kill opens for WRITE inside (ok)`), GREEN after.
+
+| # | sabotage (on a copy) | caught by |
+|---|---|---|
+| C2a | the cgroup tree not made read-only (read-back kept) | every run refused: `1 cgroup mount(s) are still WRITABLE` |
+| C2b | not made read-only AND no read-back | row 3 arm: `fresh: the caller's cgroup.kill opens for WRITE inside (ok)` |
+| C2c | no `--cgroup` on the fresh path (read-back kept) | every run refused: `the cgroup namespace is still the CALLER's` |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

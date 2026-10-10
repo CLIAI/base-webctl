@@ -212,8 +212,8 @@ is the strongest form: it names the ownership in the function that reads it.
 **Headline: `isolated` chooses its BACKEND — unshare → bwrap → docker → refuse, never unisolated
 — and is judged by ONE arm table (ib4k §1, rows 1–12); and it closes the gaps v0.33 left open: a
 private `/var/tmp`, `/dev/shm`, SysV IPC and POSIX mqueues, a fresh session keyring, the host's
-identity hidden — a READ-ONLY root (row 7) — and a fresh minimal `/dev` (row 12), a hole in every
-released `isolated`, found by review.** Phase 1 of 3 (ib4k): only the **unshare** backend is implemented. Harness and
+identity hidden — a READ-ONLY root (row 7) — and, holes in every released `isolated` found by review,
+a fresh minimal `/dev` (row 12) and a read-only cgroup tree in a cgroup namespace of its own (row 3).** Phase 1 of 3 (ib4k): only the **unshare** backend is implemented. Harness and
 gate only; no `lib/` change. **`HARNESS_GENERATION` is 7** (below). No consumer change expected,
 except a contract that matches the new verdict field or a refusal's tail.
 
@@ -221,7 +221,7 @@ except a contract that matches the new verdict field or a refusal's tail.
 
 * Backends are probed in order — **unshare, bwrap, docker** — and the first that can run is used;
   each one skipped before it is recorded with its NAMED reason. None → **refused**, naming all
-  three. A probe is side-effect free (unshare: `unshare -rnm --uts --ipc --pid --fork true` after
+  three. A probe is side-effect free (unshare: `unshare -rnm --uts --ipc --cgroup --pid --fork true` after
   its tool checks) and a probe that throws is a reason, never a crash. Only a PROBE failure moves
   on: once a backend is chosen, a failure inside it is a FAIL.
 * **`WEBCTL_ISOLATION_BACKEND=unshare|bwrap|docker`** pins one. A pinned backend that cannot be used
@@ -310,6 +310,14 @@ except a contract that matches the new verdict field or a refusal's tail.
   (except beneath `/dev/shm`, as before). The nesting proof requires the fresh `/dev` (a nested call
   under an older outer: "upgrade the outer").
 
+* **Row 3 — the caller's cgroups were WRITABLE.** No cgroup namespace, and the host's cgroup2 tree
+  read-write inside: the command could open its caller's scope's `cgroup.kill` or `cgroup.procs` for
+  write — kill (or move) the processes that called `isolated`, the release gate among them. Now
+  `unshare --cgroup` (the probe too) and the cgroup tree remounted READ-ONLY, READ BACK (a writable
+  cgroup mount, or the caller's cgroup namespace → refused); the nesting proof requires it.
+  ⚠ **What lanes lose:** cgroup writes inside (a test that made a sub-cgroup of its own scope);
+  reads — node's memory limit — still work.
+
 ### Row 7 closed — the whole tree READ-ONLY (ruling R1)
 
 * Measured before: a user-owned dir OUTSIDE the home (an `/opt/x` of one's own) was WRITABLE inside —
@@ -340,7 +348,8 @@ except a contract that matches the new verdict field or a refusal's tail.
   tmpfs not read-only (F6); a selected backend without a runner (F7); a mount under `/` that cannot
   be made read-only, or one still writable outside the declared set after it (R1); a cwd containing
   a masked dir (R1); a fresh `/dev` that cannot be built, or anything beyond the minimal set in it
-  after (row 12); a `--keep` / `--keep-ro` / cwd under `/dev` other than beneath `/dev/shm` (row 12).
+  after (row 12); a `--keep` / `--keep-ro` / cwd under `/dev` other than beneath `/dev/shm` (row 12);
+  a cgroup mount still writable, or the cgroup namespace still the caller's (row 3).
 
 ### Generation 7 (ruling R4)
 

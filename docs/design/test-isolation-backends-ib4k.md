@@ -43,7 +43,7 @@ each with its positive control (`k3wn`). A backend that passes fewer arms is not
 |---|---|---|---|
 | 1 | no host network | 127.0.0.1:<live port> → exactly ECONNREFUSED; no non-lo interface | a self-made listener inside answers |
 | 2 | no host unix sockets | docker.sock, an X display socket, the session bus → ENOENT | a socket made inside connects |
-| 3 | no host processes | a host pid → ESRCH | the same pid alive outside |
+| 3 | no host processes | a host pid → ESRCH; the caller's own `cgroup.kill` and `cgroup.procs` do not open for write (EROFS/EACCES/ENOENT) | the same pid alive outside; the same files open for write outside (never written) |
 | 4 | the home HIDDEN | ~/.ssh/config, ~/.config/webctl/config.toml → ENOENT | readable outside; a `--keep-ro` path readable, not writable |
 | 5 | no privilege | CapEff 0, NoNewPrivs 1; umount / remount refused | — |
 | 6 | env allowlist | a planted unknown var absent | `--pass-env` passes it |
@@ -54,8 +54,9 @@ each with its positive control (`k3wn`). A backend that passes fewer arms is not
 | 11 | no loader injection into the privileged half | `NODE_OPTIONS` / `LD_*` preloads never run before the masks | the command itself sees its allowed env |
 | 12 | no host devices | `/dev` holds only `null zero full random urandom tty pts ptmx shm mqueue fd stdin stdout stderr`; `/dev/pts` is not the host's devpts and lists none of its terminals; the host's `/dev/uinput` and `/dev/snd` absent (each one the host lacks is a named SKIP) | a pty opens (`/dev/ptmx`, and `script -qc true /dev/null` — master AND slave); `/dev/null`, `/dev/urandom`, `/dev/tty`, `/dev/fd` work; `/dev/shm` writable; a nested `unshare -Ur --pid --fork --mount-proc` works; the host `/dev` holds more |
 
-Row 12 comes from the re-review of v0.34 phase 1 (2026-10-10): the host `/dev` had been passed
-through whole by EVERY released `isolated` up to v0.33.1 (§1a). Rows 8–10 come from the v0.33.0 review of the namespace backend. They were MEASURED open there (deferred because they are not regressions and change keep-refusal rules), so v0.34.0 closes them in the shared arm set, for every backend at once. Row 11 is fixed in v0.33.0 and must stay fixed for every backend.
+Row 12 and row 3's cgroup arm come from the re-review of v0.34 phase 1 (2026-10-10): the host `/dev`
+had been passed through whole, and the caller's cgroups were writable, in EVERY released `isolated` up
+to v0.33.1 (§1a). Rows 8–10 come from the v0.33.0 review of the namespace backend. They were MEASURED open there (deferred because they are not regressions and change keep-refusal rules), so v0.34.0 closes them in the shared arm set, for every backend at once. Row 11 is fixed in v0.33.0 and must stay fixed for every backend.
 
 **The table is code:** `test/isolation-arm-table.test.js` runs rows 1–12 per IMPLEMENTED backend
 (pinned with `WEBCTL_ISOLATION_BACKEND`), each on the fresh, nested and stripped-markers paths, each
@@ -151,6 +152,16 @@ three paths (the table's rows 8–10).
   * *Not covered:* `/etc/hosts` (may name the host), `/proc/sys/kernel/random/boot_id`, DMI strings
     under `/sys/class/dmi/id`, **disk serials** (`/sys/class/block/*/device/serial` — block devices
     are not per network namespace, so the fresh sysfs lists them), the kernel release in `uname`.
+* **Row 3 — the caller's cgroups (re-review, item 2).** Measured open in every released `isolated` up
+  to v0.33.1: no cgroup namespace, and the cgroup2 tree read-write inside (v0.34 phase 1 moved it back
+  read-write under the fresh sysfs) — the command could open its caller's scope's `cgroup.kill` or
+  `cgroup.procs` for write, i.e. kill or move the processes that called it, the release gate among
+  them. Now `unshare --cgroup` on the fresh path (and in its probe), and the cgroup tree, once moved
+  back onto the fresh sysfs, is remounted read-only with every submount. ⛔ READ BACK
+  (`cgroupGaps`): the cgroup namespace differs from the caller's and no reachable cgroup mount is
+  writable — else REFUSED; the nesting proof requires the read-only tree too. node still READS its
+  memory limit there. The arm only OPENS the files for write (and closes them), in the throwaway
+  world — it never writes the real scope.
 * **Row 12 — CLOSED: a minimal FRESH `/dev`, like `bwrap --dev`** (re-review, item 1). Measured
   open in every released `isolated` up to v0.33.1 and in phase 1: the host `/dev` was passed through
   WHOLE — `/dev/uinput` opened for write inside (virtual-keyboard injection into the host desktop),
@@ -287,8 +298,8 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.34.0.
   (row 9, R3), the identity files read-only (row 10), the v0.33 refusal lead (§2), the runner guard
   (§2), the gate's last-match parse (§4), generation 7, `hostname` required (R2).
 * **Row 7 closed (R1):** the read-only root (§1a), on the fresh, nested and stripped paths.
-* **Re-review (2026-10-10):** row 12 — a minimal fresh `/dev` (§1a), a hole in every released
-  `isolated` up to v0.33.1.
+* **Re-review (2026-10-10):** row 12 — a minimal fresh `/dev` — and row 3's cgroup arm — a cgroup
+  namespace and a read-only cgroup tree (§1a): two holes in every released `isolated` up to v0.33.1.
 * **Residual by ruling (F2, option c):** key descriptions and ids enumerable (§1a row 9) — no mask.
   The read-only root is proved not to block nested procfs/sysfs mounts (an arm in row 7).
 * **Phase 2 — bwrap; phase 3 — docker (§3, §3a):** not started. Each lands by adding its probe,
