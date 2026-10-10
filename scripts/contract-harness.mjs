@@ -2086,9 +2086,9 @@ function runIsolated(a) {
   // /run and /tmp, our read-only hide AT the home, a lo-only netns, a mapped uid_map. Such a call
   // isolates AGAIN, fully (its own netns and pidns, the home hidden again) — and KEEPS what the
   // outer call re-bound under the home and /tmp, same mode (outerRebinds; the gate regression).
-  const { all: maskedAll, tmp: maskedTmp } = maskedDirs();
+  const { sockets: maskedSockets, scratch: maskedScratch } = maskedDirs();
   const mi = readMountinfo();
-  const outer = mi && extraInterfaces() === 0 && uidMapKind() === 'mapped' ? outerRebinds(mi, prot.home, maskedAll, maskedTmp) : null;
+  const outer = mi && extraInterfaces() === 0 && uidMapKind() === 'mapped' ? outerRebinds(mi, prot.home, maskedSockets, maskedScratch) : null;
   // ⛔ AT or WITHIN a hidden dir: not carried. Equality alone (≤ review F2) dropped `--keep ~/.ssh`
   // with a note but carried an outer `--keep ~/.ssh/<sub>` WRITABLE, silently. Only THIS call's
   // own explicit --keep may re-expose a hidden dir. ⛔ "hidden" includes every hide the OUTER call
@@ -2101,7 +2101,7 @@ function runIsolated(a) {
     try { const st = fs.statSync(b.p); return st.isDirectory() || st.isFile(); } catch { return false; } // not a /dev/null cover
   });
   // ⛔ xq's checkout (read-only; xq ONLY — xqRoot), and never one found through a WRITABLE place
-  const xq = xqRoot(prot.home, prot.hideRule, [process.cwd(), ...keeps, ...keepsRo, maskedTmp, os.tmpdir(), '/var/tmp',
+  const xq = xqRoot(prot.home, prot.hideRule, [process.cwd(), ...keeps, ...keepsRo, ...maskedScratch, os.tmpdir(), '/var/tmp',
     '/dev/shm', throwawayHome(ident.home), ...carried.filter((b) => b.rw).map((b) => b.p)]);
   const plan = planKeeps(keeps, [
     { p: process.cwd(), label: 'the working directory', rw: true, named: true, noHidden: true },
@@ -2428,20 +2428,39 @@ async function runIsolatedInner(a) {
 }
 
 /**
- * The directories that get a fresh tmpfs: where host sockets live. Real paths;
- * /run first (the keeps are staged in the NEW /run), /tmp last. /var/run only when it
- * is a REAL directory — usually it is a symlink into /run, which /run already covers.
- * @returns {{run: string, tmp: string, all: string[]}}
+ * The directories that get a fresh tmpfs. Real paths; /run first (the keeps are staged in the NEW
+ * /run), the SCRATCH dirs last. /var/run only when it is a REAL directory — usually it is a symlink
+ * into /run, which /run already covers.
+ *
+ * `scratch`: /tmp, /var/tmp and /dev/shm — world-writable dirs every process on the host shares.
+ * ⛔ v0.34.0 (ib4k §1 row 8): /var/tmp and /dev/shm were the HOST's inside (measured: a file planted
+ * there was readable inside, and a write inside landed on the host). Each now gets a fresh private
+ * tmpfs, as /tmp did. A keep BENEATH a scratch dir is re-bound like one under /tmp (staged, then
+ * moved back); a keep that IS one, or an ancestor of one, is refused (it would undo the mask). A
+ * dir that does not exist is skipped (nothing shared), and so is one whose real path lies in a dir
+ * already listed (e.g. /dev/shm -> /run/shm, /var/tmp -> /tmp).
+ * `sockets`: the v0.33 set (/run, a real /var/run, /tmp) — the nesting proof that an OUTER call is
+ * ours (outerRebinds) still keys on exactly these.
+ * @returns {{run: string, tmp: string, scratch: string[], sockets: string[], all: string[]}}
  */
 function maskedDirs() {
   const real = (/** @type {string} */ p) => { try { return fs.realpathSync.native(p); } catch { return p; } };
   const run = real('/run');
   const tmp = real('/tmp');
-  const all = [run];
-  try { if (fs.lstatSync('/var/run').isDirectory()) all.push('/var/run'); } catch { /* absent */ }
-  all.push(tmp);
-  return { run, tmp, all };
+  const sockets = [run];
+  try { if (fs.lstatSync('/var/run').isDirectory()) sockets.push('/var/run'); } catch { /* absent */ }
+  sockets.push(tmp);
+  const scratch = [tmp];
+  for (const d of SCRATCH_DIRS) {
+    let r = '';
+    try { r = fs.realpathSync.native(d); if (!fs.statSync(r).isDirectory()) continue; } catch { continue; }
+    if ([...sockets, ...scratch].some((m) => isWithin(r, m) || isWithin(m, r))) continue;
+    scratch.push(r);
+  }
+  return { run, tmp, scratch, sockets, all: [...sockets.filter((d) => d !== tmp), ...scratch] };
 }
+/** World-writable scratch dirs the host shares, masked like /tmp (v0.34.0, ib4k row 8). */
+const SCRATCH_DIRS = Object.freeze(['/var/tmp', '/dev/shm']);
 
 /**
  * $HOME when it is strictly beneath /tmp (a sandbox's throwaway home), else ''. Never the
@@ -2453,11 +2472,11 @@ function throwawayHome(pwHome) {
   if (!h) return '';
   try {
     const real = fs.realpathSync.native(h);
-    const { tmp } = maskedDirs();
+    const { scratch } = maskedDirs();
     let pw = '';
     try { pw = fs.realpathSync.native(pwHome); } catch { /* none */ }
     if (pw && isWithin(pw, real)) return '';
-    return real !== tmp && isWithin(real, tmp) ? real : '';
+    return scratch.some((t) => real !== t && isWithin(real, t)) ? real : '';
   } catch { return ''; }
 }
 
@@ -2895,10 +2914,13 @@ export function hiddenGaps(mounts, hidden, keeps) {
  * (so visible to the caller already), never a parent; the hides themselves and our /tmp mask are
  * not carried (the fresh call re-makes them); nothing at all without the proof.
  * ⚠ Facts beyond the mount table (a lo-only netns, a mapped uid_map) are the caller's to add.
- * @param {MountRow[]} mounts @param {string} home realpath'd @param {string[]} masked maskedDirs().all
- * @param {string} tmp maskedDirs().tmp @returns {{p: string, rw: boolean}[] | null}
+ * @param {MountRow[]} mounts @param {string} home realpath'd @param {string[]} masked the dirs whose
+ *   MASK proves the outer call (maskedDirs().sockets: /run, /tmp)
+ * @param {string | string[]} tmp the SCRATCH dirs re-binds are carried from (maskedDirs().scratch;
+ *   a single string = /tmp alone, as before v0.34) @returns {{p: string, rw: boolean}[] | null}
  */
 export function outerRebinds(mounts, home, masked, tmp) {
+  const scratch = Array.isArray(tmp) ? tmp : [tmp];
   const ours = (/** @type {MountRow|null} */ m, /** @type {string} */ src) => !!m && m.fstype === 'tmpfs' && m.source === src;
   if (!home || masked.length === 0 || !masked.every((d) => ours(resolveMount(mounts, d), MASK_SOURCE))) return null;
   const atHome = resolveMount(mounts, home);
@@ -2906,7 +2928,7 @@ export function outerRebinds(mounts, home, masked, tmp) {
   /** @type {{p: string, rw: boolean}[]} */
   const out = [];
   for (const m of mounts) {
-    const under = (isWithin(m.at, home) && m.at !== home) || (isWithin(m.at, tmp) && m.at !== tmp);
+    const under = (isWithin(m.at, home) && m.at !== home) || scratch.some((t) => isWithin(m.at, t) && m.at !== t);
     if (!under || m.source === HIDE_SOURCE || m.source === MASK_SOURCE) continue;
     if (resolveMount(mounts, m.at)?.id !== m.id) continue; // shadowed, or stacked over: not visible here
     if (!out.some((o) => o.p === m.at)) out.push({ p: m.at, rw: !m.opts.includes('ro') });
@@ -2973,7 +2995,7 @@ function makeTreeReadOnly(root, rbindFirst) {
  * @returns {{binds: Bind[], exempt: string[], notes: string[], usage?: string, refuse?: string}}
  */
 function planKeeps(explicit, implicit, prot, explicitRo = []) {
-  const { tmp, all } = maskedDirs();
+  const { scratch, all } = maskedDirs();
   // ⚠ The roots hold the PASSWD home, not $HOME: os.homedir() honours $HOME, and an arm's
   // throwaway HOME under a kept scratch dir is exactly what a keep is for (measured: the
   // `--scratch` gate's layout was refused by the $HOME reading).
@@ -3000,7 +3022,7 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
             + 'test-owned directory beneath it' };
         }
         // e.g. cwd '/': nothing beneath it needs re-exposing
-      } else if (m !== tmp && isWithin(real, m)) {
+      } else if (!scratch.includes(m) && isWithin(real, m)) {
         const why = `${k.label} is beneath ${m}, where host sockets live, and cannot be re-exposed `
           + 'without re-exposing them';
         return k.explicit ? { binds, exempt, notes, usage: why } : { binds, exempt, notes, refuse: why };
@@ -3054,7 +3076,7 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
     const underRoot = prot.roots.some((r) => isWithin(real, r));
     const underHidden = prot.hidden.some((h) => isWithin(real, h));
     const keepRo = k.explicit && !k.rw;
-    if ((isWithin(real, tmp) && real !== tmp) || underHome || (underRoot && k.rw) || underHidden || (keepRo && !underRoot)) {
+    if (scratch.some((t) => isWithin(real, t) && real !== t) || underHome || (underRoot && k.rw) || underHidden || (keepRo && !underRoot)) {
       binds.push({ p: real, rw: k.rw, label: k.label, named: k.named });
     }
     if (k.explicit && k.rw) exempt.push(real);
@@ -3148,8 +3170,8 @@ function mountOrWhy(argv, what, redact = []) {
  * @returns {string} '' on success, else the reason
  */
 function maskSocketDirs(binds, roots, hidden = [], home = '') {
-  const { run, tmp, all } = maskedDirs();
-  const opts = (/** @type {string} */ d) => (d === tmp ? 'mode=1777' : 'mode=0755') + ',nosuid,nodev';
+  const { run, scratch, all } = maskedDirs();
+  const opts = (/** @type {string} */ d) => (scratch.includes(d) ? 'mode=1777' : 'mode=0755') + ',nosuid,nodev';
   const cover = (/** @type {string} */ d) => mountOrWhy(['-t', 'tmpfs', '-o', opts(d), MASK_SOURCE, d],
     `cover ${d} with a fresh tmpfs`);
   const stage = path.join(run, '.webctl-keep');
@@ -3163,7 +3185,7 @@ function maskSocketDirs(binds, roots, hidden = [], home = '') {
     else { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, '', { flag: 'wx' }); }
   };
   try {
-    for (const d of all.filter((x) => x !== tmp)) { const e = cover(d); if (e) return e; }
+    for (const d of all.filter((x) => !scratch.includes(x))) { const e = cover(d); if (e) return e; }
     fs.mkdirSync(stage);
     const isDir = binds.map((b) => fs.statSync(b.p).isDirectory());
     for (const [i, b] of binds.entries()) {
@@ -3179,8 +3201,8 @@ function maskSocketDirs(binds, roots, hidden = [], home = '') {
       const e = makeTreeReadOnly(r, true);
       if (e) return `${e.split(r).join('<path>')} — a sensitive home directory would stay WRITABLE`;
     }
-    const e = cover(tmp);
-    if (e) return e;
+    // ⛔ the SCRATCH dirs last (/tmp, /var/tmp, /dev/shm): a keep beneath one was staged above
+    for (const d of scratch) { const e = cover(d); if (e) return e; }
     // outer before inner; at one path the hide first, so a keep exactly there lands on top
     const ops = [...binds.map((b, i) => ({ p: b.p, i })), ...hides.map((h) => ({ p: h, i: -1 }))]
       .sort((x, y) => x.p.length - y.p.length || Number(y.i < 0) - Number(x.i < 0));
@@ -3617,6 +3639,13 @@ function kernelInsideProof() {
   // ⛔ VERSION SKEW: a ≤ v0.32.0 outer records no WEBCTL_HIDDEN_DIRS (and hides nothing). If that
   // is the ONLY failing fact, say what it is — still refused, never "inherited" as if hidden.
   const outerTooOld = process.env[HIDDEN_ENV] === undefined && fails.length === 1;
+  // ⛔ …and a v0.33 outer masks /tmp but not /var/tmp or /dev/shm (v0.34.0, ib4k row 8): when THAT is
+  // the only failing fact, say so — refused all the same (the command would see the host's scratch)
+  const newScratch = maskedDirs().scratch.filter((d) => d !== maskedDirs().tmp);
+  if (!outerTooOld && fails.length === 1 && unmasked.length > 0 && unmasked.every((d) => newScratch.includes(d))) {
+    fails[0] = `the OUTER \`isolated\` is older than v0.34.0: ${unmasked.join(' and ')} ${unmasked.length > 1 ? 'are' : 'is'} the `
+      + 'HOST\'s there (no private tmpfs), and a nested call cannot mask them for its caller — upgrade the outer one to v0.34.0 or later';
+  }
   if (outerTooOld) {
     fails[0] = `the OUTER \`isolated\` is older than v0.33.0: it recorded no ${HIDDEN_ENV} and did not hide the `
       + 'home, and a nested call cannot hide it after the fact — upgrade the outer one (the base checkout running '

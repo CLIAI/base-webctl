@@ -454,6 +454,13 @@ const HOST_MNT = fs.readlinkSync('/proc/self/ns/mnt');
  * @param {string} recorded @param {string[]} [prefix] @param {string} [recordedMnt]
  * @param {Record<string,string>} [extraEnv]
  */
+/**
+ * The v0.34 scratch masks a fixture's fake OUTER sandbox needs (ib4k row 8): our tmpfs on /var/tmp
+ * and /dev/shm, where they exist — the nesting proof requires them since v0.34.0.
+ */
+const SCRATCH_MASKS = ' && { [ ! -d /var/tmp ] || mount -t tmpfs webctl-isolated /var/tmp; }'
+  + ' && { [ ! -d /dev/shm ] || mount -t tmpfs webctl-isolated /dev/shm; }';
+
 async function nestedAttempt(recorded, prefix = [], recordedMnt, extraEnv = {}) {
   const argv = [...prefix, process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
     'console.log("RAN-" + "MARKER")'];
@@ -1088,6 +1095,66 @@ test('⛔ keep refusals: /tmp, /run, an ancestor of them, a path under /run, $HO
     assert.equal((await run(['isolated', '--keep', '--', 'true'])).status, 3, '--keep without a value');
     assert.equal((await run(['isolated', '--bogus', '--', 'true'])).status, 3, 'an unknown option');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── /var/tmp and /dev/shm: private like /tmp (v0.34.0, ib4k §1 row 8) ──────
+//
+// ⛔ Measured open in v0.33: a file planted in the host's /dev/shm or /var/tmp was readable inside,
+// and a write there landed on the host. Each now gets a fresh tmpfs. ⇒ The KEEP RULES are /tmp's
+// (ruled in ib4k §1 row 8): a keep BENEATH one is re-bound (writable, or read-only for --keep-ro);
+// a keep that IS one, or an ancestor, is a usage error; a cwd beneath one works, a cwd AT one fails.
+// The deeper property (planted file absent, writes not visible, fresh/nested/stripped) is row 8 of
+// isolation-arm-table.test.js, run in a throwaway world; these arms touch only test-owned subdirs.
+
+/** Test-owned dirs under each REAL scratch dir that exists here, removed by the caller. */
+const scratchHomes = () => ['/dev/shm', '/var/tmp'].filter((d) => { try { return fs.statSync(d).isDirectory(); } catch { return false; } })
+  .map((d) => fs.mkdtempSync(path.join(d, 'harness-iso-')));
+
+test('⭐ a --keep BENEATH /dev/shm or /var/tmp is re-bound WRITABLE (the write lands on the host), --keep-ro read-only; an UNKEPT sibling is invisible', needsIsolation, async (t) => {
+  const dirs = scratchHomes();
+  if (!dirs.length) { t.skip('SKIP (host): neither /dev/shm nor /var/tmp exists here'); return; }
+  try {
+    for (const d of dirs) {
+      for (const sub of ['rw', 'ro', 'sib']) { fs.mkdirSync(path.join(d, sub)); fs.writeFileSync(path.join(d, sub, 'f'), sub); }
+      const probe = `const fs = require('fs'); const p = require('path'); const d = process.argv[1];
+const o = (f) => { try { const v = f(); return v === undefined ? 'ok' : String(v); } catch (e) { return e.code; } };
+console.log('RW ' + o(() => fs.readFileSync(p.join(d, 'rw', 'f'), 'utf8')) + ' ' + o(() => fs.writeFileSync(p.join(d, 'rw', 'new'), 'x')));
+console.log('RO ' + o(() => fs.readFileSync(p.join(d, 'ro', 'f'), 'utf8')) + ' ' + o(() => fs.writeFileSync(p.join(d, 'ro', 'new'), 'x')));
+console.log('SIB ' + o(() => fs.readFileSync(p.join(d, 'sib', 'f'), 'utf8')));`;
+      const r = await run(['isolated', '--keep', path.join(d, 'rw'), '--keep-ro', path.join(d, 'ro'), '--', process.execPath, '-e', probe, d]);
+      const at = path.dirname(d);
+      assert.equal(r.status, 0, `${at}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout, /^RW rw ok$/m, `${at}: the --keep is not readable+writable inside`);
+      assert.match(r.stdout, /^RO ro EROFS$/m, `${at}: the --keep-ro is not readable-only inside`);
+      assert.match(r.stdout, /^SIB ENOENT$/m, `${at}: an UNKEPT dir in the host's ${at} is visible inside`);
+      assert.equal(fs.readFileSync(path.join(d, 'rw', 'new'), 'utf8'), 'x', `${at}: the --keep write did not land on the host`);
+      assert.equal(fs.existsSync(path.join(d, 'ro', 'new')), false);
+      // CONTROL: on the host the sibling IS there — so ENOENT above is the mask
+      assert.equal(fs.readFileSync(path.join(d, 'sib', 'f'), 'utf8'), 'sib');
+    }
+  } finally { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+test('⛔ a --keep that IS /dev/shm or /var/tmp → usage 3 (it would undo the mask); a cwd AT one → FAIL; a cwd BENEATH one runs', needsIsolation, async (t) => {
+  const dirs = scratchHomes();
+  if (!dirs.length) { t.skip('SKIP (host): neither /dev/shm nor /var/tmp exists here'); return; }
+  try {
+    for (const d of dirs) {
+      const at = path.dirname(d);
+      const k = await run(['isolated', '--keep', at, '--', process.execPath, '-e', 'console.log("RAN-" + "MARKER")']);
+      assert.equal(k.status, 3, `--keep ${at}: ${k.stderr}`);
+      assert.match(k.stderr, /keeping it would undo the masking/);
+      assert.doesNotMatch(k.stdout, /RAN-MARKER/);
+      const c = await run(['isolated', '--', process.execPath, '-e', 'console.log("RAN-" + "MARKER")'], {}, process.execPath, at);
+      assert.equal(c.status, 1, `cwd ${at}: ${c.stderr}`);
+      assert.match(c.stderr, /the working directory is .* itself, which is masked/);
+      assert.doesNotMatch(c.stdout, /RAN-MARKER/);
+      // CONTROL: a cwd BENEATH it is re-bound writable, like one under /tmp
+      const b = await run(['isolated', '--', process.execPath, '-e', 'require("fs").writeFileSync("w.txt", "w")'], {}, process.execPath, d);
+      assert.equal(b.status, 0, `cwd beneath ${at}: ${b.stderr}`);
+      assert.equal(fs.readFileSync(path.join(d, 'w.txt'), 'utf8'), 'w');
+    }
+  } finally { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); }
 });
 
 test('keep-binds: a throwaway HOME under /tmp stays visible inside without --keep (the gate\'s layout)', needsIsolation, async () => {
@@ -2070,7 +2137,7 @@ test('⛔ nesting: every OLD fact satisfied (netns, mntns, our tmpfs on /run+/tm
   // What the PREVIOUS `isolated` produced: a full mask, no read-only home.
   const stage = 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
     + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
-    + ' && mount -t tmpfs webctl-isolated /tmp && mkdir -p "$0" && mount --move /run/k "$0" && exec "$@"';
+    + ' && mount -t tmpfs webctl-isolated /tmp' + SCRATCH_MASKS + ' && mkdir -p "$0" && mount --move /run/k "$0" && exec "$@"';
   const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage, ROOT],
     'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: '[]' });
   assert.equal(r.status, 2, r.stdout + r.stderr);
@@ -2335,7 +2402,7 @@ test('⛔ STRIPPED markers inside `isolated` → the call isolates AGAIN, fully 
   const inner = (r.stdout.match(/^INNER (\S+)$/m) || [])[1];
   assert.ok(inner && inner !== outer, `the stripped call did not make its own network namespace (only inherited):\n${r.stdout}`);
   assert.match(r.stdout, /^PROOF-OK$/m, `the kernel proof failed after a stripped re-isolation:\n${r.stderr}`);
-  assert.match(r.stderr, /^isolated: home HIDDEN; .*; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, keeping what the outer call re-bound \(same modes\)( — WEBCTL_ISOLATED_VERBOSE=1 lists every path)?$/m, r.stderr);
+  assert.match(r.stderr, /^isolated: home HIDDEN; .*; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, keeping what the outer call re-bound \(same modes\); backend: unshare( — WEBCTL_ISOLATED_VERBOSE=1 lists every path)?$/m, r.stderr);
   // CONTROL: from the host the verdict does not claim it
   const c = await run(['isolated', '--', 'true']);
   assert.equal(c.status, 0, c.stderr);
@@ -2942,7 +3009,7 @@ test('⭐ ARM: a host process this test started → kill(pid, 0) is ESRCH inside
 test('⛔ nesting: every other fact satisfied (full mask, ro home) but the HOST PID namespace → refused by the pid fact alone', needsIsolation, async () => {
   const stage = 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
     + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
-    + ' && mount -t tmpfs webctl-isolated /tmp && mkdir -p "$0" && mount --move /run/k "$0"'
+    + ' && mount -t tmpfs webctl-isolated /tmp' + SCRATCH_MASKS + ' && mkdir -p "$0" && mount --move /run/k "$0"'
     + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift && exec "$@"';
   const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--propagation=private', 'sh', '-c', stage, ROOT, PW_HOME],
     'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: fs.readlinkSync('/proc/self/ns/pid'),
@@ -2954,11 +3021,29 @@ test('⛔ nesting: every other fact satisfied (full mask, ro home) but the HOST 
   assert.equal(r.ran, false, 'a namespace sharing the host PIDs was accepted as `isolated`');
 });
 
+test('⛔ VERSION SKEW (v0.34): every v0.33 fact satisfied but /var/tmp and /dev/shm NOT masked → refused rc 2 saying "upgrade the outer", nothing run — CONTROL: masked, it runs', needsIsolation, async () => {
+  const stage = (/** @type {boolean} */ scratch) => 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
+    + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
+    + ` && mount -t tmpfs webctl-isolated /tmp${scratch ? SCRATCH_MASKS : ''} && mkdir -p "$0" && mount --move /run/k "$0"`
+    + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift && exec "$@"';
+  const env = { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: '[]',
+    WEBCTL_HOST_IDS: JSON.stringify({ uid: process.getuid?.(), gid: process.getgid?.() }) };
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(false), ROOT, PW_HOME],
+    'mnt:[1]', env);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /the OUTER `isolated` is older than v0\.34\.0: .*(\/var\/tmp|\/dev\/shm).* the HOST's there .* upgrade the outer one to v0\.34\.0/);
+  assert.equal(r.ran, false, 'a nested call ran with the host\'s /dev/shm and /var/tmp');
+  const c = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(true), ROOT, PW_HOME],
+    'mnt:[1]', env);
+  assert.doesNotMatch(c.stderr, /older than v0\.34|REFUSED/, `CONTROL: with the scratch masks the proof should pass:\n${c.stderr}`);
+  assert.equal(c.ran, true, `CONTROL: with the scratch masks the nested call should RUN:\n${c.stdout}${c.stderr}`);
+});
+
 test('⛔ nesting: every other fact satisfied (full mask, ro home, own PIDs) but a recorded hidden dir NOT masked → refused by the hidden fact alone — CONTROL: masked, that fact passes', needsIsolation, async () => {
   const dir = homeTmpdir(); // stands in for ~/.ssh: only its PATH is recorded and mounted on, in a throwaway mount ns
   const stage = (/** @type {boolean} */ hide) => 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
     + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
-    + ' && mount -t tmpfs webctl-isolated /tmp && mkdir -p "$0" && mount --move /run/k "$0"'
+    + ' && mount -t tmpfs webctl-isolated /tmp' + SCRATCH_MASKS + ' && mkdir -p "$0" && mount --move /run/k "$0"'
     + (hide ? ' && mount -t tmpfs -o ro webctl-isolated-hidden "$2"' : '')
     + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift 2 && exec "$@"';
   const env = { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: JSON.stringify([dir]) };
