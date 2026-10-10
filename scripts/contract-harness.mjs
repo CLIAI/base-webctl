@@ -400,7 +400,7 @@ function checkNoRevendor(repo, sub, libDir) {
     // copy under either (the copy reads the same two ways).
     for (const h of analyse(fs.readFileSync(abs, 'utf8')).hashes) if (!byHash.has(h)) byHash.set(h, rel);
     const list = byName.get(path.basename(abs)) || [];
-    list.push({ rel, real: fs.realpathSync(abs) });
+    list.push({ rel, real: fs.realpathSync.native(abs) });
     byName.set(path.basename(abs), list);
   }
 
@@ -430,10 +430,10 @@ function checkNoRevendor(repo, sub, libDir) {
 
   /** realpath of base's top-level barrel, if it has one — see (2b). */
   let baseIndex = '';
-  try { baseIndex = fs.realpathSync(path.join(baseLib, 'index.js')); } catch { /* no barrel */ }
+  try { baseIndex = fs.realpathSync.native(path.join(baseLib, 'index.js')); } catch { /* no barrel */ }
   /** @type {string[]} the submodule, lexically and through symlinks */
   const subRoots = [subAbs];
-  try { subRoots.push(fs.realpathSync(subAbs)); } catch { /* absent: lexical only */ }
+  try { subRoots.push(fs.realpathSync.native(subAbs)); } catch { /* absent: lexical only */ }
 
   /** @type {{local:string, base:string, how:string}[]} */
   const found = [];
@@ -564,7 +564,7 @@ function resolveSpec(abs, s) {
   const p = path.resolve(path.dirname(abs), s);
   for (const cand of [p, `${p}.js`, `${p}.mjs`, `${p}.cjs`, path.join(p, 'index.js')]) {
     try {
-      if (fs.statSync(cand).isFile()) return fs.realpathSync(cand);
+      if (fs.statSync(cand).isFile()) return fs.realpathSync.native(cand);
     } catch { /* next candidate */ }
   }
   return '';
@@ -2325,7 +2325,7 @@ async function runIsolatedInner(a) {
  * @returns {{run: string, tmp: string, all: string[]}}
  */
 function maskedDirs() {
-  const real = (/** @type {string} */ p) => { try { return fs.realpathSync(p); } catch { return p; } };
+  const real = (/** @type {string} */ p) => { try { return fs.realpathSync.native(p); } catch { return p; } };
   const run = real('/run');
   const tmp = real('/tmp');
   const all = [run];
@@ -2343,10 +2343,10 @@ function throwawayHome(pwHome) {
   const h = process.env.HOME;
   if (!h) return '';
   try {
-    const real = fs.realpathSync(h);
+    const real = fs.realpathSync.native(h);
     const { tmp } = maskedDirs();
     let pw = '';
-    try { pw = fs.realpathSync(pwHome); } catch { /* none */ }
+    try { pw = fs.realpathSync.native(pwHome); } catch { /* none */ }
     if (pw && isWithin(pw, real)) return '';
     return real !== tmp && isWithin(real, tmp) ? real : '';
   } catch { return ''; }
@@ -2364,7 +2364,7 @@ function pathEntriesUnder(home) {
   for (const [i, d] of String(process.env.PATH || '').split(':').entries()) {
     if (!path.isAbsolute(d)) continue;
     let real = '';
-    try { real = fs.realpathSync(d); } catch { continue; }
+    try { real = fs.realpathSync.native(d); } catch { continue; }
     if (home && isWithin(real, home)) out.push({ p: real, n: i + 1 });
   }
   return out;
@@ -2390,7 +2390,8 @@ function pathEntriesUnder(home) {
  * repo: hidden → 11 entries visible; the verdict said only "xq's root"). ⇒ `ignored` (a LABEL, no
  * path) when (a) the PATH entry, any link of the symlink chain (walked hop by hop) or the real
  * file lies — lexically or really — within `writable` (the cwd, every --keep / --keep-ro, /tmp,
- * TMPDIR, /var/tmp, /dev/shm, a throwaway HOME, the outer call's writable re-binds), or (b) the
+ * TMPDIR, /var/tmp, /dev/shm, a throwaway HOME, the outer call's writable re-binds; relative ones
+ * resolved) or in a dir OUTSIDE the home the caller can write (access W_OK), or (b) the
  * real file is not named exactly `xq`: a mutant cannot create files outside its writable dirs,
  * so it can only point at an existing file — and one named `xq` is xq's checkout or nothing.
  * The FIRST `xq` on PATH is judged, never skipped past: it is the one the command would run.
@@ -2403,24 +2404,34 @@ function xqRoot(home, hideRule, writable) {
   const none = { p: '', why: '', ignored: '' };
   /** @type {string[]} */ const spots = [];
   for (const w of writable) {
-    if (!w || !path.isAbsolute(w)) continue;
-    spots.push(path.resolve(w));
-    try { spots.push(fs.realpathSync(w)); } catch { /* absent: its lexical path is enough */ }
+    if (!w) continue;
+    // ⛔ a RELATIVE entry (`--keep ../x`, a relative TMPDIR) is writable all the same: planKeeps binds
+    // path.resolve() of it (review F1, round 4 — it used to be skipped)
+    const a = path.resolve(w);
+    spots.push(a);
+    try { spots.push(fs.realpathSync.native(a)); } catch { /* absent: its lexical path is enough */ }
   }
+  // ⛔ and any dir OUTSIDE the home the caller can write (a user-owned /opt/x): the command runs as
+  // the real uid, with everything outside the home as on the host (review F3, round 4)
   const writableAt = (/** @type {string} */ d) => {
     let r = d;
-    try { r = fs.realpathSync(d); } catch { /* lexical only */ }
-    return spots.some((s) => isWithin(d, s) || isWithin(r, s));
+    try { r = fs.realpathSync.native(d); } catch { /* lexical only */ }
+    if (spots.some((s) => isWithin(d, s) || isWithin(r, s))) return true;
+    try { if (!isWithin(r, home)) { fs.accessSync(r, fs.constants.W_OK); return true; } } catch { /* not writable */ }
+    return false;
   };
+  // ⛔ paths are joined RAW, never normalised: after a symlink, `..` is resolved by the kernel
+  // (physically), and path.join/resolve would judge a different file than execvp runs (review F4)
+  const join = (/** @type {string} */ d, /** @type {string} */ t) => (path.isAbsolute(t) ? t : `${d.replace(/\/+$/, '')}/${t}`);
   let found = '';
   for (const d of String(process.env.PATH || '').split(':')) {
     if (!path.isAbsolute(d)) continue;
-    const c = path.join(d, 'xq');
+    const c = join(d, 'xq');
     try { if (fs.statSync(c).isFile()) { fs.accessSync(c, fs.constants.X_OK); found = c; break; } } catch { /* next */ }
   }
   if (!found) return none;
   let real = '';
-  try { real = fs.realpathSync(found); } catch { return none; }
+  try { real = fs.realpathSync.native(found); } catch { return none; }
   if (!home || !isWithin(real, home)) return none;
   let ignored = '';
   // (a) every hop: the PATH entry, each link's own dir, and the last hop — the real file's dir (realpath'd)
@@ -2429,7 +2440,7 @@ function xqRoot(home, hideRule, writable) {
     let st;
     try { st = fs.lstatSync(cur); } catch { break; }
     if (!st.isSymbolicLink()) break;
-    try { cur = path.resolve(path.dirname(cur), fs.readlinkSync(cur)); } catch { break; }
+    try { cur = join(path.dirname(cur), fs.readlinkSync(cur)); } catch { break; }
   }
   // (b)
   if (!ignored && path.basename(real) !== 'xq') ignored = 'not named xq';
@@ -2528,7 +2539,7 @@ function realIdentity() {
     let home = '';
     try { home = os.userInfo().homedir; } catch { /* below */ }
     if (!home) return none(noEntry);
-    try { return { uid, gid, home: fs.realpathSync(home), refuse: '' }; } catch {
+    try { return { uid, gid, home: fs.realpathSync.native(home), refuse: '' }; } catch {
       return none('the real user\'s passwd home directory does not exist here, so it cannot be made read-only');
     }
   }
@@ -2551,7 +2562,7 @@ function realIdentity() {
     if (!home) continue;
     entries++;
     try {
-      if (fs.statSync(home).uid === uid) return { ...c, home: fs.realpathSync(home), refuse: '' };
+      if (fs.statSync(home).uid === uid) return { ...c, home: fs.realpathSync.native(home), refuse: '' };
     } catch { /* absent: not accepted */ }
   }
   return none(entries === 0 ? noEntry
@@ -2584,11 +2595,11 @@ function protectedRoots(home) {
   /** @type {{name: string, real: string}[]} */
   const sensitive = [];
   for (const d of SENSITIVE_DOTDIRS) {
-    try { sensitive.push({ name: `~/${d}`, real: fs.realpathSync(path.join(home, d)) }); } catch { /* absent */ }
+    try { sensitive.push({ name: `~/${d}`, real: fs.realpathSync.native(path.join(home, d)) }); } catch { /* absent */ }
   }
   const hideRule = [...new Set(HIDDEN_DIRS.flatMap((d) => {
     const nominal = path.join(home, d);
-    try { return [nominal, fs.realpathSync(nominal)]; } catch { return [nominal]; }
+    try { return [nominal, fs.realpathSync.native(nominal)]; } catch { return [nominal]; }
   }))];
   const { all } = maskedDirs();
   const none = (/** @type {string} */ refuse) => ({ home, roots: [], sensitive, hidden: [], hideRule, refuse });
@@ -2603,7 +2614,7 @@ function protectedRoots(home) {
   }
   /** @type {string[]} */
   const hidden = [];
-  const hideCands = HIDDEN_DIRS.map((d) => { try { return fs.realpathSync(path.join(home, d)); } catch { return ''; } })
+  const hideCands = HIDDEN_DIRS.map((d) => { try { return fs.realpathSync.native(path.join(home, d)); } catch { return ''; } })
     .filter((r) => r && !all.some((m) => isWithin(r, m))).sort((x, y) => x.length - y.length);
   for (const r of hideCands) {
     if (isWithin(home, r) || all.some((m) => isWithin(m, r))) {
@@ -2865,7 +2876,7 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
     ...implicit.map((k) => ({ rule: false, named: false, quiet: false, noHidden: false, ...k, explicit: false }))];
   for (const k of items) {
     let real = '';
-    try { real = fs.realpathSync(path.resolve(k.p)); } catch {
+    try { real = fs.realpathSync.native(path.resolve(k.p)); } catch {
       if (k.explicit) return { binds, exempt, notes, usage: `${k.label} does not exist` };
       continue; // an absent command fails on its own (127), visibly
     }
@@ -3725,7 +3736,7 @@ async function checkGuardLivePort(a) {
  * import.meta.url is the resolved one.
  */
 function isEntryScript() {
-  try { return !!process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(SELF); } catch { return false; }
+  try { return !!process.argv[1] && fs.realpathSync.native(process.argv[1]) === fs.realpathSync.native(SELF); } catch { return false; }
 }
 // ⚠ Body deliberately NOT re-indented: keeps this guard a two-line diff against
 // concurrent edits to the dispatch.

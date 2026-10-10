@@ -1291,6 +1291,44 @@ under the home>/<an executable>`; the NEXT run re-binds that repo's whole git ro
   the /tmp case. A separate final-file-dir check was REMOVED: its sabotage passed — the walk's
   last hop realpaths that same dir.
 
+### ⛔ xqRoot: three more writable places, and `..` judged as the kernel resolves it (review round 4, F1/F3/F4)
+
+* **F1 — a RELATIVE `--keep`** (`--keep ../sibling`) was skipped (`!path.isAbsolute(w)`) while
+  planKeeps binds `path.resolve()` of it read-write: a planted `sibling/bin/xq` on PATH passed.
+  ⇒ every non-empty entry is `path.resolve`d (and realpath'd). The audit found one more of the
+  same: a relative `TMPDIR` (os.tmpdir() returns it as given) — covered by the same change.
+* **F3 — the list was fixed.** A user-owned dir outside the home (`/opt/x`, `/mnt/data`) is
+  writable inside exactly as on the host: the command runs as the real uid and nothing outside
+  the home is re-mounted. ⇒ a hop dir whose REAL path is outside the home and passes
+  `access(W_OK)` counts as writable. Inside the home access() would say yes to everything, so
+  there the list still decides (the home is hidden; only the listed re-binds are writable).
+  ⚠ Under an outer `unshare -r` access() runs as the namespace root: it over-approximates
+  (a user-owned 0555 dir counts as writable) — the safe direction.
+* **F4 — lexical `..`.** `path.join(d, 'xq')` and `path.resolve(dirname, readlink())` normalise
+  `..` lexically; the kernel resolves it AFTER following the link before it. So
+  `~/.local/bin/xq -> sym/../xq` with `sym -> /tmp/w/d` was judged as ITSELF (64 hops of the
+  same non-writable dir) while execvp ran `/tmp/w/xq`. ⇒ the chain is joined RAW (`join`) and
+  each hop dir is realpath'd, so the kernel does the `..`. Same for a PATH entry with `..`.
+* ⛔ **Found on the way: Node's JS `fs.realpathSync` HANGS on such a link.** It also resolves
+  `..` lexically, so `sym/../xq` resolves to itself — forever, in a sync loop (no signal, no
+  diagnostic report fires). Measured: the F4 arm's harness spun at 100% CPU until killed;
+  `fs.realpathSync.native` (libc realpath) returns the right file at once. A run could plant
+  such a link in the writable `node_modules/.bin` and hang every later `isolated` before it ran
+  anything. ⇒ all 18 call sites use `.native` — every one feeds a mount path or a judgement
+  that must match what the kernel does.
+* **Not added: a separate check of `dirname(realpath(xq))`.** With the walk physical, its last
+  hop IS that dir (realpath'd) — the check is redundant, and its sabotage already passed once
+  (previous section).
+* **Arms** (4 new cases in the planted-xq table, each with the legitimate-shape CONTROL): a
+  relative `--keep ../sibling`; a tmpfs over `/mnt` in the throwaway namespace (owned by the
+  mapped real uid); a link target `sym/../xq` through a symlink into /tmp; a PATH entry
+  `<…>/sym/..`. **Before: the first three `SECRET-READ ok`** (the repo re-bound), the third by
+  killing a hung harness; the fourth judged a file that does not exist (no note). After: all
+  `ENOENT` + `xq ignored: found in a writable location`.
+* **Sabotage (all caught):** relative entries skipped again → the relative case; the access()
+  rule off → the /mnt case; the walk and the PATH join normalised again → both `..` cases;
+  `.native` reverted → the link-target case HANGS (test timeout).
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
