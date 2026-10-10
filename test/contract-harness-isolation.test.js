@@ -2436,6 +2436,32 @@ test('⛔ STRIPPED markers: an outer --keep strictly INSIDE a hidden dir (~/.ssh
   } finally { for (const d of [home, scratch]) fs.rmSync(d, { recursive: true, force: true }); }
 });
 
+// ⛔ Review F2 (v0.33.0, round 4): with ~/.ssh a SYMLINK (dotfiles) to a dir elsewhere under the home,
+// an outer `--keep ~/.ssh/sub` is bound at its REAL path. Inside, the hidden home makes ~/.ssh
+// unresolvable, so hideRule held only the nominal path and the carry kept `sub` writable, silently.
+// The recorded WEBCTL_HIDDEN_DIRS cannot help: it is stripped with the rest of the markers.
+test('⛔ STRIPPED markers: an outer --keep beneath a SYMLINKED ~/.ssh (bound at its real path) is NOT carried — CONTROL: an outer keep outside the hidden dirs still is', needsIsolation, async (t) => {
+  const home = homeTmpdir();
+  const subs = [path.join(home, 'dotfiles', 'ssh', 'sub'), path.join(home, 'plain')];
+  for (const d of subs) { fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'f'), 'x'); }
+  fs.symlinkSync(path.join('dotfiles', 'ssh'), path.join(home, '.ssh'));
+  const scratch = tmpdir(); // the inner call's cwd: kept by the outer, NOT under the home
+  try {
+    const r = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--keep', path.join(home, '.ssh', 'sub'), '--keep', subs[1],
+      '--keep', scratch, '--', 'sh', '-c', `"$0" -e "$3" "$4" "$5"; echo INNER; cd "$1" && env ${STRIP} "$0" "$2" isolated -- "$0" -e "$3" "$4" "$5"`,
+      process.execPath, scratch, TOOL, KEPT_PROBE, ...subs]);
+    if (!r) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stderr, /ALREADY INSIDE an isolated namespace whose markers were stripped/, 'premise: the inner call took the fresh path');
+    const [outerOut, innerOut] = r.stdout.split(/^INNER$/m);
+    assert.match(outerOut, /^KEPT 0 ok\nKEPT 1 ok$/m, `premise: the OUTER call re-bound both:\n${r.stdout}${r.stderr}`);
+    assert.match(innerOut || '', /^KEPT 0 ENOENT\nKEPT 1 ok$/m,
+      `an outer re-bind beneath a symlinked hidden dir was carried (or the control was not):\n${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /^isolated: note: 1 outer re-bind\(s\) AT or WITHIN a hidden dir .* not carried/m, r.stderr);
+    assert.ok(!r.stderr.split('\n').filter((l) => /not carried/.test(l)).join('\n').includes(home), `the note printed a path:\n${r.stderr}`);
+  } finally { for (const d of [home, scratch]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
 test('CONTROL: NOT nested, a mount under the home is NOT re-bound (nothing is carried without the kernel\'s proof of an outer sandbox)', needsIsolation, async (t) => {
   const home = fakeSecretHome();
   try {

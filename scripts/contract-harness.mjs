@@ -1996,8 +1996,11 @@ function runIsolated(a) {
   const outer = mi && extraInterfaces() === 0 && uidMapKind() === 'mapped' ? outerRebinds(mi, prot.home, maskedAll, maskedTmp) : null;
   // ⛔ AT or WITHIN a hidden dir: not carried. Equality alone (≤ review F2) dropped `--keep ~/.ssh`
   // with a note but carried an outer `--keep ~/.ssh/<sub>` WRITABLE, silently. Only THIS call's
-  // own explicit --keep may re-expose a hidden dir.
-  const inHidden = (/** @type {{p: string}} */ b) => prot.hideRule.some((h) => isWithin(b.p, h));
+  // own explicit --keep may re-expose a hidden dir. ⛔ "hidden" includes every hide the OUTER call
+  // mounted below the home (round 4, F2): a SYMLINKED ~/.ssh cannot be realpath'd in here, and the
+  // recorded HIDDEN_ENV is stripped with the other markers — the mount table is what is left.
+  const outerHides = outer ? (mi || []).filter((m) => m.fstype === 'tmpfs' && m.source === HIDE_SOURCE && m.at !== prot.home).map((m) => m.at) : [];
+  const inHidden = (/** @type {{p: string}} */ b) => [...prot.hideRule, ...outerHides].some((h) => isWithin(b.p, h));
   const atHidden = (outer || []).filter(inHidden).length;
   const carried = (outer || []).filter((b) => !inHidden(b)).filter((b) => {
     try { const st = fs.statSync(b.p); return st.isDirectory() || st.isFile(); } catch { return false; } // not a /dev/null cover
@@ -3027,9 +3030,12 @@ function mountOrWhy(argv, what, redact = []) {
  * ⛔ THE HIDES go in the SAME outer-before-inner sequence as the keeps moving back (a hide before
  * a keep at the same path): an empty tmpfs (mode HIDE_MODE, 0755 — read-only by its MOUNT), the MISSING mount points of the keeps
  * beneath it created in it, then remounted READ-ONLY. The HOME is always hidden; a hidden dir
- * under it only where a re-bind CONTAINS it (elsewhere the home's tmpfs already hides it), and
- * one outside the home always. ⇒ a keep CONTAINING a hidden dir is covered there again; a keep
- * AT or BENEATH one lands on top of it and shows only itself.
+ * under it only where a re-bind CONTAINS it or lies strictly BENEATH it (elsewhere the home's tmpfs
+ * already hides it), and one outside the home always. ⇒ a keep CONTAINING a hidden dir is covered
+ * there again; a keep AT or BENEATH one lands on top of it and shows only itself.
+ * ⛔ BENEATH too (review F2, round 4): the hide's mount is the only record of a hidden dir that
+ * survives into a nested call with stripped markers — there the home is hidden, so a SYMLINKED
+ * ~/.ssh cannot be realpath'd, and its real path is known only from this mount (runIsolated).
  * ⚠ A mount point is created only when MISSING: should a hide's tmpfs silently not be there,
  * an existing FILE at a keep's path is the REAL file, and writing '' would truncate it.
  * @param {Bind[]} binds @param {string[]} roots @param {string[]} [hidden] @param {string} [home]
@@ -3042,7 +3048,7 @@ function maskSocketDirs(binds, roots, hidden = [], home = '') {
     `cover ${d} with a fresh tmpfs`);
   const stage = path.join(run, '.webctl-keep');
   const hides = [...(home ? [home] : []),
-    ...hidden.filter((h) => !home || !isWithin(h, home) || binds.some((b) => b.p !== h && isWithin(h, b.p)))];
+    ...hidden.filter((h) => !home || !isWithin(h, home) || binds.some((b) => b.p !== h && (isWithin(h, b.p) || isWithin(b.p, h))))];
   const secret = [...binds.map((b) => b.p), ...roots, ...hidden, ...(home ? [home] : [])].sort((x, y) => y.length - x.length);
   /** @param {string} p @param {boolean} dir create a mount point only where there is none */
   const mountPoint = (p, dir) => {

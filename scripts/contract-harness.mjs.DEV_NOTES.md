@@ -1329,6 +1329,25 @@ under the home>/<an executable>`; the NEXT run re-binds that repo's whole git ro
   rule off → the /mnt case; the walk and the PATH join normalised again → both `..` cases;
   `.native` reverted → the link-target case HANGS (test timeout).
 
+### ⛔ A keep beneath a SYMLINKED hidden dir was carried writable (review round 4, F2)
+
+With `~/.ssh -> dotfiles/ssh` (inside the home), an outer `--keep ~/.ssh/sub` is bound at its
+REAL path `~/dotfiles/ssh/sub`. In the stripped-markers call the home is hidden, so
+`realpath(~/.ssh)` fails, hideRule holds only the nominal `~/.ssh`, and the carry kept `sub`
+WRITABLE, silently. The review's suggested source — the recorded `WEBCTL_HIDDEN_DIRS` — does
+not help: this path runs only because the markers were stripped, and that var is one of them.
+* ⇒ the record comes from the KERNEL: the outer now also mounts its hide tmpfs on a hidden dir
+  under the home that a re-bind lies strictly BENEATH (before: only one a re-bind CONTAINS).
+  The keep lands on top, so the outer's command sees exactly what it saw (the dir holding only
+  the keep). The nested call reads every `HIDE_SOURCE` mount below the home from mountinfo
+  (`outerHides`, only once `outer` proved the outer call) and drops carries at or within them,
+  with the same `AT or WITHIN a hidden dir` note.
+* **Arm** (fake home, `.ssh -> dotfiles/ssh`; outer `--keep ~/.ssh/sub --keep ~/plain`; inner
+  stripped): before, inner `KEPT 0 ok`; after `KEPT 0 ENOENT`, CONTROL `KEPT 1 ok`, the note
+  with `1`, no path. The non-symlinked `~/.ssh/sub` arm (previous round) stays green.
+* **Sabotage (both caught):** the carry ignoring `outerHides` → the arm; the outer's hide only
+  where a re-bind CONTAINS the dir (as before) → the arm (nothing in mountinfo to read).
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
