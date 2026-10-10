@@ -1177,6 +1177,11 @@ the trap by up to 100 ms).
   run ⇒ a false pass ≈ 0.6^12); a logic arm drives forwardSignalsPastUnshare (exported) with a
   real, childless stand-in for unshare: after `started` nothing is killed and it is not early;
   CONTROL before `started`: SIGKILL, early.
+* ⚠ **The invariant it rests on (review F4), now stated at `LATE.cli = true`:** every verb ends
+  in `process.exit`, one forwarder per process — so the no-op listeners live only while the
+  process is exiting. A future LONG-LIVED verb must clear `LATE.cli` (or `loudAgain()`) once its
+  forwarder is removed, or it ignores Ctrl-C for the rest of its life. A comment, not an arm:
+  no such verb exists to test.
 * **Sabotage (all caught):** `LATE.cli` off → the TERM ×3 arm (`7 SIGTERM 7 7 SIGTERM SIGTERM`);
   the old "no child ⇒ early" → the logic arm; no `loudAgain()` before a re-raise → the
   early-TERM and Ctrl-C arms (5 red: the harness no longer dies by the signal).

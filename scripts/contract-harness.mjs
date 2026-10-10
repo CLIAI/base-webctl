@@ -3708,6 +3708,13 @@ function isEntryScript() {
 // ⚠ Body deliberately NOT re-indented: keeps this guard a two-line diff against
 // concurrent edits to the dispatch.
 if (isEntryScript()) {
+// ⛔ INVARIANT that makes LATE.cli safe (review F4): every verb below ENDS IN process.exit (the
+// last line), and a process runs at most ONE forwarder at a time (one isolated half per process).
+// So the no-op listeners a removed forwarder leaves behind (quietLateSignals) live only for the
+// last few ticks of a process that is already exiting — a late INT/TERM/HUP is swallowed there,
+// on purpose. ⚠ A future LONG-LIVED verb (a server, a watch loop, anything that keeps running
+// after its child exits) must NOT inherit this: it would ignore Ctrl-C for the rest of its life.
+// Such a verb clears LATE.cli (or calls loudAgain()) once its forwarder is removed.
 LATE.cli = true; // a removed forwarder leaves a no-op listener until exit (quietLateSignals)
 const [, , cmd, ...args] = process.argv;
 const repo = path.resolve(opt(args, 'repo', '.'));
