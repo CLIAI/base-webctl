@@ -1438,12 +1438,38 @@ function installForwarder(send) {
 }
 
 /**
- * Forward termination signals to a child, so killing the harness kills the arm
- * rather than orphaning it. @param {import('node:child_process').ChildProcess} child
- * @returns {Forwarder}
+ * A forwarder installed BEFORE its child exists: a signal that comes first is BUFFERED and
+ * delivered on `attach(child)` (right after the spawn); after that, at once.
+ *
+ * ⛔ Review of 5773fb8, finding 5: the inner half removed its early handler BEFORE runCommand
+ * installed its forwarder, and the pid-1 helper wrote `started` before it had any handler. A
+ * node process with no listener for a signal has its DEFAULT disposition — so a TERM in either
+ * gap killed that half outright: the command, already spawned or about to be, was orphaned and
+ * SIGKILLed with the namespace, its trap never run. ⇒ Every forwarder is made first, then the
+ * spawn, then `attach`. (node dispatches a signal on a later tick, so `pending` is the belt to
+ * that brace: nothing is lost even if the spawn moved off this tick.)
+ * @template C
+ * @param {(s: NodeJS.Signals, child: C) => void} deliver
+ * @returns {Forwarder & {attach: (c: C) => void}}
  */
-function forwardSignals(child) {
-  return installForwarder((s) => { try { child.kill(s); } catch { /* already gone */ } });
+export function forwarderBeforeSpawn(deliver) {
+  /** @type {{c: C} | null} */
+  let to = null;
+  /** @type {NodeJS.Signals[]} */
+  const pending = [];
+  const fwd = installForwarder((s) => { if (to) deliver(s, to.c); else pending.push(s); });
+  return { ...fwd, attach: (c) => { to = { c }; for (const s of pending.splice(0)) deliver(s, c); } };
+}
+
+/**
+ * Forward termination signals to a child (attached after its spawn), so killing the harness
+ * kills the arm rather than orphaning it.
+ * @returns {Forwarder & {attach: (c: import('node:child_process').ChildProcess) => void}}
+ */
+function forwardSignals() {
+  return forwarderBeforeSpawn((s, /** @type {import('node:child_process').ChildProcess} */ child) => {
+    try { child.kill(s); } catch { /* already gone */ }
+  });
 }
 
 /**
@@ -1510,13 +1536,13 @@ function childrenOf(pid) {
  * (the inner side's report on fd 3 — written only once pid 1's traps are certainly in place,
  * because pid 1 started it), a signal SIGKILLs unshare and `--kill-child` takes the namespace
  * with it; `early()` then tells the caller to die by that signal. No child at all ⇒ the same.
- * @param {import('node:child_process').ChildProcess} unshare
+ * Installed BEFORE the spawn (forwarderBeforeSpawn): `attach(unshare)` once it exists.
  * @param {() => boolean} started has the inner side reported `started`?
- * @returns {Forwarder}
+ * @returns {Forwarder & {attach: (c: import('node:child_process').ChildProcess) => void}}
  */
-function forwardSignalsPastUnshare(unshare, started) {
+function forwardSignalsPastUnshare(started) {
   let early = false;
-  const fwd = installForwarder((s) => {
+  const fwd = forwarderBeforeSpawn((s, /** @type {import('node:child_process').ChildProcess} */ unshare) => {
     const kids = unshare.pid ? childrenOf(unshare.pid) : [];
     if (kids.length === 0 || !started()) {
       early = true;
@@ -1575,13 +1601,16 @@ function runPid1(a) {
     return Promise.resolve(report('isolated', EXIT.fail, 'NOT RUN: internal: the command\'s env did not arrive on its pipe — '
       + 'it is never run with the privileged env instead. The command was NOT started.'));
   }
+  // ⛔ the forwarder FIRST (review finding 5): from `started` on the caller forwards to us, and
+  // with no handler node's default disposition would kill us and orphan the command
+  const fwd = forwardSignals();
   if (status) {
     // ⚠ only a pipe/socket is ours: an fd 3 node opened for itself must never be written to
     let ours = false;
     try { const st = fs.fstatSync(3); ours = st.isSocket() || st.isFIFO(); } catch { /* absent */ }
-    // ⛔ BEFORE the command starts, so it never inherits fd 3. Our handlers are installed in the
-    // same tick as the spawn below, and pid 1 (bash) trapped its signals before starting us —
-    // so from `started` on, a forwarded signal is HEARD (forwardSignalsPastUnshare).
+    // ⛔ BEFORE the command starts, so it never inherits fd 3. Our forwarder is installed ABOVE
+    // (before this write), and pid 1 (bash) trapped its signals before starting us — so from
+    // `started` on, a forwarded signal is HEARD, and buffered until the command exists.
     if (ours) {
       try { fs.writeSync(3, 'started\n'); } catch { /* the caller then never sees `started` */ }
       try { fs.closeSync(3); } catch { /* already gone */ }
@@ -1589,7 +1618,7 @@ function runPid1(a) {
   }
   return new Promise((resolve) => {
     const child = spawn(command[0], command.slice(1), { stdio: 'inherit', env });
-    const fwd = forwardSignals(child);
+    fwd.attach(child);
     child.on('error', (e) => { fwd.remove(); resolve(report('isolated', 127, `NOT RUN: cannot start '${command[0]}': ${errMsg(e)}`)); });
     child.on('close', (code, signal) => { fwd.remove(); resolve(exitCodeOf(code, signal)); });
   });
@@ -1858,6 +1887,10 @@ function runIsolated(a) {
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
     let child;
+    /** @type {ReturnType<typeof statusChannel> | null} */
+    let st = null;
+    // ⛔ the forwarder BEFORE the spawn (review finding 5): no tick in which a TERM meets the default
+    const fwd = forwardSignalsPastUnshare(() => !!st && st.started());
     try {
       child = spawn(ub.bin,
         // --pid --fork --mount-proc: a private PID namespace with its own /proc, so no host
@@ -1870,20 +1903,21 @@ function runIsolated(a) {
         // any mask) never see NODE_OPTIONS, LD_*, or any --pass-env (PRIVILEGED_PASS_ENV)
         { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'], env: privilegedEnv(cmdEnv) });
     } catch (e) {
+      fwd.remove();
       resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
       return;
     }
-    const st = statusChannel(child);
-    const fwd = forwardSignalsPastUnshare(child, st.started);
+    const status = statusChannel(child);
+    st = status;
+    fwd.attach(child);
     const planPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[4]);
     planPipe?.on('error', () => { /* the inner side refused or never started */ });
     planPipe?.end(payload);
     let spawnErr = '';
     child.on('error', (e) => { spawnErr = errMsg(e); });
     child.on('close', (code, signal) => {
-      const status = st.text();
-      const fail = status.match(/^fail (.*)$/m);
-      if (st.started() && !fwd.early?.()) { resolve(exitOrDieBy(fwd, code, signal)); return; }
+      const fail = status.text().match(/^fail (.*)$/m);
+      if (status.started() && !fwd.early?.()) { resolve(exitOrDieBy(fwd, code, signal)); return; }
       // signalled before the command started (or we killed it then): die by it too — no verdict
       dieByForwarded(fwd);
       const why = fail ? fail[1]
@@ -2086,10 +2120,13 @@ async function runIsolatedInner(a) {
   if (!tell('started')) return refuse('internal: the status channel (fd 3) is missing — run via `isolated`');
   try { fs.closeSync(3); } catch { /* the command must not inherit it */ }
 
-  for (const s of SIGS) process.off(s, early);
   // the command's env (plan.env) goes to the helper on ITS fd 3 — setpriv/unshare of the drop run
-  // with OUR (privileged) env, so an LD_* the caller passed never runs with our capabilities
-  return runCommand(pid1HelperArgv(command, 3, false), priv.prefix, { env: plan.env });
+  // with OUR (privileged) env, so an LD_* the caller passed never runs with our capabilities.
+  // ⛔ runCommand installs its forwarder SYNCHRONOUSLY, before its spawn; only THEN is `early`
+  // removed — a listener is present throughout, so a TERM never meets the default (finding 5)
+  const ran = runCommand(pid1HelperArgv(command, 3, false), priv.prefix, { env: plan.env });
+  for (const s of SIGS) process.off(s, early);
+  return ran;
 }
 
 /**
@@ -2974,6 +3011,11 @@ function privilegeDrop(ids, { pidns = false } = {}) {
 function runCommand(command, prefix = [], { pastUnshare = false, env = /** @type {NodeJS.ProcessEnv} */ ({}) } = {}) {
   const argv = [...prefix, ...command];
   return new Promise((resolve) => {
+    // ⛔ the forwarder BEFORE the spawn (review finding 5); through `unshare --fork` a signal must
+    // go to unshare's CHILD (forwardSignalsPastUnshare)
+    /** @type {ReturnType<typeof statusChannel> | null} */
+    let st = null;
+    const fwd = pastUnshare ? forwardSignalsPastUnshare(() => !!st && st.started()) : forwardSignals();
     // pastUnshare (the nested path): fd 3 is the pid-1 helper's status pipe (`started`), fd 4 the
     // command's env; else fd 3 is the env. ⛔ The chain itself runs with privilegedEnv(env) only.
     const child = spawn(argv[0], argv.slice(1), {
@@ -2981,8 +3023,8 @@ function runCommand(command, prefix = [], { pastUnshare = false, env = /** @type
     const envPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[pastUnshare ? 4 : 3]);
     envPipe?.on('error', () => { /* the helper refused or never started; it reports */ });
     envPipe?.end(JSON.stringify(env));
-    // through `unshare --fork` a signal must go to unshare's CHILD (see forwardSignalsPastUnshare)
-    const fwd = pastUnshare ? forwardSignalsPastUnshare(child, statusChannel(child).started) : forwardSignals(child);
+    if (pastUnshare) st = statusChannel(child);
+    fwd.attach(child);
     child.on('error', (e) => {
       fwd.remove();
       resolve(report('isolated', 127, `NOT RUN: cannot start '${argv[0]}': ${errMsg(e)}`));

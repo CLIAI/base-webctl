@@ -934,6 +934,32 @@ entry is a usage refusal saying the OUTER call hides it and to keep it there; no
 * **Sabotage:** the check off → arm red; the existence test dropped (an outer-kept path refused
   too) → arm red (its CONTROL half).
 
+### Every forwarder is installed BEFORE its child (review of 5773fb8, finding 5)
+
+Two gaps where a node half had NO listener while a signal could reach it: the inner half did
+`process.off(early)` and only then did runCommand install its forwarder (after its spawn); the
+pid-1 helper wrote `started` — the caller's cue to start forwarding to it — before any handler.
+With no listener, node's DEFAULT disposition applies: the half dies by the signal, the command
+(spawned or about to be) is orphaned under pid 1, pid 1's `wait` returns, the namespace ends and
+the command is SIGKILLed — its trap never runs. (The caller still dies by the signal, so it is
+"trap skipped", not "signal lost".) The same shape existed at every `spawn` → `forwardSignals*`
+pair (the fresh unshare spawn, runCommand): a TERM between them killed the harness and left
+unshare orphaned. ⇒ `forwarderBeforeSpawn(deliver)`: install first, spawn, then `attach(child)`;
+a signal before `attach` is BUFFERED and delivered then. forwardSignals / forwardSignalsPastUnshare
+are built on it; every call site installs before spawning; the inner half removes `early` only
+AFTER runCommand returned (its executor installed the forwarder synchronously) — a listener is
+present throughout. In the helper the forwarder precedes the `started` write.
+* **Why no integration arm.** Each gap is a few synchronous statements (one `spawn()` — fork+exec
+  — wide). Nothing outside the process can widen it: the slow-`bash` shim of the early-TERM arms
+  delays pid 1's traps, which is BEFORE these windows, and spawn() returns once exec succeeded,
+  so a slow command does not widen it either. Measured: putting either old order back (handler
+  after `started`; `off(early)` before runCommand) SURVIVES all 14 signal arms. ⇒ A logic arm
+  pins the mechanism instead: `forwarderBeforeSpawn` buffers a SIGHUP emitted before `attach`,
+  delivers it on `attach`, delivers later ones at once, records `last()`, and `remove()` leaves no
+  listener (SIGHUP only — the test runner may own INT/TERM in its process).
+* **Sabotage:** pending dropped → logic arm; `attach` not flushing → logic arm; the old orders →
+  SURVIVE (above, by construction — this is the reasoned part).
+
 ### Host policy: AppArmor, and `WEBCTL_UNSHARE_BIN` (v0.33.0)
 
 `kernel.apparmor_restrict_unprivileged_userns=1` (reported from an Ubuntu 24.04 host) makes

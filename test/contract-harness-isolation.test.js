@@ -2555,6 +2555,33 @@ test('⛔ fail closed: no `bash` on PATH (pid 1 must reap) → FAIL naming it, c
 // refusal must say so and give the two fixes. ⚠ The sysctl path is a function PARAMETER, so
 // these arms never depend on (or change) the host's real setting.
 
+// ── review of 5773fb8, finding 5: every forwarder is installed BEFORE its child exists ──
+//
+// ⛔ The inner half removed its early handler before runCommand installed its forwarder, and the
+// pid-1 helper wrote `started` before it had any handler: a TERM in either gap met node's DEFAULT
+// disposition — the half died, the command was orphaned and SIGKILLed with the namespace, its
+// trap never ran. The gaps are a few synchronous statements wide and cannot be widened from
+// outside (DEV_NOTES), so the integration arms cannot hit them on demand; this pins the
+// mechanism: a forwarder made before the spawn BUFFERS a signal and delivers it on attach.
+// ⚠ SIGHUP only: the test runner may own INT/TERM handlers in this process.
+const { forwarderBeforeSpawn } = await import(pathToFileURL(TOOL).href);
+
+test('⭐ logic: a forwarder installed BEFORE the spawn buffers a signal and delivers it to the child on attach', () => {
+  assert.equal(typeof forwarderBeforeSpawn, 'function', 'no forwarderBeforeSpawn export');
+  /** @type {[string, string][]} */ const got = [];
+  const fwd = forwarderBeforeSpawn((/** @type {string} */ s, /** @type {{id: string}} */ c) => { got.push([s, c.id]); });
+  try {
+    process.emit('SIGHUP', 'SIGHUP');
+    assert.deepEqual(got, [], 'delivered with no child');
+    assert.equal(fwd.last(), 'SIGHUP', 'the signal was not recorded (exitOrDieBy would not re-raise it)');
+    fwd.attach({ id: 'child-1' });
+    assert.deepEqual(got, [['SIGHUP', 'child-1']], 'a signal that came BEFORE the spawn was LOST');
+    process.emit('SIGHUP', 'SIGHUP');
+    assert.deepEqual(got, [['SIGHUP', 'child-1'], ['SIGHUP', 'child-1']], 'after attach, delivered at once');
+  } finally { fwd.remove(); }
+  assert.equal(process.listenerCount('SIGHUP'), 0, 'remove() left a handler installed');
+});
+
 const { userNamespaceRefusal } = await import(pathToFileURL(TOOL).href);
 const UID_MAP_EPERM = 'unshare: write failed /proc/self/uid_map: Operation not permitted';
 
