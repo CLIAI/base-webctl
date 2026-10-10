@@ -207,6 +207,35 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.33.1 — 2026-10-10
+
+**Headline: `isolated` hardening from the last v0.33.0 review — which `xq` it trusts, and what
+it carries into a nested call.** Harness only; no `lib/` change; `HARNESS_GENERATION` stays 6.
+No consumer change expected.
+
+* **`xq`'s root is trusted more narrowly.** v0.33.0 already ignores an `xq` a run could have
+  planted. Now that rule also covers:
+  * a RELATIVE `--keep` or `TMPDIR`, resolved before comparing (they were skipped);
+  * any dir OUTSIDE the home that the caller can write (`access(W_OK)`), e.g. a user-owned
+    `/opt/x`. ⚠ An `xq` installed through such a dir is now ignored; install it from a dir
+    only root can write, or from the home;
+  * `..` after a symlink, judged as the kernel resolves it, not lexically.
+* **A hang is fixed.** Node's JS `fs.realpathSync` loops forever on a link like `sym/../xq`, so
+  one planted in `node_modules/.bin` could hang every later `isolated`. Every call site now uses
+  `fs.realpathSync.native`.
+* **Carry rule under a SYMLINKED hidden dir.** With `~/.ssh` a symlink (dotfiles), an outer
+  `--keep ~/.ssh/<sub>` used to be carried WRITABLE into a nested call with stripped markers. The
+  outer call now also mounts its hide on a hidden dir that has a keep beneath it. The nested call
+  reads those hides from the mount table and drops anything at or within them, with the same
+  note. What the outer command sees is unchanged.
+* Docs: a real home path in a June status note is redacted.
+
+### ⛔ What this does NOT cover
+
+Everything listed under v0.33.0's "does NOT cover" still applies: `/var/tmp` and `/dev/shm`
+shared with the host, the host session keyring, host identity (hostname, interface names,
+machine-id), and the util-linux 2.38 PDEATHSIG window. These are planned for v0.34.0 (ib4k).
+
 ## v0.33.0 — 2026-10-10
 
 **Headline: `isolated` HIDES the whole home — except what it re-binds, among them EVERY PATH dir
@@ -355,8 +384,7 @@ unhide `~/.config/webctl`); `--keep` at or beneath one re-exposes that path only
   The first `xq` on PATH is ignored (`xq ignored: found in a writable location` / `…: not named
   xq`, by label) when its PATH entry, any link of its symlink chain or its real file lies in the
   cwd, a `--keep` / `--keep-ro`, `/tmp`, `TMPDIR`, `/var/tmp` or `/dev/shm`, or its real file is
-  not named exactly `xq`. ⚠ Also in any dir OUTSIDE the home you can write (a user-owned `/opt/x`):
-  an `xq` installed through one is ignored — install it from a dir only root can write.
+  not named exactly `xq`.
 * A PATH entry that reaches the home through a symlink OUTSIDE it is re-bound at its real path
   only. Cost measured on the operator host (~100 PATH entries under the home): `isolated --
   true` 1.29 s → 1.46 s.
