@@ -207,7 +207,7 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
-## v0.33.0 — (unreleased)
+## v0.33.0 — 2026-10-10
 
 **Headline: `isolated` HIDES the whole home — except what it re-binds, among them EVERY PATH dir
 under the home, which may itself hold secrets — passes an env ALLOWLIST (and a shorter one to the
