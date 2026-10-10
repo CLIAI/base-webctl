@@ -1592,6 +1592,42 @@ own binfmt_misc on `/proc/sys/fs/binfmt_misc` is one), and that the nested path'
 rejected F2 mask (a `/dev/null` bind over `/proc/keys`) → row 7 red (`unshare: mount /proc failed:
 Operation not permitted`).
 
+### v0.34.0 re-review fixes (items 1–8, 2026-10-10)
+
+**Item 1 — row 12, a minimal fresh `/dev` (a hole in every released `isolated`).** Measured by the
+re-review: the host `/dev` was passed through whole; `/dev/uinput` opened for write inside. Now
+`freshDev()` (in `maskSocketDirs`, after the R1 ro step, before the scratch masks) builds a tmpfs in
+our `/run` — six nodes bound from the caller's `/dev`, a fresh `devpts` (`newinstance,ptmxmode=0666`),
+the `/proc/self/fd` links, empty `shm`/`mqueue` — remounts it ro and `--move`s it onto `/dev`.
+`devGaps()` reads it back after `maskIpc` (and in `kernelInsideProof`, so a nested call under an
+outer without it is refused as version skew). `planKeeps` refuses any item at or beneath `/dev`
+except beneath a scratch dir there.
+* **Measured: mode 0755 is load-bearing.** The fixture for the nesting proof first used a default
+  tmpfs (mode 1777): `> /dev/null` was EACCES even as namespace root, and pid 1's `keyctl new_session
+  >/dev/null` failed. Bisected over tmpfs options: only `mode=0755` makes a bound node openable with
+  `O_CREAT` (kernel 7.1; the sticky world-writable parent is what trips it).
+* **Found by it: `unmaskedDirs()` read the shadowed host `/dev/shm` as the top.** It took "a mount at
+  the path with nothing stacked at the same path"; under the fresh `/dev` the host's `/dev/shm` is
+  still listed there, shadowed by the fresh `/dev` itself, not by a mount AT `/dev/shm`. Every run was
+  refused (`/dev/shm still lack(s) the 'webctl-isolated' tmpfs`). Now `resolveMount` — the mount
+  path resolution lands on.
+* Arms (table row 12, all three paths): `/dev` lists nothing beyond the minimal set; `/dev/pts` is
+  not the host's devpts instance and lists no terminal; the host's `/dev/uinput` and `/dev/snd`
+  absent (existence only — uinput is never opened, no `/dev/pts/N` is touched). RED on 5e0a59a
+  (`fresh: /dev holds 229 entries beyond the minimal set`), GREEN after. Controls: `/dev/ptmx` opens,
+  `script -qc true /dev/null` (master and slave) exits 0, `/dev/null` writable, `/dev/urandom`
+  readable, `/dev/tty` a char device, `/dev/fd` listable, `/dev/shm` writable, a nested
+  `unshare -Ur --pid --fork --mount-proc` exits 0. Deeper: `--keep /dev/null` and `--keep-ro /dev/pts`
+  → usage 3 (RED on 5e0a59a: they ran).
+
+| # | sabotage (on a copy) | caught by |
+|---|---|---|
+| D1a | no fresh `/dev` (read-back kept) | every run refused: `229 entries in /dev beyond the minimal set, /dev (not the fresh read-only tmpfs), /dev/pts (not a fresh devpts), …` |
+| D1b | no fresh `/dev` AND no read-back | row 12 arm: `fresh: /dev holds 229 entr(y/ies) beyond the minimal set` |
+| D1c | the HOST's `/dev/pts` rbound instead of a fresh devpts (read-back kept) | every run refused: `/dev/pts (not a fresh devpts)` |
+| D1d | the same, no read-back | row 12 arm `fresh: /dev/pts is the HOST's devpts instance`; control `/dev/ptmx cannot be opened (EACCES)` |
+| D1e | the host's `/dev/uinput` bound into the fresh `/dev`, no read-back | row 12 arm: `fresh: /dev holds 1 entr(y/ies) beyond the minimal set` |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

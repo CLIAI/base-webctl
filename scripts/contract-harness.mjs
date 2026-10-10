@@ -2481,6 +2481,10 @@ async function runIsolatedInner(a) {
   // ⛔ HOST IPC (v0.34.0, ib4k row 8): our own IPC namespace, and a /dev/mqueue of it — READ BACK
   const ipcr = maskIpc(plan.hostIpc);
   if (ipcr) return refuse(ipcr);
+  // ⛔ HOST DEVICES (v0.34.0, ib4k row 12): the fresh /dev maskSocketDirs built — READ BACK, after the
+  // mqueue (the last mount under /dev), not trusted
+  const dGaps = devGaps();
+  if (dGaps.length) return refuse(`after building a fresh /dev, ${dGaps.join(', ')} — the host's devices could be reachable`);
   // ⛔ HOST IDENTITY (v0.34.0, ib4k row 10): a neutral hostname, a sysfs of THIS netns (only lo), neutral
   // /etc/machine-id and /etc/hostname — then READ BACK (identityGaps), not trusted
   const idr = maskIdentity(plan.tools);
@@ -2564,6 +2568,100 @@ function maskIpc(hostIpc) {
     return 'after mounting a fresh /dev/mqueue, it does not resolve to it — the host\'s POSIX message queues are visible';
   }
   return '';
+}
+
+/** The source tags of the fresh /dev and its devpts (ib4k §1 row 12). */
+const DEV_SOURCE = 'webctl-isolated-dev';
+const DEVPTS_SOURCE = 'webctl-isolated-devpts';
+/** The device nodes bound into the fresh /dev from the caller's, each with the [major, minor] it must read back as. */
+const DEV_NODES = /** @type {readonly [string, number, number][]} */ (Object.freeze([['null', 1, 3], ['zero', 1, 5], ['full', 1, 7],
+  ['random', 1, 8], ['urandom', 1, 9], ['tty', 5, 0]]));
+/** The symlinks of the fresh /dev: [name, target]. */
+const DEV_LINKS = /** @type {readonly [string, string][]} */ (Object.freeze([['ptmx', 'pts/ptmx'], ['fd', '/proc/self/fd'],
+  ['stdin', '/proc/self/fd/0'], ['stdout', '/proc/self/fd/1'], ['stderr', '/proc/self/fd/2']]));
+/** EVERY name a fresh `isolated` /dev holds — like `bwrap --dev`. Anything else there is refused (devGaps). */
+export const MINIMAL_DEV = Object.freeze([...DEV_NODES.map(([n]) => n), 'pts', ...DEV_LINKS.map(([n]) => n), 'shm', 'mqueue'].sort());
+
+/**
+ * A minimal FRESH /dev (ib4k §1 row 12). ⛔ Measured open up to v0.33.1 and in v0.34 phase 1: the host
+ * /dev was passed through WHOLE — /dev/uinput opened for write (virtual-keyboard injection into the
+ * host desktop), and the host devpts (the user's other terminals), /dev/video*, /dev/snd/*, /dev/kvm,
+ * /dev/fb0 and /dev/vcs* were writable. ⇒ Built in our /run, then MOVED onto /dev, shadowing the host's:
+ *   * a tmpfs (DEV_SOURCE), read-only once built — so nothing can be added to it later;
+ *   * null, zero, full, random, urandom and tty BOUND from the caller's /dev (a userns cannot mknod);
+ *   * a fresh devpts (`newinstance,ptmxmode=0666`) on pts — ptys of its own, none of the host's —
+ *     and ptmx -> pts/ptmx;
+ *   * fd, stdin, stdout, stderr -> /proc/self/fd/*;
+ *   * empty shm and mqueue: our private scratch tmpfs and mqueue are mounted there next (a host with
+ *     no /dev/shm of its own — not a scratch dir — gets a private one here).
+ * Runs as namespace root, before the drop; read back by devGaps. '' on success, else why.
+ * @param {string} run our /run @param {string[]} scratch maskedDirs().scratch @returns {string}
+ */
+function freshDev(run, scratch) {
+  const st = path.join(run, '.webctl-dev');
+  try {
+    fs.mkdirSync(st);
+    // ⛔ mode=0755 is LOAD-BEARING: on tmpfs's default 1777 (sticky, world-writable) an O_CREAT open of a
+    // bound node — `> /dev/null`, node's writeFileSync — is EACCES (measured, kernel 7.1)
+    let e = mountOrWhy(['-t', 'tmpfs', '-o', 'mode=0755,nosuid,nodev,noexec,size=64k', DEV_SOURCE, st], 'mount a fresh /dev');
+    if (e) return e;
+    for (const [n] of DEV_NODES) {
+      if (!fs.existsSync(path.join('/dev', n))) return `cannot build a fresh /dev: the caller has no /dev/${n} to bind`;
+      fs.writeFileSync(path.join(st, n), '', { flag: 'wx' });
+      e = mountOrWhy(['--bind', path.join('/dev', n), path.join(st, n)], `bind /dev/${n} into the fresh /dev`);
+      if (e) return e;
+    }
+    fs.mkdirSync(path.join(st, 'pts'));
+    e = mountOrWhy(['-t', 'devpts', '-o', 'newinstance,ptmxmode=0666,mode=0620,nosuid,noexec', DEVPTS_SOURCE, path.join(st, 'pts')],
+      'mount a fresh devpts');
+    if (e) return e;
+    for (const [n, to] of DEV_LINKS) fs.symlinkSync(to, path.join(st, n));
+    for (const d of ['shm', 'mqueue']) fs.mkdirSync(path.join(st, d), { mode: 0o755 });
+    if (!scratch.includes('/dev/shm')) {
+      e = mountOrWhy(['-t', 'tmpfs', '-o', 'mode=1777,nosuid,nodev', MASK_SOURCE, path.join(st, 'shm')], 'mount a private /dev/shm');
+      if (e) return e;
+    }
+    e = mountOrWhy(['-o', 'remount,bind,ro', st], 'make the fresh /dev read-only');
+    if (e) return e;
+    e = mountOrWhy(['--move', st, '/dev'], 'move the fresh /dev over the host\'s');
+    if (e) return e;
+    try { fs.rmdirSync(st); } catch { /* left empty: harmless */ }
+  } catch (e) {
+    return `cannot build a fresh /dev (${errMsg(e)})`;
+  }
+  return '';
+}
+
+/**
+ * What of the HOST's /dev is visible HERE (ib4k §1 row 12) — read from the kernel, not from what was
+ * mounted. [] when nothing. Used by the fresh path after building it and by the nesting proof.
+ *   * /dev lists nothing beyond MINIMAL_DEV;
+ *   * /dev is our read-only tmpfs, /dev/pts our fresh devpts, and every mount reachable under /dev is
+ *     one of those, a bound node, /dev/shm (or beneath it — a keep there) or /dev/mqueue;
+ *   * each bound node is the character device it is named for (a /dev/null that is a FILE is not).
+ * ⚠ Counts and names of OUR entries only — never a host device's name.
+ * @returns {string[]}
+ */
+function devGaps() {
+  /** @type {string[]} */ const gaps = [];
+  /** @type {string[]} */ let names = [];
+  try { names = fs.readdirSync('/dev'); } catch (e) { return [`/dev (unreadable: ${/** @type {NodeJS.ErrnoException} */ (e).code || errMsg(e)})`]; }
+  const extra = names.filter((n) => !MINIMAL_DEV.includes(n)).length;
+  if (extra) gaps.push(`${extra} entr${extra === 1 ? 'y' : 'ies'} in /dev beyond the minimal set`);
+  for (const [n, maj, min] of DEV_NODES) {
+    let ok = false;
+    try { const s = fs.statSync(path.join('/dev', n)); ok = s.isCharacterDevice() && s.rdev === maj * 256 + min; } catch { /* named below */ }
+    if (!ok) gaps.push(`/dev/${n} (not the ${maj}:${min} device)`);
+  }
+  const mounts = readMountinfo() || [];
+  const d = resolveMount(mounts, '/dev');
+  if (!d || d.at !== '/dev' || d.fstype !== 'tmpfs' || d.source !== DEV_SOURCE || !d.opts.includes('ro')) gaps.push('/dev (not the fresh read-only tmpfs)');
+  const pts = resolveMount(mounts, '/dev/pts');
+  if (!pts || pts.at !== '/dev/pts' || pts.fstype !== 'devpts' || pts.source !== DEVPTS_SOURCE) gaps.push('/dev/pts (not a fresh devpts)');
+  const ours = new Set(['/dev', '/dev/pts', '/dev/shm', '/dev/mqueue', ...DEV_NODES.map(([n]) => path.join('/dev', n))]);
+  const stray = (reachableMountsUnder(mounts, '/dev') || []).filter((m) => !ours.has(m.at) && !isWithin(m.at, '/dev/shm')).length;
+  if (stray) gaps.push(`${stray} other mount(s) under /dev`);
+  return gaps;
 }
 
 /** The hostname every fresh `isolated` namespace gets (ib4k §1 row 10). */
@@ -3353,6 +3451,14 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
         return k.explicit ? { binds, exempt, notes, usage: why } : { binds, exempt, notes, refuse: why };
       }
     }
+    // ⛔ HOST DEVICES (v0.34.0, ib4k row 12): /dev is a fresh minimal one — nothing at or beneath the host's
+    // is re-exposed, except beneath a scratch dir there (/dev/shm/<dir>, re-bound as under /tmp). After the
+    // masked dirs, so a keep AT /dev/shm keeps that reason
+    if (isWithin(real, '/dev') && !scratch.some((t) => isWithin(real, t) && real !== t)) {
+      const why = `${k.label} is ${real === '/dev' ? '/dev' : 'beneath /dev'}, which isolation replaces with a fresh minimal one `
+        + '(null, zero, full, random, urandom, tty, a pty of its own, /dev/shm) — a host device is never re-exposed';
+      return k.explicit ? { binds, exempt, notes, usage: why } : { binds, exempt, notes, refuse: why };
+    }
     // ⛔ the HIDDEN home: a read-only re-bind must not bring back what hiding it is for
     if (k.rule && prot.home) {
       const bad = real === prot.home ? 'is the home directory'
@@ -3534,6 +3640,10 @@ function maskSocketDirs(binds, roots, hidden = [], home = '') {
     // writes — oom_score_adj, a nested userns's uid_map — must keep working for Chromium's sandbox).
     const rootRo = makeRootReadOnly([...all.filter((x) => !scratch.includes(x)), ...ROOT_RW_TREES]);
     if (rootRo) return `${rootRo} — a path outside the declared writable set would stay WRITABLE`;
+    // ⛔ HOST DEVICES (v0.34.0, ib4k row 12): a minimal fresh /dev over the host's — after the keeps are
+    // staged, before the scratch masks (its /dev/shm is then covered as the host's was). Read back by devGaps.
+    const dev = freshDev(run, scratch);
+    if (dev) return `${dev} — the host's devices would stay visible`;
     // ⛔ the SCRATCH dirs last (/tmp, /var/tmp, /dev/shm): a keep beneath one was staged above
     for (const d of scratch) { const e = cover(d); if (e) return e; }
     // outer before inner; at one path the hide first, so a keep exactly there lands on top
@@ -3586,10 +3696,12 @@ function maskSocketDirs(binds, roots, hidden = [], home = '') {
 function unmaskedDirs() {
   const mounts = readMountinfo();
   if (!mounts) return ['/proc/self/mountinfo (unreadable)'];
+  // ⛔ the mount path resolution LANDS on (resolveMount), not "a mount at d with nothing stacked on it":
+  // under the fresh /dev (ib4k row 12) the host's /dev/shm is still listed at /dev/shm, shadowed by
+  // the fresh /dev itself — not by a mount AT /dev/shm — and was read as the top
   return maskedDirs().all.filter((d) => {
-    const here = mounts.filter((m) => m.at === d);
-    const top = here.find((m) => !here.some((o) => o.parent === m.id));
-    return !(top && top.fstype === 'tmpfs' && top.source === MASK_SOURCE);
+    const top = resolveMount(mounts, d);
+    return !(top && top.at === d && top.fstype === 'tmpfs' && top.source === MASK_SOURCE);
   });
 }
 
@@ -3973,6 +4085,9 @@ function kernelInsideProof() {
   // R2: an outer without the `hostname` tool refuses, so it never leaves the host's for us to inherit)
   const idGaps = identityGaps();
   if (idGaps.length) { fails.push(`the HOST's identity is visible: ${idGaps.join(', ')}`); v034++; }
+  // ⛔ v0.34.0 (ib4k row 12): the host's /dev must not be visible — a nested call builds none of its own
+  const dGaps = devGaps();
+  if (dGaps.length) { fails.push(`the HOST's devices are visible: ${dGaps.join(', ')}`); v034++; }
   if (!pidns) fails.push('/proc/self/ns/pid is unreadable');
   if (!recordedPid) fails.push(`${HOST_PIDNS_ENV} is not set, so there is no recorded host PID namespace to differ from`);
   else if (pidns === recordedPid) fails.push(`the current PID namespace ${pidns} EQUALS the recorded host one (host processes can be signalled)`);
@@ -3991,7 +4106,7 @@ function kernelInsideProof() {
   } else if (v034 > 0 && fails.length === v034) {
     // ⛔ …and a v0.33 outer masks /tmp but not /var/tmp or /dev/shm, and hides no identity (ib4k rows 8,
     // 10): when only THOSE fail, say so — refused all the same (the command would see the host's)
-    const what = [...(unmasked.length ? unmasked : []), ...idGaps];
+    const what = [...(unmasked.length ? unmasked : []), ...idGaps, ...(dGaps.length ? ['/dev'] : [])];
     fails.splice(0, fails.length, `the OUTER \`isolated\` is older than v0.34.0: ${what.join(', ')} ${what.length > 1 ? 'are' : 'is'} `
       + 'the HOST\'s there, and a nested call cannot hide them for its caller — upgrade the outer one to v0.34.0 or later');
   }
@@ -4000,7 +4115,7 @@ function kernelInsideProof() {
     facts: { netns, recorded: recorded ?? null, uidMap, extraInterfaces: extra,
       mntns, recordedMnt: recordedMnt ?? null, pidns, recordedPid: recordedPid ?? null, unmasked,
       roRoots: roRoots ? roRoots.length : null, writableRoRoots: writable,
-      hidden: hidden ? hidden.length : null, shownHidden: shown, identityShown: idGaps.length } };
+      hidden: hidden ? hidden.length : null, shownHidden: shown, identityShown: idGaps.length, devShown: dGaps.length } };
 }
 
 /**

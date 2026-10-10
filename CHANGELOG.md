@@ -210,9 +210,10 @@ is the strongest form: it names the ownership in the function that reads it.
 ## v0.34.0 — (unreleased)
 
 **Headline: `isolated` chooses its BACKEND — unshare → bwrap → docker → refuse, never unisolated
-— and is judged by ONE arm table (ib4k §1, rows 1–11); and it closes the gaps v0.33 left open: a
+— and is judged by ONE arm table (ib4k §1, rows 1–12); and it closes the gaps v0.33 left open: a
 private `/var/tmp`, `/dev/shm`, SysV IPC and POSIX mqueues, a fresh session keyring, the host's
-identity hidden — and a READ-ONLY root (row 7).** Phase 1 of 3 (ib4k): only the **unshare** backend is implemented. Harness and
+identity hidden — a READ-ONLY root (row 7) — and a fresh minimal `/dev` (row 12), a hole in every
+released `isolated`, found by review.** Phase 1 of 3 (ib4k): only the **unshare** backend is implemented. Harness and
 gate only; no `lib/` change. **`HARNESS_GENERATION` is 7** (below). No consumer change expected,
 except a contract that matches the new verdict field or a refusal's tail.
 
@@ -248,7 +249,7 @@ except a contract that matches the new verdict field or a refusal's tail.
 
 ### The shared arm table (ib4k §1)
 
-* `test/isolation-arm-table.test.js`: rows 1–11 as ONE table, run per implemented backend, each row
+* `test/isolation-arm-table.test.js`: rows 1–12 as ONE table, run per implemented backend, each row
   on the fresh, nested and stripped-markers paths with its positive control, in a throwaway world
   (a fake passwd home on a tmpfs, tmpfs "host" scratch dirs, its own IPC namespace and mqueue, a
   throwaway keyring; host identity compared as digests — nothing touches the real host). A guard
@@ -294,6 +295,21 @@ except a contract that matches the new verdict field or a refusal's tail.
   release gate the outer is base HEAD, so this bites only a lane whose own outer call is older. The
   nested path makes no IPC namespace of its own: it inherits its outer's.
 
+### ⛔ Holes in EVERY released `isolated` (up to v0.33.1), found by review — closed
+
+* **Row 12 — the host `/dev` was passed through WHOLE.** Measured inside: `/dev/uinput` opened for
+  write (virtual-keyboard injection into the host desktop); the host devpts (the user's other
+  terminals), `/dev/video*`, `/dev/snd/*`, `/dev/kvm`, `/dev/fb0` and `/dev/vcs*` were writable. Now a
+  minimal FRESH `/dev`, like `bwrap --dev`: `null zero full random urandom tty` bound from the host, a
+  fresh `devpts` (ptys of its own; `ptmx -> pts/ptmx`), `fd stdin stdout stderr` -> `/proc/self/fd`,
+  the private `/dev/shm` and `/dev/mqueue` — nothing else; read-only, and READ BACK (anything else
+  there → refused). A pty, `/dev/null`, `/dev/urandom`, `/dev/tty`, `/dev/shm` and a nested
+  `unshare -Ur --pid --fork --mount-proc` (Chromium's sandbox) still work — arms in row 12.
+  ⚠ **What lanes lose:** every other device — `/dev/fuse`, `/dev/net/tun`, `/dev/kvm`, `/dev/dri`,
+  sound, video, input, block devices. ⛔ A `--keep` / `--keep-ro` / cwd under `/dev` is **refused**
+  (except beneath `/dev/shm`, as before). The nesting proof requires the fresh `/dev` (a nested call
+  under an older outer: "upgrade the outer").
+
 ### Row 7 closed — the whole tree READ-ONLY (ruling R1)
 
 * Measured before: a user-owned dir OUTSIDE the home (an `/opt/x` of one's own) was WRITABLE inside —
@@ -323,12 +339,13 @@ except a contract that matches the new verdict field or a refusal's tail.
   still the caller's, or `/dev/mqueue` not resolving to the fresh mqueue (F1); the identity files'
   tmpfs not read-only (F6); a selected backend without a runner (F7); a mount under `/` that cannot
   be made read-only, or one still writable outside the declared set after it (R1); a cwd containing
-  a masked dir (R1).
+  a masked dir (R1); a fresh `/dev` that cannot be built, or anything beyond the minimal set in it
+  after (row 12); a `--keep` / `--keep-ro` / cwd under `/dev` other than beneath `/dev/shm` (row 12).
 
 ### Generation 7 (ruling R4)
 
 `HARNESS_GENERATION` is **7**: `isolated` changed behaviour (the verdict field, the refusal tails,
-the new refusals, rows 8–10). A contract that MATCHES the new verdict field must key it on the
+the new refusals, rows 8–10 and 12). A contract that MATCHES the new verdict field must key it on the
 generation, or it goes red on an older pin:
 
 ```bash

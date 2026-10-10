@@ -52,17 +52,19 @@ each with its positive control (`k3wn`). A backend that passes fewer arms is not
 | 9 | no host keyring | `keyctl show @s` names no host keyring; a key added inside is gone outside; (9b) a host key's possessor-only PAYLOAD → EACCES by id. *Residual: descriptions and ids stay enumerable (§1a)* | a key added inside is readable inside; the payload is readable outside |
 | 10 | no host identity | hostname ≠ the host's; `/sys/class/net` and `/sys/devices/virtual/net` list only `lo`; `/etc/machine-id` absent or neutral, and not rewritable through its backing copy | the same reads outside show the host's values; the rewrite works on such a bind made outside |
 | 11 | no loader injection into the privileged half | `NODE_OPTIONS` / `LD_*` preloads never run before the masks | the command itself sees its allowed env |
+| 12 | no host devices | `/dev` holds only `null zero full random urandom tty pts ptmx shm mqueue fd stdin stdout stderr`; `/dev/pts` is not the host's devpts and lists none of its terminals; the host's `/dev/uinput` and `/dev/snd` absent (each one the host lacks is a named SKIP) | a pty opens (`/dev/ptmx`, and `script -qc true /dev/null` — master AND slave); `/dev/null`, `/dev/urandom`, `/dev/tty`, `/dev/fd` work; `/dev/shm` writable; a nested `unshare -Ur --pid --fork --mount-proc` works; the host `/dev` holds more |
 
-Rows 8–10 come from the v0.33.0 review of the namespace backend. They were MEASURED open there (deferred because they are not regressions and change keep-refusal rules), so v0.34.0 closes them in the shared arm set, for every backend at once. Row 11 is fixed in v0.33.0 and must stay fixed for every backend.
+Row 12 comes from the re-review of v0.34 phase 1 (2026-10-10): the host `/dev` had been passed
+through whole by EVERY released `isolated` up to v0.33.1 (§1a). Rows 8–10 come from the v0.33.0 review of the namespace backend. They were MEASURED open there (deferred because they are not regressions and change keep-refusal rules), so v0.34.0 closes them in the shared arm set, for every backend at once. Row 11 is fixed in v0.33.0 and must stay fixed for every backend.
 
-**The table is code:** `test/isolation-arm-table.test.js` runs rows 1–11 per IMPLEMENTED backend
+**The table is code:** `test/isolation-arm-table.test.js` runs rows 1–12 per IMPLEMENTED backend
 (pinned with `WEBCTL_ISOLATION_BACKEND`), each on the fresh, nested and stripped-markers paths, each
 with its control, in a throwaway world (a fake passwd home on a tmpfs, tmpfs "host" `/dev/shm` and
 `/var/tmp`, a throwaway session keyring; host identity compared as digests). A guard fails when the
 harness can run a backend the table does not judge. The unshare-specific depth (mutants, refusals,
 races) stays in `test/contract-harness-isolation.test.js`; each row names it.
 
-### 1a. Rulings for rows 7–10 (v0.34.0 phase 1, unshare; amended by the phase-1 review, 2026-10-10)
+### 1a. Rulings for rows 7–10 and 12 (v0.34.0 phase 1, unshare; amended by the phase-1 review and the re-review, 2026-10-10)
 
 Measured on the unshare backend before the change: a file planted in the host's `/dev/shm` and
 `/var/tmp` was readable inside and a write there landed on the host; `keyctl show @s` inside listed
@@ -149,6 +151,26 @@ three paths (the table's rows 8–10).
   * *Not covered:* `/etc/hosts` (may name the host), `/proc/sys/kernel/random/boot_id`, DMI strings
     under `/sys/class/dmi/id`, **disk serials** (`/sys/class/block/*/device/serial` — block devices
     are not per network namespace, so the fresh sysfs lists them), the kernel release in `uname`.
+* **Row 12 — CLOSED: a minimal FRESH `/dev`, like `bwrap --dev`** (re-review, item 1). Measured
+  open in every released `isolated` up to v0.33.1 and in phase 1: the host `/dev` was passed through
+  WHOLE — `/dev/uinput` opened for write inside (virtual-keyboard injection into the host desktop),
+  and the host devpts (the user's other terminals), `/dev/video*`, `/dev/snd/*`, `/dev/kvm`, `/dev/fb0`
+  and `/dev/vcs*` were writable. Now, as namespace root and before the drop, after the keeps are
+  staged and before the scratch masks: a tmpfs (mode 0755) built in our `/run` with `null`, `zero`,
+  `full`, `random`, `urandom` and `tty` BOUND from the caller's `/dev` (a user namespace cannot
+  `mknod`), a fresh `devpts` (`newinstance,ptmxmode=0666`) on `pts` with `ptmx -> pts/ptmx`, `fd`,
+  `stdin`, `stdout`, `stderr` -> `/proc/self/fd/*`, and empty `shm` and `mqueue` — made read-only,
+  then MOVED onto `/dev`; the private `/dev/shm` tmpfs and the fresh mqueue (row 8) land on it.
+  ⛔ READ BACK (`devGaps`), after the mqueue: `/dev` lists nothing beyond that set, is our read-only
+  tmpfs, `/pts` is our devpts, every mount under `/dev` is one of those (or beneath `/dev/shm`), and
+  each node is the character device it is named for — else REFUSED. The nesting proof requires it
+  too (skew: "upgrade the outer"); the nested path inherits its outer's `/dev`, the stripped-markers
+  path builds its own from it. A `--keep` / `--keep-ro` / cwd AT or beneath `/dev` is REFUSED (usage
+  3 for an explicit keep), except beneath a scratch dir there (`/dev/shm/<dir>`, row 8's rule).
+  ⚠ *Measured:* mode 0755 is load-bearing — on tmpfs's default 1777 (sticky, world-writable) an
+  `O_CREAT` open of a bound node (`> /dev/null`, node's `writeFileSync`) is EACCES (kernel 7.1).
+  ⚠ *Not there, deliberately:* `/dev/fuse`, `/dev/net/tun`, `/dev/kvm`, `/dev/dri`, `/dev/console`,
+  `/dev/log` — a lane that needs one is refused nothing; it fails visibly (ENOENT) inside.
 
 The coordinator's cross-backend escape script (an independent python driver used against
 v0.31.0) is run against every backend as an extra, independent check.
@@ -265,6 +287,8 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.34.0.
   (row 9, R3), the identity files read-only (row 10), the v0.33 refusal lead (§2), the runner guard
   (§2), the gate's last-match parse (§4), generation 7, `hostname` required (R2).
 * **Row 7 closed (R1):** the read-only root (§1a), on the fresh, nested and stripped paths.
+* **Re-review (2026-10-10):** row 12 — a minimal fresh `/dev` (§1a), a hole in every released
+  `isolated` up to v0.33.1.
 * **Residual by ruling (F2, option c):** key descriptions and ids enumerable (§1a row 9) — no mask.
   The read-only root is proved not to block nested procfs/sysfs mounts (an arm in row 7).
 * **Phase 2 — bwrap; phase 3 — docker (§3, §3a):** not started. Each lands by adding its probe,

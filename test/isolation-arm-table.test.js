@@ -327,6 +327,36 @@ const ROWS = [
       }
     },
     deeper: '"⛔ NODE_OPTIONS never reaches a PRIVILEGED half", "⛔ `--pass-env LD_*` never reaches a privileged half", the planted-tool arms' },
+  { n: 12, property: 'no host devices',
+    arm: (r, w, p, untested) => {
+      const o = w.outside.outside;
+      assert.equal(r.devExtra, 0, ctx(w, `${p}: /dev holds ${r.devExtra} entr(y/ies) beyond the minimal set (null zero full random urandom tty pts ptmx shm mqueue fd stdin stdout stderr)`));
+      assert.notEqual(r.ptsDev, o.ptsDev, ctx(w, `${p}: /dev/pts is the HOST's devpts instance`));
+      // ⛔ each host device this host lacks is NAMED (the ARM is then a SKIP, never a pass)
+      if (o.uinput === 'ok') assert.equal(r.uinput, 'ENOENT', ctx(w, `${p}: the host's /dev/uinput is present (virtual-keyboard injection)`));
+      else untested.add('no /dev/uinput on this host: that arm is UNTESTED');
+      if (o.snd === 'ok') assert.equal(r.snd, 'ENOENT', ctx(w, `${p}: the host's /dev/snd is present`));
+      else untested.add('no /dev/snd on this host: that arm is UNTESTED');
+      if (typeof o.ptsNumbered === 'number' && o.ptsNumbered > 0) assert.equal(r.ptsNumbered, 0, ctx(w, `${p}: ${r.ptsNumbered} host terminal(s) listed in /dev/pts`));
+      else untested.add('no /dev/pts/N open on this host: the host-terminal arm is UNTESTED');
+    },
+    control: (w) => {
+      assert.ok(w.outside.outside.devExtra > 0, 'control: the host /dev holds nothing beyond the minimal set — the arm cannot fail');
+      for (const p of PATHS) {
+        const r = w.arm[p];
+        // what a lane plausibly needs from /dev still works (a pty, /dev/null, /dev/urandom, /dev/tty, /dev/fd)
+        assert.equal(r.ptmxOpen, 'ok', `${p}: /dev/ptmx cannot be opened (${r.ptmxOpen})`);
+        assert.equal(r.ptyScript, 0, `${p}: \`script -qc true /dev/null\` (a pty, master AND slave) fails (${r.ptyScript})`);
+        assert.equal(r.devNullWrite, 'ok', `${p}: /dev/null cannot be written (${r.devNullWrite})`);
+        assert.equal(r.urandomRead, 'ok', `${p}: /dev/urandom cannot be read (${r.urandomRead})`);
+        assert.equal(r.ttyNode, 'ok', `${p}: /dev/tty is not a char device (${r.ttyNode})`);
+        assert.equal(r.fdLink, 'ok', `${p}: /dev/fd cannot be listed (${r.fdLink})`);
+        // Chromium's sandbox: /dev/shm writable (row 8's shmSelf) and a nested user + PID namespace with its own /proc
+        assert.equal(r.shmSelf, 'ok', `${p}: /dev/shm is not writable`);
+        assert.equal(r.nestedPidProc, 0, `${p}: a nested \`unshare -Ur --pid --fork --mount-proc\` fails`);
+      }
+    },
+    deeper: '"⛔ a --keep under /dev is refused" (contract-harness-isolation.test.js)' },
 ];
 
 /**
@@ -376,7 +406,7 @@ test('⛔ the table covers EVERY backend the harness can run — extend IMPLEMEN
     if (r.status === 0) assert.ok(IMPLEMENTED.includes(b), `the harness runs the ${b} backend, but the arm table does not judge it`);
     else assert.match(r.stderr, new RegExp(`NOT RUN: WEBCTL_ISOLATION_BACKEND pins the ${b} backend`), r.stderr);
   }
-  assert.deepEqual(ROWS.map((r) => r.n), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], 'ib4k §1 has rows 1–11');
+  assert.deepEqual(ROWS.map((r) => r.n), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 'ib4k §1 has rows 1–12');
 });
 
 /** Row 9 where `keyctl show @s` fails (review F5): a named SKIP — isolated says "keyring: unverified". */

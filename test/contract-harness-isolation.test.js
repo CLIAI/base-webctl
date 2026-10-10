@@ -463,7 +463,14 @@ const HOST_MNT = fs.readlinkSync('/proc/self/ns/mnt');
  * tmpfs (the neutral copies are made there).
  */
 const { NEUTRAL_MACHINE_ID: NEUTRAL_ID } = await import(pathToFileURL(TOOL).href);
-const V034_SCRATCH = ' && { [ ! -d /var/tmp ] || mount -t tmpfs webctl-isolated /var/tmp; }'
+// a fresh minimal /dev, as `isolated` builds it (ib4k row 12) — first, so /dev/shm is masked on top of it
+const V034_DEV = ' && mkdir /run/.d && mount -t tmpfs -o mode=0755 webctl-isolated-dev /run/.d'
+  + ' && for n in null zero full random urandom tty; do : > /run/.d/$n && mount --bind /dev/$n /run/.d/$n || exit 1; done'
+  + ' && mkdir /run/.d/pts /run/.d/shm /run/.d/mqueue && mount -t devpts -o newinstance,ptmxmode=0666 webctl-isolated-devpts /run/.d/pts'
+  + ' && ln -s pts/ptmx /run/.d/ptmx && ln -s /proc/self/fd /run/.d/fd && ln -s /proc/self/fd/0 /run/.d/stdin'
+  + ' && ln -s /proc/self/fd/1 /run/.d/stdout && ln -s /proc/self/fd/2 /run/.d/stderr'
+  + ' && mount -o remount,bind,ro /run/.d && mount --move /run/.d /dev';
+const V034_SCRATCH = V034_DEV + ' && { [ ! -d /var/tmp ] || mount -t tmpfs webctl-isolated /var/tmp; }'
   + ' && { [ ! -d /dev/shm ] || mount -t tmpfs webctl-isolated /dev/shm; }';
 const V034_MASKS = V034_SCRATCH
   + ' && hostname webctl-isolated && mount -t sysfs webctl-isolated-sysfs /sys'
@@ -1144,6 +1151,15 @@ console.log('SIB ' + o(() => fs.readFileSync(p.join(d, 'sib', 'f'), 'utf8')));`;
       assert.equal(fs.readFileSync(path.join(d, 'sib', 'f'), 'utf8'), 'sib');
     }
   } finally { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+test('⛔ a --keep under /dev is refused (ib4k row 12: /dev is a fresh minimal one) → usage 3, nothing run; --keep-ro too', needsIsolation, async () => {
+  for (const [flag, p] of [['--keep', '/dev/null'], ['--keep-ro', '/dev/pts']]) {
+    const r = await run(['isolated', flag, p, '--', process.execPath, '-e', 'console.log("RAN-" + "MARKER")']);
+    assert.equal(r.status, 3, `${flag} ${p}: ${r.stderr}`);
+    assert.match(r.stderr, /is beneath \/dev, which isolation replaces with a fresh minimal one .* a host device is never re-exposed/);
+    assert.doesNotMatch(r.stdout, /RAN-MARKER/);
+  }
 });
 
 test('⛔ a --keep that IS /dev/shm or /var/tmp → usage 3 (it would undo the mask); a cwd AT one → FAIL; a cwd BENEATH one runs', needsIsolation, async (t) => {

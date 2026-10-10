@@ -17,6 +17,8 @@ const { spawnSync } = require('node:child_process');
 const [mode, cfgPath] = process.argv.slice(2);
 const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
 const inside = mode !== 'outside';
+/** Row 12: everything a fresh `isolated` /dev may hold (ib4k §1 row 12, like `bwrap --dev`). */
+const MINIMAL_DEV = ['null', 'zero', 'full', 'random', 'urandom', 'tty', 'pts', 'ptmx', 'shm', 'mqueue', 'fd', 'stdin', 'stdout', 'stderr'];
 
 /** @param {() => unknown} f */
 const errOf = (f) => { try { f(); return 'ok'; } catch (e) { return e.code || String(e.message); } };
@@ -200,5 +202,27 @@ const tamper = (target) => {
   out.machineIdTamper = inside ? tamper('/etc/machine-id') : tamper(cfg.tamperDst);
   // 11 — loader vars: the command still sees NODE_OPTIONS (its preload logged this process)
   out.nodeOptions = !!process.env.NODE_OPTIONS;
+  // 12 — no host devices: EXISTENCE only. ⛔ /dev/uinput is never opened here and no /dev/pts/N is
+  // touched — a stat, and a readdir of /dev and /dev/pts, are the whole reading.
+  let devNames = [];
+  try { devNames = fs.readdirSync('/dev'); } catch (e) { devNames = [`<${e.code}>`]; }
+  out.devExtra = devNames.filter((n) => !MINIMAL_DEV.includes(n)).length;
+  out.uinput = errOf(() => fs.statSync('/dev/uinput'));
+  out.snd = errOf(() => fs.statSync('/dev/snd'));
+  try { out.ptsNumbered = fs.readdirSync('/dev/pts').filter((n) => /^\d+$/.test(n)).length; } catch (e) { out.ptsNumbered = `<${e.code}>`; }
+  try { out.ptsDev = String(fs.statSync('/dev/pts').dev); } catch (e) { out.ptsDev = `<${e.code}>`; }
+  if (inside) {
+    // what a lane plausibly needs from /dev, read AFTER the listing above (a pty made here is ours)
+    out.ptmxOpen = errOf(() => fs.closeSync(fs.openSync('/dev/ptmx', fs.constants.O_RDWR | fs.constants.O_NOCTTY)));
+    // `script` opens the pty's SLAVE too (/dev/pts/N of OUR devpts) — a nodev devpts fails here
+    const sc = run(['script', '-qc', 'true', '/dev/null']);
+    out.ptyScript = sc.error ? `<${sc.error.code}>` : sc.status;
+    out.devNullWrite = errOf(() => fs.writeFileSync('/dev/null', 'x'));
+    out.urandomRead = errOf(() => { const fd = fs.openSync('/dev/urandom', 'r'); try { if (fs.readSync(fd, Buffer.alloc(16)) !== 16) throw new Error('short'); } finally { fs.closeSync(fd); } });
+    out.ttyNode = errOf(() => { if (!fs.statSync('/dev/tty').isCharacterDevice()) throw new Error('not a char device'); });
+    out.fdLink = errOf(() => fs.readdirSync('/dev/fd'));
+    // Chromium's sandbox: a nested user + PID namespace with its own /proc
+    out.nestedPidProc = run(['unshare', '-Ur', '--pid', '--fork', '--mount-proc', 'true']).status;
+  }
   process.stdout.write(`ARM-RESULT ${JSON.stringify(out)}\n`);
 })();
