@@ -66,8 +66,10 @@ mid-run. A start-time check is a second layer, never the only one.
 * **DNS**: resolved through the egress (the browser zone's resolver is the egress), never the
   host resolver.
 * **IPv6**: disabled on the internal network unless the egress carries it.
-* **WebRTC/STUN**: Chromium policy (`WebRtcIPHandling: disable_non_proxied_udp`) plus the
-  topology (no direct UDP path exists).
+* **WebRTC/STUN and QUIC**: explicitly DISABLED in the browser (policy/flags), not merely left
+  to fail for lack of a UDP route — a half-blocked WebRTC can still leak LOCAL addresses via
+  mDNS/host candidates (`webctl:mgr`). The topology (no UDP route) is the second layer.
+  *Arm:* an `RTCPeerConnection` gathers NO host and NO srflx candidates; QUIC is off.
 * **Background requests** (updates, safe-browsing): they leave only through the egress,
   because no other route exists; the browser's own update/safe-browsing are off by policy.
 
@@ -101,23 +103,71 @@ REFUSED with that reason — never silently degraded.
 
 ## 9. Multi-tenant hosts
 
-Egress containers and networks are `u<uid>`-scoped (the `ow9k` / `ib4k` §3a.5 rules), never
-pruned, removed only by exact id or name; listen ports come from the family registry, never
-standard ports.
+Egress containers and networks are owner-scoped (§11.1; the `ow9k` / `ib4k` §3a.5 rules),
+never pruned, removed only by exact id or name. The egress proxy is never host-published, so
+no host port is used (§11.0).
 
 ## 10. What `where` reports
 
 `egress <name> (kind <kind>, from <source>)` as machine fields. Never credentials, endpoints
 or exit addresses.
 
-## 11. Sharing and lifecycle — ⚠ OPEN (xq's lane to answer)
+## 11. Sharing, lifecycle and the seam — answered by xq's lane (2026-10-10)
 
-1. Who starts a shared egress (first user, or an explicit `xq` verb), and how users are
-   counted (a LEASE, as the X-input lease in `ow9k`) so it is not stopped under another lane.
-2. Restart: an egress restart must not reconnect a browser to a different exit silently —
-   the verdict re-runs, and a changed exit is reported.
-3. The capability base pins (`rx9q` §4): `xq capabilities` must list the egress verbs and
-   kinds before base sends them.
+### 11.0 ⛔ The browser sees ONE explicit proxy — never a shared netns, never a gateway
+
+* **Rejected, MEASURED by xq's lane:** `--network container:<egress>` (sharing the egress's
+  netns). While the egress ran, an app in that netns reached a public site DIRECTLY, around the
+  tunnel; it "failed closed" only when the egress died. Anything not forced through the tunnel
+  (DNS, WebRTC, a background request) leaks.
+* An internal network has NO default route (Docker's documented behaviour; xq's lane measures
+  it in its own code path before claiming it). So the browser reaches the egress only as an
+  EXPLICIT PROXY on that network — `socks5h://<egress>:1080` — never as a transparent gateway
+  (that would need NET_ADMIN in the BROWSER, never).
+* ⇒ **Every kind looks the same to the browser**: one SOCKS5 endpoint on the zone's internal
+  network. Kinds differ only in how the egress container reaches out (direct NAT, `ssh -D`, an
+  upstream socks/http proxy, a tor SocksPort, wireguard/vpn with NET_ADMIN/tun in the EGRESS
+  only, §8).
+* Consequences: DNS resolves remotely (`socks5h`), and Docker's embedded DNS on an internal
+  network answers container names only, so a direct DNS lookup has nowhere to go; UDP/WebRTC
+  has no route at all (browser policy stays as a second layer); nothing is host-published, so
+  §9's port registry is not needed for egress.
+
+### 11.1 Who starts it; who is using it
+
+* Both: an explicit **`xq egress up <name>`** (idempotent, ensure-semantics), AND a browser
+  zone whose `netvm` names an egress ensures it up first.
+* ⛔ **The lease is DERIVED, not counted**: an egress's users are the running containers
+  attached to its internal network, as Docker reports them. A counter or lease file drifts (a
+  crashed lane never decrements it); the attachment list cannot.
+* `xq egress down <name>` REFUSES while any non-egress container is attached, listing the
+  zones, with its own exit code. No `--force` that stops it under others: those zones stop
+  first. No auto-stop at zero users; `status` reports `users: 0`.
+* Scope: per owner — `xq-egress.<owner>-<name>`, network `xq-egress.<owner>-<name>-net`,
+  owner labels. Sharing is across ONE user's lanes, never across uids.
+
+### 11.2 Restart and proof
+
+* A restart drops in-flight proxy connections — that IS fail closed. The browser zone is not
+  restarted; the egress keeps its name on the internal network.
+* `status` carries **`generation`** (from the container's start time); base re-verifies
+  whenever it changes.
+* **`xq egress verify`** fetches the operator's OWN check endpoint (a field of the egress
+  record; never a third-party default) twice — through the egress and direct — and returns
+  `{routed, exit_fp, direct_fp}`, where `*_fp` is a SALTED HASH, never the address (§5). After
+  a restart, `exit_changed` compares with the previous `exit_fp`. For kind `tor` the exit is
+  per-circuit by design: `exit_changed` is expected and is not a fault.
+
+### 11.3 Capabilities base pins (`rx9q` §4)
+
+Verbs `egress up / down / ls / status / verify`, each `json_schema 1` with per-verb flags; a
+new field **`egress_kinds: [{kind, privileged, enabled}]`** (xq's implemented kinds plus the
+human's privileged-kinds setting). Base pins verb AND kind before sending; an xq without the
+field is too old → fail closed.
+
+`netvm`: `default | none | <egress-name>`. xq's old provider words (tor, mullvad, wireguard)
+stay refused unless an egress of that name exists, so a zone file never silently changes
+meaning.
 
 ## 12. QA — every item executes, with its control
 
@@ -136,7 +186,8 @@ or exit addresses.
 
 ## 13. Order
 
-1. This document; xq's lane answers §11 and the seam (verbs, fields, capabilities).
+1. This document. §11 answered by xq's lane (2026-10-10); it measures the internal-network
+   topology in its own code path first.
 2. Base: declaration + resolution + refusals + `where` (no network needed; testable now).
 3. xq: egress zones for the unprivileged kinds (`ssh-dynamic`, `socks5`, `http-proxy`, `tor`).
 4. Base: the verdict and proof against xq's egress; then the privileged kinds once the human
