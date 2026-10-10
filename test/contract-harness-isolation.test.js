@@ -2914,6 +2914,66 @@ test('⭐ logic: a forwarder installed BEFORE the spawn buffers a signal and del
   assert.equal(process.listenerCount('SIGHUP'), 0, 'remove() left a handler installed');
 });
 
+// ⛔ TERM ×3 at 60 ms → the harness died by TERM instead of returning the trap's 7 (measured: 9/25
+// fresh, 10/25 nested; the re-review saw 4/25 with no gap control). A LATE signal — after the
+// command started and pid 1 already EXITED — found unshare childless and was treated as EARLY:
+// SIGKILL unshare, die by the signal. The logic arm drives the forwarder with a stand-in for
+// unshare that is a real, CHILDLESS process: started → nothing killed, not early; not started →
+// SIGKILL and early (the window the early-TERM arms guard).
+const { forwardSignalsPastUnshare } = await import(pathToFileURL(TOOL).href);
+
+test('⭐ logic: a signal AFTER `started` to an unshare whose pid 1 is gone is NOT "early" (no SIGKILL, no death by it) — before `started` it is', async () => {
+  assert.equal(typeof forwardSignalsPastUnshare, 'function', 'no forwardSignalsPastUnshare export');
+  const sleeper = spawn('sleep', ['5'], { stdio: 'ignore' }); // real and childless: "pid 1 has exited"
+  try {
+    for (const started of [true, false]) {
+      /** @type {string[]} */ const killed = [];
+      const fwd = forwardSignalsPastUnshare(() => started);
+      try {
+        fwd.attach(/** @type {any} */ ({ pid: sleeper.pid, kill: (/** @type {string} */ s) => { killed.push(s); } }));
+        process.emit('SIGHUP', 'SIGHUP');
+        if (started) {
+          assert.deepEqual(killed, [], 'a late signal SIGKILLed unshare (the namespace was ending with the command\'s own status)');
+          assert.equal(fwd.early(), false, 'a late signal was taken for an EARLY one (the harness would die by it)');
+          assert.equal(fwd.last(), 'SIGHUP', 'the late signal was not recorded');
+        } else {
+          // CONTROL: before `started` the same signal IS early — the arm can fail
+          assert.deepEqual(killed, ['SIGKILL']);
+          assert.equal(fwd.early(), true);
+        }
+      } finally { fwd.remove(); }
+    }
+  } finally { sleeper.kill('SIGTERM'); }
+  assert.equal(process.listenerCount('SIGHUP'), 0, 'remove() left a handler installed');
+});
+
+/**
+ * TERM ×3, `gap` ms apart, after the command's TERM trap is set: `TERM3 <code|signal>` per run.
+ * @param {number} n @param {number} gap @param {string[]} argv
+ */
+const TERM3_PROBE = `const { spawn } = require('child_process');
+const [n, gap, ...argv] = process.argv.slice(1);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+(async () => { for (let i = 0; i < Number(n); i++) await new Promise((resolve) => {
+  const c = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'ignore'] });
+  let sent = false;
+  c.stdout.on('data', async (d) => { if (sent || !/READY/.test(String(d))) return; sent = true;
+    for (let k = 0; k < 3; k++) { try { c.kill('SIGTERM'); } catch {} await sleep(Number(gap)); } });
+  c.on('close', (code, sig) => { console.log('TERM3 ' + (sig || code)); resolve(); });
+}); })();`;
+
+test('⛔ TERM ×3 (60 ms apart) → the command\'s trap code 7, never death by TERM — fresh AND nested', needsIsolation, async () => {
+  for (const nested of [false, true]) {
+    const inner = ['sh', '-c', TRAPPER];
+    const argv = nested ? [process.execPath, TOOL, 'isolated', '--', process.execPath, TOOL, 'isolated', '--', ...inner]
+      : [process.execPath, TOOL, 'isolated', '--', ...inner];
+    const r = await runRaw([process.execPath, '-e', TERM3_PROBE, '6', '60', ...argv], { cwd: ROOT });
+    const got = [...r.stdout.matchAll(/^TERM3 (\S+)$/gm)].map((m) => m[1]);
+    assert.equal(got.length, 6, r.stdout);
+    assert.deepEqual(got.filter((x) => x !== '7'), [], `${nested ? 'nested' : 'fresh'}: a late TERM changed the outcome: ${got.join(' ')}`);
+  }
+});
+
 const { userNamespaceRefusal } = await import(pathToFileURL(TOOL).href);
 const UID_MAP_EPERM = 'unshare: write failed /proc/self/uid_map: Operation not permitted';
 

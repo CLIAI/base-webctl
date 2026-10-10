@@ -1127,6 +1127,36 @@ had this.
   that fits node's exec but not the chain's is host-dependent.
 * **Sabotage:** `fwd.remove()` dropped from the catch → the arm red (forwarder left installed).
 
+### TERM ×3 → 143 instead of the trap's code (re-review, LOW; pre-existing)
+
+The re-review saw 4/25 runs (6/25 on the old tree) where TERM ×3 sent quickly after the
+command's trap was set came back 143, not the trap's 7. **Reproduced here** with the TERMs 60 ms
+apart: 9/25 fresh and 10/25 nested ended by SIGTERM (0, 3, 15, 30, 100 ms gaps: ≤ 1/25). The rate
+depends on where the later TERMs land relative to the command's exit (a `sleep 0.1` loop defers
+the trap by up to 100 ms).
+* **Traced** (`strace -f`, one failing run): the command trapped TERM #1 and exited 7; the pid-1
+  helper and then the inner half (pid 2) reaped their children and REMOVED their forwarders —
+  restoring node's DEFAULT disposition — and TERM #3, forwarded by pid 1's bash, reached the
+  inner half during `process.exit`'s teardown: `killed by SIGTERM`. pid 1 exited 143, unshare
+  passed it on, and the harness (which had forwarded TERM) re-raised it.
+* ⇒ **`quietLateSignals`**: in the CLI only (`LATE.cli`, set by the dispatcher — never on import,
+  an importer's own Ctrl-C must work), removing a forwarder leaves a no-op listener until the
+  process exits; `loudAgain()` restores the default right before a deliberate re-raise
+  (exitOrDieBy, dieByForwarded). Deterministic: there is no longer an instant with neither a
+  forwarder nor a listener. After: 150/150 runs → 7 (gaps 45/60/80 ms, fresh and nested).
+* ⚠ A second, narrower path fixed on the way (found by reading, while the trace was pending):
+  forwardSignalsPastUnshare treated "unshare has no child" as EARLY even after `started` — i.e.
+  pid 1 had already EXITED — and SIGKILLed unshare, so the harness died by the signal. It now
+  records the signal and forwards nothing. Alone it did NOT move the 60 ms rate (10/25, 7/25
+  measured with only it applied): the trace's cause was the one above.
+* **Arms:** TERM ×3 at 60 ms, 6 runs per path, every outcome 7 (statistical: before, ~40% per
+  run ⇒ a false pass ≈ 0.6^12); a logic arm drives forwardSignalsPastUnshare (exported) with a
+  real, childless stand-in for unshare: after `started` nothing is killed and it is not early;
+  CONTROL before `started`: SIGKILL, early.
+* **Sabotage (all caught):** `LATE.cli` off → the TERM ×3 arm (`7 SIGTERM 7 7 SIGTERM SIGTERM`);
+  the old "no child ⇒ early" → the logic arm; no `loudAgain()` before a re-raise → the
+  early-TERM and Ctrl-C arms (5 red: the harness no longer dies by the signal).
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

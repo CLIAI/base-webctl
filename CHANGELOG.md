@@ -442,6 +442,10 @@ per path with pid 1 held trapless for 300 ms; 0 lost.
   end.
 * `runCommand` fails cleanly (FAIL, 127) when spawn throws synchronously (an argv node refuses,
   E2BIG): it rejected with a stack trace and left its signal forwarder installed.
+* Fixed (pre-existing): TERM ×3 in quick succession after the command's trap came back **143**
+  instead of the trap's code (measured: 9–10/25 with the TERMs 60 ms apart). A late TERM killed a
+  node half during its own exit, after it had dropped its forwarder. Now 150/150 return the
+  trap's code.
 * `WEBCTL_RO_ROOTS` and `WEBCTL_HIDDEN_DIRS` are recorded input; the other nesting facts still
   require a real masked namespace.
 * The AppArmor message is tested by its logic (the sysctl path is a parameter), not end to end.

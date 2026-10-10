@@ -1514,7 +1514,31 @@ function installForwarder(send) {
   /** @type {[NodeJS.Signals, () => void][]} */
   const handlers = FORWARDED_SIGNALS.map((s) => [s, () => { last = s; send(s); }]);
   for (const [s, h] of handlers) process.on(s, h);
-  return { last: () => last, remove: () => { for (const [s, h] of handlers) process.off(s, h); } };
+  return { last: () => last, remove: () => { quietLateSignals(); for (const [s, h] of handlers) process.off(s, h); } };
+}
+
+/**
+ * ⛔ A LATE signal killed a node half on its way out (re-review: TERM ×3 → 143 instead of the
+ * trap's 7 in 4/25; here 9–10/25 with the TERMs 60 ms apart). Traced: the command ran its trap
+ * and exited 7, the helper and the inner half reaped it and REMOVED their forwarders — which
+ * restores node's DEFAULT disposition — and the caller's third TERM, forwarded by pid 1, reached
+ * the inner half during process.exit's teardown: `killed by SIGTERM`, so pid 1 exited 143 and the
+ * harness re-raised it. ⇒ In the CLI, removing a forwarder leaves a no-op listener (recording
+ * the signal: exitOrDieBy may still re-raise it) until the process exits; only a deliberate
+ * re-raise (`loudAgain`) restores the default first. Never on import: an importer's own
+ * Ctrl-C must not be swallowed (`LATE.cli` is set by the dispatcher alone).
+ */
+const LATE = { cli: false, on: false, handler: () => { /* a late signal: the half is already exiting */ } };
+function quietLateSignals() {
+  if (!LATE.cli || LATE.on) return;
+  LATE.on = true;
+  for (const s of FORWARDED_SIGNALS) process.on(s, LATE.handler);
+}
+/** Before re-raising a signal on ourselves: the DEFAULT disposition must be back. */
+function loudAgain() {
+  if (!LATE.on) return;
+  LATE.on = false;
+  for (const s of FORWARDED_SIGNALS) process.off(s, LATE.handler);
 }
 
 /**
@@ -1576,6 +1600,7 @@ function exitOrDieBy(fwd, code, signal) {
   const sig = fwd.last();
   fwd.remove();
   if (sig && rc === 128 + (os.constants.signals[sig] || -999)) {
+    loudAgain();
     try { process.kill(process.pid, sig); } catch { /* fall through to the exit code */ }
   }
   return rc;
@@ -1615,20 +1640,25 @@ function childrenOf(pid) {
  * TERM vanished and the command ran to exit 0 after the caller gave up. ⇒ Until `started()`
  * (the inner side's report on fd 3 — written only once pid 1's traps are certainly in place,
  * because pid 1 started it), a signal SIGKILLs unshare and `--kill-child` takes the namespace
- * with it; `early()` then tells the caller to die by that signal. No child at all ⇒ the same.
+ * with it; `early()` then tells the caller to die by that signal. After `started()`, no child
+ * means pid 1 has exited: the signal is recorded, not forwarded, and never "early".
  * Installed BEFORE the spawn (forwarderBeforeSpawn): `attach(unshare)` once it exists.
  * @param {() => boolean} started has the inner side reported `started`?
  * @returns {Forwarder & {attach: (c: import('node:child_process').ChildProcess) => void}}
  */
-function forwardSignalsPastUnshare(started) {
+export function forwardSignalsPastUnshare(started) {
   let early = false;
   const fwd = forwarderBeforeSpawn((s, /** @type {import('node:child_process').ChildProcess} */ unshare) => {
-    const kids = unshare.pid ? childrenOf(unshare.pid) : [];
-    if (kids.length === 0 || !started()) {
+    if (!started()) {
       early = true;
       try { unshare.kill('SIGKILL'); } catch { /* gone */ }
       return;
     }
+    // ⛔ AFTER `started`, no child means pid 1 already EXITED — the namespace is ending with the
+    // command's own status. It used to count as "early" too: a late TERM (the caller's 2nd or 3rd)
+    // SIGKILLed unshare and we died by TERM, losing the trap's exit code (measured: TERM ×3 at
+    // 60 ms → 9/25 fresh, 10/25 nested ended by SIGTERM, not 7). Nothing to forward to: done.
+    const kids = unshare.pid ? childrenOf(unshare.pid) : [];
     for (const k of kids) { try { process.kill(k, s); } catch { /* gone */ } }
   });
   return { ...fwd, early: () => early };
@@ -1643,7 +1673,7 @@ function forwardSignalsPastUnshare(started) {
 function dieByForwarded(fwd) {
   const sig = fwd.last();
   fwd.remove();
-  if (sig) { try { process.kill(process.pid, sig); } catch { /* the caller reports */ } }
+  if (sig) { loudAgain(); try { process.kill(process.pid, sig); } catch { /* the caller reports */ } }
 }
 
 /**
@@ -3606,6 +3636,7 @@ function isEntryScript() {
 // ⚠ Body deliberately NOT re-indented: keeps this guard a two-line diff against
 // concurrent edits to the dispatch.
 if (isEntryScript()) {
+LATE.cli = true; // a removed forwarder leaves a no-op listener until exit (quietLateSignals)
 const [, , cmd, ...args] = process.argv;
 const repo = path.resolve(opt(args, 'repo', '.'));
 const sub = opt(args, 'sub', 'vendor/base-webctl');
