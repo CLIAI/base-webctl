@@ -2809,8 +2809,10 @@ function planKeeps(explicit, implicit, prot, explicitRo = []) {
     if (k.rw && !k.quiet) { // an outer call's re-bind (quiet) was noted by THAT call
       for (const sd of prot.sensitive) {
         if (isWithin(real, sd.real) || isWithin(sd.real, real)) {
+          // ⚠ a cwd is not a request: it is writable because the command runs THERE (said so)
           notes.push(`${k.label} ${isWithin(real, sd.real) ? 'is in' : 'contains'} ${sd.name} — re-exposed WRITABLE`
-            + `${k.explicit ? ', and its sockets exempt from the socket check,' : ''} at the caller's request`);
+            + (k.explicit ? ', and its sockets exempt from the socket check, at the caller\'s request'
+              : k.noHidden ? ' because the command runs there' : ''));
           break;
         }
       }

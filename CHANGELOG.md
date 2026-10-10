@@ -243,6 +243,11 @@ by default:**
   `--pass-env 'LD_*'` reached every C binary of the chain. The command's env travels in a pipe
   and is applied by the small node helper that spawns it, after the drop — so the command still
   gets `NODE_OPTIONS` and whatever you `--pass-env`, and nothing before it does.
+* ⚠ **One more process: on the FRESH path the command's parent is now that node helper**
+  (`node …/contract-harness.mjs __isolated-pid1 …`; it used to be the inner half, through an
+  exec'ing `setpriv`/`unshare -U`). A test that inspects its own process tree — `getppid()`,
+  `/proc/<ppid>/cmdline`, `ps` from pid 1 down — sees the helper between pid 1's bash and the
+  command, as the nested path already did. Exit codes and signals are unchanged (128+n, re-raised).
 * **Declare yours** — ready to copy into each lane's `isolated` call (`webctl:mgr`'s pre-check):
 
   ```bash
@@ -316,6 +321,9 @@ unhide `~/.config/webctl`); `--keep` at or beneath one re-exposes that path only
   an explicit `--keep` re-exposes a hidden dir; the read-back now exempts only those.
 * A NESTED `--keep`/`--keep-ro` under the OUTER call's hidden home now says the outer call hides
   it (keep it there), not "does not exist" (still exit 3).
+* The note for a writable re-bind inside `~/.ssh`, `~/.config`, `~/.cache`, … reads right for a
+  cwd: `the working directory is in ~/.cache — re-exposed WRITABLE because the command runs
+  there` (it said "at the caller's request", which only a `--keep` is).
 * ⛔ **What now breaks: anything that reads the home INDIRECTLY** — git's `~/.gitconfig` (and
   commit signing with `gpg.format=ssh`, which reads the key under `~/.ssh`), ssh or git-over-ssh
   reading `~/.ssh/config` / `known_hosts`, gpg's keyring and config, shell rc files, a tool's

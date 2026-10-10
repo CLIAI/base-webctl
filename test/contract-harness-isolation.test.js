@@ -1226,6 +1226,22 @@ test('⛔ a `--keep` SYMLINK to the home directory is realpath\'d → refused as
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a CWD inside ~/.cache is noted for what it is — writable because the command runs there, not "at the caller\'s request"; a --keep keeps that wording', needsIsolation, async (t) => {
+  const home = fakeSecretHome();
+  const cwd = path.join(home, '.cache', 'work');
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.mkdirSync(path.join(home, '.cache', 'kept'));
+  try {
+    const q = await underFakeHome(home, ['sh', '-c', 'cd "$0" && exec "$@"', cwd, process.execPath, TOOL, 'isolated',
+      '--keep', path.join(home, '.cache', 'kept'), '--', 'true']);
+    if (!q) { t.skip(NO_FAKE_HOME); return; }
+    assert.equal(q.status, 0, q.stdout + q.stderr);
+    assert.match(q.stderr, /^isolated: note: the working directory is in ~\/\.cache — re-exposed WRITABLE because the command runs there$/m, q.stderr);
+    assert.doesNotMatch(q.stderr, /the working directory .*at the caller's request/, q.stderr);
+    assert.match(q.stderr, /^isolated: note: --keep #1 is in ~\/\.cache — re-exposed WRITABLE, and its sockets exempt from the socket check, at the caller's request$/m, q.stderr);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
 test('a `--keep` inside ~/.cache is ALLOWED but NAMED on stderr (the caller\'s choice, made visible)', needsIsolation, async (t) => {
   const cache = path.join(PW_HOME, '.cache');
   if (!fs.existsSync(cache)) { t.skip('SKIP (host): no ~/.cache here'); return; }
