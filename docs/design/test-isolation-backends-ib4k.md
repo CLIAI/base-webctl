@@ -48,9 +48,9 @@ each with its positive control (`k3wn`). A backend that passes fewer arms is not
 | 5 | no privilege | CapEff 0, NoNewPrivs 1; umount / remount refused | — |
 | 6 | env allowlist | a planted unknown var absent | `--pass-env` passes it |
 | 7 | writable only where declared | cwd and `--keep` writable | everything else EROFS/absent |
-| 8 | no host-shared scratch | a file planted in the host's `/dev/shm` and `/var/tmp` → absent; a write there is not visible outside | a file made inside is readable inside |
+| 8 | no host-shared scratch | a file planted in the host's `/dev/shm` and `/var/tmp` → absent; a write there is not visible outside; the host's SysV IPC (a segment from `ipcmk -M`) not listed by `ipcs -m`, a `shmat` write never reaching it; the host's POSIX mqueues absent from `/dev/mqueue` | a file, a segment and a queue made inside are seen inside; a write made outside is read back |
 | 9 | no host keyring | `keyctl show @s` names no host keyring; a key added inside is gone outside | a key added inside is readable inside |
-| 10 | no host identity | hostname ≠ the host's; `/sys/class/net` lists only `lo`; `/etc/machine-id` absent or neutral | the same reads outside show the host's values |
+| 10 | no host identity | hostname ≠ the host's; `/sys/class/net` and `/sys/devices/virtual/net` list only `lo`; `/etc/machine-id` absent or neutral, and not rewritable through its backing copy | the same reads outside show the host's values; the rewrite works on such a bind made outside |
 | 11 | no loader injection into the privileged half | `NODE_OPTIONS` / `LD_*` preloads never run before the masks | the command itself sees its allowed env |
 
 Rows 8–10 come from the v0.33.0 review of the namespace backend. They were MEASURED open there (deferred because they are not regressions and change keep-refusal rules), so v0.34.0 closes them in the shared arm set, for every backend at once. Row 11 is fixed in v0.33.0 and must stay fixed for every backend.
@@ -62,7 +62,7 @@ with its control, in a throwaway world (a fake passwd home on a tmpfs, tmpfs "ho
 harness can run a backend the table does not judge. The unshare-specific depth (mutants, refusals,
 races) stays in `test/contract-harness-isolation.test.js`; each row names it.
 
-### 1a. Rulings for rows 7–10 (v0.34.0 phase 1, unshare)
+### 1a. Rulings for rows 7–10 (v0.34.0 phase 1, unshare; amended by the phase-1 review, 2026-10-10)
 
 Measured on the unshare backend before the change: a file planted in the host's `/dev/shm` and
 `/var/tmp` was readable inside and a write there landed on the host; `keyctl show @s` inside listed
@@ -82,6 +82,12 @@ three paths (the table's rows 8–10).
   dir that does not exist is skipped, and so is one whose real path lies in a dir already masked
   (`/dev/shm → /run/shm`, `/var/tmp → /tmp`). The nesting proof requires the masks; under a v0.33
   outer a nested v0.34 call is refused saying **upgrade the outer** (it cannot mask its caller's).
+  * **SysV IPC and POSIX mqueues (review F1).** Measured open: `unshare` without `--ipc` shares the
+    caller's IPC namespace — a host `ipcmk -M` segment was listed by `ipcs -m` inside, a `shmat`
+    write inside landed in it — and the host's mqueue mount shows the host namespace's queues
+    whoever reads it. ⇒ `unshare --ipc` on the fresh path (and its probe); the inner half PROVES the
+    IPC namespace differs from the caller's and mounts a fresh mqueue on `/dev/mqueue` (read back).
+    A nested call inherits its outer's IPC namespace.
 * **Row 9 — a fresh session keyring, made by pid 1.** pid 1's bash runs `keyctl new_session`
   (keyctl from the system dirs) after its traps and before its child: an anonymous session keyring
   everything below inherits, on the fresh and the nested path. Not `keyctl session -`: it prints
@@ -89,29 +95,46 @@ three paths (the table's rows 8–10).
   compares the session keyring id with the host's and refuses when it is unchanged or unreadable
   (a keyctl that ignores `new_session` is caught). **keyctl NOT installed (ruling, `webctl:base`):**
   the run goes ahead, the verdict says `keyring: shared (keyctl not installed)`, and row 9 is a
-  named SKIP — untested, never a pass. ⚠ keyctl installed but the join refused (a policy) is a
-  REFUSAL (fail closed), not a note — flagged for review. ⚠ The user keyring (`@u`) is per user
-  namespace on the measured kernel (its id differs inside); on kernels before 5.3 it was per uid.
+  named SKIP — untested, never a pass. ⛔ **keyctl installed but the join refused → REFUSAL** (ruling
+  R3), on EVERY path: pid 1 writes `fail …` on the status channel and exits before starting anything
+  (it was `|| :` — silent on the nested path, review F5). **keyctl installed but the host's
+  `keyctl show @s` fails** (review F5): the join runs, but cannot be read back — the verdict says
+  `keyring: unverified (keyctl show failed)` and row 9 is a named SKIP. ⚠ The user keyring (`@u`) is
+  per user namespace on the measured kernel (its id differs inside); on kernels before 5.3 it was per
+  uid. ⚠ **`/proc/keys` (review F2) — OPEN, needs a re-ruling:** the kernel lists every key whose
+  owner uid is mapped in the reader's user namespace (the real uid always is) under the user VIEW
+  bit, so the DESCRIPTIONS of the real uid's keys are enumerable inside, and a known id is still
+  describable under the user permission bits (contents need possessor or read). Masking the file
+  was measured to break every nested `--mount-proc` (EPERM: no fully visible procfs left) — this
+  verb's own nested and stripped paths included; keeping a shadowed clean procfs fixes nesting but
+  lets one `unshare -U --map-user … --mount-proc` read the keys again (measured: 11 lines).
 * **Row 10 — host identity.**
   * **hostname:** a UTS namespace (`unshare --uts`) named `webctl-isolated`. node has no
     `sethostname`, and `/proc/sys/kernel/hostname` belongs to the host's root (measured:
-    `Permission denied` as namespace root), so the system **`hostname` tool** sets it. *Without the
-    tool* the run goes ahead and the verdict says `hostname: the host's (no \`hostname\` tool)` — by
-    analogy with the keyctl ruling; **flagged for review**. With the tool, the name is READ BACK.
+    `Permission denied` as namespace root), so the system **`hostname` tool** sets it, and the name
+    is READ BACK. ⛔ **The tool is REQUIRED (ruling R2):** without it in the system dirs, a REFUSAL
+    naming the providing packages (`inetutils` or `hostname`) — never a run under the host's name,
+    never a raw syscall number.
   * **`/sys/class/net`:** a **fresh sysfs** mounted from inside the new network namespace lists only
     `lo` (and `/sys/devices/virtual/net` likewise). It covers every host submount of `/sys`, so the
     cgroup tree is staged first and moved back (node reads its memory limit there; measured:
-    `process.constrainedMemory()` still answers). If the kernel refuses the sysfs mount, an empty
-    read-only tmpfs goes over `/sys/class/net` and a note says **MASKED** (no interface at all).
+    `process.constrainedMemory()` still answers). ⛔ **If the kernel refuses the sysfs mount: a
+    REFUSAL** (review F3). Phase 1 put an empty tmpfs over `/sys/class/net` and ran, but
+    `/sys/devices/virtual/net` still named the host's interfaces; the read-back now checks both dirs.
   * **`/etc/machine-id`** (and `/var/lib/dbus/machine-id` when a separate file) and
     **`/etc/hostname`:** a NEUTRAL copy bound over each, read-only. The id is a fixed constant
     (`NEUTRAL_MACHINE_ID`, the hex of `webctl-isolated\0`) — not absent and not all zeros, which
     systemd/dbus treat as "no machine id". *Measured:* `systemd-id128 machine-id` and
-    `dbus-uuidgen --get` answer the neutral id inside and keep working.
+    `dbus-uuidgen --get` answer the neutral id inside and keep working. ⛔ The copies live on a tmpfs
+    of their own, remounted read-only and read back (review F6: in the writable `/run`, a copy could
+    be `chmod`ed and rewritten, changing what `/etc/machine-id` read). Not unlinked instead: the
+    kernel refuses a mount on top of a bind of an unlinked file, so a stripped-markers call could not
+    bind its own (measured).
   * All of it READ BACK before the command starts (hostname, `/sys/class/net`, both files); the
     nesting proof requires it too (skew: "upgrade the outer").
   * *Not covered:* `/etc/hosts` (may name the host), `/proc/sys/kernel/random/boot_id`, DMI strings
-    under `/sys/class/dmi/id`, the kernel release in `uname`.
+    under `/sys/class/dmi/id`, **disk serials** (`/sys/class/block/*/device/serial` — block devices
+    are not per network namespace, so the fresh sysfs lists them), the kernel release in `uname`.
 
 The coordinator's cross-backend escape script (an independent python driver used against
 v0.31.0) is run against every backend as an extra, independent check.
@@ -133,8 +156,14 @@ specific one); a pinned backend that is unavailable is a refusal, never a silent
 
 *As built (v0.34.0 phase 1):* `selectBackend()` in the harness. The **unshare probe** is: a valid
 `WEBCTL_UNSHARE_BIN` (when set), every privileged tool in the system dirs, then
-`unshare -rnm --uts --pid --fork true` — its failure keeps v0.33's HOST-POLICY text (the sysctl and
-both remedies) when the AppArmor sysctl reads 1. Only a PROBE failure moves on to the next backend;
+`unshare -rnm --uts --ipc --pid --fork true` — its failure keeps v0.33's text, WORD FOR WORD: the
+HOST-POLICY text (the sysctl and both remedies) when the AppArmor sysctl reads 1, else `unshare exited
+<n> before the isolated side reported in — …`. ⛔ **An unpinned refusal LEADS with that unshare
+reason** (review F4, ruling — a lane matches `/NOT RUN: unshare exited 1/`), then appends `; no
+isolation backend can be used here — bwrap: <why>, docker: <why>`; unshare's own stderr is printed
+above it, as v0.33's was. A pin keeps the pin's text. ⛔ A backend that is SELECTED but has no runner
+yet is refused (`internal: backend <x> has no runner yet`, review F7) — everything after selection
+is unshare's runner until each phase adds its own. Only a PROBE failure moves on to the next backend;
 once a backend is chosen, a failure inside it (a mask that fails, a read-back that disagrees) is a
 FAIL, never a reason to try the next. Until phases 2–3 land, `bwrap` and `docker` answer
 `not implemented yet (v0.34 phase 2/3)`: a pin to either is refused, and a host where unshare
@@ -199,7 +228,10 @@ is validated there, and selects nothing.
   *As built:* read from the GATE's own `isolated` verdict (the last before the contract's start
   line), so no consumer prints anything new: each scratch-mode envelope gains
   `"isolation": "<backend>"` (`none` when refused, `unknown` when no verdict named one), and the
-  summary prints `----- isolation backends: unshare=N … -----`.
+  summary prints `----- isolation backends: unshare=N … -----`. ⚠ It takes the verdict's LAST
+  `; backend:` (review F8): the paths the caller named come before the clause and may contain it.
+* `HARNESS_GENERATION` is **7** (ruling R4): a lane matching `; backend:` keys it on
+  `require-generation 7` (CHANGELOG v0.34.0 has the guard).
 * AppArmor fallback: on EPERM with the sysctl at 1, the refusal (when no backend works)
   names the sysctl and both remedies: a host sysctl, or a profile for `WEBCTL_UNSHARE_BIN`.
 
@@ -214,7 +246,10 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.34.0.
 * **Phase 1 — done (unreleased, v0.34.0):** the selection frame (§2, §4), the shared arm table
   (§1, run against unshare), rows 8–10 closed for unshare (§1a), the gate's per-consumer backend
   and mix.
-* **Open:** row 7 for dirs outside the home (§1a, needs a ruling); the two "flagged for review"
-  rulings in §1a (a refused keyring join fails closed; no `hostname` tool runs with a note).
+* **Phase-1 review (2026-10-10) — done:** SysV IPC and mqueues (row 8), the sysfs refusal and the
+  `/sys/devices/virtual/net` read-back (row 10), the keyring join on every path and `unverified`
+  (row 9, R3), the identity files read-only (row 10), the v0.33 refusal lead (§2), the runner guard
+  (§2), the gate's last-match parse (§4), generation 7, `hostname` required (R2).
+* **Open:** row 7 for dirs outside the home (§1a); `/proc/keys` (§1a row 9, needs a re-ruling).
 * **Phase 2 — bwrap; phase 3 — docker (§3, §3a):** not started. Each lands by adding its probe,
   its run path, and its name to the table's IMPLEMENTED list — the guard test fails until it does.

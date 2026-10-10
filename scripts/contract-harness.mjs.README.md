@@ -279,7 +279,7 @@ contract's output when it is used.
 
 | verb | does | exit |
 |---|---|---|
-| `isolated [--keep <path>]… [--keep-ro <path>]… [--pass-env <NAME\|PREFIX_*>]… -- <cmd> [args…]` | runs `<cmd>` in private user+network+mount+**PID** namespaces (`unshare -rnm --pid --fork --mount-proc`) — no host process can be seen or signalled, and everything the arm started dies with it: the ONLY interface is its own `lo`, brought up first so local fakes/stubs work; `/run`, `/tmp`, `/var/tmp`, `/dev/shm` (and a real `/var/run`) are a fresh tmpfs, so the host's unix sockets — docker, X11, ssh-agent, session bus — are gone. The **passwd home is HIDDEN, whole** (an empty read-only tmpfs); re-bound on top **read-only**: base's repo root, node, an absolute `<cmd>`, `WEBCTL_UNSHARE_BIN`, **every PATH entry under the home**, each `--keep-ro`; **writable**: the cwd, a `$HOME` under `/tmp`, each `--keep`. `~/.ssh`, `~/.gnupg`, `~/.cache/CLIAI`, `~/.config/CLIAI`, `~/.local/state/CLIAI` and `~/.config/webctl` stay hidden under any re-bind that contains them. **pid 1 is `bash --norc -p`, and reaps orphans.** Caller's cwd and stdio; the **env is an ALLOWLIST** — `PATH HOME USER LOGNAME SHELL LANG LC_* TERM TZ NODE_OPTIONS NODE_PATH npm_config_* WEBCTL_*` plus each `--pass-env`, never `DISPLAY`/`WAYLAND_DISPLAY`/`SSH_AUTH_SOCK`/`DBUS_SESSION_BUS_ADDRESS`/`DOCKER_HOST`/`XDG_RUNTIME_DIR`, `XDG_{CACHE,CONFIG,STATE,DATA}_HOME`, `TMUX`/`TMUX_PANE`/`XAUTHORITY`/`SSH_AGENT_PID`/`DOCKER_CONTEXT`, `SSH_{CONNECTION,CLIENT,TTY}`; `TMPDIR=/tmp`; argv as an array (no shell). One stderr verdict line: `isolated: home HIDDEN; re-bound read-only: …; writable: …` — paths only for what you named (cwd, `--keep`, `--keep-ro`), PATH entries COUNTED; `WEBCTL_ISOLATED_VERBOSE=1` lists every path. | the command's exit code; **1** (FAIL, with a JSONL `"check":"isolated"` record) when isolation could not be established — **the command is then not started**; a signal before it started: **dies by that signal** |
+| `isolated [--keep <path>]… [--keep-ro <path>]… [--pass-env <NAME\|PREFIX_*>]… -- <cmd> [args…]` | runs `<cmd>` in private user+network+mount+**PID**+UTS+IPC namespaces (`unshare -rnm --uts --ipc --pid --fork --mount-proc`) — no host process can be seen or signalled, and everything the arm started dies with it: the ONLY interface is its own `lo`, brought up first so local fakes/stubs work; `/run`, `/tmp`, `/var/tmp`, `/dev/shm` (and a real `/var/run`) are a fresh tmpfs, so the host's unix sockets — docker, X11, ssh-agent, session bus — are gone. The **passwd home is HIDDEN, whole** (an empty read-only tmpfs); re-bound on top **read-only**: base's repo root, node, an absolute `<cmd>`, `WEBCTL_UNSHARE_BIN`, **every PATH entry under the home**, each `--keep-ro`; **writable**: the cwd, a `$HOME` under `/tmp`, each `--keep`. `~/.ssh`, `~/.gnupg`, `~/.cache/CLIAI`, `~/.config/CLIAI`, `~/.local/state/CLIAI` and `~/.config/webctl` stay hidden under any re-bind that contains them. **pid 1 is `bash --norc -p`, and reaps orphans.** Caller's cwd and stdio; the **env is an ALLOWLIST** — `PATH HOME USER LOGNAME SHELL LANG LC_* TERM TZ NODE_OPTIONS NODE_PATH npm_config_* WEBCTL_*` plus each `--pass-env`, never `DISPLAY`/`WAYLAND_DISPLAY`/`SSH_AUTH_SOCK`/`DBUS_SESSION_BUS_ADDRESS`/`DOCKER_HOST`/`XDG_RUNTIME_DIR`, `XDG_{CACHE,CONFIG,STATE,DATA}_HOME`, `TMUX`/`TMUX_PANE`/`XAUTHORITY`/`SSH_AGENT_PID`/`DOCKER_CONTEXT`, `SSH_{CONNECTION,CLIENT,TTY}`; `TMPDIR=/tmp`; argv as an array (no shell). One stderr verdict line: `isolated: home HIDDEN; re-bound read-only: …; writable: …` — paths only for what you named (cwd, `--keep`, `--keep-ro`), PATH entries COUNTED; `WEBCTL_ISOLATED_VERBOSE=1` lists every path. | the command's exit code; **1** (FAIL, with a JSONL `"check":"isolated"` record) when isolation could not be established — **the command is then not started**; a signal before it started: **dies by that signal** |
 | `isolation-check <port>…` | run INSIDE `isolated`. Each named port: a connect to `127.0.0.1:<port>` must fail with **exactly `ECONNREFUSED`** (lo up, nothing listening) — `ENETUNREACH` means the loopback is DOWN and is a FAIL. A control listener it opens on the namespace loopback must be reachable. The kernel proof below must hold. | 0 pass · 1 fail, naming every condition that failed · 3 usage |
 | `sandbox-port [--bare]` | binds `127.0.0.1:0`, reads the port, closes it, **asserts a connect is refused**, prints it (JSONL + human line; `--bare` = the number only, for `$(…)`) | 0 |
 | `guard-live-port <port> [--pin-verified]` | defence in depth where `isolated` is not used: **REFUSES** when `127.0.0.1:<port>` listens **or** answers CDP (`GET /json/version` 200), naming both facts, unless `--pin-verified` | 0 pass · 1 refused · 3 usage |
@@ -294,18 +294,23 @@ contract's output when it is used.
   be used here — unshare: <reason>; bwrap: …; docker: …`). **`WEBCTL_ISOLATION_BACKEND=<name>`**
   pins one — unavailable is a refusal, never a fallback. ⚠ Phase 1: only **unshare** is
   implemented; bwrap and docker answer `not implemented yet (v0.34 phase 2/3)`. The verdict line
-  ends `; backend: unshare`; a refusal's JSONL record carries `"backend"` and `"skipped"`. The one
+  ends `; backend: unshare`; a refusal's JSONL record carries `"backend"` and `"skipped"`. A refusal
+  LEADS with the unshare reason, worded as in v0.33 (`NOT RUN: unshare exited 1 before …`), then
+  `; no isolation backend can be used here — bwrap: …, docker: …`. The one
   arm table every backend must pass: `test/isolation-arm-table.test.js`.
-* ⛔ **Private scratch, keyring and identity (v0.34.0, `ib4k` §1a).** `/var/tmp` and `/dev/shm` get
-  a fresh tmpfs like `/tmp` (a `--keep` beneath one is re-bound; a keep that IS one is usage 3).
-  pid 1 runs `keyctl new_session`: the command gets a FRESH session keyring (read back; keyctl not
-  installed → it runs, the verdict says `keyring: shared (keyctl not installed)`). The hostname is
-  **`webctl-isolated`** (a UTS namespace; set with the system `hostname` tool — without it the
-  verdict says `hostname: the host's`), `/sys/class/net` lists only `lo` (a fresh sysfs; the cgroup
-  tree carried back), and `/etc/machine-id` / `/etc/hostname` are neutral (`NEUTRAL_MACHINE_ID`;
-  systemd-id128 and dbus-uuidgen keep working). All read back before the command starts; a nested
-  call under a v0.33 outer is refused saying "upgrade the outer". *Not hidden:* `/etc/hosts`,
-  boot_id, DMI strings.
+* ⛔ **Private scratch, IPC, keyring and identity (v0.34.0, `ib4k` §1a).** `/var/tmp` and `/dev/shm`
+  get a fresh tmpfs like `/tmp` (a `--keep` beneath one is re-bound; a keep that IS one is usage 3);
+  SysV IPC is the namespace's own (`--ipc`) and `/dev/mqueue` a fresh mqueue. pid 1 runs
+  `keyctl new_session`: the command gets a FRESH session keyring (read back; a failed join is a
+  REFUSAL on every path; keyctl not installed → it runs, the verdict says `keyring: shared (keyctl
+  not installed)`; the host's `keyctl show @s` failing → `keyring: unverified (keyctl show
+  failed)`). The hostname is **`webctl-isolated`** (a UTS namespace; set with the system `hostname`
+  tool, which is REQUIRED — refused without it), `/sys/class/net` and `/sys/devices/virtual/net`
+  list only `lo` (a fresh sysfs — refused if the kernel will not mount one; the cgroup tree carried
+  back), and `/etc/machine-id` / `/etc/hostname` are neutral (`NEUTRAL_MACHINE_ID`; systemd-id128 and
+  dbus-uuidgen keep working; their copies read-only). All read back before the command starts; a
+  nested call under a v0.33 outer is refused saying "upgrade the outer". *Not hidden:* `/etc/hosts`,
+  boot_id, DMI strings, disk serials, key descriptions in `/proc/keys`.
 * ⛔ **`isolated` fails CLOSED.** No `unshare`, unprivileged user namespaces disabled (or refused
   by AppArmor — named as **HOST POLICY**, below), a bad `WEBCTL_UNSHARE_BIN`, no
   `ip`/`ifconfig`, no `mount`, no `setpriv`, no `bash` (pid 1) — each looked up in

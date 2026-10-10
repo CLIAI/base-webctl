@@ -210,73 +210,144 @@ is the strongest form: it names the ownership in the function that reads it.
 ## v0.34.0 — (unreleased)
 
 **Headline: `isolated` chooses its BACKEND — unshare → bwrap → docker → refuse, never unisolated
-— and is judged by ONE arm table (ib4k §1, rows 1–11); and it closes the three gaps v0.33 left
-open: a private `/var/tmp` and `/dev/shm`, a fresh session keyring, and the host's identity
-hidden.** Phase 1 of 3 (ib4k): only the **unshare** backend is implemented. Harness and gate
-only; no `lib/` change; `HARNESS_GENERATION` stays 6 (no new flag). No consumer change expected.
+— and is judged by ONE arm table (ib4k §1, rows 1–11); and it closes the gaps v0.33 left open: a
+private `/var/tmp`, `/dev/shm`, SysV IPC and POSIX mqueues, a fresh session keyring, and the host's
+identity hidden.** Phase 1 of 3 (ib4k): only the **unshare** backend is implemented. Harness and
+gate only; no `lib/` change. **`HARNESS_GENERATION` is 7** (below). No consumer change expected,
+except a contract that matches the new verdict field or a refusal's tail.
 
 ### Backend selection (ib4k §2, §4)
 
 * Backends are probed in order — **unshare, bwrap, docker** — and the first that can run is used;
   each one skipped before it is recorded with its NAMED reason. None → **refused**, naming all
-  three. A probe is side-effect free (unshare: `unshare -rnm --uts --pid --fork true` after its tool
-  checks) and a probe that throws is a reason, never a crash. Only a PROBE failure moves on: once a
-  backend is chosen, a failure inside it is a FAIL.
+  three. A probe is side-effect free (unshare: `unshare -rnm --uts --ipc --pid --fork true` after
+  its tool checks) and a probe that throws is a reason, never a crash. Only a PROBE failure moves
+  on: once a backend is chosen, a failure inside it is a FAIL.
 * **`WEBCTL_ISOLATION_BACKEND=unshare|bwrap|docker`** pins one. A pinned backend that cannot be used
   is a **refusal**, never a fallback; an unknown value is refused by rule. A nested call validates
   it and selects nothing (it runs inside its outer call's sandbox).
 * ⚠ **Phase 1:** `bwrap` and `docker` answer `not implemented yet (v0.34 phase 2/3)`. So on a host
   where unshare cannot run (the AppArmor sysctl — v0.33's HOST-POLICY text is kept as unshare's
-  reason) `isolated` still REFUSES; a pin to bwrap or docker is refused.
-* ⚠ **The refusal text changed shape** (same reasons): a fresh-path refusal for a missing tool,
-  a bad `WEBCTL_UNSHARE_BIN` or a refused user namespace now reads `NOT RUN: no isolation backend
-  can be used here — unshare: <the v0.33 reason>; bwrap: …; docker: …`. Still one
-  `FAIL  isolated: NOT RUN…` line + a JSONL record, which now carries `"backend"` and `"skipped"`.
-* **The verdict line ends `…; backend: unshare`.** ⚠ A test anchoring the verdict's END (after
-  `writable: …`) must allow it.
+  reason) `isolated` still REFUSES; a pin to bwrap or docker is refused. A backend that is selected
+  but has no runner yet is refused, `internal: backend <x> has no runner yet` (review F7) — it is
+  never run on unshare's runner under its own name.
+* **The refusal keeps v0.33's leading text** (review F4, ruling): an unpinned refusal reads
+  `NOT RUN: <the unshare reason, worded exactly as v0.33>; no isolation backend can be used here —
+  bwrap: <why>, docker: <why> (the command is never run unisolated). The command was NOT started.`
+  — e.g. `NOT RUN: unshare exited 1 before the isolated side reported in — …`. unshare's own message
+  is printed above it, as v0.33's was. A PIN keeps its own text (`… pins the <x> backend …`). Still
+  one `FAIL  isolated: NOT RUN…` line + a JSONL record, which now carries `"backend"` and
+  `"skipped"`. ⚠ An earlier phase-1 build said `NOT RUN: no isolation backend can be used here —
+  unshare: …`; it broke a lane's regex and is gone.
+* **The verdict line ends `…; backend: unshare`** (then `; keyring: …` when that deviates).
+  ⚠ A test anchoring the verdict's END (after `writable: …`) must allow it.
 * **The release gate** records the backend per consumer — read from its OWN `isolated` verdict, so
   nothing a consumer prints changes: scratch-mode envelopes gain `"isolation": "<backend>"` (`none`
-  when refused), and the summary prints `----- isolation backends: unshare=N -----`.
+  when refused), and the summary prints `----- isolation backends: unshare=N -----`. It takes the
+  verdict's LAST `; backend:` (review F8): a named path containing `; backend: docker` cannot win.
 
 ### The shared arm table (ib4k §1)
 
 * `test/isolation-arm-table.test.js`: rows 1–11 as ONE table, run per implemented backend, each row
   on the fresh, nested and stripped-markers paths with its positive control, in a throwaway world
-  (a fake passwd home on a tmpfs, tmpfs "host" scratch dirs, a throwaway keyring; host identity
-  compared as digests — nothing touches the real host). A guard fails when the harness can run a
-  backend the table does not judge.
+  (a fake passwd home on a tmpfs, tmpfs "host" scratch dirs, its own IPC namespace and mqueue, a
+  throwaway keyring; host identity compared as digests — nothing touches the real host). A guard
+  fails when the harness can run a backend the table does not judge.
+* Arms added by the phase-1 review: **row 8** — a host SysV segment not listed by `ipcs -m`, a
+  `shmat` write inside never reaching it, the host's POSIX mqueue absent (controls: a segment and a
+  queue made inside are seen inside; the write outside is read back); **row 10** —
+  `/sys/devices/virtual/net` lists only `lo`, and the neutral `/etc/machine-id` cannot be rewritten
+  through its backing copy (`chmod` + write; control: the same routine changes such a bind made
+  outside); **row 9** is a named SKIP where `keyctl show @s` fails.
 
 ### Rows 8–10 closed (unshare)
 
-* **Row 8 — `/var/tmp` and `/dev/shm` get a private tmpfs**, like `/tmp`. Measured before: a file
-  planted in the host's was readable inside, and a write inside landed on the host. Keep rules are
-  `/tmp`'s: a `--keep`/`--keep-ro` BENEATH one is re-bound with its mode; a keep that IS one (or an
-  ancestor) is usage 3; a cwd AT one fails, beneath one runs.
+* **Row 8 — no host-shared scratch.** `/var/tmp` and `/dev/shm` get a private tmpfs, like `/tmp`.
+  Measured before: a file planted in the host's was readable inside, and a write inside landed on
+  the host. Keep rules are `/tmp`'s: a `--keep`/`--keep-ro` BENEATH one is re-bound with its mode; a
+  keep that IS one (or an ancestor) is usage 3; a cwd AT one fails, beneath one runs. **And SysV IPC
+  and POSIX mqueues** (review F1): measured, a host `ipcmk -M` segment was listed inside, a `shmat`
+  write inside landed in it, and a host queue was visible. Now `unshare --ipc` (proved: the IPC
+  namespace differs from the caller's) and a fresh mqueue on `/dev/mqueue` (read back).
 * **Row 9 — a fresh session keyring.** Measured before: `keyctl show @s` listed the host's session
   keyring (possessor `alswrv`), a host key was found. pid 1 now runs `keyctl new_session`; the
-  fresh path READS BACK the keyring id and refuses when it is still the host's. **keyctl not
-  installed:** the command runs and the verdict says `keyring: shared (keyctl not installed)`.
+  fresh path READS BACK the keyring id and refuses when it is still the host's. A **failed join is
+  a refusal** on every path (ruling R3; it was `|| :`, silent on the nested path — review F5).
+  **keyctl not installed:** the command runs and the verdict says `keyring: shared (keyctl not
+  installed)`. **keyctl installed but the host's `keyctl show @s` fails** (review F5): the join still
+  runs, but cannot be read back — the verdict says `keyring: unverified (keyctl show failed)`.
 * **Row 10 — host identity hidden.** Measured before: hostname, every interface name in
-  `/sys/class/net`, `/etc/machine-id`. Now: a UTS namespace named **`webctl-isolated`** (set with
-  the system `hostname` tool — without it the verdict says `hostname: the host's`); a **fresh
-  sysfs** listing only `lo` (the cgroup tree carried back; if the kernel refuses sysfs, an empty
-  mask over `/sys/class/net` and a note); a **neutral `/etc/machine-id`** (a fixed constant —
-  systemd-id128 and dbus-uuidgen keep working) and `/etc/hostname`. All READ BACK.
+  `/sys/class/net`, `/etc/machine-id`. Now: a UTS namespace named **`webctl-isolated`**, set with the
+  system `hostname` tool — ⛔ **required** (ruling R2): without it `isolated` REFUSES, naming the
+  packages (`inetutils` or `hostname`); a **fresh sysfs** listing only `lo` in `/sys/class/net` and
+  `/sys/devices/virtual/net` (the cgroup tree carried back) — ⛔ **if the kernel refuses the sysfs
+  mount, `isolated` REFUSES** (review F3; an earlier build masked `/sys/class/net` alone and ran, while
+  `/sys/devices/virtual/net` still named the host's interfaces); a **neutral `/etc/machine-id`** (a
+  fixed constant — systemd-id128 and dbus-uuidgen keep working) and `/etc/hostname`, their copies on
+  a tmpfs of their own made read-only (review F6: a copy left in the writable `/run` could be
+  `chmod`ed and rewritten). All READ BACK.
 * ⚠ **Nesting:** the kernel proof now requires the scratch masks and the hidden identity. A v0.34
   call nested under a **v0.33 outer is refused** (exit 2) saying **"upgrade the outer"**. Under the
-  release gate the outer is base HEAD, so this bites only a lane whose own outer call is older.
+  release gate the outer is base HEAD, so this bites only a lane whose own outer call is older. The
+  nested path makes no IPC namespace of its own: it inherits its outer's.
+
+### New refusals (fail closed)
+
+* no `hostname` tool in `/usr/sbin:/usr/bin:/sbin:/bin` (R2); a fresh sysfs the kernel refuses (F3);
+  pid 1's `keyctl new_session` failing, on the fresh AND the nested path (R3, F5); the IPC namespace
+  still the caller's, or `/dev/mqueue` not resolving to the fresh mqueue (F1); the identity files'
+  tmpfs not read-only (F6); a selected backend without a runner (F7).
+
+### Generation 7 (ruling R4)
+
+`HARNESS_GENERATION` is **7**: `isolated` changed behaviour (the verdict field, the refusal tails,
+the new refusals, rows 8–10). A contract that MATCHES the new verdict field must key it on the
+generation, or it goes red on an older pin:
+
+```bash
+# bash: assert the backend only where the harness names it (generation ≥ 7)
+if node "$H" require-generation 7 >/dev/null 2>&1; then
+  grep -qE '^isolated: home HIDDEN; .*; backend: [a-z]+' "$LOG" || { echo "FAIL: no backend in the verdict"; exit 1; }
+fi
+```
+
+```js
+// node: the same guard
+const gen7 = spawnSync(process.execPath, [H, 'require-generation', '7'], { stdio: 'ignore' }).status === 0;
+if (gen7) assert.match(stderr, /^isolated: home HIDDEN; .*; backend: [a-z]+/m);
+```
+
+⚠ Take the LAST `; backend:` on the line (the paths you named come before it), as the gate does.
+`require-generation 6` still gates `--pass-env` (v0.33.0) and still answers 0.
+
+### Per lane
+
+* **perplexity**: its regex `/NOT RUN: unshare exited 1/` keeps matching (review F4) — measured with
+  a fake `WEBCTL_UNSHARE_BIN` printing `Operation not permitted`, exit 1, which is the lane's own
+  case. No change needed there.
+* A lane that matches a refusal's END must allow the appended `; no isolation backend can be used
+  here — bwrap: …, docker: … (the command is never run unisolated)`.
+* A lane on a host without the `hostname` tool, or where the kernel refuses a sysfs mount in a user
+  namespace, now gets a REFUSAL where phase 1 ran with a note — install the tool (`inetutils` or
+  `hostname`).
 
 ### ⛔ What this does NOT cover
 
 * **bwrap and docker backends** (phases 2 and 3, ib4k §3/§3a): not implemented. A host that forbids
   unprivileged user namespaces is still refused — the lane blocked by AppArmor is NOT unblocked yet.
 * **Row 7 is OPEN for dirs outside the home**: a user-owned dir outside the home (an `/opt/x` of
-  one's own) is WRITABLE inside — `isolated` never remounts `/` read-only. Recorded as a `todo` arm;
-  needs a ruling.
+  one's own) is WRITABLE inside — `isolated` never remounts `/` read-only. Recorded as a `todo` arm.
 * **Identity not hidden:** `/etc/hosts` (may name the host), `/proc/sys/kernel/random/boot_id`, DMI
-  strings under `/sys/class/dmi/id`, the kernel release.
-* Two rulings flagged for review (ib4k §1a): keyctl present but its join refused FAILS closed; no
-  `hostname` tool runs with a note.
+  strings under `/sys/class/dmi/id`, **disk serials** (`/sys/class/block/*/device/serial` — block
+  devices are not per network namespace, so a fresh sysfs still lists them), the kernel release.
+* **Key descriptions via `/proc/keys`** (review F2, OPEN — needs a re-ruling): the kernel lists every
+  key whose owner uid is mapped in the reader's user namespace — the real uid always is — under the
+  user VIEW bit, so the descriptions of the real uid's keys are enumerable inside, and a key whose
+  id is known is still `describe`-able under the user permission bits. Contents need the possessor
+  or read bit. ⚠ Masking `/proc/keys` was measured to break every nested `--mount-proc` (the
+  kernel refuses a new procfs while a locked mount covers a proc file) — `isolated`'s own nested and
+  stripped-markers paths included — and a shadowed clean procfs that avoids that lets any command
+  read the keys again with one `unshare -U --map-user … --mount-proc`.
 * Everything under v0.33.x's "does NOT cover" that is not listed above still applies (what a
   re-bind brings back is visible; the util-linux 2.38 PDEATHSIG window).
 
