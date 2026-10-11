@@ -462,7 +462,7 @@ const HOST_MNT = fs.readlinkSync('/proc/self/ns/mnt');
  * `unshare --uts`), a fresh sysfs (only lo), neutral /etc/machine-id and /etc/hostname. After /run's
  * tmpfs (the neutral copies are made there).
  */
-const { NEUTRAL_MACHINE_ID: NEUTRAL_ID } = await import(pathToFileURL(TOOL).href);
+const { NEUTRAL_MACHINE_ID: NEUTRAL_ID, devLinkGaps: DEV_LINK_GAPS } = await import(pathToFileURL(TOOL).href);
 // a fresh minimal /dev, as `isolated` builds it (ib4k row 12) — first, so /dev/shm is masked on top of it
 const V034_DEV = ' && mkdir /run/.d && mount -t tmpfs -o mode=0755 webctl-isolated-dev /run/.d'
   + ' && for n in null zero full random urandom tty; do : > /run/.d/$n && mount --bind /dev/$n /run/.d/$n || exit 1; done'
@@ -1160,6 +1160,30 @@ test('⛔ a --keep under /dev is refused (ib4k row 12: /dev is a fresh minimal o
     assert.match(r.stderr, /is beneath \/dev, which isolation replaces with a fresh minimal one .* a host device is never re-exposed/);
     assert.doesNotMatch(r.stdout, /RAN-MARKER/);
   }
+});
+
+// ⛔ F5 (third review): devGaps checked the nodes' devices but not the LINKS — a fresh /dev whose
+// `ptmx` pointed elsewhere (or whose `fd` was a directory) passed the read-back. Each DEV_LINKS
+// entry is now lstat'ed (a symlink) and readlink'ed (exactly its target). Built in a temp dir:
+// the same check the read-back runs on /dev.
+test('⛔ devLinkGaps: each fresh-/dev link must be a SYMLINK to exactly its target — a wrong target or a non-link is a gap', () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'devlinks-'));
+  try {
+    const want = [['ptmx', 'pts/ptmx'], ['fd', '/proc/self/fd'], ['stdin', '/proc/self/fd/0'], ['stdout', '/proc/self/fd/1'], ['stderr', '/proc/self/fd/2']];
+    for (const [n, to] of want) fs.symlinkSync(to, path.join(d, n));
+    assert.deepEqual(DEV_LINK_GAPS(d), [], 'CONTROL: the correct links are judged gaps');
+    fs.unlinkSync(path.join(d, 'ptmx'));
+    fs.symlinkSync('/dev/pts/0', path.join(d, 'ptmx'));
+    fs.unlinkSync(path.join(d, 'stdin'));
+    fs.writeFileSync(path.join(d, 'stdin'), '');
+    fs.unlinkSync(path.join(d, 'stderr'));
+    const gaps = DEV_LINK_GAPS(d);
+    assert.equal(gaps.length, 3, gaps.join('; '));
+    assert.match(gaps.join('; '), /\/ptmx \(not a link to pts\/ptmx\)/);
+    assert.match(gaps.join('; '), /\/stdin \(not a link to \/proc\/self\/fd\/0\)/);
+    assert.match(gaps.join('; '), /\/stderr \(not a link to \/proc\/self\/fd\/2\)/);
+    assert.doesNotMatch(gaps.join('; '), /\/dev\/pts\/0/, 'a gap must not echo the planted target');
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
 
 test('⛔ a --keep that IS /dev/shm or /var/tmp → usage 3 (it would undo the mask); a cwd AT one → FAIL; a cwd BENEATH one runs', needsIsolation, async (t) => {

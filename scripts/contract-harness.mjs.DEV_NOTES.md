@@ -1676,6 +1676,20 @@ that mount (`freshSysfs`: at `/sys`, `sysfs`, our source tag), not its submounts
 | S7c | the fresh sysfs mounted `ro` | the stripped-markers path refused: `cannot mount a fresh sysfs` — every row red |
 | S7d | the read-back's `freshSysfs` exemption removed | every run refused: `1 mount(s) outside the declared writable set … still WRITABLE` |
 
+### v0.34.0 third-review fixes (F1–F6, 2026-10-11)
+
+**F5 — `devGaps` read the nodes back but not the links.** A fresh `/dev` whose `ptmx` (or `fd`,
+`stdin`, `stdout`, `stderr`) pointed elsewhere, or was not a link at all, passed the read-back.
+`devLinkGaps(dir)` (exported; `devGaps` runs it on `/dev`) `lstat`s each `DEV_LINKS` entry (a
+symlink) and `readlink`s it (exactly its target); a gap names the link and its expected target,
+never what it points at instead. Arm: `devLinkGaps` over a temp dir — the correct links → none
+(control); a wrong `ptmx`, a regular-file `stdin`, a missing `stderr` → exactly three gaps. RED on
+ae496b7 (no such function), GREEN after.
+
+| # | sabotage (on a copy) | caught by |
+|---|---|---|
+| F5a | `freshDev` links `ptmx -> pts/0` | every run refused: `after building a fresh /dev, /dev/ptmx (not a link to pts/ptmx)`. The same sabotage on ae496b7 ran, and the command read `pts/0` from `readlink /dev/ptmx` |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

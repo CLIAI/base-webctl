@@ -2661,6 +2661,7 @@ function freshDev(run, scratch) {
  *   * /dev is our read-only tmpfs, /dev/pts our fresh devpts, and every mount reachable under /dev is
  *     one of those, a bound node, /dev/shm (or beneath it — a keep there) or /dev/mqueue;
  *   * each bound node is the character device it is named for (a /dev/null that is a FILE is not).
+ *   * each link (ptmx, fd, stdin, stdout, stderr) is a symlink to exactly its target (devLinkGaps).
  * ⚠ Counts and names of OUR entries only — never a host device's name.
  * @returns {string[]}
  */
@@ -2675,6 +2676,7 @@ function devGaps() {
     try { const s = fs.statSync(path.join('/dev', n)); ok = s.isCharacterDevice() && s.rdev === maj * 256 + min; } catch { /* named below */ }
     if (!ok) gaps.push(`/dev/${n} (not the ${maj}:${min} device)`);
   }
+  gaps.push(...devLinkGaps('/dev'));
   const mounts = readMountinfo() || [];
   const d = resolveMount(mounts, '/dev');
   if (!d || d.at !== '/dev' || d.fstype !== 'tmpfs' || d.source !== DEV_SOURCE || !d.opts.includes('ro')) gaps.push('/dev (not the fresh read-only tmpfs)');
@@ -2683,6 +2685,22 @@ function devGaps() {
   const ours = new Set(['/dev', '/dev/pts', '/dev/shm', '/dev/mqueue', ...DEV_NODES.map(([n]) => path.join('/dev', n))]);
   const stray = (reachableMountsUnder(mounts, '/dev') || []).filter((m) => !ours.has(m.at) && !isWithin(m.at, '/dev/shm')).length;
   if (stray) gaps.push(`${stray} other mount(s) under /dev`);
+  return gaps;
+}
+
+/**
+ * Each DEV_LINKS entry in `dir` that is not a SYMLINK to exactly its target (third review, F5): the
+ * nodes were checked by device, the links not at all — a `ptmx` pointing elsewhere passed the read-back.
+ * ⚠ Names the link and what it should be, never what it points at instead.
+ * @param {string} dir @returns {string[]}
+ */
+export function devLinkGaps(dir) {
+  /** @type {string[]} */ const gaps = [];
+  for (const [n, to] of DEV_LINKS) {
+    let ok = false;
+    try { ok = fs.lstatSync(path.join(dir, n)).isSymbolicLink() && fs.readlinkSync(path.join(dir, n)) === to; } catch { /* named below */ }
+    if (!ok) gaps.push(`${path.join(dir, n)} (not a link to ${to})`);
+  }
   return gaps;
 }
 
