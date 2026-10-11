@@ -2483,6 +2483,11 @@ async function runIsolatedInner(a) {
 
   // ⛔ the tools resolved on the HOST from the system dirs — never looked up on PATH in here
   MOUNT.bin = plan.tools.mount;
+  // ⛔ EVERY MOUNT PRIVATE, before any other (ib4k §2a): bwrap makes `/` an rslave, so a mount the host
+  // made later appeared inside — writable, after the read-only step (measured). A no-op under
+  // `unshare --propagation=private`. READ BACK below (propagationGaps).
+  const prop = mountOrWhy(['--make-rprivate', '/'], 'make every mount private (a later host mount would appear inside)');
+  if (prop) return refuse(prop);
   const up = bringLoUp(plan.tools.lo);
   if (up) return refuse(up);
   try { await loopbackSelfTest(); } catch (e) {
@@ -2545,6 +2550,12 @@ async function runIsolatedInner(a) {
   if (rootGaps.length) {
     return refuse(`after the read-only root step, ${rootGaps.length} mount(s) outside the declared writable set (the cwd, `
       + '--keep, /tmp, /var/tmp, /dev/shm, /run) are still WRITABLE (or / is not mounted at all)');
+  }
+  // ⭐ …and no mount RECEIVES propagation from the host (ib4k §2a): read back, not trusted
+  const shared = propagationGaps(rmi).length;
+  if (shared) {
+    return refuse(`after making every mount private, ${shared} mount(s) still receive propagation (shared: or master:) — a mount `
+      + 'the host makes later would appear inside, outside the read-only step');
   }
   const res = await closeResidualSockets(plan.sockets, plan.exempt);
   if (res.still > 0) {
@@ -3275,8 +3286,9 @@ function protectedRoots(home) {
  */
 
 /**
- * @typedef {{id: string, parent: string, root: string, at: string, opts: string[], fstype: string, source: string, superOpts: string[]}} MountRow
+ * @typedef {{id: string, parent: string, root: string, at: string, opts: string[], propagation: string[], fstype: string, source: string, superOpts: string[]}} MountRow
  * `root`: the mounted dir of its filesystem (a cgroup2 mount: relative to the READER's cgroup namespace);
+ * `propagation`: mountinfo's optional fields (`shared:N`, `master:N`, `propagate_from:N`, `unbindable`; [] = private);
  * `opts`: the per-mount options; `superOpts`: the superblock's (cgroup2's `nsdelegate` is one).
  */
 
@@ -3291,8 +3303,20 @@ export function parseMountinfo(txt) {
     const f = pre.split(' ');
     const g = post.split(' ');
     return { id: f[0], parent: f[1], root: unesc(f[3] || ''), at: unesc(f[4] || ''), opts: (f[5] || '').split(','),
-      fstype: g[0], source: unesc(g[1] || ''), superOpts: (g[2] || '').split(',') };
+      propagation: f.slice(6).filter(Boolean), fstype: g[0], source: unesc(g[1] || ''), superOpts: (g[2] || '').split(',') };
   });
+}
+
+/**
+ * Mounts that RECEIVE (or pass on) propagation — a `shared:` or `master:` tag (ib4k §2a, difference 1).
+ * ⛔ bwrap makes `/` an rslave: a mount the host made AFTER the start appeared inside, writable — it
+ * lands after the read-only step (measured; 0 under `unshare --propagation=private`). The inner half
+ * makes every mount private, and this reads it back: EVERY mount, covered ones included (a covered
+ * slave still receives; `--make-rprivate` walks the mount tree, not the paths).
+ * @param {MountRow[]} mounts @returns {MountRow[]}
+ */
+export function propagationGaps(mounts) {
+  return mounts.filter((m) => (m.propagation || []).some((t) => /^(?:shared|master):/.test(t)));
 }
 
 /**
@@ -4250,6 +4274,9 @@ function kernelInsideProof() {
   // ⛔ v0.34.0 (re-review item 2): the caller's cgroups must not be writable
   const cgGaps = cgroupGaps();
   if (cgGaps.length) { fails.push(`the caller's cgroups are reachable: ${cgGaps.join(', ')}`); v034++; }
+  // ⛔ v0.35.0 (ib4k §2a): no mount receives the host's propagation (every outer since v0.34 is private)
+  const propShared = propagationGaps(mounts).length;
+  if (propShared) fails.push(`${propShared} mount(s) receive propagation from outside (shared: or master:) — a later host mount would appear here`);
   if (!pidns) fails.push('/proc/self/ns/pid is unreadable');
   if (!recordedPid) fails.push(`${HOST_PIDNS_ENV} is not set, so there is no recorded host PID namespace to differ from`);
   else if (pidns === recordedPid) fails.push(`the current PID namespace ${pidns} EQUALS the recorded host one (host processes can be signalled)`);
@@ -4277,7 +4304,8 @@ function kernelInsideProof() {
     facts: { netns, recorded: recorded ?? null, uidMap, extraInterfaces: extra,
       mntns, recordedMnt: recordedMnt ?? null, pidns, recordedPid: recordedPid ?? null, unmasked,
       roRoots: roRoots ? roRoots.length : null, writableRoRoots: writable,
-      hidden: hidden ? hidden.length : null, shownHidden: shown, identityShown: idGaps.length, devShown: dGaps.length, cgroupWritable: cgGaps.length } };
+      hidden: hidden ? hidden.length : null, shownHidden: shown, identityShown: idGaps.length, devShown: dGaps.length, cgroupWritable: cgGaps.length,
+      propagationShared: propShared } };
 }
 
 /**

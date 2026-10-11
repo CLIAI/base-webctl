@@ -144,6 +144,44 @@ else {
   }
 }
 
+// ── row 7: a mount the "host" makes AFTER the start (ib4k §2a) ──
+// ⛔ bwrap makes `/` an rslave: a host mount made after the start appeared inside, writable (measured).
+// Like a real host (systemd makes `/` shared), this world's late-mount dir is a SHARED mount; each run
+// writes `ready` from inside, the world then mounts a tmpfs beneath that dir, and the probe reads its
+// mountinfo. `slave` (the control): a raw `unshare -m --propagation=slave` started the same way sees it.
+/** @type {Record<string, any>} */
+const late = {};
+const lateAt = path.join(cfg.neutral, 'late');
+fs.mkdirSync(lateAt, { recursive: true });
+if (run([cfg.mount, '--bind', lateAt, lateAt]).status !== 0 || run([cfg.mount, '--make-shared', lateAt]).status !== 0) {
+  late.unavailable = 'cannot make a shared mount in the world';
+} else {
+  const lateProbe = ['-e', [
+    "const fs = require('fs'); const [ready, go, src, dir] = process.argv.slice(1);",
+    "fs.writeFileSync(ready, ''); const t = Date.now();",
+    'while (!fs.existsSync(go) && Date.now() - t < 20000) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);',
+    "const mi = fs.readFileSync('/proc/self/mountinfo', 'utf8').split('\\n');",
+    "console.log('LATE ' + JSON.stringify({ go: fs.existsSync(go), listed: mi.filter((l) => l.includes(' ' + src + ' ')).length,",
+    "  marker: fs.existsSync(dir + '/late-marker') }));"].join('\n')];
+  const iso = [process.execPath, cfg.harness, 'isolated', '--'];
+  const calls = { slave: ['unshare', '-m', '--propagation=slave', process.execPath], fresh: [process.execPath, cfg.harness, 'isolated', '--keep', cfg.keep, '--', process.execPath],
+    nested: [...iso.slice(0, 3), '--keep', cfg.keep, '--', ...iso, process.execPath], stripped: [...iso.slice(0, 3), '--keep', cfg.keep, '--', 'env', ...strip, ...iso, process.execPath] };
+  const waitThenMount = ['out=$(mktemp); "$@" > "$out" & c=$!; i=0',
+    'while [ ! -e "$LATE_READY" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done',
+    '"$LATE_MOUNT" -t tmpfs "$LATE_SRC" "$LATE_AT" && echo marker > "$LATE_AT/late-marker"',
+    ': > "$LATE_GO"; wait $c; cat "$out"; rm -f "$out"'].join('\n');
+  for (const [mode, c] of Object.entries(calls)) {
+    const at = path.join(lateAt, mode);
+    fs.mkdirSync(at);
+    const lenv = { LATE_READY: path.join(cfg.keep, `late-ready-${mode}`), LATE_GO: path.join(cfg.keep, `late-go-${mode}`),
+      LATE_SRC: `arm-world-late-${mode}`, LATE_AT: at, LATE_MOUNT: cfg.mount };
+    const r = run(['sh', '-c', waitThenMount, 'sh', ...c, ...lateProbe, lenv.LATE_READY, lenv.LATE_GO, lenv.LATE_SRC, at],
+      { cwd: cfg.cwd, timeout: 60000, env: { ...env, ...lenv, NODE_OPTIONS: '', ...(cfg.backend ? { WEBCTL_ISOLATION_BACKEND: cfg.backend } : {}) } });
+    const line = String(r.stdout).split('\n').find((l) => l.startsWith('LATE '));
+    late[mode] = line ? JSON.parse(line.slice('LATE '.length)) : { none: `exit ${r.status}: ${String(r.stderr).slice(-400)}` };
+  }
+}
+
 // ── read back on THIS side, after the arm exited ──
 const post = {
   // the arms' own files (`arm-inside-<mode>`); the control's `arm-inside-outside` is expected here
@@ -160,4 +198,4 @@ const post = {
 };
 
 process.stdout.write(`WORLD ${JSON.stringify({ worldPid: process.pid, outside: results(outside.stdout), outsideErr: String(outside.stderr).slice(-2000),
-  arm: results(arm.stdout), armStatus: arm.status, armErr: String(arm.stderr).slice(-6000), post, tty: ttyReadings, killGroup })}\n`);
+  arm: results(arm.stdout), armStatus: arm.status, armErr: String(arm.stderr).slice(-6000), post, tty: ttyReadings, killGroup, late })}\n`);

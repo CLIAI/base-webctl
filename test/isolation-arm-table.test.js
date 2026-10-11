@@ -260,6 +260,13 @@ const ROWS = [
       assert.equal(r.nestedSysfs, 0, ctx(w, `${p}: a fresh sysfs in a nested user+net namespace (row 10's) is refused`));
       // ⚠ third review, F3: the fresh cgroup2 view must not block a nested one (F2's nsdelegate check guards THAT route)
       assert.equal(r.nestedCgroup2, 0, ctx(w, `${p}: a cgroup2 mount in a nested user+mount+cgroup namespace is refused`));
+      // ⛔ ib4k §2a: a mount the host makes AFTER the start never appears inside (bwrap's rslave `/`: measured
+      // appearing, writable, after the read-only step) — every mount private, read back
+      if (w.late.unavailable) { untested.add(`the late host mount: ${w.late.unavailable} — that arm is UNTESTED`); return; }
+      const l = w.late[p];
+      assert.equal(l?.go, true, ctx(w, `${p}: the late-mount run never got its go (${JSON.stringify(l)})`));
+      assert.equal(l?.listed, 0, ctx(w, `${p}: a mount the host made AFTER the start is listed inside (${l?.listed}×)`));
+      assert.equal(l?.marker, false, ctx(w, `${p}: a file on a mount the host made AFTER the start is readable inside`));
     },
     control: (w) => {
       for (const p of PATHS) {
@@ -269,6 +276,10 @@ const ROWS = [
         // the read-only root must not take procfs writes or nested namespaces away (Chromium's sandbox)
         assert.equal(w.arm[p].procWrite, 'ok', `${p}: /proc/self/oom_score_adj is not writable`);
         assert.equal(w.arm[p].nestedUserns, 0, `${p}: a nested \`unshare -rn\` fails`);
+      }
+      // the late mount: a raw SLAVE mount namespace started the same way sees it — the arm can fail
+      if (!w.late.unavailable) {
+        assert.ok(w.late.slave?.go && w.late.slave.listed > 0 && w.late.slave.marker, `control: a raw slave namespace does not see the late mount (${JSON.stringify(w.late.slave)})`);
       }
       assert.equal(w.outside.outside.writes.home, 'ok', 'control: the (fake) home is not writable outside');
       assert.equal(w.outside.outside.writes.outsideHome, 'ok', 'control: the user-owned dir outside the home is not writable outside');
