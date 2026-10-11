@@ -1805,6 +1805,27 @@ nested sysfs mounts). **Not counted in the verdict:** measured, an `access(W_OK)
 10,808 writable — nearly all the user's delegated cgroup files, absent from the fresh sysfs), against
 a <50 ms budget.
 
+### v0.35.0 — pre-tag follow-ups (row 12b's TIOCSTI half, a kill(0) arm)
+
+**Row 12b's TIOCSTI half could not fail here.** It accepted EPERM or EIO; with
+`dev.tty.legacy_tiocsti=0` the kernel answers EIO to a capless caller before it compares the terminal
+with the caller's controlling one. The tty probe now records the sysctl, and `tiocstiHalf()` (in the
+table) accepts only EPERM where it is 1 or absent (a kernel < 6.2); at 0 the half is named NOT TESTED
+as a diagnostic, and `/dev/tty` → ENXIO carries the property. Arm over fabricated readings; RED against
+the old acceptance (`EIO` with the sysctl at 1 passed).
+
+**kill(0) — the caller's process group (row 3).** The world runs each path in a throwaway `setsid -w`
+group: a wrapper shell, a sentinel `sleep`, and the call whose command runs `kill -TERM 0`. Arm: the
+sentinel and the wrapper survive, on all three paths. Control: the same command with no `isolated`
+kills both. Two setsids carry it — the chain's (`runCommand`) and the helper's (`runPid1`) — so it is
+red only with both gone:
+
+| # | sabotage (on a copy) | caught by |
+|---|---|---|
+| K1 | no setsid on the chain AND on the command | row 3: `fresh: \`kill -TERM 0\` inside killed a sentinel in its CALLER's process group` (wrapper and sentinel both dead, SIGTERM) |
+| K2 | no setsid on the chain only | not by this arm (the helper's group confines kill(0)); F1a's capless-ancestor arm catches it |
+| K3 | no setsid on the helper only | not by this arm (the chain's session confines it); F1b's loop test catches it |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

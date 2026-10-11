@@ -122,6 +122,28 @@ else {
   ttyReadings.out = String(t.stdout).replace(/\r/g, '').slice(-2000);
 }
 
+// ── row 3: kill(0) — the CALLER's process group (v0.35.0, from the v0.34.0 pre-tag review) ──
+// Each run is a throwaway session (`setsid -w`): a wrapper shell, a sentinel `sleep` in its group, and in
+// the same group the call whose command runs `kill -TERM 0`. Measured pre-tag: on v0.33.1 the sentinel
+// died. `outside` (the control) runs that command with no `isolated` at all: there it must kill both.
+/** @type {Record<string, any>} */
+let killGroup = {};
+if (!cfg.setsid) killGroup = { unavailable: 'no `setsid` (util-linux) in the system dirs' };
+else {
+  const kill0 = ['sh', '-c', 'kill -TERM 0'];
+  const iso = [process.execPath, cfg.harness, 'isolated', '--'];
+  const calls = { outside: kill0, fresh: [...iso, ...kill0], nested: [...iso, ...iso, ...kill0],
+    stripped: [...iso, 'env', ...strip, ...iso, ...kill0] };
+  const wrapper = 'sleep 30 & s=$!; "$@"; echo "wrapper alive"; if kill -0 "$s" 2>/dev/null; then echo "sentinel alive"; kill "$s"; fi';
+  for (const [mode, c] of Object.entries(calls)) {
+    const r = run([cfg.setsid, '-w', 'sh', '-c', wrapper, 'sh', ...c], { cwd: cfg.cwd, timeout: 60000,
+      // ⚠ without NODE_OPTIONS: row 11 counts every preload hit outside the command (these runs are not it)
+      env: { ...env, NODE_OPTIONS: '', ...(cfg.backend ? { WEBCTL_ISOLATION_BACKEND: cfg.backend } : {}) } });
+    killGroup[mode] = { wrapper: /wrapper alive/.test(String(r.stdout)), sentinel: /sentinel alive/.test(String(r.stdout)),
+      status: r.status, signal: r.signal };
+  }
+}
+
 // ── read back on THIS side, after the arm exited ──
 const post = {
   // the arms' own files (`arm-inside-<mode>`); the control's `arm-inside-outside` is expected here
@@ -138,4 +160,4 @@ const post = {
 };
 
 process.stdout.write(`WORLD ${JSON.stringify({ worldPid: process.pid, outside: results(outside.stdout), outsideErr: String(outside.stderr).slice(-2000),
-  arm: results(arm.stdout), armStatus: arm.status, armErr: String(arm.stderr).slice(-6000), post, tty: ttyReadings })}\n`);
+  arm: results(arm.stdout), armStatus: arm.status, armErr: String(arm.stderr).slice(-6000), post, tty: ttyReadings, killGroup })}\n`);

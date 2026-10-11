@@ -49,6 +49,7 @@ const MOUNT = sysTool('mount');
 const IPCMK = sysTool('ipcmk');
 const PYTHON = sysTool('python3');
 const SCRIPT = sysTool('script');
+const SETSID = sysTool('setsid');
 /** shmat(argv[1]); `w`: write argv[3] at its start, `r`: print what is there. Prints `wrote`, the text, or `failed <errno>`. */
 const SHM_PY = ['import ctypes, sys', 'libc = ctypes.CDLL(None, use_errno=True)', 'libc.shmat.restype = ctypes.c_void_p',
   'p = libc.shmat(int(sys.argv[1]), None, 0)',
@@ -111,7 +112,7 @@ try { fs.appendFileSync(${JSON.stringify(hits)}, JSON.stringify({ pid: process.p
       ipcmk: IPCMK, python: PYTHON, shmPy: SHM_PY, ipcFile: path.join(keep, 'ipc.json'),
       keyIdFile: path.join(keep, 'key-id'), keyctl: !!KEYCTL, keyName: `webctl-arm-${process.pid}`, port: /** @type {net.AddressInfo} */ (listener.address()).port,
       sockets, hostPid: process.pid, cgroup: CGROUP, baseRoot: ROOT, probe: PROBE, harness: TOOL, preload, backend,
-      script: SCRIPT, ttyProbe: TTY_PROBE, ptyIdFile: path.join(keep, 'pty-id'), ttyFile: path.join(keep, 'tty.jsonl'),
+      script: SCRIPT, setsid: SETSID, ttyProbe: TTY_PROBE, ptyIdFile: path.join(keep, 'pty-id'), ttyFile: path.join(keep, 'tty.jsonl'),
       self: path.join(keep, 'cfg.json') };
     fs.writeFileSync(cfg.self, JSON.stringify(cfg));
     const argv = [...(KEYCTL ? [KEYCTL, 'session', '-'] : []), 'unshare', '-rm', '--ipc', '--propagation=private', process.execPath, WORLD, cfg.self];
@@ -195,9 +196,20 @@ const ROWS = [
         assert.ok(['EROFS', 'EACCES'].includes(r.cgroupOwnOpen?.[f]),
           ctx(w, `${p}: the own cgroup's ${f}, by the path /proc/self/cgroup gives, opens for WRITE inside or is missing (${r.cgroupOwnOpen?.[f]})`));
       }
+      // …nor by kill(0): the command's `kill -TERM 0` must not reach the process GROUP of its caller — a
+      // sentinel there and the wrapper that called `isolated` both survive (v0.35.0; measured dying on v0.33.1)
+      if (w.killGroup.unavailable) { untested.add(`kill(0): ${w.killGroup.unavailable} — that arm is UNTESTED`); return; }
+      const k = w.killGroup[p];
+      assert.equal(k?.sentinel, true, ctx(w, `${p}: \`kill -TERM 0\` inside killed a sentinel in its CALLER's process group (${JSON.stringify(k)})`));
+      assert.equal(k?.wrapper, true, ctx(w, `${p}: \`kill -TERM 0\` inside killed the shell that called \`isolated\` (${JSON.stringify(k)})`));
     },
     control: (w, t) => {
       assert.equal(w.outside.outside.hostPid, 'ok', 'control: the host pid is not alive outside');
+      // kill(0) with no `isolated` reaches the whole group: the sentinel and the wrapper die
+      if (!w.killGroup.unavailable) {
+        assert.deepEqual([w.killGroup.outside?.sentinel, w.killGroup.outside?.wrapper], [false, false],
+          `control: \`kill -TERM 0\` outside does not kill its own group — the kill(0) arm cannot fail (${JSON.stringify(w.killGroup.outside)})`);
+      }
       const o = w.outside.outside.cgroupOpen || {};
       const bad = CGROUP_FILES.filter((f) => o[f] !== 'ok');
       if (bad.length) t.skip(`SKIP (host): the caller's ${bad.join(' and ')} do(es) not open for write even outside — the cgroup arm is UNTESTED here`);
