@@ -1186,6 +1186,59 @@ test('⛔ devLinkGaps: each fresh-/dev link must be a SYMLINK to exactly its tar
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
 
+// ⛔ F2 (third review): inside, `unshare -rm --cgroup` + `mount -t cgroup2` gives the command a WRITABLE
+// view rooted at its caller's scope; only cgroup2's `nsdelegate` stops a `cgroup.kill` write at that
+// namespace root. ⇒ FAIL CLOSED without it. ⛔ The real cgroup tree is never written, nor mkdir'ed in: the
+// refusal is driven by a FAKE mount table through a seam only an importer reaches (helpers/isolated-with-mounts.mjs).
+const { cgroupDelegationRefusal: DELEGATION, parseMountinfo: PARSE_MI } = await import(pathToFileURL(TOOL).href);
+const WITH_MOUNTS = path.join(ROOT, 'test', 'helpers', 'isolated-with-mounts.mjs');
+/** A mount table with ONE cgroup2 mount whose super options are `superOpts` ('' = no cgroup2 at all). @param {string} superOpts */
+const fakeMounts = (superOpts) => ['25 1 0:23 / / rw,relatime shared:1 - ext4 /dev/root rw',
+  ...(superOpts ? [`27 25 0:30 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:9 - cgroup2 cgroup2 ${superOpts}`] : [])].join('\n');
+
+test('⛔ cgroupDelegationRefusal: cgroup2 WITHOUT nsdelegate, or no cgroup2 visible → a refusal naming the option and the remedy; with it → none', () => {
+  const parse = (/** @type {string} */ t) => PARSE_MI(t);
+  assert.equal(DELEGATION(parse(fakeMounts('rw,nsdelegate,memory_recursiveprot'))), '', 'CONTROL: nsdelegate present is refused');
+  for (const [what, mi] of [['without nsdelegate', fakeMounts('rw,memory_recursiveprot')], ['no cgroup2 mount', fakeMounts('')]]) {
+    const why = DELEGATION(parse(mi));
+    assert.match(why, /`nsdelegate`/, `${what}: the refusal does not name the option`);
+    assert.match(why, /mount cgroup2 with `nsdelegate` \(systemd does so by default/, `${what}: the refusal does not name the remedy`);
+  }
+  // the PER-MOUNT options never count: only the superblock's (where the kernel shows it)
+  assert.notEqual(DELEGATION(parse(fakeMounts('rw').replace('rw,nosuid', 'rw,nsdelegate,nosuid'))), '', 'nsdelegate among the per-mount options was taken');
+  assert.notEqual(DELEGATION(null), '', 'an unreadable mountinfo passed');
+});
+
+/** Run `isolated` through the seam with `mountinfo` as the host's mount table. @param {string} mountinfo @param {string[]} args */
+function runWithMounts(mountinfo, args) {
+  const d = tmpdir();
+  fs.writeFileSync(path.join(d, 'mountinfo'), mountinfo);
+  return new Promise((resolve) => {
+    const c = spawn(process.execPath, [WITH_MOUNTS, TOOL, path.join(d, 'mountinfo'), ...args], { cwd: ROOT, env: cleanEnv() });
+    let stdout = ''; let stderr = '';
+    c.stdout.on('data', (x) => { stdout += x; });
+    c.stderr.on('data', (x) => { stderr += x; });
+    c.on('close', (code) => { fs.rmSync(d, { recursive: true, force: true }); resolve({ status: code, stdout, stderr }); });
+  }).then((r) => /** @type {{status: number, stdout: string, stderr: string}} */ (r));
+}
+
+test('⛔ F2: the host\'s cgroup2 WITHOUT nsdelegate → `isolated` REFUSES, nothing run — CONTROL: with nsdelegate it runs, and the verdict STATES the check', needsIsolation, async () => {
+  const marker = ['console.log("RAN-" + "MARKER")'];
+  const off = await runWithMounts(fakeMounts('rw,memory_recursiveprot'), ['--', process.execPath, '-e', ...marker]);
+  assert.equal(off.status, 1, off.stderr);
+  assert.match(off.stderr, /^FAIL {2}isolated: NOT RUN: the host's cgroup2 is mounted WITHOUT `nsdelegate` — .*`cgroup\.kill`.*; remedy: mount cgroup2 with `nsdelegate` \(systemd does so by default; .*The command was NOT started\./m, off.stderr);
+  assert.doesNotMatch(off.stdout, /RAN-MARKER/, 'the command ran');
+  assert.doesNotMatch(off.stderr, /^isolated: home HIDDEN/m, 'a verdict was printed for a refused run');
+  const on = await runWithMounts(fakeMounts('rw,nsdelegate'), ['--', process.execPath, '-e', ...marker]);
+  assert.equal(on.status, 0, `CONTROL: nsdelegate present, yet: ${on.stderr}`);
+  assert.match(on.stdout, /^RAN-MARKER$/m);
+  assert.match(on.stderr, /^isolated: home HIDDEN; .*; backend: unshare[^\n]*; cgroup2: nsdelegate( —|$)/m, on.stderr);
+  // …and the CLI's own path reads the REAL table (no seam): this host has nsdelegate, or `isolated` refuses here
+  const real = await run(['isolated', '--', 'true']);
+  if (real.status === 0) assert.match(real.stderr, /; cgroup2: nsdelegate( —|$)/m, real.stderr);
+  else assert.match(real.stderr, /`nsdelegate`/, real.stderr);
+});
+
 test('⛔ a --keep that IS /dev/shm or /var/tmp → usage 3 (it would undo the mask); a cwd AT one → FAIL; a cwd BENEATH one runs', needsIsolation, async (t) => {
   const dirs = scratchHomes();
   if (!dirs.length) { t.skip('SKIP (host): neither /dev/shm nor /var/tmp exists here'); return; }
@@ -1303,7 +1356,7 @@ test('⭐ a cwd under home is writable; `..` out of it is EROFS — the cwd is r
     assert.equal(fs.existsSync(path.join(dir, name)), false);
     // the cwd is a path the CALLER named: the verdict lists it (as ~/…), it is not merely counted
     const rel = `~/${path.relative(PW_HOME, fs.realpathSync(cwd))}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    assert.match(r.stderr, new RegExp(`^isolated: home HIDDEN; .*; writable: ${rel}; backend: unshare( — |$)`, 'm'), r.stderr);
+    assert.match(r.stderr, new RegExp(`^isolated: home HIDDEN; .*; writable: ${rel}; backend: unshare; cgroup2: nsdelegate( — |$)`, 'm'), r.stderr);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1670,7 +1723,7 @@ test('⭐ a PATH dir under the hidden home is re-bound read-only: a script in it
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /^HELLO from a PATH dir under the home$/m, r.stderr);
     assert.match(r.stdout, /^BIN-RO$/m, 'a PATH dir under the home was re-bound WRITABLE');
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 1 PATH entry; writable: ~\/work, 1 named path outside the home; backend: unshare — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 1 PATH entry; writable: ~\/work, 1 named path outside the home; backend: unshare; cgroup2: nsdelegate — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
     assert.ok(!r.stderr.includes(home), 'the verdict printed the home path');
     // CONTROL: without the PATH entry the same name is not found inside
     const c = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--', 'sh', '-c', 'hello-from-home || echo "NOT-FOUND $?"']);
@@ -1698,7 +1751,7 @@ test('⛔ the verdict never says "writable: nothing" with a writable cwd and --k
     const v = await run(argv, { WEBCTL_ISOLATED_VERBOSE: '1' }, process.execPath, cwd);
     assert.equal(v.status, 0, v.stdout + v.stderr);
     const both = [fs.realpathSync(cwd), fs.realpathSync(keep)].sort().join(', ');
-    assert.ok(v.stderr.split('\n').some((l) => l.startsWith('isolated: home HIDDEN; ') && l.includes(`; writable: ${both}; backend: unshare`)), v.stderr);
+    assert.ok(v.stderr.split('\n').some((l) => l.startsWith('isolated: home HIDDEN; ') && l.includes(`; writable: ${both}; backend: unshare; cgroup2: nsdelegate`)), v.stderr);
   } finally { for (const d of [cwd, keep]) fs.rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -1715,13 +1768,13 @@ test('⛔ the verdict COUNTS implicit PATH re-binds — a distinctive PATH dir n
     assert.match(r.stdout, /^HELLO from a PATH dir under the home$/m, 'the PATH dir was not re-bound (the count would be vacuous)');
     assert.ok(!r.stderr.includes(secretName), `an implicit PATH re-bind was NAMED on stderr:\n${r.stderr}`);
     assert.ok(!r.stderr.includes('~/bin'), `an implicit PATH re-bind was NAMED on stderr:\n${r.stderr}`);
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 2 PATH entries; writable: ~\/work, 1 named path outside the home; backend: unshare — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 2 PATH entries; writable: ~\/work, 1 named path outside the home; backend: unshare; cgroup2: nsdelegate — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
     // CONTROL: the opt-in lists every path (so the default's silence is the fix, not a missing bind)
     const v = await underFakeHome(home, argv(['env', 'WEBCTL_ISOLATED_VERBOSE=1']));
     assert.ok(v);
     assert.equal(v.status, 0, v.stdout + v.stderr);
     // the cwd (base's checkout, outside the FAKE home) is listed by its absolute path under VERBOSE (item 4)
-    assert.ok(v.stderr.split('\n').includes(`isolated: home HIDDEN; re-bound read-only: ~/bin, ~/data, ~/${secretName}/bin; writable: ~/work, ${fs.realpathSync(ROOT)}; backend: unshare`), v.stderr);
+    assert.ok(v.stderr.split('\n').includes(`isolated: home HIDDEN; re-bound read-only: ~/bin, ~/data, ~/${secretName}/bin; writable: ~/work, ${fs.realpathSync(ROOT)}; backend: unshare; cgroup2: nsdelegate`), v.stderr);
     assert.ok(!v.stderr.includes(home), 'even verbose, the home itself is printed as ~');
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
@@ -1967,7 +2020,7 @@ test('⛔ base\'s root UNDER the hidden home is re-bound READ-ONLY (the harness 
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.equal(writeOf(r.stdout), 'EROFS', 'base\'s root under the home is writable inside');
     // base's root is not a path the caller named: it is named by its LABEL, never by its path
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: base's repo root; writable: 1 named path outside the home; backend: unshare — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: base's repo root; writable: 1 named path outside the home; backend: unshare; cgroup2: nsdelegate — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
     assert.equal(fs.existsSync(path.join(base, 'x')), false);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
@@ -2682,7 +2735,7 @@ test('⛔ STRIPPED markers inside `isolated` → the call isolates AGAIN, fully 
   const inner = (r.stdout.match(/^INNER (\S+)$/m) || [])[1];
   assert.ok(inner && inner !== outer, `the stripped call did not make its own network namespace (only inherited):\n${r.stdout}`);
   assert.match(r.stdout, /^PROOF-OK$/m, `the kernel proof failed after a stripped re-isolation:\n${r.stderr}`);
-  assert.match(r.stderr, /^isolated: home HIDDEN; .*; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, keeping what the outer call re-bound \(same modes\); backend: unshare( — WEBCTL_ISOLATED_VERBOSE=1 lists every path)?$/m, r.stderr);
+  assert.match(r.stderr, /^isolated: home HIDDEN; .*; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, keeping what the outer call re-bound \(same modes\); backend: unshare; cgroup2: nsdelegate( — WEBCTL_ISOLATED_VERBOSE=1 lists every path)?$/m, r.stderr);
   // CONTROL: from the host the verdict does not claim it
   const c = await run(['isolated', '--', 'true']);
   assert.equal(c.status, 0, c.stderr);

@@ -2046,7 +2046,12 @@ function usageRefusal(why, command) {
  * @param {string[]} a
  * @returns {Promise<number>}
  */
-function runIsolated(a) {
+/**
+ * @param {string[]} a
+ * @param {{readHostMounts?: () => MountRow[] | null}} [seam] ⛔ TESTS ONLY, reached by importing this
+ *   module (never an env var or a flag): the mount table the cgroup2 `nsdelegate` check reads (F2).
+ */
+export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
   const sep = a.indexOf('--');
   const opts = sep < 0 ? a : a.slice(0, sep);
   const command = sep < 0 ? [] : a.slice(sep + 1);
@@ -2220,6 +2225,13 @@ function runIsolated(a) {
     return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: internal: backend ${choice.backend} has no runner yet — `
       + `${backendClause(choice)}. The command was NOT started.`, { command, backend: null, skipped: choice.skipped }));
   }
+  // ⛔ cgroup2 `nsdelegate` (third review, F2): without it the command could write cgroup.kill at the root of a
+  // cgroup namespace of its own — its caller's scope. FAIL CLOSED; read back inside too (cgroupGaps).
+  const deleg = cgroupDelegationRefusal(readHostMounts());
+  if (deleg) {
+    return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${deleg}. The command was NOT started.`,
+      { command, backend: choice.backend, skipped: choice.skipped }));
+  }
   // ⛔ every tool the privileged halves run: from the SYSTEM dirs, resolved HERE, passed on by path
   // (the unshare probe has already required every one of them)
   const { tools } = privilegedTools(ub, false);
@@ -2242,7 +2254,7 @@ function runIsolated(a) {
   // ⛔ with keyctl but no host reading, the join still runs (and fails closed) but cannot be READ BACK —
   // said, never a silent skip (review F5)
   const keyringNote = !tools.keyctl ? '; keyring: shared (keyctl not installed)' : keyring ? '' : '; keyring: unverified (keyctl show failed)';
-  process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', `${inside}; ${backendClause(choice)}${keyringNote}`)}\n`);
+  process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', `${inside}; ${backendClause(choice)}${keyringNote}${NSDELEGATE_CLAUSE}`)}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
   // the COMMAND's env: the allowlist + our markers. It travels in the plan (fd 4) and is applied
@@ -2836,6 +2848,33 @@ function identityGaps() {
 }
 
 /**
+ * '' when the host's cgroup2 is mounted with `nsdelegate`, else the REFUSAL (third review, F2).
+ * ⛔ Inside, the command can still make a cgroup namespace of its own (`unshare -rm --cgroup`) and mount
+ * cgroup2 there: a WRITABLE view rooted at its cgroup — the caller's scope. Only `nsdelegate` stops a
+ * `cgroup.kill` write at that namespace root (the kernel refuses writes to a cgroup namespace's root
+ * files other than the delegatable ones — `cgroup.procs`, `cgroup.threads`, `cgroup.subtree_control` —
+ * and a `cgroup.procs` write that would move a process across the namespace boundary). Without it, one
+ * write kills every process of the caller's scope, the release gate among them. ⇒ FAIL CLOSED.
+ * The option is one flag of the whole cgroup2 hierarchy, set or cleared only from the initial cgroup
+ * namespace, and shown in the SUPER options of every cgroup2 mount (`superOpts`); none visible → it
+ * cannot be read → refused too.
+ * @param {MountRow[] | null} mounts /proc/self/mountinfo, parsed @returns {string}
+ */
+export function cgroupDelegationRefusal(mounts) {
+  const why = 'without it, the command could make a cgroup namespace of its own, mount cgroup2 there and write `cgroup.kill` '
+    + 'at its root — the caller\'s scope: one write kills the processes that called `isolated`';
+  const remedy = '; remedy: mount cgroup2 with `nsdelegate` (systemd does so by default; as root: `mount -o remount,nsdelegate /sys/fs/cgroup`)';
+  if (!mounts) return `cannot read /proc/self/mountinfo, so cgroup2's \`nsdelegate\` option cannot be checked — ${why}${remedy}`;
+  const v2 = mounts.filter((m) => m.fstype === 'cgroup2');
+  if (!v2.length) return `no cgroup2 mount is visible, so its \`nsdelegate\` option cannot be checked — ${why}${remedy}`;
+  if (v2.some((m) => !m.superOpts.includes('nsdelegate'))) return `the host's cgroup2 is mounted WITHOUT \`nsdelegate\` — ${why}${remedy}`;
+  return '';
+}
+
+/** The verdict's clause for the check above (F2): stated on every run that passed it. */
+const NSDELEGATE_CLAUSE = '; cgroup2: nsdelegate';
+
+/**
  * What of the CALLER's cgroups is writable HERE (re-review item 2) — read from the kernel. [] when
  * nothing. Every cgroup (v1 or v2) mount path resolution reaches is read-only; with `hostCgroup`
  * (the fresh path), the cgroup namespace differs from the caller's too. Used by the fresh path after
@@ -2854,6 +2893,8 @@ function cgroupGaps(hostCgroup) {
   const rw = mounts.filter((m) => (m.fstype === 'cgroup2' || m.fstype === 'cgroup') && !m.opts.includes('ro')
     && resolveMount(mounts, m.at)?.id === m.id).length;
   if (rw) gaps.push(`${rw} cgroup mount(s) are still WRITABLE`);
+  // ⛔ F2: the delegation boundary a nested cgroup2 mount meets (cgroupDelegationRefusal) — read back here too
+  if (mounts.some((m) => m.fstype === 'cgroup2' && !m.superOpts.includes('nsdelegate'))) gaps.push('cgroup2 is mounted without `nsdelegate`');
   return gaps;
 }
 
@@ -3212,7 +3253,8 @@ function protectedRoots(home) {
  */
 
 /**
- * @typedef {{id: string, parent: string, at: string, opts: string[], fstype: string, source: string}} MountRow
+ * @typedef {{id: string, parent: string, at: string, opts: string[], fstype: string, source: string, superOpts: string[]}} MountRow
+ * `opts`: the per-mount options; `superOpts`: the superblock's (cgroup2's `nsdelegate` is one).
  */
 
 /**
@@ -3226,7 +3268,7 @@ export function parseMountinfo(txt) {
     const f = pre.split(' ');
     const g = post.split(' ');
     return { id: f[0], parent: f[1], at: unesc(f[4] || ''), opts: (f[5] || '').split(','),
-      fstype: g[0], source: unesc(g[1] || '') };
+      fstype: g[0], source: unesc(g[1] || ''), superOpts: (g[2] || '').split(',') };
   });
 }
 

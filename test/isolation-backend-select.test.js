@@ -128,7 +128,7 @@ test('⭐ logic: the AppArmor case keeps v0.33\'s HOST-POLICY text (the sysctl a
 test('⭐ the verdict line names the backend used: `backend: unshare` (nothing skipped before it)', needsNs, async () => {
   const r = await run(['isolated', '--', 'true']);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: unshare(?: —|$)/m);
+  assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: unshare; cgroup2: nsdelegate(?: —|$)/m);
   assert.doesNotMatch(r.stderr, /skipped/);
   // CONTROL: a successful run prints NO record of its own on stdout (the command's output is the output)
   assert.equal(r.stdout, '');
@@ -137,7 +137,7 @@ test('⭐ the verdict line names the backend used: `backend: unshare` (nothing s
 test('⭐ WEBCTL_ISOLATION_BACKEND=unshare pins the implemented backend → runs, verdict names it', needsNs, async () => {
   const r = await run(['isolated', '--', 'true'], { WEBCTL_ISOLATION_BACKEND: 'unshare' });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /; backend: unshare(?: —|$)/m);
+  assert.match(r.stderr, /; backend: unshare; cgroup2: nsdelegate(?: —|$)/m);
 });
 
 test('⛔ WEBCTL_ISOLATION_BACKEND=bwrap / docker (v0.34.0: not implemented, v0.35.0) → REFUSED naming why, the command NOT run, no fallback to unshare', needsNs, async () => {

@@ -3,7 +3,7 @@ id: ib4k
 title: "Isolation backends — one contract, unshare → bwrap → docker → refuse"
 category: test
 created: "2026-10-07"
-updated: "2026-10-10"
+updated: "2026-10-11"
 status: draft
 tags: [isolation, sandbox, unshare, bubblewrap, docker, apparmor, mutation-arms, gate, portability]
 tech:
@@ -168,6 +168,19 @@ three paths (the table's rows 8–10).
   writable — else REFUSED; the nesting proof requires the read-only tree too. node still READS its
   memory limit there. The arm only OPENS the files for write (and closes them), in the throwaway
   world — it never writes the real scope.
+  ⛔ **`nsdelegate` (third review, F2).** Inside, the command can still make a cgroup namespace of its
+  own (`unshare -rm --cgroup`) and mount cgroup2 there: a WRITABLE view rooted at its own cgroup — the
+  caller's scope. Only cgroup2's `nsdelegate` option stops a `cgroup.kill` write at that namespace root
+  (and a `cgroup.procs` write that would move a process across it). It is one flag of the whole
+  hierarchy, set only from the initial cgroup namespace, shown in the SUPER options of every cgroup2
+  line of `/proc/self/mountinfo`. ⇒ `isolated` REFUSES when the host's cgroup2 lacks it — or when no
+  cgroup2 is visible to read it from — naming the option and the remedy (mount cgroup2 with
+  `nsdelegate`; systemd does so by default). The verdict states the check (`; cgroup2: nsdelegate`);
+  the read-back (`cgroupGaps`) and the nesting proof require it too. ⇒ Row 3's cgroup half is closed
+  **where cgroup2 is mounted with `nsdelegate` (systemd's default); `isolated` refuses otherwise.** The
+  arm drives the refusal with a FAKE mount table, through a seam only an importer reaches
+  (`runIsolated(a, {readHostMounts})`, never an env var or a flag) — the real tree is never written or
+  `mkdir`ed in, not even as a probe. Residual: §6.
 * **Row 12 — CLOSED: a minimal FRESH `/dev`, like `bwrap --dev`** (re-review, item 1). Measured
   open in every released `isolated` up to v0.33.1 and in phase 1: the host `/dev` was passed through
   WHOLE — `/dev/uinput` opened for write inside (virtual-keyboard injection into the host desktop),
@@ -275,7 +288,8 @@ is validated there, and selects nothing.
 * The verdict line and JSONL record name the backend used and, for each skipped one, the
   reason (e.g. `unshare: EPERM (apparmor_restrict_unprivileged_userns=1)`).
   *As built:* the verdict ends `…; backend: unshare` (with `(skipped bwrap: …)` when a backend
-  before it was skipped); a refusal's JSONL record carries `"backend"` (null when none) and
+  before it was skipped), then `; keyring: …` when that deviates, then `; cgroup2: nsdelegate` (§1a
+  row 3, the check every run passed); a refusal's JSONL record carries `"backend"` (null when none) and
   `"skipped": [{backend, why}]`. A successful run still prints nothing on stdout.
 * The release gate records the backend per consumer, and the summary shows the mix.
   *As built:* read from the GATE's own `isolated` verdict (the last before the contract's start
@@ -320,5 +334,11 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with b
   mount read-write inside. The command cannot drive this itself: it cannot reach the daemon (host
   unix sockets masked, row 2) and holds no capability to mount one; the daemon must already be
   running on the host, as the same user, and choose to lie.
+* **Residual (third review, F2): empty child cgroups.** With `nsdelegate`, the command can still
+  `mkdir` child cgroups beneath the caller's scope through a nested cgroup2 mount (a cgroup namespace
+  of its own): the boundary refuses `cgroup.kill` at the namespace root and any move across it, not a
+  `mkdir` under it. Such a cgroup may outlive the run (an emptied cgroup is not removed by the kernel)
+  and goes when the scope does. It cannot kill or move the caller's processes. Without `nsdelegate`,
+  `isolated` refuses (§1a row 3).
 * **v0.35.0 — bwrap, then docker (§3, §3a, §5):** not started. Each lands by adding its probe,
   its run path, and its name to the table's IMPLEMENTED list — the guard test fails until it does.

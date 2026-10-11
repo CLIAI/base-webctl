@@ -1690,6 +1690,35 @@ ae496b7 (no such function), GREEN after.
 |---|---|---|
 | F5a | `freshDev` links `ptmx -> pts/0` | every run refused: `after building a fresh /dev, /dev/ptmx (not a link to pts/ptmx)`. The same sabotage on ae496b7 ran, and the command read `pts/0` from `readlink /dev/ptmx` |
 
+**F2 — cgroup2 `nsdelegate`, fail closed.** Inside, `unshare -rm --cgroup` + `mount -t cgroup2` gives
+the command a writable view rooted at its own cgroup — the caller's scope (row 3's ro tree does not
+reach a mount the command makes itself). Only `nsdelegate` refuses a `cgroup.kill` write at a cgroup
+namespace's root (the kernel lets only `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control`
+through there, and refuses a `cgroup.procs` move across the boundary). It is a flag of the whole
+cgroup2 hierarchy, changed only from the initial cgroup namespace, and shown in the SUPER options of
+every cgroup2 mount — so `parseMountinfo` now returns `superOpts` (the per-mount `opts` never carry it).
+* `cgroupDelegationRefusal(mounts)` (exported): '' with `nsdelegate`; else a refusal naming the
+  option and the remedy — also when mountinfo is unreadable or no cgroup2 is visible (it cannot be
+  read). `runIsolated` (fresh and stripped paths) refuses with it after the backend is chosen, so a
+  host where unshare cannot run keeps v0.33's refusal text. The verdict gains `; cgroup2: nsdelegate`
+  (after `; keyring: …`); `cgroupGaps` reads it back (inside, and in the nesting proof).
+* ⛔ **The seam is test-only:** `runIsolated(a, { readHostMounts })`, reached by importing the module
+  (`test/helpers/isolated-with-mounts.mjs`) — no env var, no flag. It feeds ONLY this check.
+* ⛔ The real cgroup tree is never written or `mkdir`ed in — not even a probe (the previous reviewer's
+  `mkdir`/`rmdir` was a violation). This host shows `nsdelegate` (systemd's default), so the refusal
+  arm needs the fake.
+* Arms: the function over fake tables (without `nsdelegate`, no cgroup2, unreadable → refused; the
+  option among the PER-MOUNT options only → refused; control: with it → ''); end to end through the
+  seam, a table without it → exit 1, `NOT RUN … WITHOUT \`nsdelegate\` … ; remedy: …`, nothing run, no
+  verdict; control: with it → runs, and the verdict states `; cgroup2: nsdelegate`; and the CLI's own
+  path reads the real table (the clause on this host). RED on ae496b7 (no such function, no seam).
+
+| # | sabotage (on a copy) | caught by |
+|---|---|---|
+| F2a | the call in `runIsolated` removed | the e2e arm: exit 0 for a table without `nsdelegate` (and the verdict's clause, a constant, still printed — the arm keys on the refusal, not the clause) |
+| F2b | the check reads the per-mount `opts` | the function arm's control (`nsdelegate present is refused`) and the e2e control |
+| F2c | the read-back in `cgroupGaps` removed | not caught here: this host has `nsdelegate`, and nothing reachable inside can fake it — the read-back is the second layer behind F2a's refusal |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
