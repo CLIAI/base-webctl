@@ -242,6 +242,10 @@ does bwrap run where unshare cannot. Docker is phase 3. Harness and tests only; 
 * **Selected when unshare's probe fails:** the verdict reads `backend: bwrap (skipped unshare:
   <v0.33's reason>)`, and unshare's own stderr is printed above it, so "unshare's own message, if any,
   is above" stays true.
+* **A terminal's Ctrl-C reaches the command's own trap, as under unshare.** bwrap, unlike `unshare
+  --fork`, dies by a group INT. With `--die-with-parent` that SIGKILLed the namespace, and the command's
+  INT trap never ran (found by sabotage, measured). bwrap is therefore spawned in a session of its own;
+  `isolated` forwards the signal. Arm: group Ctrl-C → `GOT-INT`, rc 7, under both backends.
 * **Stronger than unshare in two places.** `--new-session` means pid 1 and the inner half hold no
   controlling terminal either. `--die-with-parent` means a harness killed with SIGKILL takes the
   namespace with it (under unshare, the command runs on).

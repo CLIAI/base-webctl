@@ -1826,6 +1826,80 @@ red only with both gone:
 | K2 | no setsid on the chain only | not by this arm (the helper's group confines kill(0)); F1a's capless-ancestor arm catches it |
 | K3 | no setsid on the helper only | not by this arm (the chain's session confines it); F1b's loop test catches it |
 
+### v0.35.0 phase 2 — the bwrap backend (ib4k §2a)
+
+**Shape.** bwrap is the namespace CREATOR only: `creator` in `runIsolated` is either
+`[unshare, -rnm, … --fork …]` or `[bwrap, ...BWRAP_FLAGS, --]`, and the argv after it is the same
+(pid 1's bash, the inner half, `-- <cmd>`). Measured with a 20-line prototype before the design: the
+whole arm table green under bwrap, and the unshare depth suite pinned to bwrap 159/180 — every failure
+a `backend: unshare` text match or a fake-tool test the prototype's probe did not yet check.
+
+**Measured on the way (bwrap 0.11.2, kernel 7.1):**
+
+* `--bind / /` makes the tree `nodev`: `/dev/null` answered EACCES. ⇒ `--dev-bind / /`.
+* Without `--as-pid-1`, bwrap's own reaper is pid 1; with it, bwrap's direct child is our bash (as under
+  `unshare --fork`), so `forwardSignalsPastUnshare` reaches it unchanged.
+* Without `--cap-add ALL` the namespace root is capless (`mount` → permission denied) — EXCEPT when
+  bwrap itself runs as uid 0 (here: inside a test's throwaway `unshare -rm`), where it keeps every
+  capability unless `--cap-drop ALL`. The capless-root selection test therefore adds `--cap-drop ALL`.
+* ⛔ **Propagation.** bwrap makes `/` an rslave (159 of 160 mounts tagged `master:`); a tmpfs mounted
+  in a throwaway "host" 0.8 s after the start was listed twice inside and writable (unshare: 0). Closed
+  for every backend: `--make-rprivate /` first, `propagationGaps` read back (inner half, nesting proof).
+  The world's late-mount dir must itself be SHARED (as systemd makes `/`): its own mounts are private,
+  and a slave of a private mount receives nothing — the arm would pass vacuously.
+* A killed bwrap without `--die-with-parent` leaves its command running (raw run: the sleep survived);
+  with it, a SIGKILLed harness takes the namespace along. Under unshare a SIGKILLed harness leaves
+  unshare and the command running (the documented PDEATHSIG note above).
+* The probe's first draft mounted a tmpfs on `/tmp` as its "can the root mount?" step: it HID a
+  `WEBCTL_UNSHARE_BIN` kept under `/tmp` from the drop step that follows (`setpriv: failed to execute`).
+  ⇒ the step is the inner half's own first mount, `mount --make-rprivate /`, which hides nothing.
+* `setuid use of bubblewrap is not supported in this build` is a string in the 0.11.2 binary.
+
+**The probe drops inside bwrap, not on the host.** Probing the drop on the host would wrongly skip bwrap
+in the one case where it helps (an AppArmor profile granting bwrap `userns,`, whose children inherit
+it). A fake `WEBCTL_UNSHARE_BIN` that always fails therefore skips BOTH backends (the v0.33-text test),
+and one that fails only the selection probe's `-rnm` selects bwrap (the selection test).
+
+**Tests.** Arm table: `IMPLEMENTED = ['unshare', 'bwrap']`, every row on all three paths (50 green), a
+bwrap-only `--new-session` arm (no ancestor holds the tty; control: under unshare the privileged halves
+do). Selection (`isolation-backend-select.test.js`): pinned bwrap runs; unshare EPERM → bwrap runs;
+bwrap absent + unshare failing → refused with both reasons and docker's; setuid refused unrun (control:
+the same fake without the bit runs); a kernel refusal and a capless root refused, named. Depth
+(`[bwrap]` in `contract-harness-isolation.test.js`): TERM trap rc 7 fresh and nested, Ctrl-C loop,
+early TERM (the probe's process regex now `unshare|bwrap`), SIGKILLed harness leaves nothing (control:
+raw bwrap without `--die-with-parent`). RED before the runner: the selection tests (7) and the table's
+guard plus every bwrap row (the pin was refused).
+
+**⛔ Found by sabotage: a terminal's Ctrl-C SIGKILLed the command under bwrap.** Sabotaging
+`--die-with-parent` hung the Ctrl-C loop arm. Traced: a group INT reaches the bwrap process itself —
+`unshare --fork` ignores INT and blocks TERM, bwrap does neither — so bwrap died, and (with the flag)
+`--die-with-parent` SIGKILLed the namespace; without the flag nothing was left to forward to and the loop
+ran on. Measured with a trapping command, group INT: unshare `GOT-INT`, rc 7; bwrap no output, the
+parent dead by SIGINT. The existing Ctrl-C arms were green on bwrap: they check that the loop STOPS, and
+a SIGKILL stops it. ⇒ bwrap is spawned `detached`; new arm (both creators): a group Ctrl-C reaches the
+command's own INT trap, rc 7. RED on 77ea37e for bwrap (unshare green), GREEN after.
+
+**Sabotage (on a copy; `[bwrap]` rows of the table, and the `[bwrap]` depth block where named):**
+
+| # | sabotage | caught by |
+|---|---|---|
+| B1 | no `--new-session` | the bwrap-only arm: `fresh: 2 ancestor(s) of the command hold the caller's terminal under bwrap` (the contract rows stay green: the chain's setsid carries 12b) |
+| B2 | `--bind / /` for `--dev-bind` | every bwrap run refused (`/dev/null` is EACCES on the nodev tree: pid 1's `>/dev/null` makes the keyring join fail — `cannot join a fresh session keyring`); 22 of 25 red |
+| B3 | no `--unshare-net` | every run refused: `still in the CALLER'S network namespace`; 22 red |
+| B4 | no `--unshare-pid` (and `--as-pid-1`) | 22 red (row 3's ESRCH and the rest) |
+| B5 | no `--as-pid-1` | depth: `[bwrap] SIGTERM … rc 7` red (the TERM reaches bwrap's reaper, not our bash). First run, before the early arm had a deadline: the early-TERM arm HUNG — bwrap's orphaned init held the harness's pipes (cleaned up by exact pid). The arm now counts a run that never ends as `hung`, a failure |
+| B6 | no `--die-with-parent` | depth: `the HARNESS killed … 1 process(es) of the command outlived the SIGKILLed harness`; table green (no row) |
+| B7 | no `--unshare-ipc` | every run refused: `still in the CALLER'S IPC namespace`; 22 red |
+| B8 | no `--unshare-uts` | every run refused: `cannot set the neutral hostname`; 22 red |
+| B9 | no `--unshare-cgroup` | every run refused: `cannot mount a fresh cgroup2 in our cgroup namespace`; 22 red |
+| B10 | no `--cap-add ALL` | the probe: `bwrap: its namespace root cannot mount (…)`; the pin refused, 20 red |
+| B11a | no `--make-rprivate` (read-back kept) | every bwrap run refused: `2 mount(s) still receive propagation`; row 7 red |
+| B11b | neither | row 7: `fresh: a mount the host made AFTER the start is listed inside (1×)` — under bwrap only; unshare stays green (private by `--propagation=private`) |
+| B12 | the read-only root step off (shared) | every bwrap run refused by its read-back: `7 mount(s) … still WRITABLE` |
+| B13 | the drop off (shared: the command spawned without `priv.prefix`) | 21 red, row 5 among them |
+| B14 | the keyring join off (shared: pid 1's `keyctl new_session`) | every bwrap run refused by its read-back: `the session keyring inside is still the HOST's` |
+| B15 | bwrap not `detached` (the fix above) | the group-Ctrl-C INT-trap arm: `bwrap: the command's INT trap never ran (killed instead)` |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

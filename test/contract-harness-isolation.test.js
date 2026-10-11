@@ -3163,8 +3163,9 @@ test('⭐ CONTROL: the same trapper WITHOUT `isolated` → GOT-TERM, rc 7', asyn
  * argv[2] = N, argv[3…] = a harness invocation. N times: start it, poll /proc until the
  * `unshare` that carries pid 1's reaper (its argv names `webctl-isolated-pid1`) HAS A CHILD,
  * TERM the harness at once, and classify the end. Prints one line:
- * `EARLY term=<n> notrun=<n> bad=<n> other=<n> missed=<n>` — bad = the command RAN and the
- * harness exited 0; missed = the moment was never seen (the run finished first).
+ * `EARLY term=<n> notrun=<n> bad=<n> other=<n> missed=<n> hung=<n>` — bad = the command RAN and the
+ * harness exited 0; missed = the moment was never seen (the run finished first); hung = the run did
+ * not end within 20 s (killed and counted — a failure, never a wait).
  */
 const EARLY_PROBE = `
 const fs = require('fs'); const { spawn } = require('child_process');
@@ -3172,7 +3173,7 @@ const [n, ...argv] = process.argv.slice(2);
 const kids = (p) => { try { return fs.readFileSync('/proc/' + p + '/task/' + p + '/children', 'utf8').trim().split(/\\s+/).filter(Boolean).map(Number); } catch { return []; } };
 const cmd = (p) => { try { return fs.readFileSync('/proc/' + p + '/cmdline', 'utf8'); } catch { return ''; } };
 const desc = (p) => { const out = []; const q = [p]; while (q.length) { const x = q.shift(); for (const k of kids(x)) { out.push(k); q.push(k); } } return out; };
-const tally = { term: 0, notrun: 0, bad: 0, other: 0, missed: 0 };
+const tally = { term: 0, notrun: 0, bad: 0, other: 0, missed: 0, hung: 0 };
 const once = () => new Promise((resolve) => {
   const c = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; let err = ''; let sent = false; let done = false;
@@ -3184,7 +3185,12 @@ const once = () => new Promise((resolve) => {
     setImmediate(poll);
   };
   poll();
+  // ⛔ a run that never ENDS is a failure, not a wait: an orphaned pid 1 holding our pipes hung the arm for
+  // ever (measured: bwrap without --as-pid-1 or --die-with-parent, sabotaged) — count it and move on
+  const deadline = setTimeout(() => { if (done) return; done = true; tally.hung++; try { c.kill('SIGKILL'); } catch {} resolve(); }, 20000);
   c.on('close', (code, sig) => {
+    clearTimeout(deadline);
+    if (done) return;
     done = true;
     if (!sent) tally.missed++;
     else if (sig === 'SIGTERM') tally.term++;
@@ -3230,6 +3236,7 @@ test('⛔ EARLY TERM, fresh path: a TERM the moment unshare\'s child appears →
     const t = earlyOf(r.stdout);
     assert.equal(t.bad, 0, `the command RAN after the caller's TERM in ${t.bad} of ${EARLY_N} runs:\n${r.stdout}${r.stderr}`);
     assert.equal(t.other, 0, `${r.stdout}${r.stderr}`);
+    assert.equal(t.hung ?? 0, 0, `${t.hung} run(s) never ended — something inside outlived the killed creator and holds the harness's pipes:\n${r.stdout}`);
     assert.ok(t.term + t.notrun >= EARLY_N / 2, `the window was hit too rarely to judge (missed ${t.missed}):\n${r.stdout}`);
     // ⭐ and it DIES BY the signal (no verdict), as a Ctrl-C must — a NOT RUN exit 1 would be a lane FAIL upstream
     assert.equal(t.notrun, 0, `a caller's TERM became an ordinary NOT RUN exit:\n${r.stdout}`);
@@ -3248,6 +3255,7 @@ test('⛔ EARLY TERM, NESTED path: the same, for an `isolated` called inside `is
     const t = earlyOf(r.stdout);
     assert.equal(t.bad, 0, `the nested command RAN after the caller's TERM in ${t.bad} of ${EARLY_N} runs:\n${r.stdout}`);
     assert.equal(t.other, 0, `${r.stdout}${r.stderr}`);
+    assert.equal(t.hung ?? 0, 0, `${t.hung} run(s) never ended — something inside outlived the killed creator and holds the harness's pipes:\n${r.stdout}`);
     assert.ok(t.term + t.notrun >= EARLY_N / 2, `the window was hit too rarely to judge (missed ${t.missed}):\n${r.stdout}`);
     // ⭐ and it DIES BY the signal (no verdict), as a Ctrl-C must — a NOT RUN exit 1 would be a lane FAIL upstream
     assert.equal(t.notrun, 0, `a caller's TERM became an ordinary NOT RUN exit:\n${r.stdout}`);
@@ -3962,6 +3970,7 @@ test('⛔ [bwrap] EARLY TERM: a TERM the moment bwrap\'s child appears → the h
     const t = earlyOf(r.stdout);
     assert.equal(t.bad, 0, `the command RAN after the caller's TERM in ${t.bad} of ${EARLY_N} runs:\n${r.stdout}${r.stderr}`);
     assert.equal(t.other, 0, `${r.stdout}${r.stderr}`);
+    assert.equal(t.hung ?? 0, 0, `${t.hung} run(s) never ended — something inside outlived the killed creator and holds the harness's pipes:\n${r.stdout}`);
     assert.ok(t.term + t.notrun >= EARLY_N / 2, `the window was hit too rarely to judge (missed ${t.missed}):\n${r.stdout}`);
     assert.equal(t.notrun, 0, `a caller's TERM became an ordinary NOT RUN exit:\n${r.stdout}`);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -4002,4 +4011,20 @@ test('⛔ [bwrap] the HARNESS killed (SIGKILL) mid-run → nothing is left insid
   const raw = await leftAfterKill([BWRAP_BIN, '--unshare-user', '--unshare-pid', '--as-pid-1', '--dev-bind', '/', '/', '--proc', '/proc', '--',
     'sh', '-c', `echo READY; exec sleep ${tag2}`], tag2);
   assert.ok(raw > 0, 'control: a raw bwrap WITHOUT --die-with-parent took the command with it — the arm cannot fail');
+});
+
+// ⛔ MEASURED while sabotaging `--die-with-parent`: a group Ctrl-C reached the bwrap PROCESS itself, which
+// (unlike `unshare --fork`: INT ignored, TERM blocked) dies by it — and `--die-with-parent` then SIGKILLed the
+// namespace: the command's own INT trap never ran (unshare: `GOT-INT`, rc 7; bwrap: nothing, killed). ⇒ bwrap
+// is spawned in a session of its own (`detached`): a terminal's signals reach only `isolated`, which forwards
+// them past the creator exactly as past unshare.
+const INT_TRAPPER = `trap 'echo GOT-INT; exit 7' INT; echo READY; i=0; while [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; echo TIMEOUT`;
+test('⛔ Ctrl-C (INT to the GROUP) reaches the command\'s OWN INT trap — rc 7 — under unshare AND bwrap (the creator never dies by it first)', needsBwrap, async () => {
+  for (const backend of ['unshare', 'bwrap']) {
+    // the trapper travels in the env: spliced into the bash shape, its `$i` was expanded by the parent
+    const r = await bashParentWithin('H isolated -- sh -c "$INT_TRAPPER"; echo "AFTER rc=$?"', 8000, { WEBCTL_ISOLATION_BACKEND: backend, INT_TRAPPER });
+    assert.equal(r.hung, false, `${backend}: still running 8 s after Ctrl-C`);
+    assert.match(r.stdout, /^GOT-INT$/m, `${backend}: the command's INT trap never ran (killed instead):\n${r.stdout}`);
+    assert.match(r.stdout, /^AFTER rc=7$/m, `${backend}: the trap's exit code did not come back:\n${r.stdout}`);
+  }
 });

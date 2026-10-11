@@ -297,7 +297,7 @@ the masks:
 * A mask done twice means two writers to keep in step, and a read-back that passes only because one
   creator happened to do it is a defect.
 
-**The argv** (`BWRAP_FLAGS`), and what each flag carries:
+**The argv** (`BWRAP_FLAGS`; bwrap is spawned `detached`, difference 5), and what each flag carries:
 
     bwrap --unshare-user --uid 0 --gid 0 --cap-add ALL
           --unshare-net --unshare-ipc --unshare-uts --unshare-cgroup --unshare-pid
@@ -338,6 +338,12 @@ Chromium's sandbox, the nested path's drop).
 3. **The session** — `--new-session`, above.
 4. **NoNewPrivs** is already 1 in the inner half (bwrap always sets it). Harmless: `mount`,
    `hostname`, `keyctl`, `ip` and `setpriv` need no new privileges.
+5. ⛔ **A terminal's signals.** `unshare --fork` ignores SIGINT and blocks SIGTERM; bwrap does
+   neither. A group Ctrl-C reached the bwrap process, which died by it, and `--die-with-parent` then
+   SIGKILLed the namespace. *Measured:* the command's own INT trap never ran (unshare: `GOT-INT`,
+   rc 7; bwrap: nothing). ⇒ bwrap is spawned in a session of its own (`detached`), so a terminal's
+   signals reach only `isolated`, which forwards them past the creator exactly as past unshare.
+   *Arm:* a group Ctrl-C reaches the command's INT trap, rc 7, under both creators.
 
 **The probe** is side-effect free, and each step is a NAMED reason:
 

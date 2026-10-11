@@ -2389,7 +2389,10 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
           process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         // ⛔ the PRIVILEGED env: unshare, pid 1 and the inner half (namespace root, full caps, before
         // any mask) never see NODE_OPTIONS, LD_*, or any --pass-env (PRIVILEGED_PASS_ENV)
-        { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'], env: privilegedEnv(cmdEnv) });
+        // ⛔ bwrap in a SESSION OF ITS OWN (measured): unlike `unshare --fork` (INT ignored, TERM blocked) bwrap
+        // DIES by a terminal's group Ctrl-C, and `--die-with-parent` then SIGKILLed the namespace — the command's
+        // own INT trap never ran. Detached, a terminal's signals reach only us, and we forward them past it.
+        { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'], env: privilegedEnv(cmdEnv), detached: choice.backend === 'bwrap' });
     } catch (e) {
       fwd.remove();
       resolve(report('isolated', EXIT.fail, `cannot start ${choice.backend} (${errMsg(e)}); refusing to run on the host`));
