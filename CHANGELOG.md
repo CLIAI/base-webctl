@@ -321,7 +321,10 @@ run under `isolated` — the mutant, the untrusted page, the code under test —
   `/dev/tty` opened the caller's terminal, and TIOCSTI there — or on fd 0 when that is the terminal —
   injects input (kernels before 6.2, or `dev.tty.legacy_tiocsti=1`; CVE-2017-5226's class);
 * **kill its caller:** the caller's own `cgroup.kill` opened for write — one write kills every
-  process of the caller's scope: the release gate, the lane's harness, the user's session there.
+  process of the caller's scope: the release gate, the lane's harness, the user's session there;
+  and, without any cgroup, `kill(0)` inside signalled the caller's whole PROCESS GROUP (measured
+  pre-tag: a sentinel in the caller's group died on v0.33.1; at v0.34.0 it lives — closed by row 12b's
+  new session).
 
 * **Row 12 — the host `/dev` was passed through WHOLE.** Measured inside: `/dev/uinput` opened for
   write (virtual-keyboard injection into the host desktop); the host devpts (the user's other
@@ -338,7 +341,8 @@ run under `isolated` — the mutant, the untrusted page, the code under test —
 
 * **Row 12b — no controlling terminal** (third review, F1). The privilege-drop chain now starts in a
   NEW SESSION, like `bwrap --new-session` — above the capless helper and the nested path's pid 1 too,
-  so nothing the command could ptrace holds the terminal. Inside, `/dev/tty` → ENXIO and TIOCSTI →
+  so nothing the command could ptrace holds the terminal as its CONTROLLING terminal (its stdio fds
+  may still BE the terminal — see "does NOT cover"). Inside, `/dev/tty` → ENXIO and TIOCSTI →
   EPERM/EIO. Ctrl-C still stops the command: `isolated` forwards INT/TERM/HUP down the chain, and the
   last hop sends them to the command's whole process GROUP (a shell loop's `sleep` included). Exit
   codes are unchanged. ⚠ **What lanes lose:** opening `/dev/tty` inside (ssh or gpg prompts, a TUI — as under `bwrap --new-session`)
@@ -462,6 +466,12 @@ if (gen7) assert.match(stderr, /^isolated: home HIDDEN; .*; backend: [a-z]+/m);
 * **Empty child cgroups** (third review, F2): with `nsdelegate`, the command can still `mkdir` child
   cgroups beneath the caller's scope through a nested cgroup2 mount of its own. They may outlive the
   run and are removed with the scope. It cannot kill or move the caller's processes.
+* **Stdio that IS the terminal** (pre-tag review): row 12b removes the controlling terminal, not the
+  terminal. When `isolated` is run with fds 0/1/2 on a terminal, the command still holds them: it can
+  read keystrokes typed during the run, change termios (e.g. echo off, persisting after it exits)
+  and write escape sequences, some of which make a terminal answer into its own input. Same as
+  `bwrap --new-session`. The gate and the lanes run with no terminal; run `isolated` with stdin from
+  `/dev/null` and output to a pipe or file to remove this.
 * Everything under v0.33.x's "does NOT cover" that is not listed above still applies (what a
   re-bind brings back is visible; the util-linux 2.38 PDEATHSIG window).
 

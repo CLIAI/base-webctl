@@ -220,7 +220,8 @@ three paths (the table's rows 8–10).
   `bwrap --new-session` answers). Now the privilege-drop chain is spawned in a NEW SESSION (`setsid`,
   node's `detached`): the `__isolated-pid1` helper and, on the nested path, its pid 1 — both capless,
   the command's uid in its user namespace, so traceable by it where yama's `ptrace_scope` is 0 — hold
-  no terminal either; the fresh path's pid 1 and inner half keep it, holding capabilities the command
+  no CONTROLLING terminal either (fds 0/1/2 that are the terminal stay open: readable, writable,
+  termios-settable — a residual, §6, as under `bwrap --new-session`); the fresh path's pid 1 and inner half keep it, holding capabilities the command
   cannot trace. Signals: a terminal's Ctrl-C reaches the caller's group, `isolated` forwards it down
   the chain, and the helper — which spawns the command in a session and GROUP of its own — forwards
   INT/TERM/HUP to that whole group, as the terminal did (to the command alone, a shell loop ran on:
@@ -346,7 +347,7 @@ After v0.33.0 (hidden home, env allowlist, `--keep-ro`, `WEBCTL_UNSHARE_BIN`):
 
 A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with bwrap or docker.
 
-## 6. Status (2026-10-10)
+## 6. Status (2026-10-11)
 
 * **Phase 1 — done (unreleased, v0.34.0):** the selection frame (§2, §4), the shared arm table
   (§1, run against unshare), rows 8–10 closed for unshare (§1a), the gate's per-consumer backend
@@ -382,5 +383,16 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with b
   inside, as outside. Not masked, by ruling: a mount over a sysfs file blocks nested sysfs mounts
   (`mnt_already_visible`). Not counted in the verdict: walking the tree measured 2.8 s for
   `/sys/devices` (27,381 files) and 7 s for all of `/sys`, far over a per-run budget.
+* **Residual (pre-tag review): stdio that IS the terminal.** Row 12b removes the controlling
+  terminal, not the terminal: fds 0/1/2 inherited from a terminal stay open in the command — it can
+  read keystrokes typed during the run, set termios (persisting after exit) and write escape
+  sequences a terminal may answer into its own input. As under `bwrap --new-session`. The gate and
+  lanes run with no terminal. The same new session also closes `kill(0)` reaching the caller's
+  process group (measured pre-tag: a sentinel there died on v0.33.1, lives on v0.34.0); no arm of its
+  own yet — it regresses with `/dev/tty` today (the same spawn), a sentinel-group arm is v0.35.0 work.
+* **v0.35.0 follow-ups from the pre-tag review:** the row-12b TIOCSTI assertion cannot fail where
+  `dev.tty.legacy_tiocsti=0` (EIO comes before the ctty check) — accept EPERM only when it is 1,
+  else mark it untested; the `/dev/tty` ENXIO arm carries the property meanwhile. Merge
+  `runIsolated`'s two stacked JSDoc blocks.
 * **v0.35.0 — bwrap, then docker (§3, §3a, §5):** not started. Each lands by adding its probe,
   its run path, and its name to the table's IMPLEMENTED list — the guard test fails until it does.
