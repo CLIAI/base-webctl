@@ -151,7 +151,9 @@ const ZERO = /^0+$/;
  * THE TABLE (ib4k §1). `arm(r, w)`: r = the reading on ONE inside path; `control(w)`: the
  * reading(s) that prove the arm can fail. `deeper`: where the unshare depth lives.
  * `untested`: the arm ADDS a named reason for each half this host cannot test (the ARM is then a SKIP).
- * @type {{n: number, property: string, arm: (r: any, w: any, p: string, untested: Set<string>) => void, control: ((w: any, t: any) => void) | null, deeper: string}[]}
+ * `notes`: a half that PROVES nothing here while another assertion of the row carries the property — named
+ * as a diagnostic, the row still judged by the rest (row 12b's TIOCSTI where `dev.tty.legacy_tiocsti=0`).
+ * @type {{n: number, property: string, arm: (r: any, w: any, p: string, untested: Set<string>, notes: Set<string>) => void, control: ((w: any, t: any) => void) | null, deeper: string}[]}
  */
 const ROWS = [
   { n: 1, property: 'no host network',
@@ -377,7 +379,7 @@ const ROWS = [
     },
     deeper: '"⛔ NODE_OPTIONS never reaches a PRIVILEGED half", "⛔ `--pass-env LD_*` never reaches a privileged half", the planted-tool arms' },
   { n: 12, property: 'no host devices',
-    arm: (r, w, p, untested) => {
+    arm: (r, w, p, untested, notes) => {
       const o = w.outside.outside;
       assert.equal(r.devExtra, 0, ctx(w, `${p}: /dev holds ${r.devExtra} entr(y/ies) beyond the minimal set (null zero full random urandom tty pts ptmx shm mqueue fd stdin stdout stderr)`));
       assert.notEqual(r.ptsDev, o.ptsDev, ctx(w, `${p}: /dev/pts is the HOST's devpts instance`));
@@ -398,8 +400,10 @@ const ROWS = [
       // …nor any ancestor it could ptrace (same uid, no capabilities): the new session is made ABOVE the capless
       // `__isolated-pid1` helper and the nested path's pid 1 — not only around the command
       assert.equal(t.ttyCaplessAncestors, 0, ctx(w, `${p}: ${t.ttyCaplessAncestors} capless ancestor(s) of the command hold the caller's controlling terminal (TIOCSTI by ptrace)`));
-      if (/^SKIPPED/.test(String(t.tiocsti))) untested.add(`row 12b ${p}: TIOCSTI ${t.tiocsti}`);
-      else assert.ok(['EPERM', 'EIO'].includes(t.tiocsti), ctx(w, `${p}: TIOCSTI on fd 0 answered ${t.tiocsti} — never success, EPERM or EIO only`));
+      const half = tiocstiHalf(t);
+      if (half.untested) untested.add(`row 12b ${p}: ${half.untested}`);
+      else if (half.note) notes.add(`row 12b ${p}: ${half.note}`);
+      else assert.ok(half.ok, ctx(w, `${p}: ${half.why}`));
     },
     control: (w, t) => {
       assert.ok(w.outside.outside.devExtra > 0, 'control: the host /dev holds nothing beyond the minimal set — the arm cannot fail');
@@ -435,6 +439,43 @@ const ROWS = [
 ];
 
 /**
+ * Row 12b's TIOCSTI half: what ONE reading proves (v0.35.0 follow-up from the v0.34.0 pre-tag review).
+ *
+ * ⛔ It accepted EPERM or EIO — and on `dev.tty.legacy_tiocsti=0` the kernel answers EIO to every capless
+ * caller BEFORE it compares the terminal with the caller's controlling one, so EIO came back whether or
+ * not the command held the terminal: an assertion that could not fail. ⇒ Only where the sysctl is 1 (or
+ * absent: a kernel < 6.2, legacy always) does the answer depend on the session — and there it must be
+ * EPERM (not our controlling terminal). At 0 the half is NOT TESTED (a note); the `/dev/tty` → ENXIO arm
+ * carries the property.
+ * @param {{tiocsti?: string, legacyTiocsti?: string}} t a reading of helpers/isolation-arm-tty.cjs
+ * @returns {{ok: boolean, why?: string, untested?: string, note?: string}}
+ */
+function tiocstiHalf(t) {
+  if (/^SKIPPED/.test(String(t.tiocsti))) return { ok: false, untested: `TIOCSTI ${t.tiocsti}` };
+  const legacy = t.legacyTiocsti === '1' || t.legacyTiocsti === 'absent';
+  if (!legacy) {
+    return { ok: false, note: `TIOCSTI answered ${t.tiocsti}, but dev.tty.legacy_tiocsti=${t.legacyTiocsti ?? '(not read)'} answers EIO `
+      + 'before the controlling-terminal check — that half proves nothing on this host; `/dev/tty` → ENXIO carries it' };
+  }
+  return t.tiocsti === 'EPERM' ? { ok: true }
+    : { ok: false, why: `TIOCSTI on fd 0 answered ${t.tiocsti} with dev.tty.legacy_tiocsti=${t.legacyTiocsti} — only EPERM (not the `
+      + 'caller\'s controlling terminal) is a pass there' };
+}
+
+test('row 12b: the TIOCSTI half judges a reading by dev.tty.legacy_tiocsti (it could not fail where that is 0)', () => {
+  // where the answer depends on the session: EPERM passes; EIO, or a success, is RED
+  assert.deepEqual(tiocstiHalf({ tiocsti: 'EPERM', legacyTiocsti: '1' }), { ok: true });
+  assert.equal(tiocstiHalf({ tiocsti: 'EIO', legacyTiocsti: '1' }).ok, false);
+  assert.match(String(tiocstiHalf({ tiocsti: 'SUCCEEDED', legacyTiocsti: '1' }).why), /only EPERM/);
+  assert.equal(tiocstiHalf({ tiocsti: 'EIO', legacyTiocsti: 'absent' }).ok, false, 'a kernel < 6.2 has the legacy behaviour');
+  // where it does not: NOT TESTED, named — never a pass, never a fail
+  const z = tiocstiHalf({ tiocsti: 'EIO', legacyTiocsti: '0' });
+  assert.equal(z.ok, false);
+  assert.match(String(z.note), /legacy_tiocsti=0 .*proves nothing/);
+  assert.match(String(tiocstiHalf({ tiocsti: 'SKIPPED (fd 0 is not the throwaway pty)', legacyTiocsti: '1' }).untested), /SKIPPED/);
+});
+
+/**
  * Rows MEASURED OPEN on a backend — a `todo` (red, visible, not a pass) until the commit that closes
  * them empties the entry. ⛔ Never add a row here to get a suite green: it is the record of a gap.
  * @type {Record<string, number[]>}
@@ -455,10 +496,13 @@ for (const backend of IMPLEMENTED) {
       assert.match(w.armErr, new RegExp(`^isolated: home HIDDEN; .*backend: ${backend}`, 'm'), ctx(w, 'the verdict does not name the backend'));
       /** @type {Set<string>} what this host could not test — named, and the ARM is then a SKIP, never a pass */
       const untested = new Set();
+      /** @type {Set<string>} a half that proves nothing here, while the row's other assertions carry it — named */
+      const notes = new Set();
       for (const p of PATHS) {
         assert.ok(w.arm[p], ctx(w, `no reading from the ${p} path`));
-        row.arm(w.arm[p], w, p, untested);
+        row.arm(w.arm[p], w, p, untested, notes);
       }
+      for (const n of notes) t.diagnostic(`NOT TESTED HERE: ${n}`);
       if (untested.size) t.skip(`SKIP (host): ${[...untested].join('; ')} — the rest of the ARM passed`);
     });
     test(`[${backend}] row ${row.n} — ${row.property}: CONTROL (the arm can fail)`, async (t) => {

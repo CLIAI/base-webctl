@@ -26,6 +26,10 @@ if (mode === 'record') {
 const out = { mode };
 try { fs.closeSync(fs.openSync('/dev/tty', fs.constants.O_RDWR)); out.ttyOpen = 'ok'; } catch (e) { out.ttyOpen = e.code || String(e.message); }
 if (mode !== 'outside') {
+  // ⚠ what a TIOCSTI answer can PROVE depends on this sysctl (v0.35.0 follow-up): at 0 the kernel answers EIO
+  // to every capless caller BEFORE it compares the terminal with the caller's controlling one, so EIO says
+  // nothing about the session. Absent: a kernel < 6.2, which always has the legacy behaviour (as at 1).
+  try { out.legacyTiocsti = fs.readFileSync('/proc/sys/dev/tty/legacy_tiocsti', 'utf8').trim(); } catch { out.legacyTiocsti = 'absent'; }
   let recorded = '';
   try { recorded = fs.readFileSync(cfg.ptyIdFile, 'utf8').trim(); } catch { /* none recorded */ }
   if (!cfg.python) out.tiocsti = 'SKIPPED (no python3 in the system dirs)';
