@@ -317,6 +317,9 @@ run under `isolated` — the mutant, the untrusted page, the code under test —
 
 * **inject keystrokes into the user's desktop:** `/dev/uinput` opened for write, i.e. a virtual
   keyboard typing into whatever window has focus, a terminal included;
+* **type into the caller's terminal** (third review, F1): it shared the caller's session, so
+  `/dev/tty` opened the caller's terminal, and TIOCSTI there — or on fd 0 when that is the terminal —
+  injects input (kernels before 6.2, or `dev.tty.legacy_tiocsti=1`; CVE-2017-5226's class);
 * **kill its caller:** the caller's own `cgroup.kill` opened for write — one write kills every
   process of the caller's scope: the release gate, the lane's harness, the user's session there.
 
@@ -332,6 +335,16 @@ run under `isolated` — the mutant, the untrusted page, the code under test —
   sound, video, input, block devices. ⛔ A `--keep` / `--keep-ro` / cwd under `/dev` is **refused**
   (except beneath `/dev/shm`, as before). The nesting proof requires the fresh `/dev` (a nested call
   under an older outer: "upgrade the outer").
+
+* **Row 12b — no controlling terminal** (third review, F1). The privilege-drop chain now starts in a
+  NEW SESSION, like `bwrap --new-session` — above the capless helper and the nested path's pid 1 too,
+  so nothing the command could ptrace holds the terminal. Inside, `/dev/tty` → ENXIO and TIOCSTI →
+  EPERM/EIO. Ctrl-C still stops the command: `isolated` forwards INT/TERM/HUP down the chain, and the
+  last hop sends them to the command's whole process GROUP (a shell loop's `sleep` included). Exit
+  codes are unchanged. ⚠ **What lanes lose:** opening `/dev/tty` inside (ssh or gpg prompts, a TUI — as under `bwrap --new-session`)
+  fails ENXIO; **Ctrl-Z stops `isolated` but not the command** — it runs on until `fg` (TSTP/CONT are
+  not forwarded); a backgrounded command reading the terminal is no longer stopped (SIGTTIN); a TERM
+  sent to the `isolated` pid alone now reaches the command's whole group.
 
 * **Row 3 — the caller's cgroups were WRITABLE.** No cgroup namespace, and the host's cgroup2 tree
   read-write inside: the command could open its caller's scope's `cgroup.kill` or `cgroup.procs` for

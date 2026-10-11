@@ -52,7 +52,7 @@ each with its positive control (`k3wn`). A backend that passes fewer arms is not
 | 9 | no host keyring | `keyctl show @s` names no host keyring; a key added inside is gone outside; (9b) a host key's possessor-only PAYLOAD → EACCES by id. *Residual: descriptions and ids stay enumerable (§1a)* | a key added inside is readable inside; the payload is readable outside |
 | 10 | no host identity | hostname ≠ the host's; `/sys/class/net` and `/sys/devices/virtual/net` list only `lo`; `/etc/machine-id` absent or neutral, and not rewritable through its backing copy | the same reads outside show the host's values; the rewrite works on such a bind made outside |
 | 11 | no loader injection into the privileged half | `NODE_OPTIONS` / `LD_*` preloads never run before the masks | the command itself sees its allowed env |
-| 12 | no host devices | `/dev` holds only `null zero full random urandom tty pts ptmx shm mqueue fd stdin stdout stderr`; `/dev/pts` is not the host's devpts and lists none of its terminals; the host's `/dev/uinput` and `/dev/snd` absent (each one the host lacks is a named SKIP) | inside behaves EXACTLY as outside: `/dev/fd/N`, `/dev/stdin|stdout|stderr` resolve; `null zero full random urandom` read; `/dev/full` write → ENOSPC; `/dev/tty` with no controlling tty answers as outside (ENXIO); plus a pty opens (`/dev/ptmx`, `script -qc true /dev/null` — master AND slave), `/dev/shm` writable, a nested `unshare -Ur --pid --fork --mount-proc` works; the host `/dev` holds more |
+| 12 | no host devices | `/dev` holds only `null zero full random urandom tty pts ptmx shm mqueue fd stdin stdout stderr`; `/dev/pts` is not the host's devpts and lists none of its terminals; the host's `/dev/uinput` and `/dev/snd` absent (each one the host lacks is a named SKIP); (12b) under the caller's pty: `/dev/tty` → ENXIO, TIOCSTI on fd 0 → EPERM/EIO, no capless ancestor holds the terminal | inside behaves EXACTLY as outside: `/dev/fd/N`, `/dev/stdin|stdout|stderr` resolve; `null zero full random urandom` read; `/dev/full` write → ENOSPC; `/dev/tty` with no controlling tty answers as outside (ENXIO); (12b) under a pty the caller owns, `/dev/tty` opens outside; plus a pty opens (`/dev/ptmx`, `script -qc true /dev/null` — master AND slave), `/dev/shm` writable, a nested `unshare -Ur --pid --fork --mount-proc` works; the host `/dev` holds more |
 
 Row 12 and row 3's cgroup arm come from the re-review of v0.34 phase 1 (2026-10-10): the host `/dev`
 had been passed through whole, and the caller's cgroups were writable, in EVERY released `isolated` up
@@ -213,6 +213,25 @@ three paths (the table's rows 8–10).
   `O_CREAT` open of a bound node (`> /dev/null`, node's `writeFileSync`) is EACCES (kernel 7.1).
   ⚠ *Not there, deliberately:* `/dev/fuse`, `/dev/net/tun`, `/dev/kvm`, `/dev/dri`, `/dev/console`,
   `/dev/log` — a lane that needs one is refused nothing; it fails visibly (ENOENT) inside.
+  ⛔ **12b — no controlling terminal (third review, F1).** The command shared its caller's session:
+  `/dev/tty` (the bound node) opened the caller's terminal, and TIOCSTI on it — or on fd 0 when that is
+  the terminal — types into it (kernels < 6.2, or `dev.tty.legacy_tiocsti=1`; CVE-2017-5226, which
+  `bwrap --new-session` answers). Now the privilege-drop chain is spawned in a NEW SESSION (`setsid`,
+  node's `detached`): the `__isolated-pid1` helper and, on the nested path, its pid 1 — both capless,
+  the command's uid in its user namespace, so traceable by it where yama's `ptrace_scope` is 0 — hold
+  no terminal either; the fresh path's pid 1 and inner half keep it, holding capabilities the command
+  cannot trace. Signals: a terminal's Ctrl-C reaches the caller's group, `isolated` forwards it down
+  the chain, and the helper — which spawns the command in a session and GROUP of its own — forwards
+  INT/TERM/HUP to that whole group, as the terminal did (to the command alone, a shell loop ran on:
+  its `sleep` never saw the INT). Exit codes are unchanged. Arms (row 12b, all three paths, under a
+  pty the world makes with `script`): `/dev/tty` → ENXIO; TIOCSTI on fd 0 → EPERM or EIO — attempted
+  only when fd 0 is verified (st_dev:st_rdev) to be that throwaway pty; no capless ancestor holds a
+  terminal (`/proc/<pid>/stat` tty_nr); control: `/dev/tty` opens outside under the same pty. And a
+  Ctrl-C to the group stops a shell loop, fresh and nested. ⚠ **What changes for a lane:** anything
+  that opens `/dev/tty` inside fails ENXIO (ssh or gpg prompts, a TUI — as under `bwrap --new-session`); **Ctrl-Z** stops `isolated`
+  but NOT the command, which runs on until `fg` (no TSTP/CONT is forwarded); a backgrounded command
+  reading the terminal is not stopped by SIGTTIN; a TERM sent to the `isolated` pid reaches the
+  command's whole group.
 
 The coordinator's cross-backend escape script (an independent python driver used against
 v0.31.0) is run against every backend as an extra, independent check.
@@ -346,8 +365,10 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with b
   mount read-write inside. The command cannot drive this itself: it cannot reach the daemon (host
   unix sockets masked, row 2) and holds no capability to mount one; the daemon must already be
   running on the host, as the same user, and choose to lie.
-* **Third review (2026-10-11):** row 3's cgroup view is a fresh cgroup2 rooted at the namespace (F3),
-  and `nsdelegate` is required (F2); the fresh `/dev`'s links are read back (F5).
+* **Third review (2026-10-11):** no controlling terminal — a new session above the capless chain,
+  signals forwarded to the command's group (row 12b, F1); row 3's cgroup view is a fresh cgroup2
+  rooted at the namespace (F3), and `nsdelegate` is required (F2); the fresh `/dev`'s links are read
+  back (F5).
 * **Residual (third review, F2): empty child cgroups.** With `nsdelegate`, the command can still
   `mkdir` child cgroups beneath the caller's scope through a nested cgroup2 mount (a cgroup namespace
   of its own): the boundary refuses `cgroup.kill` at the namespace root and any move across it, not a

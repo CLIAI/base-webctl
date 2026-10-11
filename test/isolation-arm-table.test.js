@@ -30,6 +30,7 @@ import * as harness from '../scripts/contract-harness.mjs';
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TOOL = path.join(ROOT, 'scripts', 'contract-harness.mjs');
 const PROBE = path.join(ROOT, 'test', 'helpers', 'isolation-arm-probe.cjs');
+const TTY_PROBE = path.join(ROOT, 'test', 'helpers', 'isolation-arm-tty.cjs');
 const WORLD = path.join(ROOT, 'test', 'helpers', 'isolation-arm-world.cjs');
 
 /**
@@ -47,6 +48,7 @@ const KEYCTL = sysTool('keyctl');
 const MOUNT = sysTool('mount');
 const IPCMK = sysTool('ipcmk');
 const PYTHON = sysTool('python3');
+const SCRIPT = sysTool('script');
 /** shmat(argv[1]); `w`: write argv[3] at its start, `r`: print what is there. Prints `wrote`, the text, or `failed <errno>`. */
 const SHM_PY = ['import ctypes, sys', 'libc = ctypes.CDLL(None, use_errno=True)', 'libc.shmat.restype = ctypes.c_void_p',
   'p = libc.shmat(int(sys.argv[1]), None, 0)',
@@ -109,6 +111,7 @@ try { fs.appendFileSync(${JSON.stringify(hits)}, JSON.stringify({ pid: process.p
       ipcmk: IPCMK, python: PYTHON, shmPy: SHM_PY, ipcFile: path.join(keep, 'ipc.json'),
       keyIdFile: path.join(keep, 'key-id'), keyctl: !!KEYCTL, keyName: `webctl-arm-${process.pid}`, port: /** @type {net.AddressInfo} */ (listener.address()).port,
       sockets, hostPid: process.pid, cgroup: CGROUP, baseRoot: ROOT, probe: PROBE, harness: TOOL, preload, backend,
+      script: SCRIPT, ttyProbe: TTY_PROBE, ptyIdFile: path.join(keep, 'pty-id'), ttyFile: path.join(keep, 'tty.jsonl'),
       self: path.join(keep, 'cfg.json') };
     fs.writeFileSync(cfg.self, JSON.stringify(cfg));
     const argv = [...(KEYCTL ? [KEYCTL, 'session', '-'] : []), 'unshare', '-rm', '--ipc', '--propagation=private', process.execPath, WORLD, cfg.self];
@@ -385,9 +388,27 @@ const ROWS = [
       else untested.add('no /dev/snd on this host: that arm is UNTESTED');
       if (typeof o.ptsNumbered === 'number' && o.ptsNumbered > 0) assert.equal(r.ptsNumbered, 0, ctx(w, `${p}: ${r.ptsNumbered} host terminal(s) listed in /dev/pts`));
       else untested.add('no /dev/pts/N open on this host: the host-terminal arm is UNTESTED');
+      // 12b (third review, F1): NO CONTROLLING TERMINAL — the caller's ran under a pty the world owns (`script`).
+      // With it, /dev/tty opened inside, and TIOCSTI on fd 0 could type into the caller's terminal
+      // (kernels < 6.2, or dev.tty.legacy_tiocsti=1). A new session (bwrap --new-session; CVE-2017-5226).
+      if (w.tty.unavailable) { untested.add(`row 12b: ${w.tty.unavailable} — the controlling-terminal arm is UNTESTED`); return; }
+      const t = w.tty[p];
+      assert.ok(t, ctx(w, `${p}: no row 12b reading (script exited ${w.tty.status}):\n${w.tty.out}`));
+      assert.equal(t.ttyOpen, 'ENXIO', ctx(w, `${p}: /dev/tty opens inside (${t.ttyOpen}) — the command has its caller's CONTROLLING TERMINAL`));
+      // …nor any ancestor it could ptrace (same uid, no capabilities): the new session is made ABOVE the capless
+      // `__isolated-pid1` helper and the nested path's pid 1 — not only around the command
+      assert.equal(t.ttyCaplessAncestors, 0, ctx(w, `${p}: ${t.ttyCaplessAncestors} capless ancestor(s) of the command hold the caller's controlling terminal (TIOCSTI by ptrace)`));
+      if (/^SKIPPED/.test(String(t.tiocsti))) untested.add(`row 12b ${p}: TIOCSTI ${t.tiocsti}`);
+      else assert.ok(['EPERM', 'EIO'].includes(t.tiocsti), ctx(w, `${p}: TIOCSTI on fd 0 answered ${t.tiocsti} — never success, EPERM or EIO only`));
     },
-    control: (w) => {
+    control: (w, t) => {
       assert.ok(w.outside.outside.devExtra > 0, 'control: the host /dev holds nothing beyond the minimal set — the arm cannot fail');
+      // 12b: under the SAME pty, outside, /dev/tty opens — so ENXIO inside is the new session, not a missing tty
+      if (!w.tty.unavailable) {
+        t.diagnostic(`row 12b: ${['outside', ...PATHS].map((p) => `${p}: /dev/tty ${w.tty[p]?.ttyOpen}${w.tty[p]?.tiocsti ? `, TIOCSTI ${w.tty[p].tiocsti}` : ''}, ancestors with a tty ${w.tty[p]?.ttyAncestors} (capless ${w.tty[p]?.ttyCaplessAncestors})`).join('; ')}`);
+      }
+      if (!w.tty.unavailable) assert.ok(w.tty.outside?.ttyAncestors > 0, `control: no ancestor holds the world's pty even outside — the ancestor arm cannot fail:\n${w.tty.out}`);
+      if (!w.tty.unavailable) assert.equal(w.tty.outside?.ttyOpen, 'ok', `control: /dev/tty does not open even outside, under the world's pty (${JSON.stringify(w.tty.outside)}):\n${w.tty.out}`);
       // what the lanes use from /dev (a read-only grep of every consumer: null, shm, stdin, urandom) and
       // the rest of the minimal set behave INSIDE exactly as OUTSIDE — fd/N and stdio links, the reads,
       // /dev/full's ENOSPC, /dev/tty without a controlling tty

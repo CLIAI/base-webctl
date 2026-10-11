@@ -1749,6 +1749,20 @@ function forwardSignals() {
 }
 
 /**
+ * Forward termination signals to a child's whole PROCESS GROUP — the child spawned `detached` (a
+ * session and group of its own, NEW_SESSION). ⛔ To the child alone, Ctrl-C stopped nothing (measured):
+ * `sh -c 'while :; do sleep 1; done'` got the INT, its `sleep` did not (no longer in the terminal's
+ * foreground group), and bash's wait-and-cooperative-exit rule — "the child handled it" — ran the
+ * loop on. A terminal's Ctrl-C reaches the whole foreground group; so does this.
+ * @returns {Forwarder & {attach: (c: import('node:child_process').ChildProcess) => void}}
+ */
+function forwardSignalsToGroup() {
+  return forwarderBeforeSpawn((s, /** @type {import('node:child_process').ChildProcess} */ child) => {
+    try { if (child.pid) process.kill(-child.pid, s); else child.kill(s); } catch { try { child.kill(s); } catch { /* gone */ } }
+  });
+}
+
+/**
  * The exit code for a child that ended with (code, signal) — or, when it ended BY the signal
  * we forwarded to it, DIE BY THAT SIGNAL OURSELVES.
  *
@@ -1885,7 +1899,7 @@ export function runPid1(a) {
   }
   // ⛔ the forwarder FIRST (review finding 5): from `started` on the caller forwards to us, and
   // with no handler node's default disposition would kill us and orphan the command
-  const fwd = forwardSignals();
+  const fwd = forwardSignalsToGroup();
   if (status) {
     // ⚠ only a pipe/socket is ours: an fd 3 node opened for itself must never be written to
     let ours = false;
@@ -1902,7 +1916,9 @@ export function runPid1(a) {
     /** @type {import('node:child_process').ChildProcess} */
     let child;
     try {
-      child = spawn(command[0], command.slice(1), { stdio: 'inherit', env });
+      // `detached`: a session and process GROUP of its own, so a forwarded signal reaches the command's
+      // children as a terminal's Ctrl-C did (forwardSignalsToGroup; third review, F1)
+      child = spawn(command[0], command.slice(1), { stdio: 'inherit', env, detached: true });
     } catch (e) {
       // ⛔ spawn THROWS (not 'error') for exec failures outside node's "run-time" list — E2BIG: an
       // env var over MAX_ARG_STRLEN arrives fine on the env PIPE (review F3). Without this the
@@ -4037,11 +4053,19 @@ export function runCommand(command, prefix = [], { pastUnshare = false, env = /*
     const fwd = pastUnshare ? forwardSignalsPastUnshare(() => !!st && st.started()) : forwardSignals();
     // pastUnshare (the nested path): fd 3 is the pid-1 helper's status pipe (`started`), fd 4 the
     // command's env; else fd 3 is the env. ⛔ The chain itself runs with privilegedEnv(env) only.
+    // ⛔ `detached`: a NEW SESSION, no controlling terminal (third review, F1; bwrap --new-session,
+    // CVE-2017-5226). With the caller's, the command opened /dev/tty and could TIOCSTI keystrokes into
+    // the caller's terminal (kernels < 6.2, or dev.tty.legacy_tiocsti=1). HERE, above the whole chain —
+    // not only around the command: the `__isolated-pid1` helper (and the nested path's pid 1) run capless,
+    // as the command's uid in its user namespace, so a command allowed to ptrace them (yama ptrace_scope 0)
+    // could TIOCSTI through one still holding the terminal. The fresh path's pid 1 and inner half keep it:
+    // they hold capabilities the command does not, so it cannot trace them. A terminal's Ctrl-C still reaches
+    // our caller, which forwards it down the chain (the helper on to the command's group).
     /** @type {import('node:child_process').ChildProcess} */
     let child;
     try {
       child = spawn(argv[0], argv.slice(1), {
-        stdio: ['inherit', 'inherit', 'inherit', 'pipe', ...(pastUnshare ? /** @type {const} */ (['pipe']) : [])], env: privilegedEnv(env) });
+        stdio: ['inherit', 'inherit', 'inherit', 'pipe', ...(pastUnshare ? /** @type {const} */ (['pipe']) : [])], env: privilegedEnv(env), detached: true });
     } catch (e) {
       // ⛔ spawn THROWS for an argv node refuses (a NUL) or an exec error outside its "run-time" list
       // (E2BIG): without this the Promise rejected (a stack, no FAIL line) with our forwarder left on

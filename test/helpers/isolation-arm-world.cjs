@@ -8,7 +8,8 @@
 //   * a key planted in the (throwaway) session keyring;
 //   * a SysV shm segment and a POSIX mqueue planted in the world's OWN IPC namespace (`--ipc`).
 // Then: the probe OUTSIDE (the controls), the probe INSIDE `isolated` on the fresh, nested and
-// stripped-markers paths (the arms), and the read-backs on this side after it exits.
+// stripped-markers paths (the arms), and the read-backs on this side after it exits. Last, row 12b
+// (helpers/isolation-arm-tty.cjs): the same three paths under a pty this world makes with `script`.
 // Prints `WORLD {json}` on stdout; exit 97 = this host cannot build the world (the table skips).
 // argv: <config.json>
 'use strict';
@@ -97,6 +98,30 @@ const arm = run([process.execPath, cfg.harness, 'isolated', '--keep', cfg.keep, 
   'sh', '-c', script, process.execPath, cfg.harness, cfg.probe, cfg.self],
 { cwd: cfg.cwd, env: { ...env, ...(cfg.backend ? { WEBCTL_ISOLATION_BACKEND: cfg.backend } : {}) } });
 
+// ── row 12b (third review, F1): the command's controlling terminal, under a pty THIS world creates ──
+// `script` gives the shell below a fresh pty as its controlling terminal; the tty probe records that pty's
+// identity first (only it may ever get a TIOCSTI), reads the control outside, then the arms inside.
+/** @type {Record<string, any>} */
+let ttyReadings = {};
+if (!cfg.script) ttyReadings = { unavailable: 'no `script` (util-linux) in the system dirs' };
+else {
+  const ttyArms = [
+    '"$ARM_NODE" "$ARM_TTY" record "$ARM_CFG"',
+    '"$ARM_NODE" "$ARM_TTY" outside "$ARM_CFG"',
+    `"$ARM_NODE" "$ARM_HARNESS" isolated --keep "$ARM_KEEP" -- sh -c '"$0" "$2" fresh "$3"; "$0" "$1" isolated -- "$0" "$2" nested "$3"; `
+      + `env ${strip.join(' ')} "$0" "$1" isolated -- "$0" "$2" stripped "$3"' "$ARM_NODE" "$ARM_HARNESS" "$ARM_TTY" "$ARM_CFG"`,
+  ].join('; ');
+  const t = run([cfg.script, '-qec', ttyArms, '/dev/null'], { cwd: cfg.cwd, stdio: ['ignore', 'pipe', 'pipe'],
+    // ⚠ without NODE_OPTIONS: row 11 counts every preload hit outside the command (these runs are not it)
+    env: { ...env, NODE_OPTIONS: '', SHELL: '/bin/sh', ARM_NODE: process.execPath, ARM_TTY: cfg.ttyProbe, ARM_CFG: cfg.self, ARM_HARNESS: cfg.harness, ARM_KEEP: cfg.keep,
+      ...(cfg.backend ? { WEBCTL_ISOLATION_BACKEND: cfg.backend } : {}) } });
+  try {
+    ttyReadings = Object.fromEntries(fs.readFileSync(cfg.ttyFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).map((r) => [r.mode, r]));
+  } catch { /* none written: named below */ }
+  ttyReadings.status = t.status;
+  ttyReadings.out = String(t.stdout).replace(/\r/g, '').slice(-2000);
+}
+
 // ── read back on THIS side, after the arm exited ──
 const post = {
   // the arms' own files (`arm-inside-<mode>`); the control's `arm-inside-outside` is expected here
@@ -113,4 +138,4 @@ const post = {
 };
 
 process.stdout.write(`WORLD ${JSON.stringify({ worldPid: process.pid, outside: results(outside.stdout), outsideErr: String(outside.stderr).slice(-2000),
-  arm: results(arm.stdout), armStatus: arm.status, armErr: String(arm.stderr).slice(-6000), post })}\n`);
+  arm: results(arm.stdout), armStatus: arm.status, armErr: String(arm.stderr).slice(-6000), post, tty: ttyReadings })}\n`);

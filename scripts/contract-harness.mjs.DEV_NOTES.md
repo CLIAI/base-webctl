@@ -1754,6 +1754,46 @@ node's memory limit "still answers" were wrong.
 | F3b | the host's tree staged and moved back as before (read-back kept) | every run refused: `/sys/fs/cgroup is not a cgroup2 rooted at this cgroup namespace` |
 | F3c | F3b AND the root read-back removed | rows 3 and 10 (arm and control), as on ae496b7 |
 
+**F1 — the command shared its caller's session (no `setsid`).** Measured on ae496b7 under a throwaway
+pty (`script -qec … /dev/null`): `/dev/tty` opened inside; TIOCSTI answered EIO only because this
+kernel has `dev.tty.legacy_tiocsti=0` — on < 6.2 or with it 1, it types into the caller's terminal.
+* **Where the session is made — the chain, not only the command.** `runCommand` spawns the whole
+  privilege-drop chain `detached` (setsid). The `__isolated-pid1` helper runs capless as the command's
+  uid in its user namespace, and so does the nested path's pid 1: commoncap lets a capless process
+  ptrace them, and with yama's `ptrace_scope` 0 nothing else stops it — a helper still holding the
+  terminal would be TIOCSTI by proxy. The fresh path's pid 1 and inner half keep the terminal; they
+  hold capabilities in the outer user namespace the command cannot trace.
+* **Measured: setsid alone broke Ctrl-C for a shell loop.** INT to the group: ae496b7 rc 130, nothing
+  left. With the chain detached and the helper forwarding to the command alone, `sh -c 'while :; do
+  …; sleep 0.1; done'` HUNG — sh got the INT, its `sleep` (no longer in the terminal's foreground
+  group) did not, and bash's wait-and-cooperative-exit rule ran the loop on. ⇒ The helper spawns the
+  command `detached` too (a group of its own) and forwards INT/TERM/HUP to `-pgid`
+  (`forwardSignalsToGroup`): rc 130 again, nothing left.
+* **Measured: Ctrl-Z.** TSTP to the group: ae496b7 — the command stopped (0 ticks in 1 s), `fg`
+  resumed it. Now — `isolated` and the chain above the session stop, the command runs on (10 ticks in
+  1 s); CONT harmless. Not forwarded: forwarding TSTP/CONT needs a handler in four halves that also
+  stops itself. Documented (ib4k §1a row 12b, CHANGELOG "What lanes lose"). So is: a backgrounded
+  command reading the terminal is no longer stopped by SIGTTIN, and a TERM to the `isolated` pid alone
+  reaches the command's whole group.
+* Arms (table row 12b, all three paths; `helpers/isolation-arm-tty.cjs`, run by the world under a pty
+  it makes with `script`): `/dev/tty` → ENXIO; TIOCSTI on fd 0 → EPERM or EIO, never success — ⛔
+  attempted ONLY when fd 0's st_dev:st_rdev equals the identity recorded first, outside, under that
+  pty (else SKIPPED, a named SKIP); no capless ancestor holds a terminal (`/proc/<pid>/stat` tty_nr,
+  `/proc/<pid>/status` CapEff); control: `/dev/tty` opens outside under the same pty, and an ancestor
+  holds it there. Readings here: `outside: /dev/tty ok; fresh: /dev/tty ENXIO, TIOCSTI EIO, ancestors
+  with a tty 2 (capless 0); nested: … 0 (capless 0); stripped: … 0 (capless 0)`. And
+  `contract-harness-isolation.test.js`: Ctrl-C to the group stops a shell LOOP, fresh and nested (a
+  run still going 8 s later is TERMed as a group and fails). RED on HEAD before this: row 12 arm —
+  `fresh: /dev/tty opens inside (ok)` (fresh, nested and stripped all `ok`, capless ancestors 2).
+  The loop test is green there (the terminal's INT reached the loop directly): it guards F1b.
+* The tty runs clear `NODE_OPTIONS` (measured: they tripped row 11's privileged-preload count).
+
+| # | sabotage (on a copy) | caught by |
+|---|---|---|
+| F1a | no setsid on the chain (`runCommand`), the helper's kept | row 12b: `fresh: 1 capless ancestor(s) of the command hold the caller's controlling terminal` — `/dev/tty` was ENXIO, so only this arm sees it |
+| F1b | no setsid on the command (the helper's), the chain's kept | the loop test: `fresh: the loop was still running 8 s after Ctrl-C` — row 12b green |
+| F1c | neither | row 12b: `fresh: /dev/tty opens inside (ok)` |
+
 **F4 — user-writable sysfs attributes (docs only, by ruling).** The fresh sysfs stays read-write (a
 read-only one breaks every nested sysfs mount — S7c above), and sysfs's own permissions govern it:
 an attribute udev granted the user's uid (`uaccess`, e.g. a backlight's `brightness`) is writable

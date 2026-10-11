@@ -3279,6 +3279,52 @@ function bashParent(shape, sendInt) {
 }
 const SLEEPER = `sh -c 'echo READY; exec sleep 20'`;
 
+// ⛔ F1 (third review): the command runs in a NEW SESSION (no controlling terminal), so a terminal's Ctrl-C no
+// longer reaches it or its children directly — only what `isolated` forwards. Forwarded to the command ALONE,
+// a shell LOOP never stopped (measured: `sh -c 'while :; do sleep 1; done'` — sh got the INT, its sleep did
+// not, and bash's cooperative-exit rule ran the loop on). ⇒ The helper forwards to the command's whole
+// process GROUP, as a terminal does. SLEEPER `exec`s, so it cannot tell; this one cannot hide it.
+const LOOPER = `sh -c 'echo READY; while :; do sleep 0.2; done'`;
+/**
+ * bashParent with a deadline: a run still going `ms` after the INT is TERMinated (then KILLed) as a GROUP,
+ * and reported `hung` — the loop must never be left running.
+ * @param {string} shape @param {number} ms
+ * @returns {Promise<{status: number|null, signal: string|null, stdout: string, hung: boolean}>}
+ */
+function bashParentWithin(shape, ms) {
+  return new Promise((resolve) => {
+    const c = spawn('bash', ['-c', `N="$0"; T="$1"; H() { "$N" "$T" "$@"; }; ${shape}`, process.execPath, TOOL],
+      { env: cleanEnv(), cwd: ROOT, detached: true });
+    let stdout = ''; let sent = false; let hung = false;
+    /** @type {NodeJS.Timeout | undefined} */ let deadline;
+    c.stdout.on('data', (d) => {
+      stdout += d;
+      if (!sent && /READY/.test(stdout)) {
+        sent = true;
+        setTimeout(() => {
+          try { process.kill(-(c.pid ?? 0), 'SIGINT'); } catch { /* gone */ }
+          deadline = setTimeout(() => {
+            hung = true;
+            try { process.kill(-(c.pid ?? 0), 'SIGTERM'); } catch { /* gone */ }
+            setTimeout(() => { try { process.kill(-(c.pid ?? 0), 'SIGKILL'); } catch { /* gone */ } }, 2000);
+          }, ms);
+        }, 300);
+      }
+    });
+    c.on('close', (status, signal) => { clearTimeout(deadline); resolve({ status, signal, stdout, hung }); });
+  });
+}
+
+test('⛔ Ctrl-C (INT to the group) stops a shell LOOP under `isolated` — fresh and nested paths: the command is in a session of its own, so the INT is forwarded to its whole GROUP', needsIsolation, async () => {
+  for (const [path_, shape] of [['fresh', `H isolated -- ${LOOPER}; echo "AFTER rc=$?"`],
+    ['nested', `H isolated -- "$N" "$T" isolated -- ${LOOPER}; echo "AFTER rc=$?"`]]) {
+    const r = await bashParentWithin(shape, 8000);
+    assert.equal(r.hung, false, `${path_}: the loop was still running 8 s after Ctrl-C (only sh got the INT, not its children)`);
+    assert.doesNotMatch(r.stdout, /AFTER rc=/, `${path_}: ${r.stdout}`);
+    assert.equal(r.signal, 'SIGINT', `${path_}: the parent did not die by SIGINT (status ${r.status})`);
+  }
+});
+
 // ⛔ Ctrl-C: `isolated` forwarded SIGINT and then EXITED NORMALLY with 130. bash's
 // wait-and-cooperative-exit rule reads that as "the child HANDLED the INT", so a parent
 // script WITHOUT an INT trap carried on to its next command (measured: `AFTER rc=130`).
