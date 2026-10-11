@@ -207,7 +207,7 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
-## v0.34.0 — (unreleased)
+## v0.34.0 — 2026-10-11
 
 **Headline: `isolated` chooses its BACKEND — unshare → bwrap → docker → refuse, never unisolated
 — and is judged by ONE arm table (ib4k §1, rows 1–12); and it closes the gaps v0.33 left open: a
