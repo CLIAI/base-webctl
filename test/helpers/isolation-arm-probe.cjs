@@ -106,6 +106,41 @@ const tamper = (target) => {
       out.cgroupOpen[f] = errOf(() => fs.closeSync(fs.openSync(path.join('/sys/fs/cgroup', cfg.cgroup, f), fs.constants.O_WRONLY)));
     }
   }
+  // 3 (third review, F3) — the cgroup view: THIS process's own cgroup, by the path /proc/self/cgroup gives
+  // here (inside a cgroup namespace: `/`). Its cgroup.kill / cgroup.procs opened for write (never written);
+  // its cgroup.procs must list this pid — true only when the mount is rooted where /proc/self/cgroup is.
+  let own = '';
+  try { own = (fs.readFileSync('/proc/self/cgroup', 'utf8').match(/^0::(\/.*)$/m) || [])[1] || ''; } catch { /* no cgroup v2 */ }
+  if (own) {
+    const dir = path.join('/sys/fs/cgroup', own);
+    out.cgroupOwnOpen = {};
+    for (const f of ['cgroup.kill', 'cgroup.procs']) {
+      out.cgroupOwnOpen[f] = errOf(() => fs.closeSync(fs.openSync(path.join(dir, f), fs.constants.O_WRONLY)));
+    }
+    try { out.cgroupListsSelf = fs.readFileSync(path.join(dir, 'cgroup.procs'), 'utf8').split('\n').includes(String(process.pid)); } catch (e) { out.cgroupListsSelf = `<${e.code}>`; }
+    try { out.memoryMax = fs.readFileSync(path.join(dir, 'memory.max'), 'utf8').trim(); } catch (e) { out.memoryMax = `<${e.code}>`; }
+  }
+  out.constrainedMemory = typeof process.constrainedMemory === 'function' ? String(process.constrainedMemory()) : '<none>';
+  // the mount root of what path resolution reaches at /sys/fs/cgroup (mountinfo field 4): `/` = rooted at
+  // the reader's cgroup namespace; `/../..` = the host's tree seen from a namespace below it
+  try {
+    const rows = fs.readFileSync('/proc/self/mountinfo', 'utf8').split('\n').filter(Boolean).map((l) => l.split(' '));
+    const at = rows.filter((f) => f[4] === '/sys/fs/cgroup');
+    out.cgroupMountRoot = at.length ? at[at.length - 1][3] : '<none>';
+  } catch (e) { out.cgroupMountRoot = `<${e.code}>`; }
+  // host cgroup NAMES — digests only: outside, the top level and the own cgroup's siblings; inside, every
+  // dir name reachable under /sys/fs/cgroup (3 levels). The table requires the two sets to be disjoint.
+  /** @param {string} d */
+  const dirsOf = (d) => { try { return fs.readdirSync(d, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name); } catch { return []; } };
+  if (!inside) {
+    const sib = own ? dirsOf(path.dirname(path.join('/sys/fs/cgroup', own))).filter((n) => n !== path.basename(own)) : [];
+    out.cgroupHostNames = [...new Set([...dirsOf('/sys/fs/cgroup'), ...sib])].map(digest);
+  } else {
+    /** @type {string[]} */ const seen = [];
+    const walk = (/** @type {string} */ d, /** @type {number} */ depth) => { for (const n of dirsOf(d)) { seen.push(n); if (depth < 3) walk(path.join(d, n), depth + 1); } };
+    walk('/sys/fs/cgroup', 1);
+    out.cgroupNamesInside = [...new Set(seen)].map(digest);
+  }
   // 4 — the home hidden; --keep-ro readable, not writable
   out.sshConfig = errOf(() => fs.readFileSync(path.join(cfg.home, '.ssh', 'config')));
   out.webctlConfig = errOf(() => fs.readFileSync(path.join(cfg.home, '.config', 'webctl', 'config.toml')));
@@ -136,6 +171,8 @@ const tamper = (target) => {
     out.nestedProc = run(['unshare', '-U', '-m', '--pid', '--fork', '--mount-proc', 'true']).status;
     out.strippedPrefix = run(['unshare', '-rnm', '--uts', '--ipc', '--pid', '--fork', '--mount-proc', 'true']).status;
     out.nestedSysfs = run(['unshare', '-rnm', 'sh', '-c', 'mount -t sysfs arm-sysfs /sys']).status;
+    // ⚠ F3: the fresh cgroup2 view must not block a nested one (a MOUNT in a throwaway namespace — nothing is written)
+    out.nestedCgroup2 = run(['unshare', '-rm', '--cgroup', 'sh', '-c', 'mount -t cgroup2 arm-cgroup2 /sys/fs/cgroup']).status;
     const at = fs.readFileSync('/proc/self/mountinfo', 'utf8').split('\n').filter(Boolean).map((l) => l.split(' ')[4]
       .replace(/\\([0-7]{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8))));
     // ⚠ the kernel's rule: a locked mount over a NON-directory blocks a new procfs/sysfs (one over an

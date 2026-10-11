@@ -183,6 +183,13 @@ const ROWS = [
         assert.ok(['EROFS', 'EACCES', 'ENOENT'].includes(r.cgroupOpen?.[f]),
           ctx(w, `${p}: the caller's ${f} opens for WRITE inside (${r.cgroupOpen?.[f]}) — the command could kill or move the processes that called it`));
       }
+      // …and by the path the command itself reads from /proc/self/cgroup (third review, F3: inside a cgroup
+      // namespace that is `/`, the root of a view of its own) — the same scope's files, still not writable
+      for (const f of CGROUP_FILES) {
+        if (w.outside.outside.cgroupOwnOpen?.[f] !== 'ok') { untested.add(`the own cgroup's ${f} does not open for write even outside: that arm is UNTESTED`); continue; }
+        assert.ok(['EROFS', 'EACCES'].includes(r.cgroupOwnOpen?.[f]),
+          ctx(w, `${p}: the own cgroup's ${f}, by the path /proc/self/cgroup gives, opens for WRITE inside or is missing (${r.cgroupOwnOpen?.[f]})`));
+      }
     },
     control: (w, t) => {
       assert.equal(w.outside.outside.hostPid, 'ok', 'control: the host pid is not alive outside');
@@ -234,6 +241,8 @@ const ROWS = [
       assert.equal(r.nestedProc, 0, ctx(w, `${p}: the nested path's \`unshare -U -m --pid --fork --mount-proc\` fails`));
       assert.equal(r.strippedPrefix, 0, ctx(w, `${p}: the stripped-markers path's \`unshare -rnm --uts --ipc --pid --fork --mount-proc\` fails`));
       assert.equal(r.nestedSysfs, 0, ctx(w, `${p}: a fresh sysfs in a nested user+net namespace (row 10's) is refused`));
+      // ⚠ third review, F3: the fresh cgroup2 view must not block a nested one (F2's nsdelegate check guards THAT route)
+      assert.equal(r.nestedCgroup2, 0, ctx(w, `${p}: a cgroup2 mount in a nested user+mount+cgroup namespace is refused`));
     },
     control: (w) => {
       for (const p of PATHS) {
@@ -319,6 +328,15 @@ const ROWS = [
       if (r.machineId !== '<ENOENT>') {
         assert.equal(r.machineIdTamper, 'unchanged', ctx(w, `${p}: /etc/machine-id was REWRITTEN through its backing copy (chmod + write)`));
       }
+      // ⛔ third review, F3: the cgroup view is a FRESH cgroup2 rooted at the command's cgroup namespace — not the
+      // host's tree seen from below (mount root `/../..`), so no host scope name is reachable there
+      if (w.cfg.cgroup) {
+        assert.equal(r.cgroupMountRoot, '/', ctx(w, `${p}: /sys/fs/cgroup is not rooted at the cgroup namespace (mount root ${r.cgroupMountRoot})`));
+        assert.equal(r.cgroupListsSelf, true, ctx(w, `${p}: the own cgroup (by /proc/self/cgroup) does not list this process — the view is not rooted where the namespace is`));
+        const host = new Set(w.outside.outside.cgroupHostNames || []);
+        const shown = (r.cgroupNamesInside || []).filter((/** @type {string} */ d) => host.has(d)).length;
+        assert.equal(shown, 0, ctx(w, `${p}: ${shown} host cgroup name(s) (top level, or the caller's siblings) are visible under /sys/fs/cgroup`));
+      }
     },
     control: (w, t) => {
       const o = w.outside.outside;
@@ -330,6 +348,16 @@ const ROWS = [
       else assert.ok(o.virtNonLo > 0);
       if (/^<.*>$/.test(o.machineId)) t.diagnostic('control: this host has no /etc/machine-id — that arm is UNTESTED here');
       else assert.notEqual(o.machineId, digest(harness.NEUTRAL_MACHINE_ID || '-unset-'), 'control: the host machine-id IS the neutral one');
+      // F3: the cgroup arms can fail — outside, the own cgroup lists this process and host names exist — and
+      // what node reads there (its memory limit) is the SAME inside: constrainedMemory() and memory.max
+      if (w.cfg.cgroup) {
+        assert.equal(o.cgroupListsSelf, true, 'control: the own cgroup does not list the probe even outside');
+        if (!(o.cgroupHostNames || []).length) t.diagnostic('control: no host cgroup names outside — the cgroup-names arm is UNTESTED here');
+        for (const p of PATHS) {
+          assert.equal(w.arm[p].constrainedMemory, o.constrainedMemory, `${p}: process.constrainedMemory() differs inside (${w.arm[p].constrainedMemory}) from outside (${o.constrainedMemory})`);
+          assert.equal(w.arm[p].memoryMax, o.memoryMax, `${p}: the own cgroup's memory.max reads differently inside`);
+        }
+      }
     },
     deeper: '"⛔ /etc/machine-id: what a neutral one breaks" (contract-harness-isolation.test.js)' },
   { n: 11, property: 'no loader injection into the privileged half',

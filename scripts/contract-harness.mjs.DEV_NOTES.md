@@ -1719,6 +1719,41 @@ every cgroup2 mount — so `parseMountinfo` now returns `superOpts` (the per-mou
 | F2b | the check reads the per-mount `opts` | the function arm's control (`nsdelegate present is refused`) and the e2e control |
 | F2c | the read-back in `cgroupGaps` removed | not caught here: this host has `nsdelegate`, and nothing reachable inside can fake it — the read-back is the second layer behind F2a's refusal |
 
+**F3 — the cgroup view was the HOST's tree.** `maskIdentity` staged the host's `/sys/fs/cgroup`, mounted
+the fresh sysfs, moved the tree back and made it read-only. Measured on ae496b7, inside: its mount
+root `/../../../../..` (the host's root, seen from our cgroup namespace), while `/proc/self/cgroup`
+said `0::/`; `process.constrainedMemory()` **0** (outside 2^64 — libuv found no `memory.max` at
+`/sys/fs/cgroup/`), and all 11 top-level host cgroup dirs listed. The ib4k and CHANGELOG lines saying
+node's memory limit "still answers" were wrong.
+* Now, as namespace root after the fresh sysfs: `mount -t cgroup2 webctl-isolated-cgroup
+  /sys/fs/cgroup` inside our cgroup namespace (rooted there: the caller's scope), then `remount,bind,ro`.
+  The host's tree is no longer staged or moved. ⛔ **A BIND remount, never `-o ro` on the mount and
+  never a superblock remount:** every cgroup2 mount shares ONE superblock, the host's included.
+  (Checked after the runs: the host's `/sys/fs/cgroup` still `rw … nsdelegate`.)
+* `MountRow` gains `root` (mountinfo field 4; for cgroup2, relative to the READER's cgroup namespace).
+  `cgroupGaps` adds: `/sys/fs/cgroup` resolves to a cgroup2 mount whose root is `/` — on the fresh path
+  and in the nesting proof (an outer without it: "upgrade the outer").
+* After, inside: mount root `/`, `constrainedMemory()` = outside's, 0 host cgroup dirs listed.
+* Arms (table, all three paths): row 3 — the own cgroup's `cgroup.kill` / `cgroup.procs` BY THE PATH
+  `/proc/self/cgroup` gives (inside: `/`) open for write → EROFS/EACCES (ENOENT is no longer accepted
+  there: it meant the view was not where the namespace is); row 10 — the mount root is `/`, the own
+  cgroup's `cgroup.procs` lists the probe, and no host cgroup name (top level or the caller's siblings,
+  compared as digests) is visible; row 10's control — the same reads outside, and
+  `constrainedMemory()` and the own `memory.max` EQUAL inside and outside on every path; row 7 — a
+  cgroup2 mount in a nested user+mount+cgroup namespace still works (a mount in a throwaway namespace;
+  nothing written). No limit is constructed: that would mean writing the real tree. RED on ae496b7:
+  rows 3 and 10 (arm and control) — `constrainedMemory() differs inside (0) from outside
+  (18446744073709552000)`, `mount root /../../../../..`, the own `cgroup.kill` ENOENT.
+* The nesting fixtures' fake outers (`V034_MASKS`) do what a v0.34 outer now does: `--cgroup` on their
+  `unshare`, a fresh cgroup2 and a bind-remount ro. Without it three nesting tests refused the outer
+  as older than v0.34 (`the cgroup tree is the HOST's there`).
+
+| # | sabotage (on a copy) | caught by |
+|---|---|---|
+| F3a | the fresh cgroup2 left read-write (read-back kept) | every run refused: `1 cgroup mount(s) are still WRITABLE` |
+| F3b | the host's tree staged and moved back as before (read-back kept) | every run refused: `/sys/fs/cgroup is not a cgroup2 rooted at this cgroup namespace` |
+| F3c | F3b AND the root read-back removed | rows 3 and 10 (arm and control), as on ae496b7 |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

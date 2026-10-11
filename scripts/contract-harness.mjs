@@ -2513,8 +2513,8 @@ async function runIsolatedInner(a) {
   // /etc/machine-id and /etc/hostname — then READ BACK (identityGaps), not trusted
   const idr = maskIdentity(plan.tools);
   if (idr.why) return refuse(idr.why);
-  // ⛔ THE CALLER'S CGROUPS (v0.34.0, re-review item 2): our own cgroup namespace, and the cgroup tree
-  // moved back by maskIdentity READ-ONLY — READ BACK, not trusted
+  // ⛔ THE CALLER'S CGROUPS (v0.34.0, re-review item 2): our own cgroup namespace, and the FRESH cgroup2
+  // maskIdentity mounted in it READ-ONLY (third review, F3) — READ BACK, not trusted
   const cgr = cgroupGaps(plan.hostCgroup);
   if (cgr.length) return refuse(`after making the cgroup tree read-only, ${cgr.join(', ')} — the command could kill or move the `
     + 'processes that called it (cgroup.kill, cgroup.procs)');
@@ -2737,8 +2737,10 @@ const IDENTITY_FILES = Object.freeze([['/etc/machine-id', `${NEUTRAL_MACHINE_ID}
  *      REQUIRED (privilegedTools refuses without it — ruling R2).
  *   2. /sys: a FRESH sysfs, mounted from inside our network namespace, lists only that namespace's
  *      interfaces — `lo` — in /sys/class/net (and /sys/devices/virtual/net). It covers every host
- *      submount of /sys, so the cgroup tree (node reads its memory limit there) is staged first and
- *      moved back on top. ⛔ If the kernel refuses the sysfs mount: REFUSED (review F3) — a mask over
+ *      submount of /sys, the cgroup tree included: a FRESH cgroup2 of our cgroup namespace goes on
+ *      /sys/fs/cgroup, read-only (node reads its memory limit there; third review, F3 — the host's tree,
+ *      moved back, was rooted at the host's root and listed every scope on the host). ⛔ If the kernel
+ *      refuses the sysfs mount: REFUSED (review F3) — a mask over
  *      /sys/class/net alone left /sys/devices/virtual/net naming the host's interfaces.
  *   3. /etc/machine-id, /var/lib/dbus/machine-id, /etc/hostname: a neutral copy (made in OUR /run)
  *      bound over each real file, read-only — the copies on a tmpfs of their own, then remounted
@@ -2750,14 +2752,8 @@ function maskIdentity(tools) {
   if (h.status !== 0) return { why: `cannot set the neutral hostname: \`hostname\` exited ${h.status ?? h.signal ?? h.error?.message}` };
   const mounts = readMountinfo() || [];
   const cg = '/sys/fs/cgroup';
-  const stage = '/run/.webctl-cgroup';
-  const hasCg = mounts.some((m) => m.at === cg);
+  const hasCg = mounts.some((m) => m.fstype === 'cgroup2');
   try {
-    if (hasCg) {
-      fs.mkdirSync(stage);
-      const e = mountOrWhy(['--rbind', cg, stage], 'stage the cgroup tree before the fresh sysfs');
-      if (e) return { why: e };
-    }
     // ⛔ FAIL CLOSED when refused (review F3): the phase-1 fallback masked /sys/class/net alone and ran,
     // but /sys/devices/virtual/net (and /sys/devices/…/net) still named the host's interfaces
     const sys = mountOrWhy(['-t', 'sysfs', '-o', 'nosuid,nodev,noexec', SYSFS_SOURCE, '/sys'], 'mount a fresh sysfs');
@@ -2766,15 +2762,19 @@ function maskIdentity(tools) {
         + 'it is never replaced by a partial mask)' };
     }
     if (hasCg) {
-      const e = mountOrWhy(['--move', stage, cg], 'move the cgroup tree back onto the fresh sysfs');
+      // ⛔ A FRESH cgroup2, mounted from inside our cgroup namespace (third review, F3): it is rooted at the
+      // namespace — the caller's scope, `/` in /proc/self/cgroup. The host's tree used to be moved back here:
+      // rooted at the HOST's root (mount root `/../../..`), every scope name on the host listed, and node's
+      // process.constrainedMemory() 0 inside (it found no memory.max where /proc/self/cgroup pointed).
+      const e = mountOrWhy(['-t', 'cgroup2', '-o', 'nosuid,nodev,noexec', CGROUP_SOURCE, cg], 'mount a fresh cgroup2 in our cgroup namespace');
       if (e) return { why: e };
-      // ⛔ READ-ONLY (re-review item 2): moved back read-write, the caller's own scope's cgroup.kill and
-      // cgroup.procs opened for write inside — a write there kills (or moves) the processes that called
-      // `isolated`, the release gate among them. node only READS its memory limit there. Read back by cgroupGaps.
-      const ro = makeTreeReadOnly(cg, false);
+      // ⛔ READ-ONLY (re-review item 2): read-write, the caller's own scope's cgroup.kill and cgroup.procs
+      // open for write inside — a write there kills (or moves) the processes that called `isolated`, the
+      // release gate among them. node only READS its memory limit there. ⚠ A BIND remount (this mount only):
+      // a superblock remount would be the hierarchy's. Read back by cgroupGaps.
+      const ro = mountOrWhy(['-o', 'remount,bind,ro', cg], 'make the fresh cgroup2 read-only');
       if (ro) return { why: `${ro} — the cgroup tree would stay WRITABLE` };
     }
-    if (hasCg) { try { fs.rmdirSync(stage); } catch { /* gone: harmless */ } }
     const dir = '/run/.webctl-identity';
     fs.mkdirSync(dir, { mode: 0o755 });
     const t = mountOrWhy(['-t', 'tmpfs', '-o', 'mode=0755,nosuid,nodev,noexec,size=16k', IDENTITY_SOURCE, dir], 'mount the neutral identity files\' tmpfs');
@@ -2811,6 +2811,8 @@ function maskIdentity(tools) {
 const IDENTITY_SOURCE = 'webctl-isolated-identity';
 /** The source tag of the fresh sysfs. */
 const SYSFS_SOURCE = 'webctl-isolated-sysfs';
+/** The source tag of the fresh cgroup2 on /sys/fs/cgroup (third review, F3). */
+const CGROUP_SOURCE = 'webctl-isolated-cgroup';
 
 /**
  * What of the HOST's identity is visible HERE — read from the kernel and the files, not from what
@@ -2893,6 +2895,12 @@ function cgroupGaps(hostCgroup) {
   const rw = mounts.filter((m) => (m.fstype === 'cgroup2' || m.fstype === 'cgroup') && !m.opts.includes('ro')
     && resolveMount(mounts, m.at)?.id === m.id).length;
   if (rw) gaps.push(`${rw} cgroup mount(s) are still WRITABLE`);
+  // ⛔ F3: /sys/fs/cgroup is a cgroup2 rooted at THIS cgroup namespace — never the host's tree seen from below it
+  // (mount root `/../..`: every host scope named, node's memory limit unreadable). Only where cgroup2 exists.
+  const top = resolveMount(mounts, '/sys/fs/cgroup');
+  if (mounts.some((m) => m.fstype === 'cgroup2') && (!top || top.at !== '/sys/fs/cgroup' || top.fstype !== 'cgroup2' || top.root !== '/')) {
+    gaps.push('/sys/fs/cgroup is not a cgroup2 rooted at this cgroup namespace (the host\'s tree is visible)');
+  }
   // ⛔ F2: the delegation boundary a nested cgroup2 mount meets (cgroupDelegationRefusal) — read back here too
   if (mounts.some((m) => m.fstype === 'cgroup2' && !m.superOpts.includes('nsdelegate'))) gaps.push('cgroup2 is mounted without `nsdelegate`');
   return gaps;
@@ -3253,7 +3261,8 @@ function protectedRoots(home) {
  */
 
 /**
- * @typedef {{id: string, parent: string, at: string, opts: string[], fstype: string, source: string, superOpts: string[]}} MountRow
+ * @typedef {{id: string, parent: string, root: string, at: string, opts: string[], fstype: string, source: string, superOpts: string[]}} MountRow
+ * `root`: the mounted dir of its filesystem (a cgroup2 mount: relative to the READER's cgroup namespace);
  * `opts`: the per-mount options; `superOpts`: the superblock's (cgroup2's `nsdelegate` is one).
  */
 
@@ -3267,7 +3276,7 @@ export function parseMountinfo(txt) {
     const [pre, post = ''] = l.split(' - ');
     const f = pre.split(' ');
     const g = post.split(' ');
-    return { id: f[0], parent: f[1], at: unesc(f[4] || ''), opts: (f[5] || '').split(','),
+    return { id: f[0], parent: f[1], root: unesc(f[3] || ''), at: unesc(f[4] || ''), opts: (f[5] || '').split(','),
       fstype: g[0], source: unesc(g[1] || ''), superOpts: (g[2] || '').split(',') };
   });
 }
@@ -3460,8 +3469,8 @@ function makeTreeReadOnly(root, rbindFirst) {
  * there is governed by its own permissions (procfs: oom_score_adj, uid_map — Chromium's sandbox and the
  * privilege drop need them; /dev is replaced whole by freshDev).
  * ⛔ NOT /sys (re-review item 7): the exemption was not load-bearing — the host /sys goes read-only
- * underneath the fresh sysfs, and so does its cgroup tree before it is staged (a second layer under
- * maskIdentity's own ro step). The fresh sysfs ON TOP stays read-write, and the root read-back exempts
+ * underneath the fresh sysfs, its cgroup tree included (the fresh cgroup2 maskIdentity mounts on top is
+ * read-only too). The fresh sysfs ON TOP stays read-write, and the root read-back exempts
  * exactly it (freshSysfs): mounted `ro`, every nested sysfs mount — the stripped-markers path's own
  * among them — is refused "Mount too revealing" (measured, kernel 7.1). A write to sysfs from the
  * user namespace is governed by sysfs's own permissions (owned by the host's root).

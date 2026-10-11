@@ -43,7 +43,7 @@ each with its positive control (`k3wn`). A backend that passes fewer arms is not
 |---|---|---|---|
 | 1 | no host network | 127.0.0.1:<live port> → exactly ECONNREFUSED; no non-lo interface | a self-made listener inside answers |
 | 2 | no host unix sockets | docker.sock, an X display socket, the session bus → ENOENT | a socket made inside connects |
-| 3 | no host processes | a host pid → ESRCH; the caller's own `cgroup.kill` and `cgroup.procs` do not open for write (EROFS/EACCES/ENOENT) | the same pid alive outside; the same files open for write outside (never written) |
+| 3 | no host processes | a host pid → ESRCH; the caller's own `cgroup.kill` and `cgroup.procs` do not open for write (EROFS/EACCES/ENOENT) — by the host path and by the path `/proc/self/cgroup` gives inside (EROFS/EACCES) | the same pid alive outside; the same files open for write outside (never written) |
 | 4 | the home HIDDEN | ~/.ssh/config, ~/.config/webctl/config.toml → ENOENT | readable outside; a `--keep-ro` path readable, not writable |
 | 5 | no privilege | CapEff 0, NoNewPrivs 1; umount / remount refused | — |
 | 6 | env allowlist | a planted unknown var absent | `--pass-env` passes it |
@@ -139,9 +139,12 @@ three paths (the table's rows 8–10).
     naming the providing packages (`inetutils` or `hostname`) — never a run under the host's name,
     never a raw syscall number.
   * **`/sys/class/net`:** a **fresh sysfs** mounted from inside the new network namespace lists only
-    `lo` (and `/sys/devices/virtual/net` likewise). It covers every host submount of `/sys`, so the
-    cgroup tree is staged first and moved back (node reads its memory limit there; measured:
-    `process.constrainedMemory()` still answers). ⛔ **If the kernel refuses the sysfs mount: a
+    `lo` (and `/sys/devices/virtual/net` likewise). It covers every host submount of `/sys`, the
+    cgroup tree included: a FRESH cgroup2 is mounted on `/sys/fs/cgroup` (row 3). ⚠ *Corrected by the
+    third review (F3):* until then the host's tree was staged and moved back, and this line said
+    node's `process.constrainedMemory()` "still answers" — it answered **0** inside (the host's tree,
+    mount root `/../../..`, where `/proc/self/cgroup` said `0::/`: no `memory.max` there) against
+    2^64 outside. ⛔ **If the kernel refuses the sysfs mount: a
     REFUSAL** (review F3). Phase 1 put an empty tmpfs over `/sys/class/net` and ran, but
     `/sys/devices/virtual/net` still named the host's interfaces; the read-back now checks both dirs.
   * **`/etc/machine-id`** (and `/var/lib/dbus/machine-id` when a separate file) and
@@ -162,12 +165,19 @@ three paths (the table's rows 8–10).
   to v0.33.1: no cgroup namespace, and the cgroup2 tree read-write inside (v0.34 phase 1 moved it back
   read-write under the fresh sysfs) — the command could open its caller's scope's `cgroup.kill` or
   `cgroup.procs` for write, i.e. kill or move the processes that called it, the release gate among
-  them. Now `unshare --cgroup` on the fresh path (and in its probe), and the cgroup tree, once moved
-  back onto the fresh sysfs, is remounted read-only with every submount. ⛔ READ BACK
-  (`cgroupGaps`): the cgroup namespace differs from the caller's and no reachable cgroup mount is
-  writable — else REFUSED; the nesting proof requires the read-only tree too. node still READS its
-  memory limit there. The arm only OPENS the files for write (and closes them), in the throwaway
-  world — it never writes the real scope.
+  them. Now `unshare --cgroup` on the fresh path (and in its probe), and — as namespace root, after
+  the fresh sysfs — a **FRESH cgroup2 mounted on `/sys/fs/cgroup` inside the new cgroup namespace**,
+  then made read-only (a BIND remount: a superblock remount would be the hierarchy's) (third review,
+  F3). It is rooted at the namespace — the caller's scope, `/` in `/proc/self/cgroup` — so the host's
+  tree is not moved back: before, the view was the host's, mount root `/../../..`, every host scope
+  name listed, and node's `process.constrainedMemory()` 0 inside (2^64 outside). ⛔ READ BACK
+  (`cgroupGaps`): the cgroup namespace differs from the caller's, no reachable cgroup mount is
+  writable, and `/sys/fs/cgroup` is a cgroup2 whose mount root is `/` — else REFUSED; the nesting proof
+  requires the same (an older outer: "upgrade the outer"). node READS its memory limit there:
+  `constrainedMemory()` and the own cgroup's `memory.max` read the same inside as outside (row 10's
+  control). A nested cgroup2 mount inside (a cgroup namespace of the command's own) still works — row
+  7's arm; that route is what the `nsdelegate` check below guards. The arms only OPEN the files for
+  write (and close them), in the throwaway world — they never write the real scope.
   ⛔ **`nsdelegate` (third review, F2).** Inside, the command can still make a cgroup namespace of its
   own (`unshare -rm --cgroup`) and mount cgroup2 there: a WRITABLE view rooted at its own cgroup — the
   caller's scope. Only cgroup2's `nsdelegate` option stops a `cgroup.kill` write at that namespace root
@@ -334,6 +344,8 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with b
   mount read-write inside. The command cannot drive this itself: it cannot reach the daemon (host
   unix sockets masked, row 2) and holds no capability to mount one; the daemon must already be
   running on the host, as the same user, and choose to lie.
+* **Third review (2026-10-11):** row 3's cgroup view is a fresh cgroup2 rooted at the namespace (F3),
+  and `nsdelegate` is required (F2); the fresh `/dev`'s links are read back (F5).
 * **Residual (third review, F2): empty child cgroups.** With `nsdelegate`, the command can still
   `mkdir` child cgroups beneath the caller's scope through a nested cgroup2 mount (a cgroup namespace
   of its own): the boundary refuses `cgroup.kill` at the namespace root and any move across it, not a

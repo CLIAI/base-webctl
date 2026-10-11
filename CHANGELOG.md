@@ -299,7 +299,7 @@ except a contract that matches the new verdict field or a refusal's tail.
   `/sys/class/net`, `/etc/machine-id`. Now: a UTS namespace named **`webctl-isolated`**, set with the
   system `hostname` tool — ⛔ **required** (ruling R2): without it `isolated` REFUSES, naming the
   packages (`inetutils` or `hostname`); a **fresh sysfs** listing only `lo` in `/sys/class/net` and
-  `/sys/devices/virtual/net` (the cgroup tree carried back) — ⛔ **if the kernel refuses the sysfs
+  `/sys/devices/virtual/net` (a fresh cgroup2 on `/sys/fs/cgroup`, row 3) — ⛔ **if the kernel refuses the sysfs
   mount, `isolated` REFUSES** (review F3; an earlier build masked `/sys/class/net` alone and ran, while
   `/sys/devices/virtual/net` still named the host's interfaces); a **neutral `/etc/machine-id`** (a
   fixed constant — systemd-id128 and dbus-uuidgen keep working) and `/etc/hostname`, their copies on
@@ -336,8 +336,10 @@ run under `isolated` — the mutant, the untrusted page, the code under test —
 * **Row 3 — the caller's cgroups were WRITABLE.** No cgroup namespace, and the host's cgroup2 tree
   read-write inside: the command could open its caller's scope's `cgroup.kill` or `cgroup.procs` for
   write — kill (or move) the processes that called `isolated`, the release gate among them. Now
-  `unshare --cgroup` (the probe too) and the cgroup tree remounted READ-ONLY, READ BACK (a writable
-  cgroup mount, or the caller's cgroup namespace → refused); the nesting proof requires it.
+  `unshare --cgroup` (the probe too) and a FRESH cgroup2 on `/sys/fs/cgroup`, mounted inside that
+  cgroup namespace and made READ-ONLY (third review, F3) — rooted at the caller's scope, so no host
+  scope name is visible; READ BACK (a writable cgroup mount, the caller's cgroup namespace, or a
+  `/sys/fs/cgroup` not rooted at the namespace → refused); the nesting proof requires it.
   ⛔ **Closed where cgroup2 is mounted with `nsdelegate` (systemd's default); `isolated` refuses
   otherwise** (third review, F2): inside, the command can still make a cgroup namespace of its own and
   mount cgroup2 there — a writable view rooted at the caller's scope — and only `nsdelegate` stops a
@@ -345,8 +347,11 @@ run under `isolated` — the mutant, the untrusted page, the code under test —
   `/proc/self/mountinfo` and REFUSES without `nsdelegate` (or with no cgroup2 visible to read it from),
   naming the option and the remedy; the verdict states the check (`; cgroup2: nsdelegate`), and the
   read-back and the nesting proof require it.
-  ⚠ **What lanes lose:** cgroup writes inside (a test that made a sub-cgroup of its own scope);
-  reads — node's memory limit — still work.
+  ⚠ **What lanes lose:** cgroup writes inside (a test that made a sub-cgroup of its own scope).
+  ⚠ **Corrected (third review, F3):** an earlier build of this release moved the HOST's tree back
+  read-only and this entry said node's memory limit "still works" — measured, `process.constrainedMemory()`
+  was **0** inside (2^64 outside), and every host scope name was listed. Now it reads the SAME inside
+  as outside (an arm), as does the own cgroup's `memory.max`; the view is the caller's scope and below.
 
 ### Row 7 closed — the whole tree READ-ONLY (ruling R1)
 

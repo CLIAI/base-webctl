@@ -477,7 +477,10 @@ const V034_MASKS = V034_SCRATCH
   + ` && printf '%s\\n' ${NEUTRAL_ID} > /run/.mid && printf '%s\\n' webctl-isolated > /run/.hn`
   + ' && { [ ! -f /etc/machine-id ] || mount --bind /run/.mid "$(realpath /etc/machine-id)"; }'
   + ' && { [ ! -f /var/lib/dbus/machine-id ] || [ "$(realpath /var/lib/dbus/machine-id)" = "$(realpath /etc/machine-id)" ] || mount --bind /run/.mid /var/lib/dbus/machine-id; }'
-  + ' && { [ ! -f /etc/hostname ] || mount --bind /run/.hn "$(realpath /etc/hostname)"; }';
+  + ' && { [ ! -f /etc/hostname ] || mount --bind /run/.hn "$(realpath /etc/hostname)"; }'
+  // a fresh cgroup2 of the fixture's own cgroup namespace (its unshare has --cgroup), read-only — ib4k row 3, F3.
+  // ⛔ ro by a BIND remount only: every cgroup2 mount shares ONE superblock, the host's included
+  + ' && mount -t cgroup2 webctl-isolated-cgroup /sys/fs/cgroup && mount -o remount,bind,ro /sys/fs/cgroup';
 
 async function nestedAttempt(recorded, prefix = [], recordedMnt, extraEnv = {}) {
   const argv = [...prefix, process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
@@ -2272,7 +2275,7 @@ test('⛔ nesting: every OLD fact satisfied (netns, mntns, our tmpfs on /run+/tm
   const stage = 'mount -t tmpfs webctl-isolated /run && mkdir /run/k && mount --rbind "$0" /run/k'
     + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
     + ' && mount -t tmpfs webctl-isolated /tmp' + V034_MASKS + ' && mkdir -p "$0" && mount --move /run/k "$0" && exec "$@"';
-  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--propagation=private', 'sh', '-c', stage, ROOT],
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--cgroup', '--propagation=private', 'sh', '-c', stage, ROOT],
     'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: '[]' });
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(r.stderr, /1 of 1 protected root\(s\) — the home directory — are WRITABLE here/);
@@ -3345,7 +3348,7 @@ test('⛔ nesting: every other fact satisfied (full mask, ro home) but the HOST 
     + ' && { [ -L /var/run ] || mount -t tmpfs webctl-isolated /var/run; }'
     + ' && mount -t tmpfs webctl-isolated /tmp' + V034_MASKS + ' && mkdir -p "$0" && mount --move /run/k "$0"'
     + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift && exec "$@"';
-  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--propagation=private', 'sh', '-c', stage, ROOT, PW_HOME],
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--cgroup', '--propagation=private', 'sh', '-c', stage, ROOT, PW_HOME],
     'mnt:[1]', { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: fs.readlinkSync('/proc/self/ns/pid'),
       WEBCTL_HIDDEN_DIRS: '[]' });
   assert.equal(r.status, 2, r.stdout + r.stderr);
@@ -3362,17 +3365,17 @@ test('⛔ VERSION SKEW (v0.34): every v0.33 fact satisfied but /var/tmp, /dev/sh
     + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift && exec "$@"';
   const env = { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: '[]',
     WEBCTL_HOST_IDS: JSON.stringify({ uid: process.getuid?.(), gid: process.getgid?.() }) };
-  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(false), ROOT, PW_HOME],
+  const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--cgroup', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(false), ROOT, PW_HOME],
     'mnt:[1]', env);
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(r.stderr, /the OUTER `isolated` is older than v0\.34\.0: .*(\/var\/tmp|\/dev\/shm).*the hostname.* the HOST's there, and a nested call cannot hide them .*upgrade the outer one to v0\.34\.0/);
   assert.equal(r.ran, false, 'a nested call ran with the host\'s /dev/shm and /var/tmp');
-  const c = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(true), ROOT, PW_HOME],
+  const c = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--cgroup', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(true), ROOT, PW_HOME],
     'mnt:[1]', env);
   assert.doesNotMatch(c.stderr, /older than v0\.34|REFUSED/, `CONTROL: with the scratch masks the proof should pass:\n${c.stderr}`);
   assert.equal(c.ran, true, `CONTROL: with the scratch masks the nested call should RUN:\n${c.stdout}${c.stderr}`);
   // …and the identity fact ALONE: scratch masked, identity the host's → still refused, naming only it
-  const i = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(V034_SCRATCH), ROOT, PW_HOME],
+  const i = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--cgroup', '--pid', '--fork', '--mount-proc', '--propagation=private', 'sh', '-c', stage(V034_SCRATCH), ROOT, PW_HOME],
     'mnt:[1]', env);
   assert.equal(i.status, 2, i.stdout + i.stderr);
   assert.equal(i.ran, false, 'a nested call ran with the host\'s identity visible');
@@ -3390,7 +3393,7 @@ test('⛔ identity read-back: an interface dir or identity file UNREADABLE (not 
   const env = { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: '[]',
     WEBCTL_HOST_IDS: JSON.stringify({ uid: process.getuid?.(), gid: process.getgid?.() }) };
   const capless = ['unshare', '-U', '--map-user', String(process.getuid?.()), '--map-group', String(process.getgid?.())];
-  const attempt = (/** @type {string} */ extra) => nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--pid', '--fork', '--mount-proc',
+  const attempt = (/** @type {string} */ extra) => nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--cgroup', '--pid', '--fork', '--mount-proc',
     '--propagation=private', 'sh', '-c', stage(extra), ROOT, PW_HOME, ...capless], 'mnt:[1]', env);
   const c = await attempt('');
   assert.equal(c.ran, true, `CONTROL: with everything readable the nested call should RUN:\n${c.stdout}${c.stderr}`);
@@ -3415,12 +3418,12 @@ test('⛔ nesting: every other fact satisfied (full mask, ro home, own PIDs) but
     + ' && mount --rbind "$1" "$1" && mount -o remount,bind,ro "$1" && shift 2 && exec "$@"';
   const env = { WEBCTL_RO_ROOTS: JSON.stringify([PW_HOME]), WEBCTL_HOST_PIDNS: 'pid:[1]', WEBCTL_HIDDEN_DIRS: JSON.stringify([dir]) };
   try {
-    const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--propagation=private', 'sh', '-c', stage(false), ROOT, PW_HOME, dir], 'mnt:[1]', env);
+    const r = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--cgroup', '--propagation=private', 'sh', '-c', stage(false), ROOT, PW_HOME, dir], 'mnt:[1]', env);
     assert.equal(r.status, 2, r.stdout + r.stderr);
     assert.match(r.stderr, /1 of 1 hidden dir\(s\) — the home, ~\/\.ssh, the state roots — lack the 'webctl-isolated-hidden' mask here/);
     assert.doesNotMatch(r.stderr, /EQUALS|uid_map is|interface\(s\) besides|no 'webctl-isolated' tmpfs|identity is visible|older than v0\.34|WRITABLE here/, 'only the hidden fact should refuse');
     assert.equal(r.ran, false, 'a namespace with the secret dirs visible was accepted as `isolated`');
-    const c = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--propagation=private', 'sh', '-c', stage(true), ROOT, PW_HOME, dir], 'mnt:[1]', env);
+    const c = await nestedAttempt('net:[1]', ['unshare', '-rnm', '--uts', '--cgroup', '--propagation=private', 'sh', '-c', stage(true), ROOT, PW_HOME, dir], 'mnt:[1]', env);
     assert.doesNotMatch(c.stderr, /hidden home dir|REFUSED/, `CONTROL: with the mask in place the hidden fact should pass:\n${c.stderr}`);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
