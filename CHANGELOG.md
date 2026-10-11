@@ -318,7 +318,6 @@ run under `isolated` — the mutant, the untrusted page, the code under test —
 * **kill its caller:** the caller's own `cgroup.kill` opened for write — one write kills every
   process of the caller's scope: the release gate, the lane's harness, the user's session there.
 
-
 * **Row 12 — the host `/dev` was passed through WHOLE.** Measured inside: `/dev/uinput` opened for
   write (virtual-keyboard injection into the host desktop); the host devpts (the user's other
   terminals), `/dev/video*`, `/dev/snd/*`, `/dev/kvm`, `/dev/fb0` and `/dev/vcs*` were writable. Now a
