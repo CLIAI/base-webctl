@@ -2060,12 +2060,9 @@ function usageRefusal(why, command) {
  * (userNamespaceRefusal). WEBCTL_UNSHARE_BIN — an absolute path to an executable — replaces
  * `unshare` in EVERY invocation, so a host can grant userns to one dedicated binary.
  * @param {string[]} a
- * @returns {Promise<number>}
- */
-/**
- * @param {string[]} a
  * @param {{readHostMounts?: () => MountRow[] | null}} [seam] ⛔ TESTS ONLY, reached by importing this
  *   module (never an env var or a flag): the mount table the cgroup2 `nsdelegate` check reads (F2).
+ * @returns {Promise<number>}
  */
 export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
   const sep = a.indexOf('--');
