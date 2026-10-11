@@ -10,7 +10,7 @@ tech:
   - name: "util-linux unshare"
     version: ">=2.38"
   - name: "bubblewrap"
-    version: "any"
+    version: ">=0.11 (measured: 0.11.2 only)"
   - name: "Docker Engine"
     version: "any"
 relates_to: [xrl4, k3wn, dip7]
@@ -43,16 +43,16 @@ each with its positive control (`k3wn`). A backend that passes fewer arms is not
 |---|---|---|---|
 | 1 | no host network | 127.0.0.1:<live port> → exactly ECONNREFUSED; no non-lo interface | a self-made listener inside answers |
 | 2 | no host unix sockets | docker.sock, an X display socket, the session bus → ENOENT | a socket made inside connects |
-| 3 | no host processes | a host pid → ESRCH; the caller's own `cgroup.kill` and `cgroup.procs` do not open for write (EROFS/EACCES/ENOENT) — by the host path and by the path `/proc/self/cgroup` gives inside (EROFS/EACCES) | the same pid alive outside; the same files open for write outside (never written) |
+| 3 | no host processes | a host pid → ESRCH; the caller's own `cgroup.kill` and `cgroup.procs` do not open for write (EROFS/EACCES/ENOENT) — by the host path and by the path `/proc/self/cgroup` gives inside (EROFS/EACCES); the command's `kill -TERM 0` leaves a sentinel in its caller's process group, and the caller, alive | the same pid alive outside; the same files open for write outside (never written); `kill -TERM 0` with no `isolated` kills the sentinel |
 | 4 | the home HIDDEN | ~/.ssh/config, ~/.config/webctl/config.toml → ENOENT | readable outside; a `--keep-ro` path readable, not writable |
 | 5 | no privilege | CapEff 0, NoNewPrivs 1; umount / remount refused | — |
 | 6 | env allowlist | a planted unknown var absent | `--pass-env` passes it |
-| 7 | writable only where declared | a user-owned dir outside the home, base's root, the home → EROFS/absent | the cwd, `--keep` (inside and outside /tmp) writable; procfs writes and a nested `unshare -rn` still work |
+| 7 | writable only where declared | a user-owned dir outside the home, base's root, the home → EROFS/absent; a mount the host makes AFTER the start never appears inside (every mount private, read back) | the cwd, `--keep` (inside and outside /tmp) writable; procfs writes and a nested `unshare -rn` still work; a raw slave mount namespace sees the late mount |
 | 8 | no host-shared scratch | a file planted in the host's `/dev/shm` and `/var/tmp` → absent; a write there is not visible outside; the host's SysV IPC (a segment from `ipcmk -M`) not listed by `ipcs -m`, a `shmat` write never reaching it; the host's POSIX mqueues absent from `/dev/mqueue` | a file, a segment and a queue made inside are seen inside; a write made outside is read back |
 | 9 | no host keyring | `keyctl show @s` names no host keyring; a key added inside is gone outside; (9b) a host key's possessor-only PAYLOAD → EACCES by id. *Residual: descriptions and ids stay enumerable (§1a)* | a key added inside is readable inside; the payload is readable outside |
 | 10 | no host identity | hostname ≠ the host's; `/sys/class/net` and `/sys/devices/virtual/net` list only `lo`; `/etc/machine-id` absent or neutral, and not rewritable through its backing copy | the same reads outside show the host's values; the rewrite works on such a bind made outside |
 | 11 | no loader injection into the privileged half | `NODE_OPTIONS` / `LD_*` preloads never run before the masks | the command itself sees its allowed env |
-| 12 | no host devices | `/dev` holds only `null zero full random urandom tty pts ptmx shm mqueue fd stdin stdout stderr`; `/dev/pts` is not the host's devpts and lists none of its terminals; the host's `/dev/uinput` and `/dev/snd` absent (each one the host lacks is a named SKIP); (12b) under the caller's pty: `/dev/tty` → ENXIO, TIOCSTI on fd 0 → EPERM/EIO, no capless ancestor holds the terminal | inside behaves EXACTLY as outside: `/dev/fd/N`, `/dev/stdin|stdout|stderr` resolve; `null zero full random urandom` read; `/dev/full` write → ENOSPC; `/dev/tty` with no controlling tty answers as outside (ENXIO); (12b) under a pty the caller owns, `/dev/tty` opens outside; plus a pty opens (`/dev/ptmx`, `script -qc true /dev/null` — master AND slave), `/dev/shm` writable, a nested `unshare -Ur --pid --fork --mount-proc` works; the host `/dev` holds more |
+| 12 | no host devices | `/dev` holds only `null zero full random urandom tty pts ptmx shm mqueue fd stdin stdout stderr`; `/dev/pts` is not the host's devpts and lists none of its terminals; the host's `/dev/uinput` and `/dev/snd` absent (each one the host lacks is a named SKIP); (12b) under the caller's pty: `/dev/tty` → ENXIO, TIOCSTI on fd 0 → EPERM where `dev.tty.legacy_tiocsti` is 1 or absent (at 0 the kernel answers EIO before the terminal check: NOT TESTED, named), no capless ancestor holds the terminal | inside behaves EXACTLY as outside: `/dev/fd/N`, `/dev/stdin|stdout|stderr` resolve; `null zero full random urandom` read; `/dev/full` write → ENOSPC; `/dev/tty` with no controlling tty answers as outside (ENXIO); (12b) under a pty the caller owns, `/dev/tty` opens outside; plus a pty opens (`/dev/ptmx`, `script -qc true /dev/null` — master AND slave), `/dev/shm` writable, a nested `unshare -Ur --pid --fork --mount-proc` works; the host `/dev` holds more |
 
 Row 12 and row 3's cgroup arm come from the re-review of v0.34 phase 1 (2026-10-10): the host `/dev`
 had been passed through whole, and the caller's cgroups were writable, in EVERY released `isolated` up
@@ -264,11 +264,135 @@ above it, as v0.33's was. A pin keeps the pin's text. ⛔ A backend that is SELE
 yet is refused (`internal: backend <x> has no runner yet`, review F7) — everything after selection
 is unshare's runner until each phase adds its own. Only a PROBE failure moves on to the next backend;
 once a backend is chosen, a failure inside it (a mask that fails, a read-back that disagrees) is a
-FAIL, never a reason to try the next. Until v0.35.0, `bwrap` and `docker` answer
-`not implemented yet (v0.35.0)`: a pin to either is refused, and a host where unshare
-cannot run is refused naming all three. An unknown pin is refused by rule (its value is not
+FAIL, never a reason to try the next. Until v0.35.0, `bwrap` and `docker` answered
+`not implemented yet (v0.35.0)`. Since v0.35.0, bwrap has its probe and runner (§2a); `docker` still
+answers that until phase 3, so a pin to it is refused, and a host where neither namespace backend can
+run is refused naming all three. An unknown pin is refused by rule (its value is not
 printed). A **nested** call makes no sandbox of its own (it runs inside its outer call's): the pin
 is validated there, and selects nothing.
+
+### 2a. The bwrap backend (v0.35.0, phase 2)
+
+**What bwrap is, here: the namespace CREATOR, nothing more.** It replaces the fresh path's
+`unshare -rnm … --fork` — the namespaces and the reaping pid 1 — and nothing else. Everything inside
+is the SAME code as under unshare, unchanged: pid 1's bash (`PID1_REAPER`, the keyring join), the
+`__isolated-inner` half (the masks, the read-only root, the fresh `/dev`, sysfs and cgroup2, the
+identity), every read-back (`readOnlyGaps`, `hiddenGaps`, `devGaps`, `identityGaps`, `cgroupGaps`),
+the privilege drop (`privilegeDrop`, read back) and the `__isolated-pid1` helper. One implementation
+meets the contract; the table (§1) judges it under each creator.
+
+⛔ **bwrap's own mount flags are NOT used** (`--ro-bind / /`, `--dev`, `--tmpfs`, `--hostname`,
+`--clearenv`/`--setenv`, `--cap-drop ALL`), because they would be a second, weaker implementation of
+the masks:
+
+* bwrap has no option for a FRESH sysfs or cgroup2 (rows 10 and 3), so the inner half must still
+  run, with capabilities, after it. `--cap-drop ALL` would leave it unable to mount anything.
+* `--dev` is not the contract's `/dev`: it adds `core -> /proc/kcore` (and `console` when stdin is a
+  tty), has no `mqueue`, and stays writable. `devGaps` refuses it. The inner half builds the
+  minimal one and reads it back, on both creators.
+* `--clearenv`/`--setenv` would put the command's env on bwrap's argv, readable in
+  `/proc/<pid>/cmdline` by every process of the uid, and on the privileged halves (row 11).
+  bwrap is spawned with `privilegedEnv`, as unshare is; the command's env travels by pipe to the
+  helper.
+* A mask done twice means two writers to keep in step, and a read-back that passes only because one
+  creator happened to do it is a defect.
+
+**The argv** (`BWRAP_FLAGS`), and what each flag carries:
+
+    bwrap --unshare-user --uid 0 --gid 0 --cap-add ALL
+          --unshare-net --unshare-ipc --unshare-uts --unshare-cgroup --unshare-pid
+          --as-pid-1 --die-with-parent --new-session
+          --dev-bind / / --proc /proc
+          -- <bash> --norc -p -c PID1_REAPER webctl-isolated-pid1 <keyctl> <node> <harness> __isolated-inner <netns> -- <cmd…>
+
+| flag | unshare's equivalent | carries |
+|---|---|---|
+| `--unshare-user --uid 0 --gid 0 --cap-add ALL` | `-r` | the inner half is namespace root WITH capabilities (every mask; without them it refuses) |
+| `--unshare-net` | `-n` | row 1 (the inner half refuses a shared netns) |
+| `--unshare-ipc` | `--ipc` | row 8 (`maskIpc` refuses a shared IPC ns) |
+| `--unshare-uts` | `--uts` | row 10 (the neutral hostname needs a UTS ns of its own) |
+| `--unshare-cgroup` | `--cgroup` | row 3 (`cgroupGaps` refuses a shared cgroup ns) |
+| `--unshare-pid --as-pid-1` | `--pid --fork` | row 3; pid 1 is OUR reaping bash, as under unshare. Without `--as-pid-1` bwrap's own reaper is pid 1 and the harness's forwarding past the creator reaches it, not bash |
+| `--proc /proc` | `--mount-proc` | a procfs of the new PID namespace (row 3) |
+| `--dev-bind / /` | `-m` | the caller's tree, as `unshare -m` gives it. ⚠ *Measured:* `--bind / /` makes it `nodev`, and `/dev/null` answers EACCES |
+| `--die-with-parent` | `--kill-child` | the namespace dies with bwrap — and with bwrap's PARENT, the harness (stronger: a harness killed under unshare leaves unshare running). The early-signal SIGKILL of the creator (`forwardSignalsPastUnshare`) relies on it |
+| `--new-session` | (none) | the privileged halves hold no controlling terminal either. Under unshare they keep it (12b: "ancestors with a tty 2, capless 0"); under bwrap, 0. A strengthening, not a row: the shared chain's setsid carries 12b on both |
+
+⛔ **Not `--unshare-all`**: its user and cgroup parts are the `-try` variants, so a namespace bwrap
+cannot make is silently skipped. Each namespace is named, and its absence is a failure.
+**Not `--disable-userns`**: the command must keep making namespaces of its own (row 7's control,
+Chromium's sandbox, the nested path's drop).
+
+**Measured differences, and what closes each** (bwrap 0.11.2, kernel 7.1):
+
+1. ⛔ **Mount propagation.** bwrap makes `/` an rslave, so a mount the host makes AFTER the start
+   appears inside. *Measured:* a tmpfs mounted in a throwaway "host" 0.8 s after the start was
+   listed twice in the sandbox's mountinfo, and writable there. It lands outside the read-only step,
+   which ran before it existed. Under `unshare --propagation=private` it was listed 0 times. ⇒ The
+   inner half makes every mount PRIVATE (`mount --make-rprivate /`, its first mount, a no-op under
+   unshare). It then READS BACK `propagationGaps`: no mount reachable from `/` may carry a `shared:`
+   or `master:` tag. Both creators run this, and so does the nesting proof. *Arm (row 7):* a mount the
+   "host" makes after the start never appears inside. *Control:* a raw slave namespace started at the
+   same time sees it.
+2. **`nodev`** — `--dev-bind`, above.
+3. **The session** — `--new-session`, above.
+4. **NoNewPrivs** is already 1 in the inner half (bwrap always sets it). Harmless: `mount`,
+   `hostname`, `keyctl`, `ip` and `setpriv` need no new privileges.
+
+**The probe** is side-effect free, and each step is a NAMED reason:
+
+1. `bwrap` from the system dirs only. Otherwise: `bwrap: not installed (no bwrap in /usr/sbin,
+   /usr/bin, /sbin, /bin)`.
+2. **Not setuid** (S_ISUID on the resolved file), refused by rule before it is ever run: `bwrap:
+   setuid — …`. A setuid bwrap is what a host installs when unprivileged user namespaces are off.
+   Under it the inner half could not mask: bwrap's source refuses `--cap-add` to a non-root caller
+   in setuid mode (*not measured here*: this host has no setuid bwrap). The command could not make a
+   nested user namespace either, which row 7's control, the drop and the nested path all need. And
+   bwrap ≥ 0.11 builds without setuid support by default (*measured*: the 0.11.2 binary here
+   carries "setuid use of bubblewrap is not supported in this build"). `isolated` never executes a
+   setuid binary as part of its chain.
+3. Every privileged tool, exactly as for unshare (`privilegedTools`). ⚠ bwrap does NOT remove the
+   need for util-linux: the drop is `setpriv … unshare -U --map-user` (util-linux ≥ 2.38), and so
+   is the nested path.
+4. The argv above around `mount -t tmpfs webctl-isolated-probe /tmp`, which proves the namespace
+   root can MOUNT, not only that bwrap starts. Its failure reads `bwrap exited <n> before the
+   isolated side reported in (<bwrap's last stderr line>)`. When the AppArmor sysctl reads 1, it
+   adds `kernel.apparmor_restrict_unprivileged_userns = 1 — AppArmor denies bwrap a user namespace
+   too`.
+
+**No override** (no `WEBCTL_BWRAP_BIN`). `WEBCTL_UNSHARE_BIN` exists so that a host can grant user
+namespaces to ONE dedicated binary instead of the system `unshare` (§0). The bwrap backend cannot
+use that remedy on its own: it still runs `WEBCTL_UNSHARE_BIN` (or the system unshare) for the drop.
+No host is known that needs a dedicated bwrap. A binary that runs every privileged step is exactly
+what `systemTool` keeps off PATH. ⇒ Not added; a host that needs one is a ruling to ask for, with a
+measurement.
+
+**When bwrap actually runs** — the honest answer:
+
+| host | unshare probe | bwrap probe | `isolated` |
+|---|---|---|---|
+| unprivileged userns allowed (*measured, this host*) | passes | passes | **unshare**. bwrap runs only when pinned — and pinned, it passes the whole table on all three paths (*measured*) |
+| `user.max_user_namespaces=0` or `kernel.unprivileged_userns_clone=0`, bwrap not setuid | EPERM | EPERM (the same kernel check: "No permissions to create a new namespace") | refused, naming both |
+| the same, bwrap setuid | EPERM | refused by rule (setuid) | refused, naming both |
+| Ubuntu ≥ 23.10, `apparmor_restrict_unprivileged_userns=1`, no profile for bwrap (*measured on a lane's host*, §0) | EPERM | EPERM | refused (HOST POLICY text) |
+| the same, with Ubuntu's `bwrap-userns-restrict` profile (*not measured*: no AppArmor here) | EPERM | bwrap gets its namespace, but its children run with every capability denied, so the probe's mount fails | refused, named |
+| the same, with an admin's profile granting `userns,` to `/usr/bin/bwrap`, children unconfined (*not measured*) | EPERM | passes | **bwrap**. The one class found. The same admin could profile a dedicated unshare (`WEBCTL_UNSHARE_BIN`) instead |
+
+⇒ **On no measured host does bwrap run where unshare cannot.** It is a second, independently built
+namespace creator. A host can pin it, or reach it in the one AppArmor case above, and the same
+table judges it. A host blocked by policy (§0) is not unblocked by bwrap; that host waits for docker
+(§3, phase 3).
+
+**Nested and stripped paths.** These are unchanged. A nested call makes no sandbox of its own (§2),
+whatever created its outer. A stripped-markers call isolates again with the backend IT selects. A
+pin is inherited through the `WEBCTL_*` allowlist, so a pinned bwrap outer runs bwrap again inside
+(*measured*: the table's stripped path is green under bwrap).
+
+**Verdict and gate.** `…; backend: bwrap` — with `(skipped unshare: <v0.33's reason>)` when unshare's
+probe failed. unshare's own stderr is then printed above the verdict, so the reason's "unshare's own
+message, if any, is above" stays true. The gate reads the backend exactly as before (§4).
+`HARNESS_GENERATION` stays **7**: no verdict changes meaning. A host that refused before may now run
+with `backend: bwrap` named.
 
 ## 3. The docker backend — as strong as the namespace one
 
@@ -388,11 +512,15 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with b
   read keystrokes typed during the run, set termios (persisting after exit) and write escape
   sequences a terminal may answer into its own input. As under `bwrap --new-session`. The gate and
   lanes run with no terminal. The same new session also closes `kill(0)` reaching the caller's
-  process group (measured pre-tag: a sentinel there died on v0.33.1, lives on v0.34.0); no arm of its
-  own yet — it regresses with `/dev/tty` today (the same spawn), a sentinel-group arm is v0.35.0 work.
+  process group (measured pre-tag: a sentinel there died on v0.33.1, lives on v0.34.0); row 3's kill(0)
+  arm since v0.35.0 (red only with BOTH setsids gone — the chain's and the helper's).
 * **v0.35.0 follow-ups from the pre-tag review:** the row-12b TIOCSTI assertion cannot fail where
   `dev.tty.legacy_tiocsti=0` (EIO comes before the ctty check) — accept EPERM only when it is 1,
   else mark it untested; the `/dev/tty` ENXIO arm carries the property meanwhile. Merge
   `runIsolated`'s two stacked JSDoc blocks.
-* **v0.35.0 — bwrap, then docker (§3, §3a, §5):** not started. Each lands by adding its probe,
-  its run path, and its name to the table's IMPLEMENTED list — the guard test fails until it does.
+* **v0.35.0 follow-ups — done:** the TIOCSTI half judged by `dev.tty.legacy_tiocsti` (a named
+  NOT TESTED where it is 0); row 3's kill(0) arm — a sentinel in the caller's process group survives;
+  the JSDoc blocks merged.
+* **v0.35.0 phase 2 — bwrap (§2a):** designed. It lands by adding its probe, its run path, and its
+  name to the table's IMPLEMENTED list — the guard test fails until it does.
+* **v0.35.0 phase 3 — docker (§3, §3a):** not started.
