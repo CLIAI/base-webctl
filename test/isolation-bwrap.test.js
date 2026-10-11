@@ -1,8 +1,10 @@
 // isolation-bwrap.test.js — the bwrap backend's own depth (ib4k §2a, v0.35.0 phase 2).
 //
-// The CONTRACT is the shared arm table (isolation-arm-table.test.js), run under unshare AND bwrap.
-// Here: what bwrap brought with it — the mount-propagation hole it opened (closed for every backend),
-// its probe and its named refusals, and the flags whose job no table row sees.
+// The CONTRACT is the shared arm table (isolation-arm-table.test.js), run under unshare AND bwrap (plus
+// its bwrap-only `--new-session` arm). bwrap's probe and named refusals are in
+// isolation-backend-select.test.js; the signal path through it (`--as-pid-1`, `--die-with-parent`) is the
+// `[bwrap]` block of contract-harness-isolation.test.js. Here: the mount-propagation hole bwrap opened,
+// closed for every backend.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

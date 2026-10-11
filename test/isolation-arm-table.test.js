@@ -37,7 +37,7 @@ const WORLD = path.join(ROOT, 'test', 'helpers', 'isolation-arm-world.cjs');
  * The backends this table is RUN against — every backend the harness can run. ⛔ Extend it when a
  * backend lands (phase 2: bwrap, phase 3: docker); the guard test below fails until you do.
  */
-const IMPLEMENTED = ['unshare'];
+const IMPLEMENTED = ['unshare', 'bwrap'];
 const PATHS = /** @type {const} */ (['fresh', 'nested', 'stripped']);
 const NEUTRAL_HOSTNAME = 'webctl-isolated';
 /** @param {string} s */
@@ -503,7 +503,7 @@ test('row 12b: the TIOCSTI half judges a reading by dev.tty.legacy_tiocsti (it c
  * them empties the entry. ⛔ Never add a row here to get a suite green: it is the record of a gap.
  * @type {Record<string, number[]>}
  */
-const OPEN_ROWS = { unshare: [] };
+const OPEN_ROWS = { unshare: [], bwrap: [] };
 
 for (const backend of IMPLEMENTED) {
   for (const row of ROWS) {
@@ -555,3 +555,17 @@ test('⛔ the table covers EVERY backend the harness can run — extend IMPLEMEN
 const KEYRING_UNVERIFIED = 'SKIP (host): `keyctl show @s` fails here — the keyring row is UNVERIFIED (isolated says "keyring: unverified")';
 /** Row 9 without keyctl: a named SKIP — untested, never a pass. */
 const NO_KEYCTL = 'SKIP (host): keyctl not installed — the keyring row is UNTESTED here (isolated says "keyring: shared")';
+
+// ⭐ bwrap only (ib4k §2a, `--new-session`): NO ancestor of the command holds the caller's terminal — the
+// privileged halves (pid 1, the inner half) included. Not a contract row: under unshare those keep it (they
+// hold capabilities the command cannot trace), and the shared chain's setsid carries 12b on both creators.
+test('[bwrap] --new-session: no ancestor of the command holds a terminal, privileged halves included — CONTROL: under unshare they do', async (t) => {
+  if (!IMPLEMENTED.includes('bwrap')) { t.skip('bwrap is not implemented'); return; }
+  const w = await world('bwrap');
+  if (w.skip) { t.skip(w.skip); return; }
+  if (w.tty.unavailable) { t.skip(`SKIP (host): ${w.tty.unavailable}`); return; }
+  assert.equal(w.tty.fresh?.ttyAncestors, 0, `fresh: ${w.tty.fresh?.ttyAncestors} ancestor(s) of the command hold the caller's terminal under bwrap`);
+  assert.ok(w.tty.outside?.ttyAncestors > 0, 'control: no ancestor holds the pty even outside');
+  const u = await world('unshare');
+  if (!u.skip && !u.tty.unavailable) assert.ok(u.tty.fresh?.ttyAncestors > 0, 'control: under unshare the privileged halves hold no terminal either — the arm cannot tell bwrap\'s flag from the chain\'s setsid');
+});

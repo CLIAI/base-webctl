@@ -3179,7 +3179,7 @@ const once = () => new Promise((resolve) => {
   c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; });
   const poll = () => {
     if (done || sent) return;
-    const u = desc(c.pid).find((p) => /^(?:[^\\0]*\\/)?unshare\\0/.test(cmd(p)) && cmd(p).includes('webctl-isolated-pid1') && kids(p).length > 0);
+    const u = desc(c.pid).find((p) => /^(?:[^\\0]*\\/)?(?:unshare|bwrap)\\0/.test(cmd(p)) && cmd(p).includes('webctl-isolated-pid1') && kids(p).length > 0);
     if (u) { sent = true; c.kill('SIGTERM'); return; }
     setImmediate(poll);
   };
@@ -3290,13 +3290,13 @@ const LOOPER = `sh -c 'echo READY; while :; do sleep 0.2; done'`;
 /**
  * bashParent with a deadline: a run still going `ms` after the INT is TERMinated (then KILLed) as a GROUP,
  * and reported `hung` — the loop must never be left running.
- * @param {string} shape @param {number} ms
+ * @param {string} shape @param {number} ms @param {Record<string, string>} [env] e.g. a WEBCTL_ISOLATION_BACKEND pin
  * @returns {Promise<{status: number|null, signal: string|null, stdout: string, hung: boolean}>}
  */
-function bashParentWithin(shape, ms) {
+function bashParentWithin(shape, ms, env = {}) {
   return new Promise((resolve) => {
     const c = spawn('bash', ['-c', `N="$0"; T="$1"; H() { "$N" "$T" "$@"; }; ${shape}`, process.execPath, TOOL],
-      { env: cleanEnv(), cwd: ROOT, detached: true });
+      { env: cleanEnv(env), cwd: ROOT, detached: true });
     let stdout = ''; let sent = false; let hung = false;
     /** @type {NodeJS.Timeout | undefined} */ let deadline;
     c.stdout.on('data', (d) => {
@@ -3919,4 +3919,87 @@ test('⛔ importing the harness runs NO verb, even when the importer\'s argv nam
   assert.equal(res.status, 0, res.stdout + res.stderr);
   assert.equal(res.stdout.trim(), 'IMPORTED 7', 'a verb ran on import');
   assert.equal(res.stderr, '');
+});
+
+// ── bwrap (ib4k §2a): the SIGNAL path through the other namespace creator ────
+//
+// The shared arm table judges the contract under bwrap; these are the arms a table row does not see —
+// how a signal crosses the creator. bwrap differs from `unshare --fork` exactly there: `--as-pid-1` (pid 1
+// is our reaping bash, not bwrap's reaper), `--die-with-parent` (the namespace dies with bwrap AND with
+// its parent, the harness). Each arm pins WEBCTL_ISOLATION_BACKEND=bwrap.
+const BWRAP_BIN = SYSTEM_DIRS.map((d) => path.join(d, 'bwrap')).find((p) => fs.existsSync(p)) || '';
+const BWRAP_PIN = { WEBCTL_ISOLATION_BACKEND: 'bwrap' };
+const needsBwrap = NO_ISOLATION ? needsIsolation : !BWRAP_BIN ? { skip: 'SKIP (host): bwrap not installed' }
+  : spawnSync(BWRAP_BIN, ['--unshare-user', '--uid', '0', '--gid', '0', '--cap-add', 'ALL', '--unshare-pid', '--as-pid-1', '--dev-bind', '/', '/',
+    '--proc', '/proc', '--', 'true']).status === 0 ? {} : { skip: 'SKIP (host): bwrap cannot make its namespaces here' };
+
+test('⭐ [bwrap] SIGTERM to the harness reaches the command\'s OWN trap (rc 7) — fresh and nested', needsBwrap, async () => {
+  const f = await termAfterReady([process.execPath, TOOL, 'isolated', '--', 'sh', '-c', TRAPPER], BWRAP_PIN);
+  assert.match(f.stdout, /GOT-TERM/, `fresh: the command never saw the SIGTERM:\n${f.stdout}${f.stderr}`);
+  assert.equal(f.status, 7, `fresh: ${f.status} ${f.signal}`);
+  assert.match(f.stderr, /; backend: bwrap; /, 'not run under bwrap');
+  const n = await termAfterReady([process.execPath, TOOL, 'isolated', '--', process.execPath, TOOL, 'isolated', '--', 'sh', '-c', TRAPPER], BWRAP_PIN);
+  assert.match(n.stdout, /GOT-TERM/, `nested: the trap never ran:\n${n.stdout}${n.stderr}`);
+  assert.equal(n.status, 7, `nested: ${n.status} ${n.signal}`);
+});
+
+test('⛔ [bwrap] Ctrl-C (INT to the group) stops a shell LOOP — fresh and nested; the parent dies by SIGINT', needsBwrap, async () => {
+  for (const [path_, shape] of [['fresh', `H isolated -- ${LOOPER}; echo "AFTER rc=$?"`],
+    ['nested', `H isolated -- "$N" "$T" isolated -- ${LOOPER}; echo "AFTER rc=$?"`]]) {
+    const r = await bashParentWithin(shape, 8000, BWRAP_PIN);
+    assert.equal(r.hung, false, `${path_}: the loop was still running 8 s after Ctrl-C`);
+    assert.doesNotMatch(r.stdout, /AFTER rc=/, `${path_}: ${r.stdout}`);
+    assert.equal(r.signal, 'SIGINT', `${path_}: the parent did not die by SIGINT (status ${r.status})`);
+  }
+});
+
+test('⛔ [bwrap] EARLY TERM: a TERM the moment bwrap\'s child appears → the harness DIES BY TERM — never "ran and exited 0"', needsBwrap, async (tt) => {
+  const dir = earlyDir();
+  try {
+    const r = await withBinds(slowBinds(dir), [process.execPath, path.join(dir, 'early.cjs'), String(EARLY_N), process.execPath, TOOL, 'isolated', '--', ...EARLY_CMD],
+      { env: cleanEnv(BWRAP_PIN) });
+    if (!r) { tt.skip(NO_BINDS); return; }
+    const t = earlyOf(r.stdout);
+    assert.equal(t.bad, 0, `the command RAN after the caller's TERM in ${t.bad} of ${EARLY_N} runs:\n${r.stdout}${r.stderr}`);
+    assert.equal(t.other, 0, `${r.stdout}${r.stderr}`);
+    assert.ok(t.term + t.notrun >= EARLY_N / 2, `the window was hit too rarely to judge (missed ${t.missed}):\n${r.stdout}`);
+    assert.equal(t.notrun, 0, `a caller's TERM became an ordinary NOT RUN exit:\n${r.stdout}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+/** Host pids whose argv contains `tag` (a unique sleep length), by /proc scan — never pkill. @param {string} tag */
+const pidsWithArg = (tag) => fs.readdirSync('/proc').filter((d) => /^\d+$/.test(d)).filter((d) => {
+  try { return fs.readFileSync(`/proc/${d}/cmdline`, 'utf8').split('\0').includes(tag); } catch { return false; }
+}).map(Number);
+
+/**
+ * SIGKILL `argv` (it cannot forward anything) once its command printed READY; then how many processes
+ * with `tag` in their argv are left 2 s later. Leftovers are TERMed by exact pid (ours: unique tag).
+ * @param {string[]} argv @param {string} tag @param {Record<string, string>} [env]
+ */
+function leftAfterKill(argv, tag, env = {}) {
+  return /** @type {Promise<number>} */ (new Promise((resolve) => {
+    const c = spawn(argv[0], argv.slice(1), { env: cleanEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = ''; let sent = false;
+    c.stdout.on('data', (d) => {
+      out += d;
+      if (!sent && /READY/.test(out)) { sent = true; c.kill('SIGKILL'); }
+    });
+    // ⚠ 'exit', not 'close': a survivor holds our stdout pipe, and 'close' would wait for it to end
+    c.on('exit', () => setTimeout(() => {
+      const left = pidsWithArg(tag);
+      for (const p of left) { try { process.kill(p, 'SIGTERM'); } catch { /* gone */ } }
+      resolve(left.length);
+    }, 2000));
+  }));
+}
+
+test('⛔ [bwrap] the HARNESS killed (SIGKILL) mid-run → nothing is left inside (`--die-with-parent`) — CONTROL: a raw bwrap without it leaves the command running', needsBwrap, async () => {
+  const tag = `30.${process.pid}${Date.now() % 100000}`;
+  const left = await leftAfterKill([process.execPath, TOOL, 'isolated', '--', 'sh', '-c', `echo READY; exec sleep ${tag}`], tag, BWRAP_PIN);
+  assert.equal(left, 0, `${left} process(es) of the command outlived the SIGKILLed harness`);
+  const tag2 = `31.${process.pid}${Date.now() % 100000}`;
+  const raw = await leftAfterKill([BWRAP_BIN, '--unshare-user', '--unshare-pid', '--as-pid-1', '--dev-bind', '/', '/', '--proc', '/proc', '--',
+    'sh', '-c', `echo READY; exec sleep ${tag2}`], tag2);
+  assert.ok(raw > 0, 'control: a raw bwrap WITHOUT --die-with-parent took the command with it — the arm cannot fail');
 });

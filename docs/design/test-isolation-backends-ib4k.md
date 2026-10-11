@@ -354,8 +354,11 @@ Chromium's sandbox, the nested path's drop).
 3. Every privileged tool, exactly as for unshare (`privilegedTools`). ⚠ bwrap does NOT remove the
    need for util-linux: the drop is `setpriv … unshare -U --map-user` (util-linux ≥ 2.38), and so
    is the nested path.
-4. The argv above around `mount -t tmpfs webctl-isolated-probe /tmp`, which proves the namespace
-   root can MOUNT, not only that bwrap starts. Its failure reads `bwrap exited <n> before the
+4. The argv above around the inner half's own first mount, `mount --make-rprivate /` (it needs
+   CAP_SYS_ADMIN, so it proves the namespace root can MOUNT, not only that bwrap starts), then
+   the privilege drop exactly as the inner half runs it (`setpriv … unshare -U --map-user`). A
+   tmpfs on `/tmp`, as first planned, hid a `WEBCTL_UNSHARE_BIN` kept there from the drop step
+   (measured). Its failure reads `bwrap exited <n> before the
    isolated side reported in (<bwrap's last stderr line>)`. When the AppArmor sysctl reads 1, it
    adds `kernel.apparmor_restrict_unprivileged_userns = 1 — AppArmor denies bwrap a user namespace
    too`.

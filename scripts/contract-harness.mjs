@@ -1547,8 +1547,86 @@ function refusalText(c, pinned, probeStderr) {
     + ' (the command is never run unisolated)';
 }
 
-/** Phase-1 placeholders: these backends are specified (ib4k §3) but not implemented yet. */
-const NOT_IMPLEMENTED = Object.freeze({ bwrap: 'not implemented yet (v0.35.0)', docker: 'not implemented yet (v0.35.0)' });
+/** Placeholders: these backends are specified (ib4k §3) but not implemented yet (bwrap landed in v0.35.0, §2a). */
+const NOT_IMPLEMENTED = Object.freeze({ docker: 'not implemented yet (v0.35.0)' });
+
+/**
+ * bwrap's argv up to its `--` (ib4k §2a): the NAMESPACES and the reaping pid 1 — nothing else. bwrap is the
+ * namespace CREATOR only; the masks, every read-back and the drop are the inner half's, as under unshare.
+ *   `--unshare-user --uid 0 --gid 0 --cap-add ALL`: namespace root WITH capabilities (`unshare -r`);
+ *   `--unshare-net/-ipc/-uts/-cgroup/-pid`: each named — never `--unshare-all`, whose user and cgroup parts
+ *     are the `-try` variants (a namespace bwrap cannot make would be silently skipped);
+ *   `--as-pid-1`: pid 1 is OUR reaping bash (PID1_REAPER), as under `unshare --fork` — not bwrap's own reaper;
+ *   `--die-with-parent`: the namespace dies with bwrap, and with bwrap's parent (us) (`--kill-child`);
+ *   `--new-session`: the privileged halves hold no controlling terminal either (unshare's keep it);
+ *   `--dev-bind / /`: the caller's tree, as `unshare -m` gives it — ⚠ `--bind` makes it nodev: /dev/null
+ *     answered EACCES (measured); `--proc /proc`: a procfs of the new PID namespace (`--mount-proc`).
+ * ⛔ NOT bwrap's own masks (--ro-bind, --dev, --tmpfs, --hostname, --setenv, --cap-drop): a second, weaker
+ * implementation of the inner half's (no fresh sysfs or cgroup2; `--dev` adds core/console) — ib4k §2a.
+ */
+const BWRAP_FLAGS = Object.freeze(['--unshare-user', '--uid', '0', '--gid', '0', '--cap-add', 'ALL',
+  '--unshare-net', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup', '--unshare-pid',
+  '--as-pid-1', '--die-with-parent', '--new-session', '--dev-bind', '/', '/', '--proc', '/proc']);
+
+/**
+ * The bwrap to run: from the SYSTEM dirs only (no override — ib4k §2a). `why` names the rule broken.
+ * ⛔ A SETUID bwrap is refused by RULE, before it is ever run: `isolated` never executes a setuid binary
+ * in its chain; in setuid mode bwrap refuses `--cap-add` to a non-root caller (so nothing could be
+ * masked) and the command would get no nested user namespace (the drop, row 7). bwrap ≥ 0.11 is built
+ * without setuid support by default anyway. @returns {{bin: string, why: string}}
+ */
+function bwrapBin() {
+  const bin = systemTool('bwrap');
+  if (!bin) return { bin, why: noSystemTool('bwrap', 'install bubblewrap') };
+  try {
+    if (fs.statSync(bin).mode & 0o4000) {
+      return { bin: '', why: 'setuid — refused by rule: isolated never runs a setuid binary in its chain, and a setuid bwrap can neither '
+        + 'give the namespace root the capabilities the masks need nor the command a nested user namespace (ib4k §2a)' };
+    }
+  } catch (e) { return { bin: '', why: `cannot stat it (${errMsg(e)})` }; }
+  return { bin, why: '' };
+}
+
+/** The AppArmor note for a user namespace refused while its sysctl reads 1 (bwrap's wording too), else ''. @param {string} stderr */
+function apparmorNote(stderr) {
+  if (!/\b(uid[ _]map|gid[ _]map|setgroups|unshare|namespace)\b[^\n]*(Operation not permitted|EPERM|Permission denied|No permissions)/i.test(stderr)
+    && !/No permissions to create a new namespace/.test(stderr)) return '';
+  let v = '';
+  try { v = fs.readFileSync(APPARMOR_USERNS_SYSCTL, 'utf8').trim(); } catch { return ''; }
+  return v === '1' ? ' — HOST POLICY: kernel.apparmor_restrict_unprivileged_userns = 1, AppArmor denies bwrap a user namespace too' : '';
+}
+
+/**
+ * Can the `bwrap` backend run here (ib4k §2a)? '' when yes, else the NAMED reason. ⛔ Side-effect free:
+ * everything happens in namespaces gone when the probe exits. In order: bwrap from the system dirs, not
+ * setuid; every privileged tool, as for unshare — ⚠ bwrap does not remove util-linux: the drop is
+ * `setpriv … unshare -U --map-user` (WEBCTL_UNSHARE_BIN when set); then BWRAP_FLAGS around a bash that
+ * (71) runs the inner half's FIRST mount, `mount --make-rprivate /` — proving the namespace root holds
+ * CAP_SYS_ADMIN, not only that bwrap starts (a tmpfs on /tmp, as first written, hid a WEBCTL_UNSHARE_BIN
+ * kept there from step 72) — and (72) runs the privilege drop exactly as the inner half will. Ids are never printed.
+ * @param {{bin: string, why: string}} bw bwrapBin() @param {{bin: string, why: string}} ub unshareBin()
+ * @param {{uid: number, gid: number}} ids the REAL uid/gid @returns {string}
+ */
+function probeBwrap(bw, ub, ids) {
+  if (bw.why) return bw.why;
+  if (ub.why) return `${ub.why} (bwrap's privilege drop runs it too)`;
+  const { tools, why } = privilegedTools(ub, false);
+  if (why) return why;
+  const r = spawnSync(bw.bin, [...BWRAP_FLAGS, '--', tools.bash, ...PID1_BASH_FLAGS,
+    '"$1" --make-rprivate / || exit 71; "$2" --no-new-privs -- "$3" -U --map-user "$4" --map-group "$5" -- "$6" || exit 72',
+    'webctl-isolated-probe', tools.mount, tools.setpriv, tools.unshare, String(ids.uid), String(ids.gid), SYSTEM_TRUE()],
+  { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
+  if (r.error) return `cannot run bwrap (${errMsg(r.error)})`;
+  if (r.status === 0) return '';
+  const err = String(r.stderr || '');
+  const last = (err.trim().split('\n').pop() || '').replace(new RegExp(`\\b(${ids.uid}|${ids.gid})\\b`, 'g'), '<id>');
+  if (r.status === 71) {
+    return `its namespace root cannot mount (${last || 'mount failed'}) — the masks need it; an LSM policy may deny `
+      + `capabilities inside bwrap (e.g. Ubuntu's bwrap-userns-restrict)${apparmorNote(err)}`;
+  }
+  if (r.status === 72) return `the privilege drop (\`setpriv … unshare -U --map-user\`) fails inside bwrap (${last || `exit ${r.status}`})${apparmorNote(err)}`;
+  return `bwrap exited ${r.status ?? r.signal} before the isolated side reported in (${last || 'no message'})${apparmorNote(err)}`;
+}
 
 /**
  * Can the `unshare` backend run here? '' when yes, else the NAMED reason (ib4k §2): an invalid
@@ -1991,7 +2069,8 @@ function usageRefusal(why, command) {
  *
  * The outer half spawns
  * `unshare -rnm --pid --fork --mount-proc --kill-child --propagation=private <bash> --norc -p -c PID1_REAPER … <node> <this file> __isolated-inner <netns> -- <cmd…>`
- * — pid 1 is a bash that REAPS orphans (PID1_REAPER), the inner half runs under it — with
+ * (or, on the bwrap backend, `bwrap BWRAP_FLAGS -- <bash> …` — the same argv after the namespace CREATOR,
+ * ib4k §2a) — pid 1 is a bash that REAPS orphans (PID1_REAPER), the inner half runs under it — with
  * two extra pipes: fd 3 is the STATUS channel, fd 4 carries the masking PLAN
  * (host mount-ns id, cwd, paths to re-expose, the host's path sockets — a list that
  * can be long, so never argv). The inner half proves the isolation and masks (below),
@@ -2222,19 +2301,20 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
   // ⭐ THE BACKEND (ib4k §2): unshare → bwrap → docker → REFUSE; WEBCTL_ISOLATION_BACKEND pins one.
   // Each probe answers '' or a NAMED reason; a pinned one that cannot run is refused, never replaced.
   const seen = { stderr: '' };
+  const bw = bwrapBin();
   const choice = selectBackend(process.env[BACKEND_ENV], [
     { name: 'unshare', probe: () => probeUnshare(ub, seen) },
-    { name: 'bwrap', probe: () => NOT_IMPLEMENTED.bwrap },
+    { name: 'bwrap', probe: () => probeBwrap(bw, ub, ident) },
     { name: 'docker', probe: () => NOT_IMPLEMENTED.docker },
   ]);
   if (choice.refuse) {
     return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${refusalText(choice, process.env[BACKEND_ENV], seen.stderr)}. `
       + 'The command was NOT started.', { command, backend: null, skipped: choice.skipped }));
   }
-  // ⛔ THE ONLY RUNNER BELOW IS UNSHARE'S (review F7). A backend whose probe lands before its runner
-  // would otherwise run here, on unshare, under its own name — refused until each backend has its runner.
-  // The choice (and every skip's reason) is kept in the message and the record.
-  if (choice.backend !== 'unshare') {
+  // ⛔ THE RUNNERS BELOW ARE UNSHARE'S AND BWRAP'S (review F7) — they differ only in the namespace CREATOR
+  // (ib4k §2a). A backend whose probe lands before its runner would otherwise run here, on another's
+  // creator, under its own name — refused until it has its runner. The choice (and every skip) is kept.
+  if (choice.backend !== 'unshare' && choice.backend !== 'bwrap') {
     return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: internal: backend ${choice.backend} has no runner yet — `
       + `${backendClause(choice)}. The command was NOT started.`, { command, backend: null, skipped: choice.skipped }));
   }
@@ -2267,6 +2347,11 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
   // ⛔ with keyctl but no host reading, the join still runs (and fails closed) but cannot be READ BACK —
   // said, never a silent skip (review F5)
   const keyringNote = !tools.keyctl ? '; keyring: shared (keyctl not installed)' : keyring ? '' : '; keyring: unverified (keyctl show failed)';
+  // unshare skipped (its probe failed): its own message goes ABOVE the verdict, so its reason's "unshare's own
+  // message, if any, is above" stays true on this path too, as on a refusal (refusalText)
+  if (choice.skipped.some((x) => x.backend === 'unshare') && seen.stderr.trim()) {
+    process.stderr.write(seen.stderr.endsWith('\n') ? seen.stderr : `${seen.stderr}\n`);
+  }
   process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', `${inside}; ${backendClause(choice)}${keyringNote}${NSDELEGATE_CLAUSE}`)}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
@@ -2287,15 +2372,19 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
     let st = null;
     // ⛔ the forwarder BEFORE the spawn (review finding 5): no tick in which a TERM meets the default
     const fwd = forwardSignalsPastUnshare(() => !!st && st.started());
+    // THE NAMESPACE CREATOR — the one thing the two runners do differently (ib4k §2a):
+    // unshare: --pid --fork --mount-proc: a private PID namespace with its own /proc, so no host
+    // process can be signalled or even seen. --kill-child: if unshare dies, so does
+    // everything inside (pid 1 is the reaping bash, PID1_REAPER; the inner half runs under it).
+    // --uts (v0.34.0, ib4k row 10): a hostname of its own, set to NEUTRAL_HOSTNAME by the inner half.
+    // --ipc (v0.34.0, ib4k row 8): SysV IPC and POSIX mqueues of its own (the inner half mounts /dev/mqueue)
+    // --cgroup (v0.34.0, re-review item 2): a cgroup namespace of its own (the tree itself is made read-only)
+    // bwrap: the same namespaces and pid 1 (BWRAP_FLAGS); everything after the creator is the same argv.
+    const creator = choice.backend === 'bwrap' ? [bw.bin, ...BWRAP_FLAGS, '--']
+      : [ub.bin, '-rnm', '--uts', '--ipc', '--cgroup', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private'];
     try {
-      child = spawn(ub.bin,
-        // --pid --fork --mount-proc: a private PID namespace with its own /proc, so no host
-        // process can be signalled or even seen. --kill-child: if unshare dies, so does
-        // everything inside (pid 1 is the reaping bash, PID1_REAPER; the inner half runs under it).
-        // --uts (v0.34.0, ib4k row 10): a hostname of its own, set to NEUTRAL_HOSTNAME by the inner half.
-        // --ipc (v0.34.0, ib4k row 8): SysV IPC and POSIX mqueues of its own (the inner half mounts /dev/mqueue)
-        // --cgroup (v0.34.0, re-review item 2): a cgroup namespace of its own (the tree itself is made read-only)
-        ['-rnm', '--uts', '--ipc', '--cgroup', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
+      child = spawn(creator[0],
+        [...creator.slice(1),
           tools.bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', tools.keyctl,
           process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         // ⛔ the PRIVILEGED env: unshare, pid 1 and the inner half (namespace root, full caps, before
@@ -2303,7 +2392,7 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
         { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'], env: privilegedEnv(cmdEnv) });
     } catch (e) {
       fwd.remove();
-      resolve(report('isolated', EXIT.fail, `cannot start unshare (${errMsg(e)}); refusing to run on the host`));
+      resolve(report('isolated', EXIT.fail, `cannot start ${choice.backend} (${errMsg(e)}); refusing to run on the host`));
       return;
     }
     const status = statusChannel(child);
@@ -2320,8 +2409,9 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
       // signalled before the command started (or we killed it then): die by it too — no verdict
       dieByForwarded(fwd);
       const why = fail ? fail[1]
-        : spawnErr ? `unshare could not be started (${spawnErr}) — is util-linux installed`
-          : diagnoseUserNamespace(ub.bin) || unshareExitedWhy(code ?? signal);
+        : spawnErr ? `${choice.backend} could not be started (${spawnErr})${choice.backend === 'unshare' ? ' — is util-linux installed' : ''}`
+          : choice.backend === 'bwrap' ? `bwrap exited ${code ?? signal} before the isolated side reported in — its own message, if any, is above`
+            : diagnoseUserNamespace(ub.bin) || unshareExitedWhy(code ?? signal);
       resolve(report('isolated', EXIT.fail,
         `NOT RUN: ${why}. The command was NOT started, and is never run on the host as a fallback.`,
         { command, backend: choice.backend, skipped: choice.skipped }));
