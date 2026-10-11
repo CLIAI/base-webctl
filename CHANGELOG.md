@@ -357,7 +357,7 @@ run under `isolated` — the mutant, the untrusted page, the code under test —
   otherwise** (third review, F2): inside, the command can still make a cgroup namespace of its own and
   mount cgroup2 there — a writable view rooted at the caller's scope — and only `nsdelegate` stops a
   `cgroup.kill` write at its root. So `isolated` reads cgroup2's super options in
-  `/proc/self/mountinfo` and REFUSES without `nsdelegate` (or with no cgroup2 visible to read it from),
+  `/proc/self/mountinfo` and REFUSES without `nsdelegate` (or with NO cgroup2 mount: a cgroup v1-only host is refused by name, "no cgroup2 mount visible; isolated needs cgroup2 with nsdelegate"),
   naming the option and the remedy; the verdict states the check (`; cgroup2: nsdelegate`), and the
   read-back and the nesting proof require it.
   ⚠ **What lanes lose:** cgroup writes inside (a test that made a sub-cgroup of its own scope).
@@ -405,7 +405,7 @@ run under `isolated` — the mutant, the untrusted page, the code under test —
   a masked dir (R1); a fresh `/dev` that cannot be built, or anything beyond the minimal set in it
   after (row 12); a `--keep` / `--keep-ro` / cwd under `/dev` other than beneath `/dev/shm` (row 12);
   a cgroup mount still writable, or the cgroup namespace still the caller's (row 3); the host's
-  cgroup2 without `nsdelegate`, or no cgroup2 visible to read it from (row 3, third review F2); an interface
+  cgroup2 without `nsdelegate`, or no cgroup2 mount at all (a cgroup v1-only host) (row 3, third review F2); an interface
   dir or identity file that cannot be READ (anything but ENOENT) in the identity read-back — it was
   read as "nothing shown" (re-review item 5).
 

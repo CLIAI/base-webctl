@@ -1698,8 +1698,9 @@ through there, and refuses a `cgroup.procs` move across the boundary). It is a f
 cgroup2 hierarchy, changed only from the initial cgroup namespace, and shown in the SUPER options of
 every cgroup2 mount — so `parseMountinfo` now returns `superOpts` (the per-mount `opts` never carry it).
 * `cgroupDelegationRefusal(mounts)` (exported): '' with `nsdelegate`; else a refusal naming the
-  option and the remedy — also when mountinfo is unreadable or no cgroup2 is visible (it cannot be
-  read). `runIsolated` (fresh and stripped paths) refuses with it after the backend is chosen, so a
+  option and the remedy — also when mountinfo is unreadable, and on a host with NO cgroup2 mount (a
+  cgroup v1-only host), named as such: `no cgroup2 mount visible; isolated needs cgroup2 with
+  \`nsdelegate\`` (ruling: fail closed; "probably safe" is not a check). `runIsolated` (fresh and stripped paths) refuses with it after the backend is chosen, so a
   host where unshare cannot run keeps v0.33's refusal text. The verdict gains `; cgroup2: nsdelegate`
   (after `; keyring: …`); `cgroupGaps` reads it back (inside, and in the nesting proof).
 * ⛔ **The seam is test-only:** `runIsolated(a, { readHostMounts })`, reached by importing the module
@@ -1717,7 +1718,7 @@ every cgroup2 mount — so `parseMountinfo` now returns `superOpts` (the per-mou
 |---|---|---|
 | F2a | the call in `runIsolated` removed | the e2e arm: exit 0 for a table without `nsdelegate` (and the verdict's clause, a constant, still printed — the arm keys on the refusal, not the clause) |
 | F2b | the check reads the per-mount `opts` | the function arm's control (`nsdelegate present is refused`) and the e2e control |
-| F2c | the read-back in `cgroupGaps` removed | not caught here: this host has `nsdelegate`, and nothing reachable inside can fake it — the read-back is the second layer behind F2a's refusal |
+| F2c | the read-back in `cgroupGaps` removed | **not caught — an UNGUARDED second layer, accepted by ruling.** `nsdelegate` is one flag of the whole cgroup2 hierarchy, set only from the initial cgroup namespace and shown on every cgroup2 mount, so no host where these tests run can present it absent INSIDE while present outside; the refusal it backs (F2a) is guarded |
 
 **F3 — the cgroup view was the HOST's tree.** `maskIdentity` staged the host's `/sys/fs/cgroup`, mounted
 the fresh sysfs, moved the tree back and made it read-only. Measured on ae496b7, inside: its mount

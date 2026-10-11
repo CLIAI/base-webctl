@@ -2884,7 +2884,8 @@ export function cgroupDelegationRefusal(mounts) {
   const remedy = '; remedy: mount cgroup2 with `nsdelegate` (systemd does so by default; as root: `mount -o remount,nsdelegate /sys/fs/cgroup`)';
   if (!mounts) return `cannot read /proc/self/mountinfo, so cgroup2's \`nsdelegate\` option cannot be checked — ${why}${remedy}`;
   const v2 = mounts.filter((m) => m.fstype === 'cgroup2');
-  if (!v2.length) return `no cgroup2 mount is visible, so its \`nsdelegate\` option cannot be checked — ${why}${remedy}`;
+  // ⛔ a cgroup v1-only host (ruling): REFUSED, by name — "probably safe" is not a check
+  if (!v2.length) return `no cgroup2 mount visible; isolated needs cgroup2 with \`nsdelegate\` — ${why}${remedy}`;
   if (v2.some((m) => !m.superOpts.includes('nsdelegate'))) return `the host's cgroup2 is mounted WITHOUT \`nsdelegate\` — ${why}${remedy}`;
   return '';
 }

@@ -185,8 +185,9 @@ three paths (the table's rows 8–10).
   caller's scope. Only cgroup2's `nsdelegate` option stops a `cgroup.kill` write at that namespace root
   (and a `cgroup.procs` write that would move a process across it). It is one flag of the whole
   hierarchy, set only from the initial cgroup namespace, shown in the SUPER options of every cgroup2
-  line of `/proc/self/mountinfo`. ⇒ `isolated` REFUSES when the host's cgroup2 lacks it — or when no
-  cgroup2 is visible to read it from — naming the option and the remedy (mount cgroup2 with
+  line of `/proc/self/mountinfo`. ⇒ `isolated` REFUSES when the host's cgroup2 lacks it — and on a host with
+  NO cgroup2 mount (cgroup v1 only), named as such: "no cgroup2 mount visible; isolated needs cgroup2
+  with nsdelegate" (ruling: fail closed; "probably safe" is not a check) — naming the option and the remedy (mount cgroup2 with
   `nsdelegate`; systemd does so by default). The verdict states the check (`; cgroup2: nsdelegate`);
   the read-back (`cgroupGaps`) and the nesting proof require it too. ⇒ Row 3's cgroup half is closed
   **where cgroup2 is mounted with `nsdelegate` (systemd's default); `isolated` refuses otherwise.** The

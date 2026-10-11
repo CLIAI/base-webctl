@@ -1207,6 +1207,8 @@ test('⛔ cgroupDelegationRefusal: cgroup2 WITHOUT nsdelegate, or no cgroup2 vis
     assert.match(why, /`nsdelegate`/, `${what}: the refusal does not name the option`);
     assert.match(why, /mount cgroup2 with `nsdelegate` \(systemd does so by default/, `${what}: the refusal does not name the remedy`);
   }
+  // ⛔ a cgroup v1-only host is NAMED as such (ruling): refused, never judged "probably safe"
+  assert.match(DELEGATION(parse(fakeMounts(''))), /^no cgroup2 mount visible; isolated needs cgroup2 with `nsdelegate`/, 'the v1-only case is not named');
   // the PER-MOUNT options never count: only the superblock's (where the kernel shows it)
   assert.notEqual(DELEGATION(parse(fakeMounts('rw').replace('rw,nosuid', 'rw,nsdelegate,nosuid'))), '', 'nsdelegate among the per-mount options was taken');
   assert.notEqual(DELEGATION(null), '', 'an unreadable mountinfo passed');
