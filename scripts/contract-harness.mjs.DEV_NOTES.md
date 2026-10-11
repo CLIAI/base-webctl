@@ -1754,6 +1754,16 @@ node's memory limit "still answers" were wrong.
 | F3b | the host's tree staged and moved back as before (read-back kept) | every run refused: `/sys/fs/cgroup is not a cgroup2 rooted at this cgroup namespace` |
 | F3c | F3b AND the root read-back removed | rows 3 and 10 (arm and control), as on ae496b7 |
 
+**F4 — user-writable sysfs attributes (docs only, by ruling).** The fresh sysfs stays read-write (a
+read-only one breaks every nested sysfs mount — S7c above), and sysfs's own permissions govern it:
+an attribute udev granted the user's uid (`uaccess`, e.g. a backlight's `brightness`) is writable
+inside as outside. ib4k §1a row 7 said its files "belong to the host's root" — corrected; residual in
+ib4k §6 and the CHANGELOG. Not masked (a mount over a sysfs file trips `mnt_already_visible` for
+nested sysfs mounts). **Not counted in the verdict:** measured, an `access(W_OK)` walk took 2.8 s over
+`/sys/devices` (27,381 files, 1 writable as the user) and 7.2 s over all of `/sys` (74,538 files;
+10,808 writable — nearly all the user's delegated cgroup files, absent from the fresh sysfs), against
+a <50 ms budget.
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

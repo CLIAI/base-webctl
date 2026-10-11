@@ -3473,7 +3473,8 @@ function makeTreeReadOnly(root, rbindFirst) {
  * read-only too). The fresh sysfs ON TOP stays read-write, and the root read-back exempts
  * exactly it (freshSysfs): mounted `ro`, every nested sysfs mount — the stripped-markers path's own
  * among them — is refused "Mount too revealing" (measured, kernel 7.1). A write to sysfs from the
- * user namespace is governed by sysfs's own permissions (owned by the host's root).
+ * user namespace is governed by sysfs's own permissions — an attribute udev granted the user's uid
+ * (`uaccess`, e.g. a backlight's brightness) stays writable (third review, F4: a residual, ib4k §6).
  */
 const ROOT_RW_TREES = Object.freeze(['/proc', '/dev']);
 /** Kernel trees an outer call's writable mounts are never CARRIED from (outerRebinds): ours, made again. */

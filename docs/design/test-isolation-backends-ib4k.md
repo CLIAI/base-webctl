@@ -85,7 +85,9 @@ three paths (the table's rows 8–10).
   stays read-write, and the read-back exempts exactly that one mount — not its submounts: ⚠ *measured:*
   a fresh sysfs mounted `ro` makes every nested sysfs mount — `ro` or not — fail "Mount too revealing",
   the stripped-markers path's own included (kernel 7.1). Sysfs writes from the user namespace are
-  governed by sysfs's own permissions (its files belong to the host's root). Every WRITABLE item (cwd, `--keep`, a throwaway HOME, an outer's rw
+  governed by sysfs's own permissions — and NOT every file belongs to the host's root (corrected by
+  the third review, F4): an attribute udev granted the user's uid (`uaccess` — e.g. a backlight's
+  `brightness`) stays writable inside the fresh sysfs. Residual: §6. Every WRITABLE item (cwd, `--keep`, a throwaway HOME, an outer's rw
   re-bind) gets its own bind on top; one that CONTAINS a masked dir (a cwd of `/`) is refused. READ
   BACK: `readOnlyGaps` over `/` minus the declared writable set → refuse on any gap. A mount point no
   lookup can reach (EACCES — measured: docker's overlay rootfs under a root-owned 0710 dir) is
@@ -352,5 +354,11 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with b
   `mkdir` under it. Such a cgroup may outlive the run (an emptied cgroup is not removed by the kernel)
   and goes when the scope does. It cannot kill or move the caller's processes. Without `nsdelegate`,
   `isolated` refuses (§1a row 3).
+* **Residual (third review, F4): user-writable sysfs attributes.** The fresh sysfs is read-write (a
+  read-only one breaks every nested sysfs mount, §1a row 7), and sysfs's own permissions govern it: an
+  attribute udev granted the user's uid (`uaccess`, e.g. a backlight's `brightness`) is writable
+  inside, as outside. Not masked, by ruling: a mount over a sysfs file blocks nested sysfs mounts
+  (`mnt_already_visible`). Not counted in the verdict: walking the tree measured 2.8 s for
+  `/sys/devices` (27,381 files) and 7 s for all of `/sys`, far over a per-run budget.
 * **v0.35.0 — bwrap, then docker (§3, §3a, §5):** not started. Each lands by adding its probe,
   its run path, and its name to the table's IMPLEMENTED list — the guard test fails until it does.

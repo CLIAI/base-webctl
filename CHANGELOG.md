@@ -442,6 +442,10 @@ if (gen7) assert.match(stderr, /^isolated: home HIDDEN; .*; backend: [a-z]+/m);
   bit: a host key with possessor-only read answers EACCES inside (arm 9b). A masked `/proc/keys` was
   measured to break every nested `--mount-proc` (the kernel's `mnt_already_visible`), this verb's own
   nested and stripped paths included, and a fresh nested procfs lists the keys again anyway.
+* **User-writable sysfs attributes** (third review, F4): the fresh sysfs stays read-write (a
+  read-only one breaks nested sysfs mounts), so an attribute udev granted the user's uid — e.g. a
+  backlight's `brightness` — is writable inside, as it is outside. Not masked: a mount over a sysfs
+  file breaks nested sysfs mounts.
 * **Empty child cgroups** (third review, F2): with `nsdelegate`, the command can still `mkdir` child
   cgroups beneath the caller's scope through a nested cgroup2 mount of its own. They may outlive the
   run and are removed with the scope. It cannot kill or move the caller's processes.
