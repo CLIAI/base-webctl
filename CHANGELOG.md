@@ -207,6 +207,100 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.35.0 — (unreleased)
+
+**Headline: `isolated` gains its second backend: bwrap, a second namespace CREATOR judged by the same
+arm table (ib4k §2a).** Pin it with `WEBCTL_ISOLATION_BACKEND=bwrap`, or reach it when unshare's probe
+fails. It runs every row on the fresh, nested and stripped paths, with the same inner half, read-backs
+and drop as unshare. Building it found a hole bwrap opens, mount propagation, now closed for every
+backend. ⚠ **It does NOT unblock a host that forbids user namespaces** (below): on no measured host
+does bwrap run where unshare cannot. Docker is phase 3. Harness and tests only; no `lib/` change.
+`HARNESS_GENERATION` stays **7**.
+
+### The bwrap backend (ib4k §2a)
+
+* **What it is:** bwrap replaces only the fresh path's `unshare -rnm … --fork`, which makes the
+  namespaces and the reaping pid 1. Everything inside is the same code on both creators: pid 1's bash,
+  the `__isolated-inner` half (masks, read-only root, fresh `/dev`, sysfs, cgroup2, identity), every
+  read-back, the privilege drop and the `__isolated-pid1` helper. bwrap's own mount flags (`--ro-bind`,
+  `--dev`, `--tmpfs`, `--hostname`, `--setenv`, `--cap-drop`) are deliberately not used. They would be a
+  second, weaker implementation: bwrap cannot make a fresh sysfs or cgroup2, and its `--dev` adds
+  `core` and `console`.
+* **argv:** `bwrap --unshare-user --uid 0 --gid 0 --cap-add ALL --unshare-net --unshare-ipc
+  --unshare-uts --unshare-cgroup --unshare-pid --as-pid-1 --die-with-parent --new-session --dev-bind / /
+  --proc /proc -- <pid 1 …>`. ib4k §2a says what each flag carries.
+* **Probe** (named reasons). Steps:
+  * bwrap is taken from the system dirs only, with no override (`not found … — install bubblewrap`).
+  * A **setuid** bwrap is refused by rule before it is ever run (`setuid — refused by rule …`).
+  * The same privileged tools as unshare are required. ⚠ bwrap still needs util-linux ≥ 2.38: the drop
+    is `setpriv … unshare -U --map-user` (`WEBCTL_UNSHARE_BIN` when set).
+  * Inside bwrap, the probe runs the inner half's first mount (`mount --make-rprivate /`), which shows
+    the namespace root can mount. It then runs the drop exactly as a real run would.
+  * Failures read: `bwrap exited <n> … (<bwrap's last line>)`, `its namespace root cannot mount (…)`
+    (Ubuntu's `bwrap-userns-restrict` shape), or `the privilege drop … fails inside bwrap`, plus an
+    AppArmor note when that sysctl is 1.
+* **Selected when unshare's probe fails:** the verdict reads `backend: bwrap (skipped unshare:
+  <v0.33's reason>)`, and unshare's own stderr is printed above it, so "unshare's own message, if any,
+  is above" stays true.
+* **Stronger than unshare in two places.** `--new-session` means pid 1 and the inner half hold no
+  controlling terminal either. `--die-with-parent` means a harness killed with SIGKILL takes the
+  namespace with it (under unshare, the command runs on).
+* **Refusal text:** an unpinned refusal still LEADS with v0.33's unshare text. The perplexity regex
+  `/NOT RUN: unshare exited 1/` keeps matching. bwrap's part of the appended summary is now a real
+  reason instead of `not implemented yet (v0.35.0)`.
+
+### ⛔ Mount propagation, closed for every backend (found building bwrap)
+
+bwrap makes `/` an rslave. A mount the host made AFTER the start appeared inside, listed twice and
+writable, landing after the read-only step (measured). Under `unshare --propagation=private` it was
+listed 0 times. ⇒ The inner half now makes every mount private (`mount --make-rprivate /`, its first
+mount; a no-op under unshare) and READS BACK that no mount carries a `shared:` or `master:` tag
+(`propagationGaps`). The nesting proof checks the same. A new refusal (fail closed):
+`after making every mount private, N mount(s) still receive propagation`. Row 7 arm: a tmpfs the
+world mounts under a SHARED dir after each path starts is never listed inside. Control: a raw
+`unshare -m --propagation=slave` sees it.
+
+### v0.34.0 pre-tag review follow-ups
+
+* **Row 12b's TIOCSTI half could not fail where `dev.tty.legacy_tiocsti=0`.** The kernel answers EIO
+  there before the controlling-terminal check. Now only EPERM passes, and only where the sysctl is 1
+  or absent (kernel < 6.2). At 0 the half is a named `NOT TESTED HERE` diagnostic, and `/dev/tty` →
+  ENXIO carries the property.
+* **Row 3: a `kill(0)` arm.** In a throwaway `setsid` group, a sentinel and the wrapper that called
+  `isolated` both survive the command's `kill -TERM 0`, on all three paths. Without `isolated`, both die.
+* `runIsolated`'s two stacked JSDoc blocks are merged.
+
+### For lanes
+
+* **Nothing to change** unless you want bwrap. `WEBCTL_ISOLATION_BACKEND=bwrap` on the gate host (or
+  around your own suite) pins it. The pin passes through the `WEBCTL_*` allowlist, so your nested
+  `isolated` calls validate it and run inside the bwrap outer. A stripped-markers call isolates again
+  with bwrap.
+* A lane matching `; backend: unshare` should match `; backend: [a-z]+` (generation ≥ 7, as v0.34.0
+  says).
+
+### ⛔ What this does NOT cover
+
+* **Docker = phase 3** (ib4k §3, §3a). `docker` still answers `not implemented yet (v0.35.0)`; a pin to
+  it is refused.
+* **A host that forbids unprivileged user namespaces is NOT unblocked by bwrap.**
+  * The sysctls (`user.max_user_namespaces=0`, `kernel.unprivileged_userns_clone=0`) refuse bwrap
+    by the same kernel check.
+  * A setuid bwrap is refused by rule: no `--cap-add` for a non-root caller, and no nested user
+    namespace for the drop.
+  * Ubuntu's AppArmor restriction denies bwrap too (§0, measured on a lane's host).
+  * Its `bwrap-userns-restrict` profile, where enabled, strips capabilities inside (not measured here).
+  * The one class where bwrap runs and unshare cannot is an admin AppArmor profile granting `userns,`
+    to `/usr/bin/bwrap` (not measured). That lane waits for docker.
+* **Measured on one host only:** bubblewrap 0.11.2, kernel 7.1, no AppArmor. Older bubblewraps are not
+  measured. The AppArmor profile behaviour above comes from the profile's design, not a run.
+* **No `WEBCTL_BWRAP_BIN`.** A host that needs a dedicated bwrap must ask for one, with a measurement.
+* **`--dev`, `--ro-bind`, `--cap-drop` are not bwrap's job here** (the inner half's). A sabotage of one
+  of them is not an arm.
+* Everything under v0.34.0's "does NOT cover" still applies, on both backends: key descriptions,
+  user-writable sysfs attributes, empty child cgroups, stdio that is the terminal, the identity not
+  hidden.
+
 ## v0.34.0 — 2026-10-11
 
 **Headline: `isolated` chooses its BACKEND — unshare → bwrap → docker → refuse, never unisolated
