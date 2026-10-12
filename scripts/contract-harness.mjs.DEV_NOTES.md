@@ -1879,6 +1879,37 @@ parent dead by SIGINT. The existing Ctrl-C arms were green on bwrap: they check 
 a SIGKILL stops it. ⇒ bwrap is spawned `detached`; new arm (both creators): a group Ctrl-C reaches the
 command's own INT trap, rc 7. RED on 77ea37e for bwrap (unshare green), GREEN after.
 
+**The depth suite runs pinned too** (`WEBCTL_ISOLATION_BACKEND=bwrap node --test
+test/contract-harness-isolation.test.js`; `webctl:base` point 3). It had 21 failures under the pin. Each
+was fixed at its cause, and no assertion was loosened to "any backend":
+
+* **Verdict text (11).** `forBackend()` / `${BACKEND}` name the backend under test, exactly.
+* **Probe refusals (7).** Under a pin, selectBackend wraps the reason. `probeRefusal()` expects exactly
+  `NOT RUN: WEBCTL_ISOLATION_BACKEND pins the bwrap backend, which cannot be used here — bwrap: <reason>`.
+  Unpinned, the regex is unchanged. Nested refusals are not wrapped and keep the plain regex.
+* **Fake creator (1).** "A creator that does not isolate" gets bwrap's own seam: a fake bwrap that
+  drops everything up to its `--`, since its flags carry values. The inner half refuses: still in the
+  caller's network namespace.
+* **The too-old unshare (1).** bwrap's probe runs the drop inside bwrap and now names the same floor:
+  `… fails inside bwrap (… --map-user …) — util-linux ≥ 2.38 (unshare --map-user) is required`.
+* **The drop that makes no namespace (1).** Exact per creator, measured: under bwrap it would hold
+  `CapInh, CapPrm, CapEff, CapAmb`, because `--cap-add ALL` raises the inheritable and ambient sets too.
+  Under `unshare -r` it holds `CapPrm, CapEff`.
+* **⚠ A setpriv that ignores `--no-new-privs` (1): the one assertion that changes SHAPE under bwrap.**
+  bwrap sets no_new_privs for its whole sandbox, so such a setpriv cannot remove it. The read-back
+  finds NoNewPrivs 1 and the run goes ahead (measured). Under bwrap the arm asserts the PROPERTY
+  instead of a refusal: the command reads `NoNewPrivs: 1` and `CapEff: 0`. Under unshare it is
+  unchanged (refused, `NoNewPrivs is not set`). The setpriv flag is a second layer under bwrap.
+
+**Exit codes, re-measured per creator (point 4)**, as a new arm on both backends:
+
+* a command killed by INT, TERM or HUP → `isolated` exits 130, 143 or 129;
+* the same signal sent to `isolated` → it dies by that signal (the caller's shell sees 128+n);
+* plus the existing pinned arms: a group Ctrl-C on a loop stops it; the INT trap runs (rc 7);
+* row 3's kill(0) arm in the table.
+
+RED on a copy without `--as-pid-1`: `bwrap: SIGINT to isolated → status 0 signal null`.
+
 **A consumer through the gate, pinned.** `WEBCTL_CONSUMERS_FILE=<one wired consumer>
 WEBCTL_ISOLATION_BACKEND=bwrap test-all-consumers.sh --against-head --scratch` gave PASS, `isolation:
 "bwrap"` in its envelope and `isolation backends: bwrap=1` (35 s). Unpinned it gave the same with

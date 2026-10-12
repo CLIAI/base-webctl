@@ -1624,7 +1624,10 @@ function probeBwrap(bw, ub, ids) {
     return `its namespace root cannot mount (${last || 'mount failed'}) — the masks need it; an LSM policy may deny `
       + `capabilities inside bwrap (e.g. Ubuntu's bwrap-userns-restrict)${apparmorNote(err)}`;
   }
-  if (r.status === 72) return `the privilege drop (\`setpriv … unshare -U --map-user\`) fails inside bwrap (${last || `exit ${r.status}`})${apparmorNote(err)}`;
+  if (r.status === 72) {
+    return `the privilege drop (\`setpriv … unshare -U --map-user\`) fails inside bwrap (${last || `exit ${r.status}`}) — util-linux ≥ 2.38 `
+      + `(unshare --map-user) is required${apparmorNote(err)}`;
+  }
   return `bwrap exited ${r.status ?? r.signal} before the isolated side reported in (${last || 'no message'})${apparmorNote(err)}`;
 }
 

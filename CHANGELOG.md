@@ -246,6 +246,12 @@ does bwrap run where unshare cannot. Docker is phase 3. Harness and tests only; 
   --fork`, dies by a group INT. With `--die-with-parent` that SIGKILLed the namespace, and the command's
   INT trap never ran (found by sabotage, measured). bwrap is therefore spawned in a session of its own;
   `isolated` forwards the signal. Arm: group Ctrl-C → `GOT-INT`, rc 7, under both backends.
+* **Measured under the pin, not only in the table:** base's whole isolation depth suite runs green with
+  `WEBCTL_ISOLATION_BACKEND=bwrap`. Exit codes match unshare's: a command killed by INT, TERM or HUP
+  gives 130, 143 or 129, and the same signal sent to `isolated` makes it die by that signal. Ctrl-C on
+  a loop and kill(0) behave as under unshare.
+  One difference: bwrap sets no_new_privs for the whole sandbox, so a broken `setpriv` cannot remove
+  it there.
 * **Stronger than unshare in two places.** `--new-session` means pid 1 and the inner half hold no
   controlling terminal either. `--die-with-parent` means a harness killed with SIGKILL takes the
   namespace with it (under unshare, the command runs on).

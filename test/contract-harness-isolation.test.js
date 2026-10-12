@@ -50,6 +50,24 @@ const NO_ISOLATION = isolationUnavailable();
 const needsIsolation = NO_ISOLATION ? { skip: `SKIP (isolation): ${NO_ISOLATION}` } : {};
 
 /**
+ * The backend this run judges (ib4k §2a). The suite runs as is (unshare) AND pinned —
+ * `WEBCTL_ISOLATION_BACKEND=bwrap node --test test/contract-harness-isolation.test.js` — and an assertion
+ * names the backend actually under test, exactly; none is loosened to "any backend".
+ */
+const PIN = process.env.WEBCTL_ISOLATION_BACKEND || '';
+const BACKEND = PIN || 'unshare';
+/**
+ * A fresh-path PROBE refusal, exactly as the harness words it: under a pin, selectBackend wraps the
+ * backend's reason (`NOT RUN: WEBCTL_ISOLATION_BACKEND pins the <b> backend, which cannot be used here — <b>: <reason>`).
+ * ⚠ Only for refusals that come from the PROBE — a nested call, or a failure after selection, is not wrapped.
+ * @param {RegExp} re a regex containing `NOT RUN: `
+ */
+const probeRefusal = (re) => (PIN ? new RegExp(re.source.split('NOT RUN: ')
+  .join(`NOT RUN: WEBCTL_ISOLATION_BACKEND pins the ${PIN} backend, which cannot be used here — ${PIN}: `), re.flags) : re);
+/** A verdict regex naming the backend under test (it is written with `backend: unshare`). @param {RegExp} re */
+const forBackend = (re) => new RegExp(re.source.split('backend: unshare').join(`backend: ${BACKEND}`), re.flags);
+
+/**
  * Run the harness ASYNC — a fake listener in this process must be able to
  * accept while the child runs. Never throws.
  * @param {string[]} args @param {Record<string,string>} [env] @param {string} [execPath]
@@ -242,7 +260,7 @@ test('⛔ fail closed: no `unshare` in the system dirs → FAIL, reason printed,
       `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: 'unshare' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install util-linux, or name one with WEBCTL_UNSHARE_BIN/);
+    assert.match(r.stderr, probeRefusal(/FAIL {2}isolated: NOT RUN: 'unshare' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install util-linux, or name one with WEBCTL_UNSHARE_BIN/));
     assert.match(r.stdout, /"check":"isolated","result":"fail"/);
     assert.equal(fs.existsSync(marker), false, 'the command ran although isolation was unavailable');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -251,12 +269,15 @@ test('⛔ fail closed: no `unshare` in the system dirs → FAIL, reason printed,
 test('⛔ fail closed: an `unshare` that does NOT isolate → FAIL, command NOT run (the property is checked, not the exit)', needsIsolation, async (t) => {
   const dir = tmpdir();
   const marker = path.join(dir, 'RAN');
-  // A fake `unshare` over the system one: drops its flags and execs the rest ON THE "HOST" (here:
-  // the throwaway namespace the fake is bound in — the caller's network namespace)
-  const fake = path.join(dir, 'unshare');
-  fs.writeFileSync(fake, '#!/bin/sh\nwhile [ "${1#-}" != "$1" ]; do shift; done\nexec "$@"\n', { mode: 0o755 });
+  // A fake namespace CREATOR over the system one: drops its flags and execs the rest ON THE "HOST" (here:
+  // the throwaway namespace the fake is bound in — the caller's network namespace). The creator is the
+  // backend under test: unshare (its flags take no separate values), or bwrap (its own seam: everything up
+  // to its `--`, since `--uid 0` and `--dev-bind / /` carry values)
+  const fake = path.join(dir, BACKEND);
+  fs.writeFileSync(fake, BACKEND === 'bwrap' ? '#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done; shift\nexec "$@"\n'
+    : '#!/bin/sh\nwhile [ "${1#-}" != "$1" ]; do shift; done\nexec "$@"\n', { mode: 0o755 });
   try {
-    const r = await withBinds(overTool(fake, 'unshare'), [process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
+    const r = await withBinds(overTool(fake, BACKEND), [process.execPath, TOOL, 'isolated', '--', process.execPath, '-e',
       `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
@@ -274,7 +295,7 @@ test('⛔ fail closed: neither `ip` nor `ifconfig` in the system dirs → FAIL n
       process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /NOT RUN: cannot bring the namespace loopback up: neither 'ip' nor 'ifconfig' found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install iproute2/);
+    assert.match(r.stderr, probeRefusal(/NOT RUN: cannot bring the namespace loopback up: neither 'ip' nor 'ifconfig' found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install iproute2/));
     assert.equal(fs.existsSync(marker), false, 'the command ran without a working loopback');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -287,7 +308,7 @@ test('⛔ fail closed: no `mount` in the system dirs → FAIL naming it, command
       `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`]);
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /NOT RUN: cannot mask the host's sockets: 'mount' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install util-linux/);
+    assert.match(r.stderr, probeRefusal(/NOT RUN: cannot mask the host's sockets: 'mount' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install util-linux/));
     assert.equal(fs.existsSync(marker), false, 'the command ran with the host\'s unix sockets unmasked');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -1237,7 +1258,7 @@ test('⛔ F2: the host\'s cgroup2 WITHOUT nsdelegate → `isolated` REFUSES, not
   const on = await runWithMounts(fakeMounts('rw,nsdelegate'), ['--', process.execPath, '-e', ...marker]);
   assert.equal(on.status, 0, `CONTROL: nsdelegate present, yet: ${on.stderr}`);
   assert.match(on.stdout, /^RAN-MARKER$/m);
-  assert.match(on.stderr, /^isolated: home HIDDEN; .*; backend: unshare[^\n]*; cgroup2: nsdelegate( —|$)/m, on.stderr);
+  assert.match(on.stderr, forBackend(/^isolated: home HIDDEN; .*; backend: unshare[^\n]*; cgroup2: nsdelegate( —|$)/m), on.stderr);
   // …and the CLI's own path reads the REAL table (no seam): this host has nsdelegate, or `isolated` refuses here
   const real = await run(['isolated', '--', 'true']);
   if (real.status === 0) assert.match(real.stderr, /; cgroup2: nsdelegate( —|$)/m, real.stderr);
@@ -1361,7 +1382,7 @@ test('⭐ a cwd under home is writable; `..` out of it is EROFS — the cwd is r
     assert.equal(fs.existsSync(path.join(dir, name)), false);
     // the cwd is a path the CALLER named: the verdict lists it (as ~/…), it is not merely counted
     const rel = `~/${path.relative(PW_HOME, fs.realpathSync(cwd))}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    assert.match(r.stderr, new RegExp(`^isolated: home HIDDEN; .*; writable: ${rel}; backend: unshare; cgroup2: nsdelegate( — |$)`, 'm'), r.stderr);
+    assert.match(r.stderr, new RegExp(`^isolated: home HIDDEN; .*; writable: ${rel}; backend: ${BACKEND}; cgroup2: nsdelegate( — |$)`, 'm'), r.stderr);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1728,7 +1749,7 @@ test('⭐ a PATH dir under the hidden home is re-bound read-only: a script in it
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /^HELLO from a PATH dir under the home$/m, r.stderr);
     assert.match(r.stdout, /^BIN-RO$/m, 'a PATH dir under the home was re-bound WRITABLE');
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 1 PATH entry; writable: ~\/work, 1 named path outside the home; backend: unshare; cgroup2: nsdelegate — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, forBackend(/^isolated: home HIDDEN; re-bound read-only: ~\/data, 1 PATH entry; writable: ~\/work, 1 named path outside the home; backend: unshare; cgroup2: nsdelegate — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m), r.stderr);
     assert.ok(!r.stderr.includes(home), 'the verdict printed the home path');
     // CONTROL: without the PATH entry the same name is not found inside
     const c = await underFakeHome(home, [process.execPath, TOOL, 'isolated', '--', 'sh', '-c', 'hello-from-home || echo "NOT-FOUND $?"']);
@@ -1752,11 +1773,11 @@ test('⛔ the verdict never says "writable: nothing" with a writable cwd and --k
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.equal(fs.readFileSync(path.join(cwd, 'w'), 'utf8'), 'w', 'the cwd was not writable (the arm would be vacuous)');
     assert.doesNotMatch(r.stderr, /writable: nothing/, r.stderr);
-    assert.match(r.stderr, /^isolated: home HIDDEN; [^\n]*; writable: 2 named paths outside the home; backend: unshare[^\n]* — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, forBackend(/^isolated: home HIDDEN; [^\n]*; writable: 2 named paths outside the home; backend: unshare[^\n]* — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m), r.stderr);
     const v = await run(argv, { WEBCTL_ISOLATED_VERBOSE: '1' }, process.execPath, cwd);
     assert.equal(v.status, 0, v.stdout + v.stderr);
     const both = [fs.realpathSync(cwd), fs.realpathSync(keep)].sort().join(', ');
-    assert.ok(v.stderr.split('\n').some((l) => l.startsWith('isolated: home HIDDEN; ') && l.includes(`; writable: ${both}; backend: unshare; cgroup2: nsdelegate`)), v.stderr);
+    assert.ok(v.stderr.split('\n').some((l) => l.startsWith('isolated: home HIDDEN; ') && l.includes(`; writable: ${both}; backend: ${BACKEND}; cgroup2: nsdelegate`)), v.stderr);
   } finally { for (const d of [cwd, keep]) fs.rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -1773,13 +1794,13 @@ test('⛔ the verdict COUNTS implicit PATH re-binds — a distinctive PATH dir n
     assert.match(r.stdout, /^HELLO from a PATH dir under the home$/m, 'the PATH dir was not re-bound (the count would be vacuous)');
     assert.ok(!r.stderr.includes(secretName), `an implicit PATH re-bind was NAMED on stderr:\n${r.stderr}`);
     assert.ok(!r.stderr.includes('~/bin'), `an implicit PATH re-bind was NAMED on stderr:\n${r.stderr}`);
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: ~\/data, 2 PATH entries; writable: ~\/work, 1 named path outside the home; backend: unshare; cgroup2: nsdelegate — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, forBackend(/^isolated: home HIDDEN; re-bound read-only: ~\/data, 2 PATH entries; writable: ~\/work, 1 named path outside the home; backend: unshare; cgroup2: nsdelegate — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m), r.stderr);
     // CONTROL: the opt-in lists every path (so the default's silence is the fix, not a missing bind)
     const v = await underFakeHome(home, argv(['env', 'WEBCTL_ISOLATED_VERBOSE=1']));
     assert.ok(v);
     assert.equal(v.status, 0, v.stdout + v.stderr);
     // the cwd (base's checkout, outside the FAKE home) is listed by its absolute path under VERBOSE (item 4)
-    assert.ok(v.stderr.split('\n').includes(`isolated: home HIDDEN; re-bound read-only: ~/bin, ~/data, ~/${secretName}/bin; writable: ~/work, ${fs.realpathSync(ROOT)}; backend: unshare; cgroup2: nsdelegate`), v.stderr);
+    assert.ok(v.stderr.split('\n').includes(`isolated: home HIDDEN; re-bound read-only: ~/bin, ~/data, ~/${secretName}/bin; writable: ~/work, ${fs.realpathSync(ROOT)}; backend: ${BACKEND}; cgroup2: nsdelegate`), v.stderr);
     assert.ok(!v.stderr.includes(home), 'even verbose, the home itself is printed as ~');
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
@@ -2025,7 +2046,7 @@ test('⛔ base\'s root UNDER the hidden home is re-bound READ-ONLY (the harness 
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.equal(writeOf(r.stdout), 'EROFS', 'base\'s root under the home is writable inside');
     // base's root is not a path the caller named: it is named by its LABEL, never by its path
-    assert.match(r.stderr, /^isolated: home HIDDEN; re-bound read-only: base's repo root; writable: 1 named path outside the home; backend: unshare; cgroup2: nsdelegate — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m, r.stderr);
+    assert.match(r.stderr, forBackend(/^isolated: home HIDDEN; re-bound read-only: base's repo root; writable: 1 named path outside the home; backend: unshare; cgroup2: nsdelegate — WEBCTL_ISOLATED_VERBOSE=1 lists every path$/m), r.stderr);
     assert.equal(fs.existsSync(path.join(base, 'x')), false);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
@@ -2478,7 +2499,7 @@ test('⛔ fail closed (ruling R2): no `hostname` tool → NOT RUN, naming the pa
     const r = await markerRun(dir, overTool(noexecFile(dir), 'hostname'));
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot set the neutral hostname: 'hostname' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install inetutils or hostname/);
+    assert.match(r.stderr, probeRefusal(/FAIL {2}isolated: NOT RUN: cannot set the neutral hostname: 'hostname' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install inetutils or hostname/));
     assert.doesNotMatch(r.stderr, /hostname: the host's/, 'the phase-1 "run with a note" path is back');
     assert.equal(r.ran, false, 'the command ran under the host\'s hostname');
     const c = await run(['isolated', '--', process.execPath, '-e', 'console.log("RAN " + (require("os").hostname() === "webctl-isolated" ? "NEUTRAL" : "HOSTS"))']);
@@ -2579,7 +2600,7 @@ test('⛔ keyctl NOT installed → the command still runs, and the verdict says 
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.equal(r.ran, true, 'the command did not run without keyctl (the ruling: it runs, and says so)');
-    assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: unshare; keyring: shared \(keyctl not installed\)/m);
+    assert.match(r.stderr, forBackend(/^isolated: home HIDDEN; .*; backend: unshare; keyring: shared \(keyctl not installed\)/m));
     const c = await run(['isolated', '--', 'true']);
     assert.equal(c.status, 0, c.stderr);
     assert.doesNotMatch(c.stderr, /keyring:/);
@@ -2624,7 +2645,7 @@ test('⛔ keyctl installed but the HOST\'s `keyctl show @s` FAILS (review F5) �
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.equal(r.ran, true, 'the command did not run (the ruling: like keyctl absent, it runs, and says so)');
-    assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: unshare; keyring: unverified \(keyctl show failed\)/m);
+    assert.match(r.stderr, forBackend(/^isolated: home HIDDEN; .*; backend: unshare; keyring: unverified \(keyctl show failed\)/m));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -2664,7 +2685,7 @@ test('⛔ fail closed: no `setpriv` in the system dirs → FAIL naming it, comma
     const r = await markerRun(dir, overTool(noexecFile(dir), 'setpriv'));
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot enter the uid-mapped child user namespace: 'setpriv' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin/);
+    assert.match(r.stderr, probeRefusal(/FAIL {2}isolated: NOT RUN: cannot enter the uid-mapped child user namespace: 'setpriv' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin/));
     assert.equal(r.ran, false, 'the command ran with capabilities');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -2674,6 +2695,20 @@ test('⛔ fail closed: a `setpriv` that ignores its flags (runs its argv as-is) 
   const fake = path.join(dir, 'setpriv');
   fs.writeFileSync(fake, '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done; shift\nexec "$@"\n', { mode: 0o755 });
   try {
+    if (BACKEND === 'bwrap') {
+      // ⚠ MEASURED: bwrap sets no_new_privs for its whole sandbox, so a setpriv that drops `--no-new-privs`
+      // cannot take it away — the read-back finds NoNewPrivs 1 and the run goes ahead. The PROPERTY is
+      // asserted instead of the refusal: the command itself reads NoNewPrivs 1 (and no capability).
+      const status = path.join(dir, 'status');
+      const r = await withBinds(overTool(fake, 'setpriv'), [process.execPath, TOOL, 'isolated', '--keep', dir, '--', 'sh', '-c',
+        'cat /proc/self/status > "$0"', status]);
+      if (!r) { t.skip(NO_BINDS); return; }
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      const st = fs.readFileSync(status, 'utf8');
+      assert.match(st, /^NoNewPrivs:\s*1$/m, `the command runs WITHOUT no_new_privs under bwrap:\n${st}`);
+      assert.match(st, /^CapEff:\s*0+$/m, st);
+      return;
+    }
     const r = await markerRun(dir, overTool(fake, 'setpriv'));
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
@@ -2696,7 +2731,10 @@ exec ${JSON.stringify(real)} "$@"
     const r = await markerRun(dir, [[systemCopy('unshare'), real], ...overTool(fake, 'unshare')]);
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /FAIL {2}isolated: NOT RUN: cannot enter the uid-mapped child user namespace: .* exited 1 .*util-linux ≥ 2\.38/);
+    // under bwrap the PROBE runs the drop inside bwrap, so the same floor is named there (a probe refusal)
+    assert.match(r.stderr, BACKEND === 'bwrap'
+      ? probeRefusal(/FAIL {2}isolated: NOT RUN: the privilege drop \(`setpriv … unshare -U --map-user`\) fails inside bwrap \(.*--map-user.*\) — util-linux ≥ 2\.38/)
+      : /FAIL {2}isolated: NOT RUN: cannot enter the uid-mapped child user namespace: .* exited 1 .*util-linux ≥ 2\.38/);
     assert.ok(!new RegExp(`\\b${process.getuid?.()}\\b`).test(r.stderr), 'the refusal printed the real uid');
     assert.equal(r.ran, false, 'the command ran without the child user namespace');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -2714,7 +2752,11 @@ exec ${JSON.stringify(real)} "$@"
     const r = await markerRun(dir, [[systemCopy('unshare'), real], ...overTool(fake, 'unshare')]);
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /after entering the uid-mapped child user namespace, it would still hold CapPrm, CapEff; its uid\/gid are not the real ones; its uid_map\/gid_map are not exactly the one expected mapping/);
+    // exact per creator (measured): bwrap's `--cap-add ALL` raises the INHERITABLE and AMBIENT sets too, so a drop
+    // that makes no namespace keeps all four; under `unshare -r` only the permitted and effective ones
+    const held = BACKEND === 'bwrap' ? 'CapInh, CapPrm, CapEff, CapAmb' : 'CapPrm, CapEff';
+    assert.match(r.stderr, new RegExp(`after entering the uid-mapped child user namespace, it would still hold ${held}; its uid/gid are not the real ones; `
+      + 'its uid_map/gid_map are not exactly the one expected mapping'));
     assert.equal(r.ran, false, 'the command ran as namespace root');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -2740,7 +2782,7 @@ test('⛔ STRIPPED markers inside `isolated` → the call isolates AGAIN, fully 
   const inner = (r.stdout.match(/^INNER (\S+)$/m) || [])[1];
   assert.ok(inner && inner !== outer, `the stripped call did not make its own network namespace (only inherited):\n${r.stdout}`);
   assert.match(r.stdout, /^PROOF-OK$/m, `the kernel proof failed after a stripped re-isolation:\n${r.stderr}`);
-  assert.match(r.stderr, /^isolated: home HIDDEN; .*; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, keeping what the outer call re-bound \(same modes\); backend: unshare; cgroup2: nsdelegate( — WEBCTL_ISOLATED_VERBOSE=1 lists every path)?$/m, r.stderr);
+  assert.match(r.stderr, forBackend(/^isolated: home HIDDEN; .*; ALREADY INSIDE an isolated namespace whose markers were stripped — isolated AGAIN, fully, keeping what the outer call re-bound \(same modes\); backend: unshare; cgroup2: nsdelegate( — WEBCTL_ISOLATED_VERBOSE=1 lists every path)?$/m), r.stderr);
   // CONTROL: from the host the verdict does not claim it
   const c = await run(['isolated', '--', 'true']);
   assert.equal(c.status, 0, c.stderr);
@@ -3575,9 +3617,9 @@ test('⛔ fail closed: no `bash` in the system dirs (pid 1 must reap) → FAIL n
     const r = await markerRun(dir, overTool(none, 'bash'));
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, NO_BASH_RE);
-    // the FRESH path probes its backend: the reason is unshare's skip reason (ib4k §2)
-    assert.match(r.stderr, /NOT RUN: 'bash' not found/);
+    assert.match(r.stderr, probeRefusal(NO_BASH_RE));
+    // the FRESH path probes its backend: the reason is the backend's skip reason (ib4k §2)
+    assert.match(r.stderr, probeRefusal(/NOT RUN: 'bash' not found/));
     assert.equal(r.ran, false, 'the command ran without a reaping pid 1');
     // nested: the outer call is ordinary; inside it, a throwaway `unshare -rm` hides bash from the inner one
     const marker = path.join(dir, 'RAN-NESTED');
@@ -3773,7 +3815,7 @@ test('⛔ a bad WEBCTL_UNSHARE_BIN (relative, missing, a directory, not executab
       const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`],
         { WEBCTL_UNSHARE_BIN: bin });
       assert.equal(r.status, 1, `${bin === dir ? '<dir>' : path.basename(bin)}: ${r.stdout}${r.stderr}`);
-      assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file/m);
+      assert.match(r.stderr, probeRefusal(/^FAIL {2}isolated: NOT RUN: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file/m));
       assert.ok(!r.stderr.includes(dir), 'the refusal printed the path');
       assert.equal(fs.existsSync(marker), false);
     }
@@ -3791,10 +3833,12 @@ test('⭐ WEBCTL_UNSHARE_BIN is used for EVERY unshare: the outer namespace, the
       { WEBCTL_UNSHARE_BIN: wrapper, WEBCTL_TEST_UNSHARE_LOG: path.join(log, 'used') });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     const used = fs.readFileSync(path.join(log, 'used'), 'utf8').trim().split('\n');
-    // the backend probe (side-effect free: `-rnm --uts --ipc --pid --fork true`) and the outer namespace
-    assert.equal(used.filter((l) => l === 'USED -rnm').length, 2, `the probe and the outer namespace did not both use it:\n${used.join('\n')}`);
-    // outer: the drop's probe + the command; nested: its drop's probe + its command
-    assert.equal(used.filter((l) => l === 'USED -U').length, 4, `the privilege drops did not all use it:\n${used.join('\n')}`);
+    // unshare: the backend probe (side-effect free: `-rnm --uts --ipc --pid --fork true`) and the outer namespace.
+    // bwrap: neither is unshare (bwrap creates the namespaces) — but its PROBE runs the drop inside bwrap: one more -U
+    assert.equal(used.filter((l) => l === 'USED -rnm').length, BACKEND === 'bwrap' ? 0 : 2,
+      `the probe and the outer namespace did not both use it:\n${used.join('\n')}`);
+    // outer: the drop's probe + the command; nested: its drop's probe + its command (bwrap: + its probe's drop)
+    assert.equal(used.filter((l) => l === 'USED -U').length, BACKEND === 'bwrap' ? 5 : 4, `the privilege drops did not all use it:\n${used.join('\n')}`);
     // CONTROL: without the var, the wrapper is never called
     fs.rmSync(path.join(log, 'used'));
     const c = await run(['isolated', '--keep', log, '--', 'true'], { WEBCTL_TEST_UNSHARE_LOG: path.join(log, 'used') });
@@ -4026,5 +4070,23 @@ test('⛔ Ctrl-C (INT to the GROUP) reaches the command\'s OWN INT trap — rc 7
     assert.equal(r.hung, false, `${backend}: still running 8 s after Ctrl-C`);
     assert.match(r.stdout, /^GOT-INT$/m, `${backend}: the command's INT trap never ran (killed instead):\n${r.stdout}`);
     assert.match(r.stdout, /^AFTER rc=7$/m, `${backend}: the trap's exit code did not come back:\n${r.stdout}`);
+  }
+});
+
+// ⭐ Exit codes and forwarding, per creator (webctl:base, point 4): INT 130, TERM 143, HUP 129 —
+//   (a) the command killed by the signal itself → `isolated` exits 128+n;
+//   (b) the signal sent to the `isolated` process → forwarded to the command, which dies by it, and `isolated`
+//       DIES BY the same signal (so its caller's shell reports 128+n and stops, as for an un-isolated command).
+const EXIT_SIGNALS = /** @type {[NodeJS.Signals, number][]} */ ([['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]);
+test('⭐ exit codes under unshare AND bwrap: a command killed by INT/TERM/HUP → 130/143/129; the signal sent to `isolated` → it dies by it', needsBwrap, async () => {
+  for (const backend of ['unshare', 'bwrap']) {
+    const pin = { WEBCTL_ISOLATION_BACKEND: backend };
+    for (const [sig, code] of EXIT_SIGNALS) {
+      const self = await run(['isolated', '--', 'sh', '-c', `kill -s ${sig.slice(3)} $$`], pin);
+      assert.equal(self.status, code, `${backend}: a command killed by ${sig} → ${self.status}, not ${code}:\n${self.stderr}`);
+      assert.match(self.stderr, new RegExp(`; backend: ${backend}; `), `${backend}: not run under it`);
+      const fwd = await termAfterReady([process.execPath, TOOL, 'isolated', '--', 'sh', '-c', 'echo READY; exec sleep 20'], pin, sig);
+      assert.equal(fwd.signal, sig, `${backend}: ${sig} to isolated → status ${fwd.status} signal ${fwd.signal}, not death by ${sig}:\n${fwd.stderr}`);
+    }
   }
 });
