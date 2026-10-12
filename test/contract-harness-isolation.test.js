@@ -2698,15 +2698,21 @@ test('⛔ fail closed: a `setpriv` that ignores its flags (runs its argv as-is) 
     if (BACKEND === 'bwrap') {
       // ⚠ MEASURED: bwrap sets no_new_privs for its whole sandbox, so a setpriv that drops `--no-new-privs`
       // cannot take it away — the read-back finds NoNewPrivs 1 and the run goes ahead. The PROPERTY is
-      // asserted instead of the refusal: the command itself reads NoNewPrivs 1 (and no capability).
+      // asserted instead of the refusal (ruling): the command itself reads NoNewPrivs 1 and holds no capability.
+      // ⚠ So under bwrap the harness's own refusal, "NoNewPrivs is not set" (privilegeDrop's read-back), is
+      // UNREACHABLE: bubblewrap sets PR_SET_NO_NEW_PRIVS unconditionally near the top of main (bubblewrap.c
+      // v0.11.0), before anything of ours runs. The setpriv flag is a second layer there, not the only one.
       const status = path.join(dir, 'status');
       const r = await withBinds(overTool(fake, 'setpriv'), [process.execPath, TOOL, 'isolated', '--keep', dir, '--', 'sh', '-c',
         'cat /proc/self/status > "$0"', status]);
       if (!r) { t.skip(NO_BINDS); return; }
       assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.match(r.stderr, /; backend: bwrap; /, `not run under bwrap — the arm would judge another creator:\n${r.stderr}`);
       const st = fs.readFileSync(status, 'utf8');
       assert.match(st, /^NoNewPrivs:\s*1$/m, `the command runs WITHOUT no_new_privs under bwrap:\n${st}`);
-      assert.match(st, /^CapEff:\s*0+$/m, st);
+      // all four capability sets, as privilegeDrop's read-back (CAP_FIELDS) — not CapEff alone: `--cap-add ALL`
+      // raises the inheritable and ambient sets too (measured), and an ambient cap survives execve
+      for (const k of ['CapInh', 'CapPrm', 'CapEff', 'CapAmb']) assert.match(st, new RegExp(`^${k}:\\s*0+$`, 'm'), `${k} is not 0:\n${st}`);
       return;
     }
     const r = await markerRun(dir, overTool(fake, 'setpriv'));
