@@ -1939,6 +1939,47 @@ allowlist. The full release gate was not run.
 | B14 | the keyring join off (shared: pid 1's `keyctl new_session`) | every bwrap run refused by its read-back: `the session keyring inside is still the HOST's` |
 | B15 | bwrap not `detached` (the fix above) | the group-Ctrl-C INT-trap arm: `bwrap: the command's INT trap never ran (killed instead)` |
 
+### Fifth review of phase 2: the early window, and signals (F1–F10)
+
+**F1–F3, the early window under bwrap.** The review's reproducer (`race2.cjs`: TERM the harness the
+moment its creator has a child, then judge by a marker the command writes) gave ranAfterTerm **24/30**
+under bwrap, with orphans after 12 runs, and **0/20** under unshare. One orphan, read in /proc, was a
+`bwrap` process with NSpid `… 1`, SigCgt 0, sleeping on its `eventfd` (bwrap's child_wait_fd), holding
+the caller's stdout and stderr. bubblewrap.c v0.11.0 explains both outcomes. The child reads
+child_wait_fd (l.3261) until the parent writes it (l.3208), and sets PR_SET_PDEATHSIG only before the
+exec (l.3598). If bwrap is killed before the write, the child waits for ever. If it is killed after,
+the child runs with no parent to die with. The harness survived until its pipes closed, read
+`started`, and the inner half started the command.
+
+* **Teardown (A):** `killCreatorTree`, used by `forwardSignalsPastUnshare`'s early branch.
+* **Go-handshake (B):** `statusChannel` answers `started` with `go` only if `mayGo()`. `awaitGo`
+  is the far side's blocking read; EOF ⇒ exit without a word. On an early signal the harness also
+  destroys its end of the pipe.
+* After both: ranAfterTerm **0/30** under bwrap (orphans 0, hung 0) and **0/20** under unshare.
+* The arm's own defect (F3): EARLY_PROBE scored `sig === SIGTERM` before RAN. Fixed first, as its
+  own commit; that commit alone is red under bwrap: `term=0 bad=8`.
+* ⚠ The GO arm first froze the harness at the creator's first child. That passed under unshare even
+  against the OLD harness: the harness was frozen before it had finished sending the plan (fd 4), so
+  the inner half stopped there. It now freezes once the inner half exists (argv[2] is
+  `__isolated-inner`; the creator's and pid 1's argv CONTAIN that word, so `includes` matched them
+  first). It asserts `planRead=1` (the inner half's fd 4 is no longer the plan's socket) and `atGo=1`
+  (it then sat in read(2) on fd 3, per /proc/<pid>/syscall), and holds the freeze until then, up to
+  120 s. A fixed 6 s freeze went vacuous on a host at load average 30: the inner half took 8.8 s just to
+  appear (measured).
+
+**The harness SIGKILLed in bwrap's setup window (residual, measured).** `residual.cjs` sends SIGKILL,
+not TERM, to the harness at spread delays: half at the creator's first appearance +0–1.5 ms, half once
+it has a child +0–3 ms. Result over 160 runs under bwrap: **ran 0, hung 0, leaked 0** (74 killed before
+the child existed, 86 after).
+The window that could still leak is between bwrap's own `prctl(PR_SET_PDEATHSIG)` (l.3181) and its
+child_wait_fd write (l.3208): a few syscalls wide, and not hit in 160 runs. Hit, it leaves a child
+blocked in read, as an init, holding the caller's stdio. The command would not run: it needs `go`.
+
+| # | sabotage | caught by |
+|---|---|---|
+| B16 | the early path SIGKILLs the creator ALONE (no `killCreatorTree`; the handshake and pipe close kept) | the teardown logic arm: `1 process(es) of the namespace outlived the early teardown`. ⚠ The `[bwrap] EARLY TERM` arm stays GREEN: with the handshake, the command never runs, and the stuck-child window is hit too rarely for an 8-run arm. That is why the teardown arm builds its outcome directly |
+| B17 | no wait for `go` (the inner half and the nested helper take it as given) | the GO arm: `unshare: the command RAN while the harness was frozen — it never said \`go\`` |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

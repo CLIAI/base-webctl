@@ -1892,6 +1892,36 @@ function childrenOf(pid) {
   return out;
 }
 
+/** The state letter of /proc/<pid>/stat ('X' when it cannot be read: gone). @param {number} pid */
+function procState(pid) {
+  try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return st.slice(st.lastIndexOf(')') + 2, st.lastIndexOf(')') + 3); } catch { return 'X'; }
+}
+/** Block this thread for `ms` (no event loop needed: a signal handler's teardown runs to the end). @param {number} ms */
+const sleepMs = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+
+/**
+ * Tear a namespace CREATOR down WITH everything it started — the early-signal path (fifth review, F1 + F2).
+ *
+ * ⛔ SIGKILL to the creator ALONE was not enough under bwrap. Its child — pid 1 of the new PID namespace —
+ * sets PR_SET_PDEATHSIG only just before it execs, and before that blocks in read(child_wait_fd) until
+ * bwrap writes it. Killed BEFORE that write, the child sat there for ever: a pid-namespace init (it ignores
+ * TERM) holding the caller's stdio — `isolated` hung (seen 3 times, once in the pinned depth suite). Killed
+ * AFTER it but before the exec, the child went on with no parent to die with, and the command RAN after the
+ * caller had died by its TERM (27 of 30 early TERMs; 0 of 20 under `unshare --kill-child`, whose child sets
+ * PDEATHSIG at once). ⇒ SIGSTOP the creator — it can neither fork nor write any more (a fork in flight
+ * restarts once the stop is pending) — wait until it IS stopped (kill(2) returns before), SIGKILL each of its
+ * children — SIGKILL from the parent namespace DOES reach a pid-namespace init, and the kernel then kills
+ * every process in that namespace — then the creator. Backend-agnostic: under unshare it changes nothing.
+ * @param {number | undefined} pid
+ */
+function killCreatorTree(pid) {
+  if (!pid) return;
+  try { process.kill(pid, 'SIGSTOP'); } catch { return; /* already gone */ }
+  for (const until = Date.now() + 500; Date.now() < until && !/^[TtZX]$/.test(procState(pid));) sleepMs(1);
+  for (const k of childrenOf(pid)) { try { process.kill(k, 'SIGKILL'); } catch { /* gone */ } }
+  try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+}
+
 /**
  * Forward termination signals THROUGH `unshare --fork` to the inner half.
  *
@@ -1905,12 +1935,13 @@ function childrenOf(pid) {
  * new PID namespace IGNORES any signal it has no handler for, and bash installs its traps a
  * moment AFTER unshare's child exists — so "a child exists" is not "pid 1 can hear us": the
  * TERM vanished and the command ran to exit 0 after the caller gave up. ⇒ Until `started()`
- * (the inner side's report on fd 3 — written only once pid 1's traps are certainly in place,
- * because pid 1 started it), a signal SIGKILLs unshare and `--kill-child` takes the namespace
- * with it; `early()` then tells the caller to die by that signal. After `started()`, no child
- * means pid 1 has exited: the signal is recorded, not forwarded, and never "early".
- * Installed BEFORE the spawn (forwarderBeforeSpawn): `attach(unshare)` once it exists.
- * @param {() => boolean} started has the inner side reported `started`?
+ * (the inner side reported on fd 3 — only once pid 1's traps are certainly in place, because pid 1
+ * started it — AND we answered `go`: statusChannel), a signal tears the creator down with its
+ * namespace (killCreatorTree); `early()` then tells the caller to die by that signal. The far side
+ * waits for that `go` before it starts the command, so "early" also means "the command never ran".
+ * After `started()`, no child means pid 1 has exited: the signal is recorded, not forwarded, and
+ * never "early". Installed BEFORE the spawn (forwarderBeforeSpawn): `attach(unshare)` once it exists.
+ * @param {() => boolean} started have we said `go` to the inner side?
  * @returns {Forwarder & {attach: (c: import('node:child_process').ChildProcess) => void}}
  */
 export function forwardSignalsPastUnshare(started) {
@@ -1918,7 +1949,11 @@ export function forwardSignalsPastUnshare(started) {
   const fwd = forwarderBeforeSpawn((s, /** @type {import('node:child_process').ChildProcess} */ unshare) => {
     if (!started()) {
       early = true;
-      try { unshare.kill('SIGKILL'); } catch { /* gone */ }
+      killCreatorTree(unshare.pid);
+      // ⛔ and never `go` (statusChannel): our end of the status pipe CLOSED, so a far side the teardown
+      // missed reads EOF and exits with nothing started — it waits for `go`, we wait for its end: without
+      // this, one survivor would be a deadlock, not a run
+      try { /** @type {import('node:net').Socket | undefined} */ (unshare.stdio?.[3])?.destroy(); } catch { /* gone */ }
       return;
     }
     // ⛔ AFTER `started`, no child means pid 1 already EXITED — the namespace is ending with the
@@ -1944,15 +1979,56 @@ function dieByForwarded(fwd) {
 }
 
 /**
- * Collect `started` from a status pipe (fd 3 of a child). @param {import('node:child_process').ChildProcess} child
+ * The status pipe (fd 3 of a child, a socketpair — both ways): collect `started` / `fail …`, and ANSWER
+ * `started` with `go` — the GO-HANDSHAKE (fifth review, F1).
+ *
+ * ⛔ The far side (the inner half; the nested path's pid-1 helper) reports `started` and then WAITS for
+ * `go` before it starts the command (awaitGo). Without that, "the inner side reported in" and "the
+ * command may run" were one event on the far side and two on ours: a signal handled before the
+ * `started` data was read counted as EARLY while the command was already starting. We answer only when
+ * `mayGo()` — never after an early signal — and `started()` is true from that answer on. One thread: a
+ * signal handler and this data handler never interleave, so EITHER the signal came first (no `go`, ever;
+ * the command never runs) OR `go` did (the signal is forwarded to a command that may be running).
+ * ⚠ If we die before answering, the far side reads EOF and exits without running anything — no hang.
+ * @param {import('node:child_process').ChildProcess} child @param {() => boolean} [mayGo]
  * @returns {{started: () => boolean, text: () => string}}
  */
-function statusChannel(child) {
+function statusChannel(child, mayGo = () => true) {
   let status = '';
-  const pipe = /** @type {import('node:stream').Readable | null | undefined} */ (child.stdio[3]);
-  pipe?.on('data', (d) => { status += String(d); });
+  let went = false;
+  const pipe = /** @type {import('node:net').Socket | null | undefined} */ (child.stdio[3]);
+  pipe?.on('data', (d) => {
+    status += String(d);
+    if (went || !/^started$/m.test(status) || !mayGo()) return;
+    went = true;
+    try { pipe.write(`${GO}\n`); } catch { /* the far side is gone: it never starts the command */ }
+  });
   pipe?.on('error', () => { /* the other side closed it */ });
-  return { started: () => /^started$/m.test(status), text: () => status };
+  return { started: () => went, text: () => status };
+}
+
+/** The one answer that lets the far side of a status pipe start the command (statusChannel, awaitGo). */
+const GO = 'go';
+
+/**
+ * Wait on `fd` (the status pipe) for the harness's `go` — a BLOCKING read up to a newline or EOF (fifth
+ * review, F1). 'go' only for exactly `go\n`; 'eof' when the harness closed it unanswered (it died, or tore
+ * the namespace down — nobody is left to report to); else 'other'. Never the command on anything but 'go'.
+ * @param {number} fd @returns {'go' | 'eof' | 'other'}
+ */
+function awaitGo(fd) {
+  const b = Buffer.alloc(16);
+  let got = '';
+  while (!got.includes('\n') && got.length < 16) {
+    let n = 0;
+    try { n = fs.readSync(fd, b, 0, b.length, null); } catch (e) {
+      if (/** @type {NodeJS.ErrnoException} */ (e).code === 'EINTR') continue;
+      return 'other';
+    }
+    if (n === 0) return got ? 'other' : 'eof';
+    got += b.subarray(0, n).toString();
+  }
+  return got === `${GO}\n` ? 'go' : 'other';
 }
 
 /**
@@ -1988,9 +2064,20 @@ export function runPid1(a) {
     // ⛔ BEFORE the command starts, so it never inherits fd 3. Our forwarder is installed ABOVE
     // (before this write), and pid 1 (bash) trapped its signals before starting us — so from
     // `started` on, a forwarded signal is HEARD, and buffered until the command exists.
+    // ⛔ …and the command starts only on the caller's `go` (the go-handshake, statusChannel): EOF —
+    // it died, or tore us down for an early signal — or anything else, and nothing is started.
+    // ⚠ fail closed: `--status` with no status pipe cannot be answered, so it is not run either.
+    let go = /** @type {'go' | 'eof' | 'other'} */ ('other');
     if (ours) {
-      try { fs.writeSync(3, 'started\n'); } catch { /* the caller then never sees `started` */ }
+      try { fs.writeSync(3, 'started\n'); go = awaitGo(3); } catch { /* the caller is gone: never `go` */ }
       try { fs.closeSync(3); } catch { /* already gone */ }
+    }
+    if (go !== 'go') {
+      fwd.remove();
+      // 'eof': the nested caller is gone — nobody to report to (a FAIL line after it died by its signal
+      // would read as a verdict); otherwise say why
+      return Promise.resolve(go === 'eof' ? EXIT.fail : report('isolated', EXIT.fail, 'NOT RUN: internal: the nested caller did not '
+        + 'answer `go` on the status pipe. The command was NOT started.'));
     }
   }
   return new Promise((resolve) => {
@@ -2401,7 +2488,7 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
       resolve(report('isolated', EXIT.fail, `cannot start ${choice.backend} (${errMsg(e)}); refusing to run on the host`));
       return;
     }
-    const status = statusChannel(child);
+    const status = statusChannel(child, () => !fwd.early?.());
     st = status;
     fwd.attach(child);
     const planPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[4]);
@@ -2682,7 +2769,15 @@ async function runIsolatedInner(a) {
   if (priv.why) return refuse(priv.why);
 
   if (!tell('started')) return refuse('internal: the status channel (fd 3) is missing — run via `isolated`');
+  // ⛔ THE GO-HANDSHAKE (fifth review, F1): the command starts only on the harness's `go` (statusChannel).
+  // It used to start right after `started`: a TERM the harness handled before READING `started` was taken
+  // for an early one while the command was already running. EOF — the harness died, or is tearing the
+  // namespace down — means exit with nothing started, and SAY nothing: nobody is left to report to, and a
+  // FAIL line on the caller's stderr after it died by its signal would read as a verdict.
+  const go = awaitGo(3);
   try { fs.closeSync(3); } catch { /* the command must not inherit it */ }
+  if (go === 'eof') return EXIT.fail;
+  if (go !== 'go') return refuse('internal: the harness did not answer `go` on the status channel');
 
   // the command's env (plan.env) goes to the helper on ITS fd 3 — setpriv/unshare of the drop run
   // with OUR (privileged) env, so an LD_* the caller passed never runs with our capabilities.
@@ -4197,7 +4292,7 @@ export function runCommand(command, prefix = [], { pastUnshare = false, env = /*
     const envPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[pastUnshare ? 4 : 3]);
     envPipe?.on('error', () => { /* the helper refused or never started; it reports */ });
     envPipe?.end(JSON.stringify(env));
-    if (pastUnshare) st = statusChannel(child);
+    if (pastUnshare) st = statusChannel(child, () => !fwd.early?.());
     fwd.attach(child);
     child.on('error', (e) => {
       fwd.remove();

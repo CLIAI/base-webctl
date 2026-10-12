@@ -3323,6 +3323,100 @@ test('⛔ EARLY TERM, NESTED path: the same, for an `isolated` called inside `is
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+/**
+ * THE GO-HANDSHAKE (fifth review, F1): argv[2] = the least time to keep the harness frozen (ms), argv[3…] = a harness
+ * invocation, run with a unique TAG appended. The moment the inner half exists, the harness is SIGSTOPped — it can
+ * neither read `started` nor answer `go` — and kept so until the inner half has read its plan and sits in read(2)
+ * on fd 3 (waiting for `go`), or the command printed RAN; at least argv[2] ms, at most 120 s. Then it is SIGKILLed.
+ * Prints `GO ran=<0|1> ended=<0|1> left=<n> planRead=<0|1> atGo=<0|1>`: ran = the command printed RAN (it must
+ * not: it starts only on `go`); ended = the run ended within 15 s of the kill (no hang: the far side's read ends on
+ * EOF); left = processes still carrying the tag (each TERMed, then KILLed, by exact pid); planRead / atGo = how far
+ * the inner half got while the harness was frozen (the arm is vacuous unless it reached the wait).
+ * ⛔ process.exit() at the end: a hang never stalls the test file.
+ */
+const GO_PROBE = `
+const fs = require('fs'); const { spawn } = require('child_process');
+const [ms, ...argv] = process.argv.slice(2);
+const kids = (p) => { try { return fs.readFileSync('/proc/' + p + '/task/' + p + '/children', 'utf8').trim().split(/\\s+/).filter(Boolean).map(Number); } catch { return []; } };
+const cmd = (p) => { try { return fs.readFileSync('/proc/' + p + '/cmdline', 'utf8'); } catch { return ''; } };
+const desc = (p) => { const out = []; const q = [p]; while (q.length) { const x = q.shift(); for (const k of kids(x)) { out.push(k); q.push(k); } } return out; };
+const tagged = (tag) => fs.readdirSync('/proc').filter((d) => /^\\d+$/.test(d)).map(Number)
+  .filter((p) => p !== process.pid && cmd(p).split('\\0').includes(tag));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const tag = 'webctl-go-' + process.pid;
+const c = spawn(argv[0], [...argv.slice(1), tag], { stdio: ['ignore', 'pipe', 'pipe'] });
+let out = ''; let err = ''; let ended = false;
+c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; });
+c.on('close', () => { ended = true; });
+// read(2) on fd 3, as /proc/<pid>/syscall shows it: "<nr> 0x3 …" (nr by arch; elsewhere only the deadline ends the wait)
+const READ_NR = { x64: '0', arm64: '63', ia32: '3', arm: '3' }[process.arch];
+(async () => {
+  // ⚠ frozen once the INNER half exists — not at the creator's first child: frozen that early, the harness had
+  // not finished sending the plan (fd 4), and the run stopped there, before any \`go\` mattered (measured)
+  let inner = 0;
+  for (const t0 = Date.now(); !inner && Date.now() - t0 < 120000;) {
+    // argv[2]: the creator's and pid 1's argv CONTAIN the inner half's, so \`includes\` would find them first
+    inner = desc(c.pid).find((p) => cmd(p).split('\\0')[2] === '__isolated-inner') || 0;
+    if (!inner) await sleep(1);
+  }
+  c.kill('SIGSTOP');
+  // planRead: the inner half got its whole plan and closed fd 4 while we were frozen; atGo: it then sat in read(2)
+  // on fd 3 — waiting for the \`go\` a frozen harness cannot send. Without the handshake it runs the command (RAN)
+  // instead. The wait is for one of those (a loaded host took > 8 s to get here, measured), at least ms, at most 120 s.
+  // ⚠ only a READABLE fd table counts, where fd 4 is gone or no longer the plan's socket (the number is reused: the
+  // inner half opens more sockets later, and a 20 ms poll can miss the gap) — never an unreadable table or a gone process
+  const fd4 = () => { try { return fs.readlinkSync('/proc/' + inner + '/fd/4'); } catch (e) { return e.code === 'ENOENT' ? '' : null; } };
+  const plan0 = fd4();
+  const fd4gone = () => { try { fs.readdirSync('/proc/' + inner + '/fd'); } catch { return false; }
+    const now = fd4(); return now !== null && !!plan0 && /^socket:/.test(plan0) && now !== plan0; };
+  const inRead3 = () => { try { const f = fs.readFileSync('/proc/' + inner + '/syscall', 'utf8').split(' '); return f[0] === READ_NR && f[1] === '0x3'; } catch { return false; } };
+  let planRead = 0; let atGo = 0;
+  for (const t0 = Date.now(); Date.now() - t0 < 120000;) {
+    if (inner && fd4gone()) planRead = 1;
+    if (planRead && inRead3()) atGo = 1;
+    if ((atGo || /^RAN$/m.test(out)) && Date.now() - t0 >= Number(ms)) break;
+    await sleep(20);
+  }
+  c.kill('SIGKILL');
+  for (const t0 = Date.now(); !ended && Date.now() - t0 < 15000;) await sleep(50);
+  const ok = ended;
+  if (!ended) { c.stdout.destroy(); c.stderr.destroy(); }
+  const left = tagged(tag);
+  for (const p of left) { try { process.kill(p, 'SIGTERM'); } catch {} }
+  if (left.length) { await sleep(300); for (const p of tagged(tag)) { try { process.kill(p, 'SIGKILL'); } catch {} } }
+  console.log('GO ran=' + (/^RAN$/m.test(out) ? 1 : 0) + ' ended=' + (ok ? 1 : 0) + ' left=' + left.length + ' planRead=' + planRead + ' atGo=' + atGo);
+  if (/^RAN$/m.test(out) || !ok) process.stderr.write(err.slice(-600) + '\\n');
+  process.exit(0);
+})();
+`;
+/** The least time the GO arm keeps the harness frozen once the inner half waits for `go` (or the command ran). */
+const GO_FREEZE_MS = 1500;
+/** Can bwrap make its namespaces here? (the check needsBwrap makes, below; a function: callable from here) */
+function bwrapUsable() {
+  const b = SYSTEM_DIRS.map((d) => path.join(d, 'bwrap')).find((p) => fs.existsSync(p));
+  return !!b && spawnSync(b, ['--unshare-user', '--uid', '0', '--gid', '0', '--cap-add', 'ALL', '--unshare-pid', '--as-pid-1', '--dev-bind', '/', '/',
+    '--proc', '/proc', '--', 'true']).status === 0;
+}
+
+test('⛔ GO-HANDSHAKE: the harness FROZEN (SIGSTOP) once the inner half exists → the command does NOT start; then SIGKILLed → the run ends, nothing left — unshare AND bwrap', needsIsolation, async () => {
+  const dir = tmpdir();
+  try {
+    fs.writeFileSync(path.join(dir, 'go.cjs'), GO_PROBE);
+    for (const backend of bwrapUsable() ? ['unshare', 'bwrap'] : ['unshare']) {
+      const r = spawnSync(process.execPath, [path.join(dir, 'go.cjs'), String(GO_FREEZE_MS), process.execPath, TOOL, 'isolated', '--', ...EARLY_CMD],
+        { encoding: 'utf8', env: cleanEnv({ WEBCTL_ISOLATION_BACKEND: backend }), timeout: 300000 });
+      const m = (r.stdout.match(/^GO ran=(\d) ended=(\d) left=(\d+) planRead=(\d) atGo=(\d)$/m) || []).slice(1).map(Number);
+      assert.equal(m.length, 5, `${backend}: no GO line:\n${r.stdout}${r.stderr}`);
+      assert.equal(m[3], 1, `${backend}: the inner half never got past reading its plan while the harness was frozen — the arm proves nothing`);
+      assert.equal(m[0], 0, `${backend}: the command RAN while the harness was frozen — it never said \`go\`:\n${r.stderr}`);
+      // and it got as far as WAITING for it (x64/arm64/x86/arm: read(2) on fd 3) — else the command was held back by something else
+      if (['x64', 'arm64', 'ia32', 'arm'].includes(process.arch)) assert.equal(m[4], 1, `${backend}: the inner half never sat waiting for \`go\` — the arm proves nothing`);
+      assert.equal(m[1], 1, `${backend}: the run did not end within 15 s of the harness's SIGKILL (a hang):\n${r.stderr}`);
+      assert.equal(m[2], 0, `${backend}: ${m[2]} process(es) carrying the tag outlived the run`);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('isolated: a command killed by a signal → 128+signal (143 for SIGTERM)', needsIsolation, async () => {
   const r = await run(['isolated', '--', 'sh', '-c', 'kill -TERM $$']);
   assert.equal(r.status, 143, r.stdout + r.stderr);
@@ -3698,7 +3792,7 @@ test('⭐ logic: a forwarder installed BEFORE the spawn buffers a signal and del
 // command started and pid 1 already EXITED — found unshare childless and was treated as EARLY:
 // SIGKILL unshare, die by the signal. The logic arm drives the forwarder with a stand-in for
 // unshare that is a real, CHILDLESS process: started → nothing killed, not early; not started →
-// SIGKILL and early (the window the early-TERM arms guard).
+// SIGKILLed (by pid) and early (the window the early-TERM arms guard).
 const { forwardSignalsPastUnshare } = await import(pathToFileURL(TOOL).href);
 
 test('⭐ logic: a signal AFTER `started` to an unshare whose pid 1 is gone is NOT "early" (no SIGKILL, no death by it) — before `started` it is', async () => {
@@ -3716,14 +3810,52 @@ test('⭐ logic: a signal AFTER `started` to an unshare whose pid 1 is gone is N
           assert.equal(fwd.early(), false, 'a late signal was taken for an EARLY one (the harness would die by it)');
           assert.equal(fwd.last(), 'SIGHUP', 'the late signal was not recorded');
         } else {
-          // CONTROL: before `started` the same signal IS early — the arm can fail
-          assert.deepEqual(killed, ['SIGKILL']);
+          // CONTROL: before `started` the same signal IS early — the arm can fail. The creator is torn down by
+          // PID (killCreatorTree: STOP, its children, then it — fifth review, F1/F2), not through .kill()
           assert.equal(fwd.early(), true);
+          const how = await new Promise((r) => { if (sleeper.signalCode) r(sleeper.signalCode); else sleeper.on('exit', (_c, sg) => r(sg)); });
+          assert.equal(how, 'SIGKILL', 'an early signal did not SIGKILL the creator');
         }
       } finally { fwd.remove(); }
     }
   } finally { sleeper.kill('SIGTERM'); }
   assert.equal(process.listenerCount('SIGHUP'), 0, 'remove() left a handler installed');
+});
+
+// ⛔ F2 (fifth review): an EARLY signal SIGKILLed the creator ALONE. bwrap's child — pid 1 of its PID namespace —
+// sets PDEATHSIG only just before it execs; before that it waits in read(child_wait_fd) for a write the killed
+// bwrap never makes, and as a namespace init it ignores TERM: it sat there for ever holding the caller's stdio.
+// The early-TERM arms hit that window too rarely to be sure of failing (it is a few syscalls wide), so this arm
+// builds its RESULT directly: a raw bwrap WITHOUT --die-with-parent whose pid 1 outlives a SIGKILL of bwrap.
+test('⛔ logic: an EARLY signal tears the creator down WITH its namespace — a pid 1 that outlives SIGKILL of its creator does not outlive the teardown', async (tt) => {
+  if (!bwrapUsable()) { tt.skip('SKIP (host): bwrap cannot make its namespaces here'); return; }
+  const bwrap = SYSTEM_DIRS.map((d) => path.join(d, 'bwrap')).find((p) => fs.existsSync(p)) || 'bwrap';
+  /** @param {string} tag */
+  const alive = (tag) => fs.readdirSync('/proc').filter((d) => /^\d+$/.test(d)).map(Number).filter((p) => {
+    try { return fs.readFileSync(`/proc/${p}/cmdline`, 'utf8').split('\0').includes(tag); } catch { return false; }
+  });
+  const pause = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
+  /** @param {string} tag @param {(c: import('node:child_process').ChildProcess) => void} kill @returns {Promise<number>} */
+  const leftAfter = async (tag, kill) => {
+    const c = spawn(bwrap, ['--unshare-user', '--unshare-pid', '--as-pid-1', '--dev-bind', '/', '/', '--proc', '/proc', '--', 'sleep', tag], { stdio: 'ignore' });
+    for (const t0 = Date.now(); alive(tag).length < 2 && Date.now() - t0 < 5000;) await pause(10); // bwrap AND its pid 1
+    kill(c);
+    await pause(500);
+    const left = alive(tag);
+    // ours (unique tag), by exact pid: TERM, then KILL — a pid-namespace init ignores TERM
+    for (const p of left) { try { process.kill(p, 'SIGTERM'); } catch { /* gone */ } }
+    if (left.length) { await pause(200); for (const p of alive(tag)) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } }
+    return left.length;
+  };
+  const tag = `33.${process.pid}${Date.now() % 100000}`;
+  const left = await leftAfter(tag, (c) => {
+    const fwd = forwardSignalsPastUnshare(() => false);
+    try { fwd.attach(c); process.emit('SIGHUP', 'SIGHUP'); assert.equal(fwd.early(), true); } finally { fwd.remove(); }
+  });
+  assert.equal(left, 0, `${left} process(es) of the namespace outlived the early teardown`);
+  // CONTROL: SIGKILL to that bwrap ALONE leaves its pid 1 behind — the arm can fail
+  const ctl = await leftAfter(`34.${process.pid}${Date.now() % 100000}`, (c) => { c.kill('SIGKILL'); });
+  assert.ok(ctl > 0, 'control: SIGKILL of the creator alone took its pid 1 with it — the arm proves nothing');
 });
 
 /**

@@ -315,7 +315,7 @@ the masks:
 | `--unshare-pid --as-pid-1` | `--pid --fork` | row 3; pid 1 is OUR reaping bash, as under unshare. Without `--as-pid-1` bwrap's own reaper is pid 1 and the harness's forwarding past the creator reaches it, not bash |
 | `--proc /proc` | `--mount-proc` | a procfs of the new PID namespace (row 3) |
 | `--dev-bind / /` | `-m` | the caller's tree, as `unshare -m` gives it. ⚠ *Measured:* `--bind / /` makes it `nodev`, and `/dev/null` answers EACCES |
-| `--die-with-parent` | `--kill-child` | the namespace dies with bwrap — and with bwrap's PARENT, the harness (stronger: a harness killed under unshare leaves unshare running). The early-signal SIGKILL of the creator (`forwardSignalsPastUnshare`) relies on it |
+| `--die-with-parent` | `--kill-child` | the namespace dies with bwrap — and with bwrap's PARENT, the harness (stronger: a harness killed under unshare leaves unshare running). ⛔ NOT enough in the early window: bwrap's child sets it only just before it execs (difference 6) |
 | `--new-session` | (none) | the privileged halves hold no controlling terminal either. Under unshare they keep it (12b: "ancestors with a tty 2, capless 0"); under bwrap, 0. A strengthening, not a row: the shared chain's setsid carries 12b on both. ⚠ Since bwrap is spawned `detached` (difference 5) this flag is a SECOND layer: either one alone keeps the bwrap-only arm green, both gone turn it red (measured) |
 
 ⛔ **Not `--unshare-all`**: its user and cgroup parts are the `-try` variants, so a namespace bwrap
@@ -344,6 +344,38 @@ Chromium's sandbox, the nested path's drop).
    rc 7; bwrap: nothing). ⇒ bwrap is spawned in a session of its own (`detached`), so a terminal's
    signals reach only `isolated`, which forwards them past the creator exactly as past unshare.
    *Arm:* a group Ctrl-C reaches the command's INT trap, rc 7, under both creators.
+6. ⛔ **The early window: the command ran after the caller had died by its TERM (fifth review, F1–F3).**
+   A TERM before the inner side reports in SIGKILLed the creator, which under `unshare --kill-child`
+   takes the namespace with it: unshare's child sets PDEATHSIG at once. bwrap's child does not. It
+   blocks in `read(child_wait_fd)` until bwrap writes it, and sets PR_SET_PDEATHSIG only just before
+   it execs (bubblewrap.c v0.11.0). So:
+   * bwrap killed BEFORE its write: the child waits for ever, as a pid-namespace init that ignores TERM,
+     holding the caller's stdio. `isolated` HUNG (F2: seen 3 times, once in the pinned depth suite).
+   * bwrap killed AFTER the write: the child went on with no parent to die with. The harness lived
+     until its pipes closed, so the inner half's `started` reached it, and the command ran. *Measured
+     (the review's reproducer, `race2.cjs`):* ranAfterTerm 24/30 under bwrap, 0/20 under unshare.
+   * The arm did not see it (F3): its probe counted "died by TERM" before it looked for RAN.
+
+   Two layers close it, both backend-agnostic:
+   * **(A) teardown** (`killCreatorTree`): SIGSTOP the creator and wait until it IS stopped. It can then
+     neither fork nor write, and a fork in flight restarts. Then SIGKILL each of its children and then
+     the creator. SIGKILL from the parent namespace reaches a pid-namespace init, and the kernel then
+     kills every process in it.
+   * **(B) the go-handshake** (`statusChannel`, `awaitGo`): the far side reports `started` and then
+     waits for `go` on the status pipe before it starts the command. The harness answers only if no
+     early signal came first; one thread decides, so it is one or the other. On an early signal the
+     harness also closes its end, so a survivor of (A) reads EOF and exits with nothing started.
+     EOF, or anything other than `go`, means the command never starts. The nested path's pid-1 helper
+     does the same.
+
+   *Measured after:* ranAfterTerm 0/30 under bwrap (orphans 0, hung 0) and 0/20 under unshare.
+   *Arms:* the early-TERM arms judge RAN first, and assert nothing is left by tag and no run hangs.
+   The GO arm freezes the harness (SIGSTOP) once the inner half exists, and keeps it frozen until the
+   inner half sits in `read` on the status pipe. The command must not start, and once the harness is
+   SIGKILLed the run ends with nothing left, under both creators. The
+   teardown arm: a raw bwrap without `--die-with-parent` whose pid 1 outlives a SIGKILL of bwrap
+   alone does not outlive the early teardown. Sabotage: (A) off → the teardown arm is red (B16), and
+   (B) off → the GO arm is red (B17).
 
 **The probe** is side-effect free, and each step is a NAMED reason:
 
@@ -544,4 +576,13 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with b
   caught; `--new-session` is caught only together with the detach. One wired consumer was run through
   a one-consumer `--against-head --scratch` gate pinned to bwrap: PASS, and its log is identical to the
   unshare run apart from the backend.
+* **Fifth review of phase 2 (2026-10-12): the early window (§2a difference 6).** The command ran after the
+  caller died by an early TERM, and `isolated` could hang. Closed by the teardown and the go-handshake
+  on both creators (B16, B17).
+* **Residual (fifth review): the harness SIGKILLed during bwrap's setup.** With the handshake the command
+  never runs. A leak remains possible in one window: the harness dies between bwrap's own
+  `prctl(PR_SET_PDEATHSIG)` and its child_wait_fd write, a few syscalls. That would leave bwrap's child
+  blocked in `read`, as a pid-namespace init holding the caller's stdio, and nothing in it can be
+  signalled except by SIGKILL. *Measured:* 160 harness SIGKILLs spread over the setup window gave
+  0 runs, 0 hangs and 0 leaks.
 * **v0.35.0 phase 3 — docker (§3, §3a):** not started.

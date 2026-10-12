@@ -270,6 +270,26 @@ mount; a no-op under unshare) and READS BACK that no mount carries a `shared:` o
 world mounts under a SHARED dir after each path starts is never listed inside. Control: a raw
 `unshare -m --propagation=slave` sees it.
 
+### ⛔ An early signal under bwrap: the command ran after the caller had died (fifth review, F1–F3)
+
+* **What was wrong:** a TERM that came before the inner side reported in SIGKILLed bwrap. bwrap's
+  child (pid 1 of the new PID namespace) sets PDEATHSIG only just before it execs, so it either went
+  on and ran the command after `isolated` had died by the TERM, or, killed before bwrap released it,
+  waited for ever holding the caller's stdio. The second case is a hang.
+  *Measured with the review's reproducer:* the command ran after the TERM in 24 of 30 runs under
+  bwrap, with 12 runs leaving orphans. Under unshare it was 0 of 20.
+* **Why the arm missed it:** its probe counted "died by TERM" before it looked for the command's
+  output.
+* **Fix, two layers, on both backends and both paths:**
+  * the early path tears the creator down with its namespace: STOP it, SIGKILL its children, then it;
+  * the command starts only on a `go` the harness sends back on the status pipe, and only if no early
+    signal came first. If the harness dies first, the far side reads EOF and starts nothing.
+* *After:* 0 of 30 under bwrap (orphans 0, hung 0), and 0 of 20 under unshare.
+* **Arms:** the early-TERM arms judge the command's output first and assert nothing is left and
+  nothing hangs. A GO arm freezes the harness once the inner half exists: the command does not start,
+  and a SIGKILL of the harness ends the run with nothing left. A teardown arm covers a pid 1 that
+  outlives a SIGKILL of its creator.
+
 ### v0.34.0 pre-tag review follow-ups
 
 * **Row 12b's TIOCSTI half could not fail where `dev.tty.legacy_tiocsti=0`.** The kernel answers EIO
@@ -302,6 +322,10 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   * Its `bwrap-userns-restrict` profile, where enabled, strips capabilities inside (not measured here).
   * The one class where bwrap runs and unshare cannot is an admin AppArmor profile granting `userns,`
     to `/usr/bin/bwrap` (not measured). That lane waits for docker.
+* **A harness SIGKILLed in one narrow part of bwrap's setup could still leave a process behind.** The
+  window is between bwrap's own PDEATHSIG and its release of the child: a few syscalls. The command
+  never runs there (it needs `go`), but bwrap's child would stay blocked, holding the caller's stdio.
+  *Measured:* 0 leaks in 160 harness SIGKILLs spread over the setup window (ib4k §6).
 * **Measured on one host only:** bubblewrap 0.11.2, kernel 7.1, no AppArmor. Older bubblewraps are not
   measured. The AppArmor profile behaviour above comes from the profile's design, not a run.
 * **No `WEBCTL_BWRAP_BIN`.** A host that needs a dedicated bwrap must ask for one, with a measurement.
