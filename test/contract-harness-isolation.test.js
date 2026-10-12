@@ -4225,19 +4225,31 @@ test('⛔ Ctrl-C (INT to the GROUP) reaches the command\'s OWN INT trap — rc 7
   }
 });
 
-// ⭐ Exit codes and forwarding, per creator (webctl:base, point 4): INT 130, TERM 143, HUP 129 —
+// ⭐ Exit codes and forwarding, per creator (webctl:base, point 4): INT 130, TERM 143, HUP 129, QUIT 131 —
 //   (a) the command killed by the signal itself → `isolated` exits 128+n;
 //   (b) the signal sent to the `isolated` process → forwarded to the command, which dies by it, and `isolated`
 //       DIES BY the same signal (so its caller's shell reports 128+n and stops, as for an un-isolated command).
-const EXIT_SIGNALS = /** @type {[NodeJS.Signals, number][]} */ ([['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]);
-test('⭐ exit codes under unshare AND bwrap: a command killed by INT/TERM/HUP → 130/143/129; the signal sent to `isolated` → it dies by it', needsBwrap, async () => {
+// ⛔ (b) used to be judged by the harness's death alone — VACUOUS (fifth review, sabotage C-fwd2): a harness that
+// re-raised the signal on itself WITHOUT forwarding it stayed green on both creators. ⇒ The command PROVES it got
+// the signal: its handler prints `GOT-<SIG>`, restores the default and kills itself with it. ⚠ node, not sh: bash
+// ignores QUIT for itself, `trap - QUIT` included (measured: `kill -s QUIT $$` then left it running). QUIT (forwarded
+// since v0.35.0) runs under `ulimit -c 0`: its default is a core dump — of the command and, re-raised, of the harness.
+const EXIT_SIGNALS = /** @type {[NodeJS.Signals, number][]} */ ([['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129], ['SIGQUIT', 131]]);
+/** node source: on argv[1] (e.g. SIGTERM) print GOT-<name>, restore the default and die by it; READY first. */
+const PROVE_AND_DIE = 'const s = process.argv[1]; process.on(s, () => { console.log("GOT-" + s.slice(3)); process.removeAllListeners(s); '
+  + 'process.kill(process.pid, s); }); console.log("READY"); setTimeout(() => {}, 20000);';
+test('⭐ exit codes under unshare AND bwrap: a command killed by INT/TERM/HUP/QUIT → 130/143/129/131; the signal sent to `isolated` → FORWARDED (the command says so) and it dies by it', needsBwrap, async () => {
+  const noCore = (/** @type {string[]} */ argv) => ['bash', '-c', 'ulimit -c 0; exec "$@"', 'bash', ...argv];
   for (const backend of ['unshare', 'bwrap']) {
     const pin = { WEBCTL_ISOLATION_BACKEND: backend };
     for (const [sig, code] of EXIT_SIGNALS) {
-      const self = await run(['isolated', '--', 'sh', '-c', `kill -s ${sig.slice(3)} $$`], pin);
+      const n = sig.slice(3);
+      const self = await run(['isolated', '--', 'bash', '-c', 'ulimit -c 0; exec "$0" -e "process.kill(process.pid, process.argv[1])" "$1"',
+        process.execPath, sig], pin);
       assert.equal(self.status, code, `${backend}: a command killed by ${sig} → ${self.status}, not ${code}:\n${self.stderr}`);
       assert.match(self.stderr, new RegExp(`; backend: ${backend}; `), `${backend}: not run under it`);
-      const fwd = await termAfterReady([process.execPath, TOOL, 'isolated', '--', 'sh', '-c', 'echo READY; exec sleep 20'], pin, sig);
+      const fwd = await termAfterReady(noCore([process.execPath, TOOL, 'isolated', '--', process.execPath, '-e', PROVE_AND_DIE, sig]), pin, sig);
+      assert.match(fwd.stdout, new RegExp(`^GOT-${n}$`, 'm'), `${backend}: ${sig} to isolated never reached the command:\n${fwd.stdout}${fwd.stderr}`);
       assert.equal(fwd.signal, sig, `${backend}: ${sig} to isolated → status ${fwd.status} signal ${fwd.signal}, not death by ${sig}:\n${fwd.stderr}`);
     }
   }

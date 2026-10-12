@@ -247,9 +247,13 @@ does bwrap run where unshare cannot. Docker is phase 3. Harness and tests only; 
   INT trap never ran (found by sabotage, measured). bwrap is therefore spawned in a session of its own;
   `isolated` forwards the signal. Arm: group Ctrl-C → `GOT-INT`, rc 7, under both backends.
 * **Measured under the pin, not only in the table:** base's whole isolation depth suite runs green with
-  `WEBCTL_ISOLATION_BACKEND=bwrap`. Exit codes match unshare's: a command killed by INT, TERM or HUP
-  gives 130, 143 or 129, and the same signal sent to `isolated` makes it die by that signal. Ctrl-C on
-  a loop and kill(0) behave as under unshare.
+  `WEBCTL_ISOLATION_BACKEND=bwrap`. On both backends, the arms show:
+  * a command killed by INT, TERM, HUP or QUIT gives 130, 143, 129 or 131;
+  * the same signal sent to `isolated` REACHES the command, whose own handler prints it, and `isolated`
+    then dies by that signal. (Fifth review: this arm used to judge only the death. A harness that
+    re-raised the signal without forwarding it passed it.)
+  * a group Ctrl-C stops a shell loop;
+  * the command's `kill(0)` does not reach its caller's process group (row 3).
   One difference: bwrap sets no_new_privs for the whole sandbox, so a broken `setpriv` cannot remove
   it there.
 * **Stronger than unshare in one place.** `--new-session` means pid 1 and the inner half hold no

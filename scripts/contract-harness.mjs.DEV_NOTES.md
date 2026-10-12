@@ -2012,6 +2012,17 @@ running). Such a command rightly lives through a forwarded QUIT, and so does the
 |---|---|---|
 | B21 | no `setpriv --pdeathsig` in front of unshare (QUIT forwarded) | the per-signal arm: `unshare SIGUSR2: … outlived the harness` |
 
+**Item 5, the exit-code arm's forward half was VACUOUS.** The review's sabotage C-fwd2 makes the harness
+re-raise the signal on itself without forwarding it, and the arm stayed green on both backends: it
+judged only the harness's death. Now the command proves receipt. A node prover (bash ignores QUIT
+for itself, above) prints `GOT-<SIG>`, restores the default and dies by it. QUIT joins the list,
+under `ulimit -c 0`.
+
+| # | sabotage | caught by |
+|---|---|---|
+| C-fwd2 | the harness re-raises a forwarded signal on itself WITHOUT forwarding it (the review's sabotage, re-run) | the exit-code arm: `unshare: SIGINT to isolated never reached the command` (green before this change) |
+| B20 | QUIT not forwarded (dropped from FORWARDED_SIGNALS; the parent-death signal kept) | the exit-code arm: `unshare: SIGQUIT to isolated never reached the command`. The per-signal arm stays green: the harness dies by QUIT and takes the namespace with it, so nothing outlives it |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
