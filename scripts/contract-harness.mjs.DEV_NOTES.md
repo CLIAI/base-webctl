@@ -1879,6 +1879,13 @@ parent dead by SIGINT. The existing Ctrl-C arms were green on bwrap: they check 
 a SIGKILL stops it. ⇒ bwrap is spawned `detached`; new arm (both creators): a group Ctrl-C reaches the
 command's own INT trap, rc 7. RED on 77ea37e for bwrap (unshare green), GREEN after.
 
+**A consumer through the gate, pinned.** `WEBCTL_CONSUMERS_FILE=<one wired consumer>
+WEBCTL_ISOLATION_BACKEND=bwrap test-all-consumers.sh --against-head --scratch` gave PASS, `isolation:
+"bwrap"` in its envelope and `isolation backends: bwrap=1` (35 s). Unpinned it gave the same with
+unshare (33 s). The two logs differ only in the backend and the nonces. The pin reaches the gate's own
+`isolated` call through the environment; a lane's nested calls inherit it through the `WEBCTL_*`
+allowlist. The full release gate was not run.
+
 **Sabotage (on a copy; `[bwrap]` rows of the table, and the `[bwrap]` depth block where named):**
 
 | # | sabotage | caught by |

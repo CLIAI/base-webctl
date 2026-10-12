@@ -530,6 +530,11 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with b
 * **v0.35.0 follow-ups — done:** the TIOCSTI half judged by `dev.tty.legacy_tiocsti` (a named
   NOT TESTED where it is 0); row 3's kill(0) arm — a sentinel in the caller's process group survives;
   the JSDoc blocks merged.
-* **v0.35.0 phase 2 — bwrap (§2a):** designed. It lands by adding its probe, its run path, and its
-  name to the table's IMPLEMENTED list — the guard test fails until it does.
+* **v0.35.0 phase 2 — bwrap (§2a): implemented (unreleased).** Its probe, its runner (the namespace
+  creator only, spawned detached) and its name in the table's IMPLEMENTED list. Every row passes on all
+  three paths under both creators. Mount propagation is closed for both, and so is the terminal
+  Ctrl-C that SIGKILLed the command under bwrap (difference 5). 15 sabotages (DEV_NOTES B1–B15) are all
+  caught; `--new-session` is caught only together with the detach. One wired consumer was run through
+  a one-consumer `--against-head --scratch` gate pinned to bwrap: PASS, and its log is identical to the
+  unshare run apart from the backend.
 * **v0.35.0 phase 3 — docker (§3, §3a):** not started.
