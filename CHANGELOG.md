@@ -382,8 +382,10 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   * QUIT is forwarded, the command starts only on the harness's `go`, and the namespace dies with the
     harness on both backends.
 
-  Find v0.34-vendored harnesses with "who is below 8". A contract that depends on any of this keys it
-  on `require-generation 8`. `require-generation 7` still gates `; backend:`.
+  It is **9**, not 8: v0.34.1 (a SECURITY patch, the SIGUSR1 fix) took 8, and v0.35.0 contains that fix
+  as well as its own changes. Find v0.34-vendored harnesses with "who is below 9". A contract that
+  depends on any of this keys it on `require-generation 9`. `require-generation 8` still proves the
+  SIGUSR1 fix; `require-generation 7` still gates `; backend:`.
 * **Refusal text where bwrap runs (fifth review, F8).** On a host where unshare's probe fails but bwrap
   runs, a run that then fails reads `NOT RUN: bwrap exited <n> before the isolated side reported in — …`
   or the inner half's own refusal, not v0.33's unshare text. Every shape where NO backend runs still

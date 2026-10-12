@@ -400,15 +400,17 @@ test('guard-live-port: no listener → PASS; a bad port → usage', async () => 
   assert.equal((await run(['guard-live-port', 'abc'])).status, 3);
 });
 
-test('HARNESS_GENERATION is 8 (v0.35.0): `isolated` CHANGED behaviour again (a second backend, a propagation refusal, signal semantics) — `require-generation 7` still gates `; backend:`', async () => {
+test('HARNESS_GENERATION is 9 (v0.35.0, stacked on v0.34.1\'s 8): `isolated` CHANGED behaviour again (a second backend, a propagation refusal, signal semantics) — `require-generation 8` still proves the SIGUSR1 fix, `7` still gates `; backend:`', async () => {
   const r = await run(['generation']);
-  assert.equal(JSON.parse(r.stdout.trim()).generation, 8);
+  assert.equal(JSON.parse(r.stdout.trim()).generation, 9);
   // the shapes lanes copy (CHANGELOG): v0.33.0's `require-generation 6` gates `--pass-env` — still true —
   // and v0.34.0's `require-generation 7` gates anything that matches `; backend:`
   assert.equal((await run(['require-generation', '6'])).status, 0);
   assert.equal((await run(['require-generation', '7'])).status, 0);
+  // v0.34.1's `require-generation 8` is the floor that proves the SIGUSR1 fix is present
   assert.equal((await run(['require-generation', '8'])).status, 0);
-  assert.equal((await run(['require-generation', '9'])).status, 1);
+  assert.equal((await run(['require-generation', '9'])).status, 0);
+  assert.equal((await run(['require-generation', '10'])).status, 1);
 });
 
 // ── isolation-check: the precondition a lane runs INSIDE `isolated` ───────────
@@ -4129,7 +4131,7 @@ test('⛔ importing the harness runs NO verb, even when the importer\'s argv nam
   });
   const res = /** @type {{status:number, stdout:string, stderr:string}} */ (r);
   assert.equal(res.status, 0, res.stdout + res.stderr);
-  assert.equal(res.stdout.trim(), 'IMPORTED 8', 'a verb ran on import');
+  assert.equal(res.stdout.trim(), 'IMPORTED 9', 'a verb ran on import');
   assert.equal(res.stderr, '');
 });
 
@@ -4399,4 +4401,105 @@ test('⛔ a default-fatal signal to `isolated` (HUP INT QUIT TERM USR2 ALRM PIPE
       assert.equal(r.left, 0, `${backend} ${sig}: ${r.left} process(es) of the command outlived the harness (it ended by ${r.how})`);
     }
   }
+});
+
+// ── SIGUSR1: no node half may open its inspector (security, v0.34.1) ─────────
+//
+// ⛔ Node's DEFAULT reaction to SIGUSR1 is an unauthenticated debugger on 127.0.0.1:9229 that
+// evaluates code in the receiving process. Measured on v0.34.0: the isolated command reached the
+// node halves in its PID namespace — the PRIVILEGED `__isolated-inner` among them — and a same-uid
+// process reached the host harness. ⇒ These arms SIGNAL and then READ the kernel's socket tables;
+// they never connect to any port.
+
+/** Does this node arm `--disable-sigusr1` on the re-execs (≥ 22.14)? */
+const USR1_FLAG = process.allowedNodeEnvironmentFlags.has('--disable-sigusr1');
+
+/**
+ * Runs AS THE ISOLATED COMMAND: SIGUSR1 to every pid it can see EXCEPT pid 1, then poll this netns's
+ * /proc/net/tcp{,6} for a LISTEN (0A) row for up to 2.5 s; print what it signalled, how many
+ * listeners appeared, and which targets died. Reads /proc only.
+ * ⚠ pid 1 is the reaping BASH, not node: it has no inspector to open. It is skipped because its
+ * `read -t` loop makes bash catch EVERY fatal signal, so ANY of them from inside (USR1, USR2, ALRM,
+ * PIPE — measured) ends pid 1 and the namespace with it. That is the command ending its own run, a
+ * separate pre-existing residual — not this arm's property.
+ */
+const USR1_PROBE = [
+  'const fs = require("fs");',
+  'const sent = [];',
+  'for (const d of fs.readdirSync("/proc").filter((x) => /^\\d+$/.test(x) && Number(x) !== process.pid && x !== "1")) {',
+  '  let cmd = ""; try { cmd = fs.readFileSync("/proc/" + d + "/cmdline", "utf8").split("\\0").join(" "); } catch {}',
+  '  try { process.kill(Number(d), "SIGUSR1"); sent.push({ pid: Number(d), cmd }); } catch {}',
+  '}',
+  'const listening = () => ["tcp", "tcp6"].flatMap((f) => { try { return fs.readFileSync("/proc/net/" + f, "utf8")',
+  '  .split("\\n").slice(1).filter((l) => l.trim().split(/\\s+/)[3] === "0A"); } catch { return []; } }).length;',
+  'const t0 = Date.now();',
+  'const tick = () => { const n = listening(); if (n === 0 && Date.now() - t0 < 2500) { setTimeout(tick, 100); return; }',
+  '  const dead = sent.filter((p) => { try { process.kill(p.pid, 0); return false; } catch { return true; } }).map((p) => p.pid);',
+  '  console.log("USR1 " + JSON.stringify({ sent, listening: n, dead })); };',
+  'setTimeout(tick, 100);',
+].join('\n');
+
+/**
+ * Assert one USR1_PROBE result: it reached the named halves (not vacuous), no listener appeared,
+ * every target survived, and the re-exec'd halves carry --disable-sigusr1 where node supports it.
+ * @param {{status:number, stdout:string, stderr:string}} r @param {string[]} halves @param {string} label
+ */
+function assertUsr1Swallowed(r, halves, label) {
+  const line = (r.stdout.match(/^USR1 (.*)$/m) || [])[1];
+  assert.ok(line, `${label}: the probe printed nothing:\n${r.stdout}${r.stderr}`);
+  const got = /** @type {{sent: {pid:number, cmd:string}[], listening:number, dead:number[]}} */ (JSON.parse(line));
+  const hits = halves.map((h) => got.sent.find((p) => p.cmd.split(' ').includes(h)));
+  halves.forEach((h, i) => assert.ok(hits[i], `${label}: the probe did not reach the ${h} half (vacuous):\n${line}`));
+  // behaviour FIRST, so a missing layer is never reported as a mere argv mismatch
+  assert.equal(got.listening, 0, `${label}: a LISTENING socket appeared after SIGUSR1 — a node half opened its inspector:\n${r.stderr}`);
+  assert.deepEqual(got.dead, [], `${label}: a signalled half DIED of SIGUSR1:\n${line}`);
+  assert.doesNotMatch(r.stderr, /Debugger listening/, `${label}: a node half announced its inspector`);
+  assert.equal(r.status, 0, `${label}: the run did not complete normally:\n${r.stdout}${r.stderr}`);
+  // the SECOND layer (the flag) — the listener alone already passes everything above
+  if (USR1_FLAG) {
+    halves.forEach((h, i) => assert.ok(hits[i]?.cmd.split(' ').includes('--disable-sigusr1'),
+      `${label}: ${h} was re-exec'd WITHOUT --disable-sigusr1:\n${hits[i]?.cmd}`));
+  }
+}
+
+test('⛔ SIGUSR1 from the isolated command to every pid it sees (but pid 1) opens NO inspector and kills nothing — fresh, nested and stripped-markers paths', needsIsolation, async () => {
+  const fresh = await run(['isolated', '--', process.execPath, '-e', USR1_PROBE]);
+  assertUsr1Swallowed(fresh, ['__isolated-inner', '__isolated-pid1'], 'fresh');
+  const nested = await run(['isolated', '--', 'sh', '-c', '"$0" "$1" isolated -- "$0" -e "$2"', process.execPath, TOOL, USR1_PROBE]);
+  assertUsr1Swallowed(nested, ['__isolated-pid1'], 'nested');
+  const stripped = await run(['isolated', '--', 'sh', '-c', `env ${STRIP} "$0" "$1" isolated -- "$0" -e "$2"`, process.execPath, TOOL, USR1_PROBE]);
+  assertUsr1Swallowed(stripped, ['__isolated-inner', '__isolated-pid1'], 'stripped');
+});
+
+/** The inodes of every LISTEN (0A) row in this netns's /proc/net/tcp{,6}. */
+function listeningInodes() {
+  return new Set(['tcp', 'tcp6'].flatMap((f) => fs.readFileSync(`/proc/net/${f}`, 'utf8').split('\n').slice(1)
+    .map((l) => l.trim().split(/\s+/)).filter((c) => c[3] === '0A').map((c) => c[9])));
+}
+/** The socket inodes pid holds open (/proc/<pid>/fd → `socket:[N]`). @param {number} pid */
+function socketInodes(pid) {
+  return fs.readdirSync(`/proc/${pid}/fd`).flatMap((fd) => {
+    try { return [fs.readlinkSync(`/proc/${pid}/fd/${fd}`)]; } catch { return []; }
+  }).map((l) => (l.match(/^socket:\[(\d+)\]$/) || [])[1]).filter((x) => !!x);
+}
+
+test('⛔ SIGUSR1 from the host to a running harness opens NO inspector: the harness owns no listening socket, keeps running and ends normally', needsIsolation, async () => {
+  const c = spawn(process.execPath, [TOOL, 'isolated', '--', 'sh', '-c', 'echo READY; sleep 4; echo DONE'], { cwd: ROOT, env: cleanEnv() });
+  let stdout = ''; let stderr = '';
+  c.stderr.on('data', (d) => { stderr += d; });
+  const ready = new Promise((resolve) => c.stdout.on('data', (d) => { stdout += d; if (/^READY$/m.test(stdout)) resolve(undefined); }));
+  const closed = new Promise((resolve) => c.on('close', (code, sig) => resolve({ code, sig })));
+  await Promise.race([ready, closed]);
+  assert.match(stdout, /^READY$/m, `the harness never started its command:\n${stderr}`);
+  const pid = /** @type {number} */ (c.pid);
+  process.kill(pid, 'SIGUSR1');
+  await new Promise((r) => setTimeout(r, 1500));
+  const alive = c.exitCode === null && c.signalCode === null;
+  const owned = alive ? socketInodes(pid).filter((i) => listeningInodes().has(i)) : [];
+  const end = /** @type {{code: number|null, sig: string|null}} */ (await closed);
+  assert.ok(alive, `the harness DIED of SIGUSR1 (${JSON.stringify(end)}):\n${stderr}`);
+  assert.deepEqual(owned, [], `the harness owns a LISTENING socket after SIGUSR1 — its inspector opened:\n${stderr}`);
+  assert.doesNotMatch(stderr, /Debugger listening/, 'the harness announced its inspector');
+  assert.deepEqual(end, { code: 0, sig: null }, `the harness did not end normally:\n${stdout}${stderr}`);
+  assert.match(stdout, /^DONE$/m, 'the command did not run to completion');
 });

@@ -482,10 +482,10 @@ pin is inherited through the `WEBCTL_*` allowlist, so a pinned bwrap outer runs 
 **Verdict and gate.** `…; backend: bwrap` — with `(skipped unshare: <v0.33's reason>)` when unshare's
 probe failed. unshare's own stderr is then printed above the verdict, so the reason's "unshare's own
 message, if any, is above" stays true. The gate reads the backend exactly as before (§4).
-`HARNESS_GENERATION` is **8** (fifth review): no verdict changes meaning, but behaviour does. A host
+`HARNESS_GENERATION` is **9** (fifth review; 8 is v0.34.1's SIGUSR1 fix, which v0.35.0 contains): no verdict changes meaning, but behaviour does. A host
 that refused before may now run with `backend: bwrap` named. There is a new propagation refusal. The
 signal semantics changed (QUIT forwarded, the go-handshake, the early teardown, the creator dying with
-the harness). Lanes find v0.34-vendored harnesses with "who is below 8".
+the harness). Lanes find v0.34-vendored harnesses with "who is below 9".
 
 ## 3. The docker backend — as strong as the namespace one
 
