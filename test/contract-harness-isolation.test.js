@@ -3366,8 +3366,9 @@ const READ_NR = { x64: '0', arm64: '63', ia32: '3', arm: '3' }[process.arch];
   // not finished sending the plan (fd 4), and the run stopped there, before any \`go\` mattered (measured)
   let inner = 0;
   for (const t0 = Date.now(); !inner && Date.now() - t0 < 120000;) {
-    // argv[2]: the creator's and pid 1's argv CONTAIN the inner half's, so \`includes\` would find them first
-    inner = desc(c.pid).find((p) => cmd(p).split('\\0')[2] === '__isolated-inner') || 0;
+    // the verb within argv[1..3] — \`node [--disable-sigusr1] <script> __isolated-inner\` (v0.34.1 added the flag): the
+    // creator's and pid 1's argv CONTAIN the inner half's further on, so a bare \`includes\` would find them first
+    inner = desc(c.pid).find((p) => cmd(p).split('\\0').slice(1, 4).includes('__isolated-inner')) || 0;
     if (!inner) await sleep(1);
   }
   c.kill('SIGSTOP');
@@ -3426,6 +3427,106 @@ test('⛔ GO-HANDSHAKE: the harness FROZEN (SIGSTOP) once the inner half exists 
       assert.equal(m[2], 0, `${backend}: ${m[2]} process(es) carrying the tag outlived the run`);
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ⛔ B4 (sixth review): "never `go` after an early signal" was proven only TOGETHER with the teardown — an early
+// signal kills the creator and closes the status pipe, so the far side dies or reads EOF whatever statusChannel does.
+// ⇒ This arm DISABLES the teardown through runIsolated's import-only seam (never an env var): the creator lives on, the
+// inner half reports `started` — and must still never be answered. CONTROL: the same seam, no early signal → it runs.
+// ⚠ local copies: pidsTagged/descendants are declared further down, and a filtered run can start a test first
+/** Live host pids whose argv has `tag` as one whole argument. @param {string} tag */
+const b4Tagged = (tag) => fs.readdirSync('/proc').filter((d) => /^\d+$/.test(d)).map(Number).filter((p) => {
+  try { return fs.readFileSync(`/proc/${p}/cmdline`, 'utf8').split('\0').includes(tag); } catch { return false; }
+});
+/** Every descendant of `p`. @param {number} p */
+const b4Descendants = (p) => {
+  /** @type {number[]} */ const out = []; const q = [p];
+  while (q.length) {
+    const c = /** @type {number} */ (q.shift());
+    let kids = /** @type {number[]} */ ([]);
+    try { kids = fs.readFileSync(`/proc/${c}/task/${c}/children`, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number); } catch { /* gone */ }
+    out.push(...kids); q.push(...kids);
+  }
+  return out;
+};
+/** Imports the harness and runs `isolated -- <argv>` with the teardown disabled; EARLY=1: an early SIGTERM first. */
+const NO_TEARDOWN_PROBE = `
+const m = await import(process.env.HARNESS_URL);
+const argv = JSON.parse(process.env.CMD);
+m.runIsolated(['--', ...argv], { teardown: () => { console.log('TEARDOWN-SKIPPED'); } }).then((c) => console.log('RESOLVED ' + c));
+// the forwarder is installed in the same tick as the creator's spawn: its SIGTERM listener says the creator exists
+if (process.env.EARLY === '1') {
+  const poll = () => { if (process.listenerCount('SIGTERM') > 0) process.emit('SIGTERM', 'SIGTERM'); else setImmediate(poll); };
+  poll();
+}`;
+/** The syscall number of read(2), for /proc/<pid>/syscall (unknown arch: '' — the WAITING half is not judged). */
+const READ_SYSCALL = { x64: '0', arm64: '63', ia32: '3', arm: '3' }[process.arch] ?? '';
+/**
+ * Run NO_TEARDOWN_PROBE (EARLY or not) with a unique tag in the command; watch up to `ms` for the command's RAN and for
+ * the inner half sitting in read(2) on fd 3 (waiting for `go`). Everything tagged is KILLed after (a pid-namespace
+ * init ignores TERM). @param {boolean} early @param {number} ms
+ * @returns {Promise<{ran: boolean, waiting: boolean, skipped: boolean, out: string, err: string}>}
+ */
+async function noTeardownRun(early, ms) {
+  const tag = `webctl-b4-${process.pid}-${Date.now()}`;
+  const c = spawn(process.execPath, ['--input-type=module', '-e', NO_TEARDOWN_PROBE], { env: cleanEnv({ HARNESS_URL: pathToFileURL(TOOL).href,
+    CMD: JSON.stringify(['sh', '-c', 'echo RAN', tag]), EARLY: early ? '1' : '0' }), stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = ''; let err = '';
+  c.stdout.on('data', (d) => { out += d; });
+  c.stderr.on('data', (d) => { err += d; });
+  const pause = (/** @type {number} */ t) => new Promise((r) => setTimeout(r, t));
+  const innerOf = () => b4Tagged(tag).find((p) => { try { return fs.readFileSync(`/proc/${p}/cmdline`, 'utf8').split('\0').slice(1, 4).includes('__isolated-inner'); } catch { return false; } });
+  const inRead3 = (/** @type {number} */ p) => { try { const f = fs.readFileSync(`/proc/${p}/syscall`, 'utf8').split(' '); return f[0] === READ_SYSCALL && f[1] === '0x3'; } catch { return false; } };
+  let waiting = false;
+  for (const t0 = Date.now(); Date.now() - t0 < ms && !/^RAN$/m.test(out);) {
+    const inner = innerOf();
+    if (inner && READ_SYSCALL && inRead3(inner)) waiting = true;
+    await pause(20);
+  }
+  for (const p of b4Tagged(tag)) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } }
+  c.kill('SIGKILL');
+  await new Promise((r) => { if (c.exitCode !== null || c.signalCode !== null) r(undefined); else c.on('close', () => r(undefined)); });
+  return { ran: /^RAN$/m.test(out), waiting, skipped: /^TEARDOWN-SKIPPED$/m.test(out), out, err };
+}
+
+test('⛔ B4: an EARLY signal with the teardown DISABLED (import-only seam) → the inner half reports in and waits, and is NEVER told `go`: the command does not run — CONTROL: no early signal → it runs', needsIsolation, async () => {
+  const r = await noTeardownRun(true, 6000);
+  assert.ok(r.skipped, `the early signal never reached the teardown (vacuous):\n${r.out}${r.err}`);
+  assert.equal(r.ran, false, `the command RAN after an early signal — statusChannel said \`go\`:\n${r.out}${r.err}`);
+  if (READ_SYSCALL) assert.ok(r.waiting, `the inner half never sat waiting for \`go\` (the arm proves nothing):\n${r.out}${r.err}`);
+  const c = await noTeardownRun(false, 60000);
+  assert.ok(c.ran, `control: with the seam and no early signal the command did not run — the arm cannot fail:\n${c.out}${c.err}`);
+});
+
+// ⛔ B4 (sixth review): the NESTED path's unshare runs under `setpriv --pdeathsig KILL` too (v0.35.0), and nothing
+// failed without it. A nested harness killed by a signal it cannot forward (KILL) left its unshare and the nested
+// namespace running inside the outer one. ⇒ The arm keeps the OUTER run alive past the nested harness's SIGKILL and
+// counts what is left of the nested command meanwhile.
+test('⛔ B4: the NESTED harness SIGKILLed mid-run → nothing of its namespace is left while the OUTER run goes on (`--pdeathsig` on the nested unshare)', needsIsolation, async () => {
+  const tag = `41.${process.pid}${Date.now() % 100000}`;
+  // ⚠ the tag only INSIDE script strings: the one process carrying it as a whole argument is the nested `sleep`
+  const c = spawn(process.execPath, [TOOL, 'isolated', '--', 'sh', '-c', `"$0" "$1" isolated -- sh -c "echo READY; exec sleep ${tag}"; echo NESTED-ENDED; sleep 4`,
+    process.execPath, TOOL], { env: cleanEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  c.stdout.on('data', (d) => { out += d; });
+  const pause = (/** @type {number} */ t) => new Promise((r) => setTimeout(r, t));
+  for (const t0 = Date.now(); !/READY/.test(out) && Date.now() - t0 < 120000;) await pause(20);
+  assert.match(out, /READY/, 'the nested command never started');
+  // the NESTED harness: `node <tool> isolated …` below the outer one (the inner halves carry other verbs)
+  const nested = b4Descendants(c.pid ?? 0).find((p) => { try { return fs.readFileSync(`/proc/${p}/cmdline`, 'utf8').split('\0').slice(1, 4).includes('isolated'); } catch { return false; } });
+  assert.ok(nested, 'the nested harness was not found');
+  const before = b4Tagged(tag).length;
+  process.kill(/** @type {number} */ (nested), 'SIGKILL');
+  for (const t0 = Date.now(); !/NESTED-ENDED/.test(out) && Date.now() - t0 < 10000;) await pause(20);
+  await pause(1500);
+  const outerAlive = c.exitCode === null && c.signalCode === null;
+  const left = b4Tagged(tag);
+  for (const p of left) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } }
+  c.kill('SIGTERM');
+  await new Promise((r) => { if (c.exitCode !== null || c.signalCode !== null) r(undefined); else c.on('close', () => r(undefined)); });
+  assert.ok(before > 0, 'the nested command was not running before the kill (vacuous)');
+  assert.ok(outerAlive, 'the outer run had already ended — its own teardown would hide a leftover');
+  assert.equal(left.length, 0, `${left.length} process(es) of the nested namespace outlived its SIGKILLed harness`);
 });
 
 test('isolated: a command killed by a signal → 128+signal (143 for SIGTERM)', needsIsolation, async () => {
@@ -3831,6 +3932,41 @@ test('⭐ logic: a signal AFTER `started` to an unshare whose pid 1 is gone is N
     }
   } finally { sleeper.kill('SIGTERM'); }
   assert.equal(process.listenerCount('SIGHUP'), 0, 'remove() left a handler installed');
+});
+
+// ⛔ B3 (sixth review): the teardown and the post-`started` forward signalled the creator's pid, and its children, even
+// once node had REAPED the creator — a pid the kernel may already have given to another process. ⇒ A creator whose
+// exitCode/signalCode is set is never signalled, nor anything read as its child. The "creator" here is a stand-in
+// whose pid is a LIVE process of ours (and whose child is one too): any signal the forwarder sends lands on them.
+test('⛔ logic (B3): a REAPED creator (exitCode set) is never torn down, and its pid\'s children are never forwarded to — before and after `started`', async () => {
+  // ⚠ local: this file's childPids is declared further down, and a test can start before the module finishes
+  const childPids = (/** @type {number} */ p) => { try { return fs.readFileSync(`/proc/${p}/task/${p}/children`, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number); } catch { return []; } };
+  const live = spawn('sh', ['-c', 'sleep 5 & wait'], { stdio: 'ignore' }); // live, with a child of its own
+  const pause = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
+  for (const t0 = Date.now(); childPids(live.pid ?? 0).length === 0 && Date.now() - t0 < 5000;) await pause(10);
+  const kid = childPids(live.pid ?? 0)[0];
+  const state = (/** @type {number} */ p) => { try { const st = fs.readFileSync(`/proc/${p}/stat`, 'utf8'); return st.slice(st.lastIndexOf(')') + 2, st.lastIndexOf(')') + 3); } catch { return 'X'; } };
+  try {
+    assert.ok(kid, 'the stand-in has no child (vacuous)');
+    for (const started of [false, true]) {
+      const fwd = forwardSignalsPastUnshare(() => started);
+      try {
+        fwd.attach(/** @type {any} */ ({ pid: live.pid, exitCode: 0, signalCode: null, stdio: [], kill: () => { throw new Error('kill() on a reaped creator'); } }));
+        process.emit('SIGHUP', 'SIGHUP');
+        await pause(200);
+        assert.match(state(live.pid ?? 0), /^[SR]$/, `started=${started}: the reaped creator's pid was signalled (state ${state(live.pid ?? 0)})`);
+        assert.match(state(kid), /^[SR]$/, `started=${started}: a child of the reaped creator's pid was signalled (state ${state(kid)})`);
+      } finally { fwd.remove(); }
+    }
+    // CONTROL: the same stand-in NOT reaped, after `started` → its child IS forwarded to (the arm can fail)
+    const fwd = forwardSignalsPastUnshare(() => true);
+    try {
+      fwd.attach(/** @type {any} */ ({ pid: live.pid, exitCode: null, signalCode: null, stdio: [], kill: () => {} }));
+      process.emit('SIGHUP', 'SIGHUP');
+      for (const t0 = Date.now(); state(kid) !== 'X' && state(kid) !== 'Z' && Date.now() - t0 < 3000;) await pause(20);
+      assert.match(state(kid), /^[XZ]$/, 'control: a live creator\'s child was not forwarded to — the arm cannot fail');
+    } finally { fwd.remove(); }
+  } finally { live.kill('SIGKILL'); if (kid) { try { process.kill(kid, 'SIGKILL'); } catch { /* gone */ } } }
 });
 
 // ⛔ F2 (fifth review): an EARLY signal SIGKILLed the creator ALONE. bwrap's child — pid 1 of its PID namespace —
@@ -4333,6 +4469,141 @@ test('⛔ F4: TERM to the harness, its creator and every descendant AT ONCE (a c
     assert.match(r.stderr, new RegExp(`; backend: ${backend}; `), `${backend}: not run under it`);
     assert.equal(r.left, 0, `${backend}: ${r.left} process(es) outlived the run`);
   }
+});
+
+// ── a stop signal to the caller's GROUP, or to EVERY pid of the run (sixth review, B1 + B2) ──────────────────────
+//
+// ⛔ Measured by the review, under unshare only: a QUIT or HUP to the caller's process group (a terminal's Ctrl-\,
+// a hangup) killed the unshare creator — `unshare --fork` blocks INT and TERM but neither ignores nor blocks those —
+// and `--kill-child` then ended the command mid-trap: rc 131/129, CLEANED never printed. And the INT/TERM it did
+// survive reached pid 1 and the inner half DIRECTLY (they were in the caller's group) as well as forwarded, so the
+// command got ONE group signal 2–3 times. bwrap (detached, shielded) was fine. ⇒ The unshare creator is detached and
+// shielded too; a terminal-group signal reaches only the harness and is forwarded ONCE.
+// ⚠ node, not sh, as the command: bash ignores QUIT for itself. Runs under `ulimit -c 0` (QUIT dumps core by default).
+/** node: on argv[1] print GOT-<name> (every time), then after 0.5 s print CLEANED and exit 7; READY first. */
+const TRAP_ONCE_7 = 'const s = process.argv[1]; let t = null; process.on(s, () => { console.log("GOT-" + s.slice(3)); '
+  + 't ??= setTimeout(() => { console.log("CLEANED"); process.exit(7); }, 500); }); console.log("READY"); setTimeout(() => {}, 20000);';
+/**
+ * `isolated -- node -e TRAP_ONCE_7 <sig> <tag>` under `backend`, the harness a process-GROUP leader of its own; once
+ * READY shows, `sig` to `who`: 'group' — kill(-harness) (a terminal's signal to its foreground group) — or 'all' — the
+ * harness and every descendant by pid, at once (what an every-pid stop does; no cgroup is made). A run still going
+ * 15 s later is KILLed by tag (`hung`); leftovers by tag are TERMed, then KILLed. Resolves with how it ended, the GOT
+ * count, stdout and `left`.
+ * @param {string} backend @param {NodeJS.Signals} sig @param {'group' | 'all'} who
+ * @returns {Promise<{status: number|null, signal: string|null, got: number, stdout: string, stderr: string, hung: boolean, left: number}>}
+ */
+function signalWho(backend, sig, who) {
+  const tag = `webctl-b1-${process.pid}-${Date.now()}`;
+  return new Promise((resolve) => {
+    const c = spawn('bash', ['-c', 'ulimit -c 0; exec "$@"', 'bash', process.execPath, TOOL, 'isolated', '--', process.execPath, '-e', TRAP_ONCE_7, sig, tag],
+      { env: cleanEnv({ WEBCTL_ISOLATION_BACKEND: backend }), detached: true });
+    let stdout = ''; let stderr = ''; let sent = false; let hung = false;
+    const giveUp = () => { hung = true; for (const p of pidsTagged(tag)) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } c.kill('SIGKILL'); };
+    let deadline = setTimeout(giveUp, 180000);
+    c.stderr.on('data', (d) => { stderr += d; });
+    c.stdout.on('data', (d) => {
+      stdout += d;
+      if (sent || !/READY/.test(stdout)) return;
+      sent = true;
+      const pid = c.pid ?? 0;
+      if (who === 'group') { try { process.kill(-pid, sig); } catch { /* gone */ } } else {
+        for (const p of [pid, ...descendants(pid)]) { try { process.kill(p, sig); } catch { /* gone */ } }
+      }
+      clearTimeout(deadline);
+      deadline = setTimeout(giveUp, 15000);
+    });
+    c.on('close', (status, signal) => {
+      clearTimeout(deadline);
+      setTimeout(() => {
+        const left = pidsTagged(tag);
+        for (const p of left) { try { process.kill(p, 'SIGTERM'); } catch { /* gone */ } }
+        setTimeout(() => { for (const p of pidsTagged(tag)) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } }
+          const got = (stdout.match(new RegExp(`^GOT-${sig.slice(3)}$`, 'gm')) || []).length;
+          resolve({ status, signal, got, stdout, stderr, hung, left: left.length }); }, left.length ? 300 : 0);
+      }, 500);
+    });
+  });
+}
+const STOP_SIGNALS = /** @type {NodeJS.Signals[]} */ (['SIGHUP', 'SIGQUIT', 'SIGINT', 'SIGTERM']);
+/** Assert one signalWho result: the trap ran and COMPLETED, rc 7, nothing left. @param {Awaited<ReturnType<typeof signalWho>>} r @param {string} label */
+function assertTrapCompleted(r, label) {
+  assert.equal(r.hung, false, `${label}: still running 15 s after the signal`);
+  assert.ok(r.got >= 1, `${label}: the command's trap never ran:\n${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /^CLEANED$/m, `${label}: the trap was cut short (killed mid-cleanup):\n${r.stdout}`);
+  assert.deepEqual([r.status, r.signal], [7, null], `${label}: ${r.status} ${r.signal}:\n${r.stdout}${r.stderr}`);
+  assert.equal(r.left, 0, `${label}: ${r.left} process(es) outlived the run`);
+}
+
+test('⛔ B1+B2: HUP/QUIT/INT/TERM to the caller\'s process GROUP → the command\'s trap gets it EXACTLY ONCE and completes, rc 7 — unshare AND bwrap', needsIsolation, async () => {
+  for (const backend of bwrapUsable() ? ['unshare', 'bwrap'] : ['unshare']) {
+    for (const sig of STOP_SIGNALS) {
+      const r = await signalWho(backend, sig, 'group');
+      assertTrapCompleted(r, `${backend} group ${sig}`);
+      assert.match(r.stderr, new RegExp(`; backend: ${backend}; `), `${backend}: not run under it`);
+      assert.equal(r.got, 1, `${backend} group ${sig}: the command got it ${r.got} times, not once:\n${r.stdout}`);
+    }
+  }
+});
+
+// ⚠ An every-pid signal reaches each half DIRECTLY as well as forwarded, so the command may get it more than once —
+// standard signals coalesce while pending, so the count varies. MEASURED and documented (ib4k §2a), not asserted:
+// what IS asserted is that every one of them reaches the trap and the trap completes.
+test('⛔ B1: HUP/QUIT/INT/TERM to EVERY pid of the run at once → the command\'s trap runs and completes, rc 7 — unshare AND bwrap', needsIsolation, async (t) => {
+  for (const backend of bwrapUsable() ? ['unshare', 'bwrap'] : ['unshare']) {
+    for (const sig of STOP_SIGNALS) {
+      const r = await signalWho(backend, sig, 'all');
+      assertTrapCompleted(r, `${backend} all-pids ${sig}`);
+      t.diagnostic(`${backend} all-pids ${sig}: GOT ×${r.got}`);
+    }
+  }
+});
+
+// ⛔ B5 (sixth review): the creator's shield was TRUSTED — `env --ignore-signal` exiting 0 in a probe. ⇒ Read back from the
+// HOST side: the running creator's SigIgn must hold TERM, INT, HUP and QUIT, before the harness says `go`.
+const SHIELD_MASK = ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT'].reduce((m, n) => m | (1n << BigInt(os.constants.signals[/** @type {NodeJS.Signals} */ (n)] - 1)), 0n);
+test('⛔ B5: the RUNNING creator ignores TERM, INT, HUP and QUIT — read back from the host in /proc/<creator>/status — unshare AND bwrap', needsIsolation, async () => {
+  for (const backend of bwrapUsable() ? ['unshare', 'bwrap'] : ['unshare']) {
+    const c = spawn(process.execPath, [TOOL, 'isolated', '--', 'sh', '-c', 'echo READY; sleep 1'], { env: cleanEnv({ WEBCTL_ISOLATION_BACKEND: backend }) });
+    let out = ''; let err = ''; let ign = '';
+    c.stderr.on('data', (d) => { err += d; });
+    c.stdout.on('data', (d) => {
+      out += d;
+      if (ign || !/READY/.test(out)) return;
+      const creator = childPids(c.pid ?? 0)[0];
+      try { ign = (fs.readFileSync(`/proc/${creator}/status`, 'utf8').match(/^SigIgn:\s*([0-9a-f]+)$/m) || [])[1] || '?'; } catch { ign = '?'; }
+    });
+    const code = await new Promise((r) => c.on('close', (k) => r(k)));
+    assert.equal(code, 0, `${backend}: ${err}`);
+    assert.match(err, new RegExp(`; backend: ${backend}; `), `${backend}: not run under it`);
+    assert.match(ign, /^[0-9a-f]+$/, `${backend}: the creator's SigIgn could not be read (${ign})`);
+    assert.equal(BigInt(`0x${ign}`) & SHIELD_MASK, SHIELD_MASK, `${backend}: the creator's SigIgn ${ign} lacks TERM, INT, HUP or QUIT`);
+  }
+});
+
+test('⛔ B5: an `env` that ACCEPTS --ignore-signal and does nothing → the run is REFUSED, the creator read back unshielded, nothing run — unshare AND bwrap — CONTROL: the real env runs', needsIsolation, async (t) => {
+  const dir = tmpdir();
+  try {
+    const realEnv = TOOL_DIRS.map((d) => path.join(d, 'env')).find((p) => fs.existsSync(p)) || '/usr/bin/env';
+    const real = realCopyAt(dir, 'env');
+    const fake = path.join(dir, 'fake-env');
+    // drops --ignore-signal=… / --default-signal=… (exit 0, as if applied) and runs the real env with the rest
+    fs.writeFileSync(fake, '#!/bin/sh\nn=$#; while [ "$n" -gt 0 ]; do a=$1; shift; n=$((n-1)); case "$a" in --ignore-signal=*|--default-signal=*) ;; '
+      + `*) set -- "$@" "$a";; esac; done\nexec ${JSON.stringify(real)} "$@"\n`, { mode: 0o755 });
+    const marker = path.join(dir, 'RAN');
+    for (const backend of bwrapUsable() ? ['unshare', 'bwrap'] : ['unshare']) {
+      const argv = [process.execPath, TOOL, 'isolated', '--keep', dir, '--', 'sh', '-c', 'echo x > "$0"', marker];
+      const r = await withBinds([[realEnv, real], ...overTool(fake, 'env')], argv, { env: cleanEnv({ WEBCTL_ISOLATION_BACKEND: backend }) });
+      if (!r) { t.skip('SKIP (host): cannot bind a fake env in a throwaway `unshare -rm` here'); return; }
+      assert.equal(r.status, 1, `${backend}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`NOT RUN: ${backend} is running WITHOUT its shield \\(read back: SigIgn [0-9a-f]+ lacks TERM, INT, HUP or QUIT\\)`), `${backend}: ${r.stderr}`);
+      assert.equal(fs.existsSync(marker), false, `${backend}: the command RAN under an unshielded creator`);
+      // CONTROL: the same binds minus the fake — the real env — runs
+      const c = await withBinds([[realEnv, real]], argv, { env: cleanEnv({ WEBCTL_ISOLATION_BACKEND: backend }) });
+      assert.equal(c?.status, 0, `${backend} control: ${c?.stdout}${c?.stderr}`);
+      assert.equal(fs.existsSync(marker), true, `${backend} control: the command did not run — the arm cannot fail`);
+      fs.rmSync(marker);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('⛔ F4: TERM to the CREATOR alone → the command is unaffected (it runs to its own end, rc 5) — unshare AND bwrap', needsIsolation, async () => {
