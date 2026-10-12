@@ -421,6 +421,67 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
 * Everything under v0.34.0's "does NOT cover" still applies, on both backends: key descriptions,
   user-writable sysfs attributes, empty child cgroups, stdio that is the terminal, the identity not
   hidden.
+## v0.34.1 — 2026-10-12
+
+**Headline: a SECURITY patch to `isolated` — no node half of it honours SIGUSR1 any more.**
+Harness only; no `lib/` change. **`HARNESS_GENERATION` is 8.** No consumer change expected.
+
+### ⛔ SECURITY
+
+* **The isolated command could make a node half open its debugger, and that reached the
+  PRIVILEGED half.** Node's default reaction to SIGUSR1 is to start its inspector: an
+  unauthenticated debugger on `127.0.0.1:9229` that evaluates code inside the receiving process.
+  The command could signal the node halves in its own PID namespace — among them
+  `__isolated-inner`, which runs as namespace root with full capabilities before any mask is in
+  place. Code evaluated there runs with that half's privileges, inside the sandbox's network
+  namespace.
+* **The host harness opened an unauthenticated loopback debugger on SIGUSR1.** Any process of the
+  same uid could signal a running `isolated`, which then listened on host loopback for the rest of
+  the run.
+* **Fixed, in two layers, each enough on its own:**
+  * every node half — the host entry, `__isolated-inner`, `__isolated-pid1` — installs a no-op
+    SIGUSR1 listener as its first statement (its own, never relying on inheritance);
+  * the three node re-execs (inner, pid 1, the preflight probe) carry `--disable-sigusr1` when
+    the running node accepts it (node ≥ 22.14). The engines floor stays 22.12; on 22.12–22.13 the
+    listener alone protects.
+* **Affected:** every release whose `isolated` has a node inner half — **v0.31.0 through v0.34.0**
+  (v0.31.0 introduced `__isolated-inner`; v0.32.0 added `__isolated-pid1`). The host-side exposure
+  is node's default and applies to the harness in every release, but only `isolated` (v0.31.0+)
+  keeps it running for the length of a command.
+* **What lanes do:** bump the pin to v0.34.1 and raise the floor to `require-generation 8` — it
+  answers 0 only on a harness that has this fix. Nothing a contract matches changed.
+
+### What lanes lose
+
+Expected: **nothing**. Measured against the full suite: no output, verdict or exit code changed.
+Two edges, neither used by any contract we know of:
+
+* `kill -USR1` no longer attaches a debugger to a running harness or to its halves. Debug one with
+  an explicit `node --inspect …` instead.
+* The inner and pid-1 halves' argv now carries `--disable-sigusr1` before the script path (on node
+  ≥ 22.14). A tool that finds a half by argv POSITION (`argv[2] === '__isolated-inner'`) must match
+  by inclusion instead.
+
+### Arms
+
+* Inside, on the fresh, nested and stripped-markers paths: the command sends SIGUSR1 to every pid
+  it can see; no LISTEN row may appear in `/proc/net/tcp{,6}`, every target survives, the run ends
+  0, and the re-exec'd halves carry the flag where node supports it.
+* Host: a running harness is sent SIGUSR1; its socket inodes (`/proc/<pid>/fd`) are mapped against
+  the LISTEN rows — it must own none, survive and end 0. No arm connects to any port.
+* Sabotaged copies: the listener removed (flag kept) is caught by the host arm; the flag removed
+  (listener kept) by the inside arm's argv check; both removed by both arms, on behaviour.
+
+### ⛔ What this does NOT cover
+
+* **The host harness keeps a short window** between node start and its first statement (module
+  loading) in which SIGUSR1 still opens the inspector. Reachable only by the same uid, which can
+  already ptrace the harness. The privileged halves have no such window where the flag is supported.
+* **pid 1 (the reaping bash) dies of a fatal signal sent from inside** — USR1, USR2, ALRM, PIPE,
+  measured — because its `read -t` wait loop makes bash catch them; `--kill-child` then ends the
+  namespace. That is the command ending its own run (it could simply exit), not an escalation; it is
+  pre-existing and left for a later release. The new arm skips pid 1 for this reason.
+* Everything under v0.34.0's "does NOT cover" still applies.
 
 ## v0.34.0 — 2026-10-11
 
