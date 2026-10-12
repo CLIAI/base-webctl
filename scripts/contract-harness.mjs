@@ -1511,10 +1511,16 @@ function unshareBin() {
  * ALRM, any it cannot catch) left unshare and the whole namespace running, the command orphaned (measured on
  * every released `isolated`). The parent-death signal is set on the process the harness spawned, before
  * unshare runs, and survives the exec and unshare's own user namespace (measured: 2 processes left without it,
- * 0 with it). @param {string} unshare @param {string} setpriv @returns {string[]}
+ * 0 with it).
+ * ⛔ SHIELDED like bwrap (v0.35.0, sixth review B1): `env --ignore-signal=CREATOR_SHIELDED` in front of unshare,
+ * `env --default-signal` before pid 1's bash, and spawned `detached`. `unshare --fork` blocks TERM and ignores INT
+ * on its own — but NOT HUP or QUIT (measured: a QUIT or HUP to the caller's process group killed unshare, and
+ * `--kill-child` then ended the command mid-trap, rc 131/129, its cleanup never run). The same reaches it from an
+ * every-pid stop. @param {string} unshare @param {string} setpriv @param {string} env @returns {string[]}
  */
-const unshareCreator = (unshare, setpriv) => [setpriv, '--pdeathsig', 'KILL', '--', unshare, '-rnm', '--uts', '--ipc', '--cgroup',
-  '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private'];
+const unshareCreator = (unshare, setpriv, env) => [setpriv, '--pdeathsig', 'KILL', '--', env, `--ignore-signal=${CREATOR_SHIELDED}`,
+  unshare, '-rnm', '--uts', '--ipc', '--cgroup', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
+  env, `--default-signal=${CREATOR_SHIELDED}`];
 
 /**
  * The env var that PINS one isolation backend (ib4k §2): `unshare`, `bwrap` or `docker`.
@@ -1630,14 +1636,14 @@ const BWRAP_FLAGS = Object.freeze(['--unshare-user', '--uid', '0', '--gid', '0',
  * would inherit the ignore too. The probe reads back that pid 1 CAN trap them (SigCgt, step 73). The harness itself still gets
  * these signals and forwards them (FORWARDED_SIGNALS), exactly as past unshare.
  */
-const BWRAP_SHIELDED = 'TERM,INT,HUP,QUIT';
-/** The signal-mask bits of BWRAP_SHIELDED, as hex for bash's `(( 0x$SigCgt & 0x… ))`. */
-const BWRAP_SHIELDED_MASK = BWRAP_SHIELDED.split(',').reduce((m, n) => m | (1n << BigInt((os.constants.signals[/** @type {NodeJS.Signals} */ (`SIG${n}`)] || 1) - 1)), 0n).toString(16);
+const CREATOR_SHIELDED = 'TERM,INT,HUP,QUIT';
+/** The signal-mask bits of CREATOR_SHIELDED, as hex for bash's `(( 0x$SigCgt & 0x… ))`. */
+const CREATOR_SHIELDED_MASK = CREATOR_SHIELDED.split(',').reduce((m, n) => m | (1n << BigInt((os.constants.signals[/** @type {NodeJS.Signals} */ (`SIG${n}`)] || 1) - 1)), 0n).toString(16);
 /**
- * The namespace creator's argv for bwrap, up to pid 1's bash: bwrap shielded from BWRAP_SHIELDED, pid 1 not.
+ * The namespace creator's argv for bwrap, up to pid 1's bash: bwrap shielded from CREATOR_SHIELDED, pid 1 not.
  * @param {{bin: string, env: string}} bw bwrapBin() @returns {string[]}
  */
-const bwrapCreator = (bw) => [bw.env, `--ignore-signal=${BWRAP_SHIELDED}`, bw.bin, ...BWRAP_FLAGS, '--', bw.env, `--default-signal=${BWRAP_SHIELDED}`];
+const bwrapCreator = (bw) => [bw.env, `--ignore-signal=${CREATOR_SHIELDED}`, bw.bin, ...BWRAP_FLAGS, '--', bw.env, `--default-signal=${CREATOR_SHIELDED}`];
 
 /**
  * The bwrap to run: from the SYSTEM dirs only (no override — ib4k §2a). `why` names the rule broken.
@@ -1646,7 +1652,7 @@ const bwrapCreator = (bw) => [bw.env, `--ignore-signal=${BWRAP_SHIELDED}`, bw.bi
  * user namespace (the drop, row 7). bwrap ≥ 0.11 is built without setuid support by default anyway.
  * ⚠ NOT "isolated never executes a setuid binary" (fifth review, F5): /usr/bin/mount is setuid and runs
  * inside on both creators, where the bit has no effect (its owner, host root, is not mapped in the user namespace).
- * `env`: the one from the system dirs, able to ignore and reset signals (BWRAP_SHIELDED).
+ * `env`: the one from the system dirs, able to ignore and reset signals (CREATOR_SHIELDED).
  * @returns {{bin: string, env: string, why: string}}
  */
 function bwrapBin() {
@@ -1659,16 +1665,45 @@ function bwrapBin() {
         + 'give the namespace root the capabilities the masks need nor the command a nested user namespace (ib4k §2a)' };
     }
   } catch (e) { return { bin: '', env, why: `cannot stat it (${errMsg(e)})` }; }
-  // ⛔ bwrap runs with BWRAP_SHIELDED ignored, and pid 1 gets them back through `env --default-signal` — an `env`
+  // ⛔ bwrap runs with CREATOR_SHIELDED ignored, and pid 1 gets them back through `env --default-signal` — an `env`
   // without it (GNU coreutils < 8.31, or another env) would leave the command unable to trap them: refused, NAMED
-  if (!env) return { bin: '', env, why: noSystemTool('env', 'install coreutils') };
-  const r = spawnSync(env, [`--ignore-signal=${BWRAP_SHIELDED}`, `--default-signal=${BWRAP_SHIELDED}`, SYSTEM_TRUE()], { stdio: 'ignore' });
-  if (r.error || r.status !== 0) {
-    return { bin: '', env, why: 'its `env` cannot reset signal dispositions (`env --ignore-signal` / `--default-signal` need GNU coreutils '
-      + '≥ 8.31): bwrap must run with TERM, INT, HUP and QUIT ignored — a stop signal aimed at it would SIGKILL the command mid-trap — '
-      + 'and pid 1 must get them back, or the command could not trap them' };
+  const why = shieldEnvWhy(env, 'bwrap');
+  return why ? { bin: '', env, why } : { bin, env, why: '' };
+}
+
+/**
+ * '' when the RUNNING creator (`pid`, the process the harness spawned — env exec'd it) IGNORES every CREATOR_SHIELDED
+ * signal, read back from the host side (/proc/<pid>/status SigIgn); else the named reason (sixth review B5). Asked
+ * when the far side reports `started` — long after the exec — and before `go`: a creator that is not shielded is
+ * torn down, nothing is run. ⛔ This, not shieldEnvWhy, is what catches an `env` that ACCEPTS `--ignore-signal` and
+ * does nothing; and an unreadable SigIgn is a refusal too, never "probably fine".
+ * @param {number | undefined} pid @param {string} creator its name, for the reason @returns {string}
+ */
+function creatorShieldWhy(pid, creator) {
+  let ign = '';
+  try { ign = (fs.readFileSync(`/proc/${pid}/status`, 'utf8').match(/^SigIgn:\s*([0-9a-fA-F]+)$/m) || [])[1] || ''; } catch { /* below */ }
+  if (!ign) {
+    return `cannot read ${creator}'s signal dispositions (SigIgn in /proc) — its shield against TERM, INT, HUP and QUIT is unverified`;
   }
-  return { bin, env, why: '' };
+  const want = BigInt(`0x${CREATOR_SHIELDED_MASK}`);
+  if ((BigInt(`0x${ign}`) & want) === want) return '';
+  return `${creator} is running WITHOUT its shield (read back: SigIgn ${ign} lacks TERM, INT, HUP or QUIT) — its \`env\` accepted `
+    + '`--ignore-signal` and did not apply it; a stop signal aimed at the creator would SIGKILL the command mid-trap';
+}
+
+/**
+ * '' when `env` (from the system dirs) can SHIELD a namespace creator — `--ignore-signal` and `--default-signal`
+ * for CREATOR_SHIELDED, accepted — else the named reason. ⚠ "accepted" is all this can see: an `env` that takes
+ * the options and does nothing is caught by the read-back of the creator's SigIgn once it runs (creatorShieldWhy).
+ * @param {string} env @param {string} creator its name, for the reason @returns {string}
+ */
+function shieldEnvWhy(env, creator) {
+  if (!env) return noSystemTool('env', 'install coreutils');
+  const r = spawnSync(env, [`--ignore-signal=${CREATOR_SHIELDED}`, `--default-signal=${CREATOR_SHIELDED}`, SYSTEM_TRUE()], { stdio: 'ignore' });
+  if (!r.error && r.status === 0) return '';
+  return `its \`env\` cannot reset signal dispositions (\`env --ignore-signal\` / \`--default-signal\` need GNU coreutils `
+    + `≥ 8.31): ${creator} must run with TERM, INT, HUP and QUIT ignored — a stop signal aimed at it would SIGKILL the command mid-trap — `
+    + 'and pid 1 must get them back, or the command could not trap them';
 }
 
 /** The AppArmor note for a user namespace refused while its sysctl reads 1 (bwrap's wording too), else ''. @param {string} stderr */
@@ -1698,13 +1733,13 @@ function probeBwrap(bw, ub, ids) {
   if (why) return why;
   const [cr0, ...cr] = bwrapCreator(bw);
   const r = spawnSync(cr0, [...cr, tools.bash, ...PID1_BASH_FLAGS,
-    // 73 FIRST: pid 1 must be able to TRAP every BWRAP_SHIELDED signal — read back from its SigCgt, not trusted.
+    // 73 FIRST: pid 1 must be able to TRAP every CREATOR_SHIELDED signal — read back from its SigCgt, not trusted.
     // ⚠ Not "SigIgn is clear": bash ignores QUIT for ITSELF (measured: SigIgn 0x4 even under `env --default-signal`)
     // and still traps it; a signal ignored at ENTRY is the one it cannot trap (the trap is silently a no-op)
-    `trap : ${BWRAP_SHIELDED.split(',').join(' ')}; c=; while read -r k v; do [ "$k" = SigCgt: ] && c=$v; done < /proc/$$/status; `
-      + `trap - ${BWRAP_SHIELDED.split(',').join(' ')}; [ -n "$c" ] || exit 73; (( (0x$c & 0x$7) == 0x$7 )) || exit 73; `
+    `trap : ${CREATOR_SHIELDED.split(',').join(' ')}; c=; while read -r k v; do [ "$k" = SigCgt: ] && c=$v; done < /proc/$$/status; `
+      + `trap - ${CREATOR_SHIELDED.split(',').join(' ')}; [ -n "$c" ] || exit 73; (( (0x$c & 0x$7) == 0x$7 )) || exit 73; `
       + '"$1" --make-rprivate / || exit 71; "$2" --no-new-privs -- "$3" -U --map-user "$4" --map-group "$5" -- "$6" || exit 72',
-    'webctl-isolated-probe', tools.mount, tools.setpriv, tools.unshare, String(ids.uid), String(ids.gid), SYSTEM_TRUE(), BWRAP_SHIELDED_MASK],
+    'webctl-isolated-probe', tools.mount, tools.setpriv, tools.unshare, String(ids.uid), String(ids.gid), SYSTEM_TRUE(), CREATOR_SHIELDED_MASK],
   { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
   if (r.error) return `cannot run bwrap (${errMsg(r.error)})`;
   if (r.status === 0) return '';
@@ -1749,9 +1784,24 @@ function probeUnshare(ub, seen = { stderr: '' }) {
   const r = spawnSync(ub.bin, ['-rnm', '--uts', '--ipc', '--cgroup', '--pid', '--fork', SYSTEM_TRUE()], { encoding: 'utf8',
     stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
   if (r.error) return `cannot run unshare (${errMsg(r.error)})`;
-  if (r.status === 0) return '';
-  seen.stderr = String(r.stderr || '');
-  return userNamespaceRefusal(seen.stderr) || unshareExitedWhy(r.status ?? r.signal);
+  if (r.status !== 0) {
+    seen.stderr = String(r.stderr || '');
+    return userNamespaceRefusal(seen.stderr) || unshareExitedWhy(r.status ?? r.signal);
+  }
+  // ⛔ the SHIELD (unshareCreator, sixth review B1) — checked only once the kernel said yes, so every refusal
+  // above keeps v0.33's wording. pid 1 must be able to TRAP every CREATOR_SHIELDED signal after the reset:
+  // read back from its SigCgt (as the bwrap probe's step 73), not trusted.
+  const envWhy = shieldEnvWhy(tools.env, 'unshare');
+  if (envWhy) return envWhy;
+  const sh = spawnSync(tools.env, [`--ignore-signal=${CREATOR_SHIELDED}`, ub.bin, '-r', '--fork', tools.env, `--default-signal=${CREATOR_SHIELDED}`,
+    tools.bash, ...PID1_BASH_FLAGS, `trap : ${CREATOR_SHIELDED.split(',').join(' ')}; c=; while read -r k v; do [ "$k" = SigCgt: ] && c=$v; done < /proc/$$/status; `
+      + '[ -n "$c" ] || exit 73; (( (0x$c & 0x$1) == 0x$1 )) || exit 73', 'webctl-isolated-probe', CREATOR_SHIELDED_MASK],
+  { stdio: 'ignore', env: privilegedEnv(process.env) });
+  if (sh.error || sh.status !== 0) {
+    return 'pid 1 cannot trap TERM, INT, HUP or QUIT after `env --default-signal` under unshare (still ignored, or its SigCgt is '
+      + `unreadable; exit ${sh.status ?? sh.signal}) — the command's own traps for them would never run`;
+  }
+  return '';
 }
 /**
  * v0.33's reason for an `unshare` that exited before isolating anything — kept WORD FOR WORD (review
@@ -1793,7 +1843,10 @@ function privilegedTools(ub, nested) {
   /** @type {[string, string[]][]} */
   const lo = nested ? [] : /** @type {[string, string[]][]} */ ([[systemTool('ip'), ['link', 'set', 'lo', 'up']],
     [systemTool('ifconfig'), ['lo', 'up']]]).filter(([b]) => b);
-  const tools = { unshare: ub.bin, bash, setpriv, mount, lo, keyctl, hostname };
+  // the SHIELD of both unshare creators (CREATOR_SHIELDED): the fresh path's (unshareCreator; checked by
+  // probeUnshare) and the nested path's (privilegeDrop with pidns)
+  const env = systemTool('env');
+  const tools = { unshare: ub.bin, bash, setpriv, mount, lo, keyctl, hostname, env };
   if (!bash) return { tools, why: NO_BASH };
   if (!setpriv) {
     return { tools, why: `cannot enter the uid-mapped child user namespace: ${noSystemTool('setpriv', 'install util-linux')}; `
@@ -2007,6 +2060,12 @@ function procState(pid) {
 /** Block this thread for `ms` (no event loop needed: a signal handler's teardown runs to the end). @param {number} ms */
 const sleepMs = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
+/** @typedef {{pid?: number, exitCode?: number | null, signalCode?: NodeJS.Signals | string | null}} ChildLike */
+/** Has node REAPED this child (its pid may already belong to another process)? @param {ChildLike} c */
+const reaped = (c) => typeof c.exitCode === 'number' || typeof c.signalCode === 'string';
+/** Creators killCreatorTree has already torn down (at most once each). @type {WeakSet<object>} */
+const tornDown = new WeakSet();
+
 /**
  * Tear a namespace CREATOR down WITH everything it started — the early-signal path (fifth review, F1 + F2).
  *
@@ -2020,14 +2079,30 @@ const sleepMs = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),
  * restarts once the stop is pending) — wait until it IS stopped (kill(2) returns before), SIGKILL each of its
  * children — SIGKILL from the parent namespace DOES reach a pid-namespace init, and the kernel then kills
  * every process in that namespace — then the creator. Backend-agnostic: under unshare it changes nothing.
- * @param {number | undefined} pid
+ * ⛔ NEVER A PID NODE HAS REAPED (sixth review B3): once node has reaped the creator (exitCode / signalCode set)
+ * its pid is free for the kernel to reuse — a STOP and a KILL to it, and to its "children", would land on
+ * unrelated processes. And AT MOST ONCE per creator: a second early signal finds it torn down already.
+ * @param {ChildLike} creator
  */
-function killCreatorTree(pid) {
-  if (!pid) return;
+function killCreatorTree(creator) {
+  const pid = creator.pid;
+  if (!pid || reaped(creator) || tornDown.has(creator)) return;
+  tornDown.add(creator);
   try { process.kill(pid, 'SIGSTOP'); } catch { return; /* already gone */ }
   for (const until = Date.now() + 500; Date.now() < until && !/^[TtZX]$/.test(procState(pid));) sleepMs(1);
   for (const k of childrenOf(pid)) { try { process.kill(k, 'SIGKILL'); } catch { /* gone */ } }
   try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+}
+
+/**
+ * An EARLY signal's teardown: the creator with its namespace (killCreatorTree) — and never `go` (statusChannel):
+ * our end of the status pipe CLOSED, so a far side the teardown missed reads EOF and exits with nothing started.
+ * It waits for `go`, we wait for its end: without this, one survivor would be a deadlock, not a run.
+ * @param {import('node:child_process').ChildProcess} creator
+ */
+function earlyTeardown(creator) {
+  killCreatorTree(creator);
+  try { /** @type {import('node:net').Socket | undefined} */ (creator.stdio?.[3])?.destroy(); } catch { /* gone */ }
 }
 
 /**
@@ -2050,25 +2125,24 @@ function killCreatorTree(pid) {
  * After `started()`, no child means pid 1 has exited: the signal is recorded, not forwarded, and
  * never "early". Installed BEFORE the spawn (forwarderBeforeSpawn): `attach(unshare)` once it exists.
  * @param {() => boolean} started have we said `go` to the inner side?
+ * @param {(c: import('node:child_process').ChildProcess) => void} [teardown] ⛔ TESTS ONLY (runIsolated's import-only
+ *   seam): what an early signal does to the creator. Default earlyTeardown.
  * @returns {Forwarder & {attach: (c: import('node:child_process').ChildProcess) => void}}
  */
-export function forwardSignalsPastUnshare(started) {
+export function forwardSignalsPastUnshare(started, teardown = earlyTeardown) {
   let early = false;
   const fwd = forwarderBeforeSpawn((s, /** @type {import('node:child_process').ChildProcess} */ unshare) => {
     if (!started()) {
       early = true;
-      killCreatorTree(unshare.pid);
-      // ⛔ and never `go` (statusChannel): our end of the status pipe CLOSED, so a far side the teardown
-      // missed reads EOF and exits with nothing started — it waits for `go`, we wait for its end: without
-      // this, one survivor would be a deadlock, not a run
-      try { /** @type {import('node:net').Socket | undefined} */ (unshare.stdio?.[3])?.destroy(); } catch { /* gone */ }
+      teardown(unshare);
       return;
     }
     // ⛔ AFTER `started`, no child means pid 1 already EXITED — the namespace is ending with the
     // command's own status. It used to count as "early" too: a late TERM (the caller's 2nd or 3rd)
     // SIGKILLed unshare and we died by TERM, losing the trap's exit code (measured: TERM ×3 at
     // 60 ms → 9/25 fresh, 10/25 nested ended by SIGTERM, not 7). Nothing to forward to: done.
-    const kids = unshare.pid ? childrenOf(unshare.pid) : [];
+    // ⛔ …and a REAPED creator's pid may be another process's now (B3): its "children" are not ours to signal
+    const kids = unshare.pid && !reaped(unshare) ? childrenOf(unshare.pid) : [];
     for (const k of kids) { try { process.kill(k, s); } catch { /* gone */ } }
   });
   return { ...fwd, early: () => early };
@@ -2338,11 +2412,13 @@ function usageRefusal(why, command) {
  * (userNamespaceRefusal). WEBCTL_UNSHARE_BIN — an absolute path to an executable — replaces
  * `unshare` in EVERY invocation, so a host can grant userns to one dedicated binary.
  * @param {string[]} a
- * @param {{readHostMounts?: () => MountRow[] | null}} [seam] ⛔ TESTS ONLY, reached by importing this
- *   module (never an env var or a flag): the mount table the cgroup2 `nsdelegate` check reads (F2).
+ * @param {{readHostMounts?: () => MountRow[] | null, teardown?: (c: import('node:child_process').ChildProcess) => void}} [seam]
+ *   ⛔ TESTS ONLY, reached by importing this module (never an env var or a flag): `readHostMounts`, the mount table
+ *   the cgroup2 `nsdelegate` check reads (F2); `teardown`, what an EARLY signal does to the fresh path's creator
+ *   (earlyTeardown) — disabled, it proves the far side never gets `go` on the strength of statusChannel ALONE (B4).
  * @returns {Promise<number>}
  */
-export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
+export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earlyTeardown } = {}) {
   const sep = a.indexOf('--');
   const opts = sep < 0 ? a : a.slice(0, sep);
   const command = sep < 0 ? [] : a.slice(sep + 1);
@@ -2570,11 +2646,11 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
     /** @type {ReturnType<typeof statusChannel> | null} */
     let st = null;
     // ⛔ the forwarder BEFORE the spawn (review finding 5): no tick in which a TERM meets the default
-    const fwd = forwardSignalsPastUnshare(() => !!st && st.started());
+    const fwd = forwardSignalsPastUnshare(() => !!st && st.started(), teardown);
     // THE NAMESPACE CREATOR — the one thing the two runners do differently (ib4k §2a): unshareCreator,
-    // or bwrap with the same namespaces and pid 1 (BWRAP_FLAGS), exec'd with BWRAP_SHIELDED ignored and
-    // pid 1 reset (bwrapCreator). Both die with the harness. Everything after the creator is the same argv.
-    const creator = choice.backend === 'bwrap' ? bwrapCreator(bw) : unshareCreator(ub.bin, tools.setpriv);
+    // or bwrap with the same namespaces and pid 1 (BWRAP_FLAGS). BOTH are exec'd with CREATOR_SHIELDED ignored and
+    // pid 1 reset, and both die with the harness. Everything after the creator is the same argv.
+    const creator = choice.backend === 'bwrap' ? bwrapCreator(bw) : unshareCreator(ub.bin, tools.setpriv, tools.env);
     try {
       child = spawn(creator[0],
         [...creator.slice(1),
@@ -2582,16 +2658,27 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
           process.execPath, ...NO_USR1_FLAG, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         // ⛔ the PRIVILEGED env: unshare, pid 1 and the inner half (namespace root, full caps, before
         // any mask) never see NODE_OPTIONS, LD_*, or any --pass-env (PRIVILEGED_PASS_ENV)
-        // ⛔ bwrap in a SESSION OF ITS OWN (measured): unlike `unshare --fork` (INT ignored, TERM blocked) bwrap
-        // DIES by a terminal's group Ctrl-C, and `--die-with-parent` then SIGKILLed the namespace — the command's
-        // own INT trap never ran. Detached, a terminal's signals reach only us, and we forward them past it.
-        { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'], env: privilegedEnv(cmdEnv), detached: choice.backend === 'bwrap' });
+        // ⛔ the creator in a SESSION OF ITS OWN, on BOTH backends (measured). bwrap DIED by a terminal's group
+        // Ctrl-C, and `--die-with-parent` then SIGKILLed the namespace — the command's own INT trap never ran.
+        // `unshare --fork` only BLOCKS INT and TERM: a group QUIT or HUP killed it the same way (sixth review B1),
+        // and the INT/TERM it survived reached pid 1 and the inner half DIRECTLY as well as forwarded — the
+        // command got one group signal 2–3 times (B2). Detached, a terminal's signals reach only us, and we
+        // forward each ONCE past the creator.
+        { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'], env: privilegedEnv(cmdEnv), detached: true });
     } catch (e) {
       fwd.remove();
       resolve(report('isolated', EXIT.fail, `cannot start ${choice.backend} (${errMsg(e)}); refusing to run on the host`));
       return;
     }
-    const status = statusChannel(child, () => !fwd.early?.());
+    // ⛔ `go` only for a creator READ BACK as shielded (creatorShieldWhy, B5) — else it is torn down like an early signal
+    let shieldWhy = '';
+    const status = statusChannel(child, () => {
+      if (fwd.early?.()) return false;
+      shieldWhy = creatorShieldWhy(child.pid, choice.backend);
+      if (!shieldWhy) return true;
+      earlyTeardown(child);
+      return false;
+    });
     st = status;
     fwd.attach(child);
     const planPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[4]);
@@ -2604,7 +2691,7 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
       if (status.started() && !fwd.early?.()) { resolve(exitOrDieBy(fwd, code, signal)); return; }
       // signalled before the command started (or we killed it then): die by it too — no verdict
       dieByForwarded(fwd);
-      const why = fail ? fail[1]
+      const why = shieldWhy ? shieldWhy : fail ? fail[1]
         : spawnErr ? `${choice.backend} could not be started (${spawnErr})${choice.backend === 'unshare' ? ' — is util-linux installed' : ''}`
           : choice.backend === 'bwrap' ? `bwrap exited ${code ?? signal} before the isolated side reported in — its own message, if any, is above`
             : diagnoseUserNamespace(ub.bin) || unshareExitedWhy(code ?? signal);
@@ -4293,7 +4380,7 @@ function singleMapping(map, inside, outside) {
  * --map-user: util-linux < 2.38), one that ignores its flags, a real uid of 0 — refused.
  * ⚠ Refusals never print the ids: they get pasted into a public repo's logs.
  * @param {{uid: number, gid: number} | null} ids the REAL uid/gid (host namespace)
- * @param {{setpriv: string, unshare: string}} tools ABSOLUTE paths (privilegedTools) — never PATH
+ * @param {{setpriv: string, unshare: string, env?: string}} tools ABSOLUTE paths (privilegedTools) — never PATH
  * @param {{pidns?: boolean}} [o]
  * @returns {{prefix: string[], why: string}}
  */
@@ -4308,10 +4395,18 @@ function privilegeDrop(ids, tools, { pidns = false } = {}) {
   // stay locked, and the command (a non-root uid after exec) holds no capabilities in it.
   // ⛔ both by ABSOLUTE path from the system dirs (privilegedTools) — never the caller's PATH
   const pid = pidns ? ['-m', '--pid', '--fork', '--mount-proc', '--kill-child'] : [];
-  // ⛔ …and that unshare dies with its caller (fifth review, item 4): `unshare --fork` ignores QUIT, so a nested
-  // call killed by a signal it does not forward left its namespace running (unshareCreator, on the fresh path)
-  const prefix = [tools.setpriv, ...(pidns ? ['--pdeathsig', 'KILL'] : []), '--no-new-privs', '--', tools.unshare, '-U', '--map-user', String(ids.uid),
-    '--map-group', String(ids.gid), ...pid, '--'];
+  // ⛔ …and that unshare dies with its caller (fifth review, item 4): it does not die with its parent, so a nested
+  // call killed by a signal it does not forward left its namespace running (unshareCreator, on the fresh path).
+  // ⛔ …and it is SHIELDED as the fresh path's creator is (sixth review B1): `unshare --fork` blocks only INT and
+  // TERM, so an every-pid HUP or QUIT killed it and `--kill-child` ended the nested command mid-trap.
+  if (pidns) {
+    const sw = shieldEnvWhy(tools.env || '', 'the nested unshare');
+    if (sw) return { prefix: [], why: `cannot shield the nested call's unshare: ${sw}` };
+  }
+  const shield = pidns ? [/** @type {string} */ (tools.env), `--ignore-signal=${CREATOR_SHIELDED}`] : [];
+  const reset = pidns ? [/** @type {string} */ (tools.env), `--default-signal=${CREATOR_SHIELDED}`] : [];
+  const prefix = [tools.setpriv, ...(pidns ? ['--pdeathsig', 'KILL'] : []), '--no-new-privs', '--', ...shield, tools.unshare, '-U', '--map-user', String(ids.uid),
+    '--map-group', String(ids.gid), ...pid, '--', ...reset];
   const r = spawnSync(prefix[0], [...prefix.slice(1), process.execPath, ...NO_USR1_FLAG, '-e',
     'const f = require("fs"); process.stdout.write(JSON.stringify({ status: f.readFileSync("/proc/self/status", "utf8"),'
       + ' uidMap: f.readFileSync("/proc/self/uid_map", "utf8"), gidMap: f.readFileSync("/proc/self/gid_map", "utf8"),'
