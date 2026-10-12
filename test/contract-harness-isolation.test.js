@@ -4686,18 +4686,17 @@ test('⛔ a default-fatal signal to `isolated` (HUP INT QUIT TERM USR2 ALRM PIPE
 const USR1_FLAG = process.allowedNodeEnvironmentFlags.has('--disable-sigusr1');
 
 /**
- * Runs AS THE ISOLATED COMMAND: SIGUSR1 to every pid it can see EXCEPT pid 1, then poll this netns's
+ * Runs AS THE ISOLATED COMMAND: SIGUSR1 to every pid it can see — pid 1 included — then poll this netns's
  * /proc/net/tcp{,6} for a LISTEN (0A) row for up to 2.5 s; print what it signalled, how many
  * listeners appeared, and which targets died. Reads /proc only.
- * ⚠ pid 1 is the reaping BASH, not node: it has no inspector to open. It is skipped because its
- * `read -t` loop makes bash catch EVERY fatal signal, so ANY of them from inside (USR1, USR2, ALRM,
- * PIPE — measured) ends pid 1 and the namespace with it. That is the command ending its own run, a
- * separate pre-existing residual — not this arm's property.
+ * ⚠ pid 1 is the reaping BASH, not node: no inspector there. v0.34.1's arm SKIPPED it — its `read -t`
+ * loop made bash catch every fatal signal, so a USR1 from inside ended pid 1 and the run. Since v0.35.0
+ * it swallows them (PID1_SWALLOWED, sixth review B9), so it is signalled, and must survive, like the rest.
  */
 const USR1_PROBE = [
   'const fs = require("fs");',
   'const sent = [];',
-  'for (const d of fs.readdirSync("/proc").filter((x) => /^\\d+$/.test(x) && Number(x) !== process.pid && x !== "1")) {',
+  'for (const d of fs.readdirSync("/proc").filter((x) => /^\\d+$/.test(x) && Number(x) !== process.pid)) {',
   '  let cmd = ""; try { cmd = fs.readFileSync("/proc/" + d + "/cmdline", "utf8").split("\\0").join(" "); } catch {}',
   '  try { process.kill(Number(d), "SIGUSR1"); sent.push({ pid: Number(d), cmd }); } catch {}',
   '}',
@@ -4721,6 +4720,7 @@ function assertUsr1Swallowed(r, halves, label) {
   const got = /** @type {{sent: {pid:number, cmd:string}[], listening:number, dead:number[]}} */ (JSON.parse(line));
   const hits = halves.map((h) => got.sent.find((p) => p.cmd.split(' ').includes(h)));
   halves.forEach((h, i) => assert.ok(hits[i], `${label}: the probe did not reach the ${h} half (vacuous):\n${line}`));
+  assert.ok(got.sent.some((p) => p.pid === 1), `${label}: the probe did not signal pid 1:\n${line}`);
   // behaviour FIRST, so a missing layer is never reported as a mere argv mismatch
   assert.equal(got.listening, 0, `${label}: a LISTENING socket appeared after SIGUSR1 — a node half opened its inspector:\n${r.stderr}`);
   assert.deepEqual(got.dead, [], `${label}: a signalled half DIED of SIGUSR1:\n${line}`);
@@ -4733,13 +4733,32 @@ function assertUsr1Swallowed(r, halves, label) {
   }
 }
 
-test('⛔ SIGUSR1 from the isolated command to every pid it sees (but pid 1) opens NO inspector and kills nothing — fresh, nested and stripped-markers paths', needsIsolation, async () => {
+test('⛔ SIGUSR1 from the isolated command to every pid it sees (pid 1 included) opens NO inspector and kills nothing — fresh, nested and stripped-markers paths', needsIsolation, async () => {
   const fresh = await run(['isolated', '--', process.execPath, '-e', USR1_PROBE]);
   assertUsr1Swallowed(fresh, ['__isolated-inner', '__isolated-pid1'], 'fresh');
   const nested = await run(['isolated', '--', 'sh', '-c', '"$0" "$1" isolated -- "$0" -e "$2"', process.execPath, TOOL, USR1_PROBE]);
   assertUsr1Swallowed(nested, ['__isolated-pid1'], 'nested');
   const stripped = await run(['isolated', '--', 'sh', '-c', `env ${STRIP} "$0" "$1" isolated -- "$0" -e "$2"`, process.execPath, TOOL, USR1_PROBE]);
   assertUsr1Swallowed(stripped, ['__isolated-inner', '__isolated-pid1'], 'stripped');
+});
+
+// ⛔ B9 (sixth review): pid 1 — the reaping bash — DIED of a default-fatal signal sent from inside (its `read -t` loop
+// made bash catch them), and the run ended 138/140/142/… instead of with the command's own status. Each signal is sent
+// to pid 1 TWICE, the second after the first was handled (a stale `read -t` timer once turned a handled USR1 into ALRM).
+const PID1_SWALLOWED_SIGS = ['USR1', 'USR2', 'ALRM', 'PIPE', 'VTALRM', 'XCPU', 'XFSZ', 'SYS', 'TRAP', 'ABRT'];
+const SIGNAL_PID1 = `for s in ${PID1_SWALLOWED_SIGS.join(' ')}; do kill -s "$s" 1 || echo "NOT-SENT $s"; sleep 0.05; kill -s "$s" 1; sleep 0.05; done; echo SENT-ALL; exit 5`;
+test('⛔ B9: USR1 USR2 ALRM PIPE VTALRM XCPU XFSZ SYS TRAP ABRT sent from inside to pid 1 → the run ends with the COMMAND\'s status (5) — fresh and nested, unshare AND bwrap', needsIsolation, async () => {
+  for (const backend of bwrapUsable() ? ['unshare', 'bwrap'] : ['unshare']) {
+    const env = { WEBCTL_ISOLATION_BACKEND: backend };
+    const fresh = await run(['isolated', '--', 'bash', '-c', SIGNAL_PID1], env);
+    assert.match(fresh.stdout, /^SENT-ALL$/m, `${backend} fresh: the command did not get through its signals:\n${fresh.stdout}${fresh.stderr}`);
+    assert.doesNotMatch(fresh.stdout, /NOT-SENT/, `${backend} fresh: pid 1 could not be signalled (vacuous):\n${fresh.stdout}`);
+    assert.equal(fresh.status, 5, `${backend} fresh: pid 1 died of a signal from inside — rc ${fresh.status}, not the command's 5:\n${fresh.stderr}`);
+    const nested = await run(['isolated', '--', 'sh', '-c', '"$0" "$1" isolated -- bash -c "$2"', process.execPath, TOOL, SIGNAL_PID1], env);
+    assert.match(nested.stdout, /^SENT-ALL$/m, `${backend} nested: ${nested.stdout}${nested.stderr}`);
+    assert.doesNotMatch(nested.stdout, /NOT-SENT/, `${backend} nested: pid 1 could not be signalled (vacuous):\n${nested.stdout}`);
+    assert.equal(nested.status, 5, `${backend} nested: pid 1 died of a signal from inside — rc ${nested.status}, not 5:\n${nested.stderr}`);
+  }
 });
 
 /** The inodes of every LISTEN (0A) row in this netns's /proc/net/tcp{,6}. */
