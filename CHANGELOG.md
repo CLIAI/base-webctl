@@ -346,6 +346,47 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   FPE, ILL, TRAP, ABRT, SYS) were not measured; whatever kills the harness, the creator's parent-death
   signal takes the namespace with it.
 
+### Sixth review (B1–B6)
+
+* **The unshare creator is shielded and detached, as bwrap is (B1).** `unshare --fork` blocks INT and
+  TERM and nothing else. A QUIT or HUP to the caller's process group — a terminal's Ctrl-\ or a hangup —
+  or from an every-pid stop killed it, and `--kill-child` then ended the command mid-trap: rc 131/129,
+  cleanup never run. bwrap was fine. Now the unshare creator is spawned in a session of its own and run
+  through `env --ignore-signal=TERM,INT,HUP,QUIT … env --default-signal=…`, like bwrap. The nested path's
+  `unshare --fork` gets the same shield. The unshare probe refuses an `env` without those options and reads
+  back that pid 1 can trap all four.
+  *Arms, both creators:* HUP, QUIT, INT and TERM, sent to the group and to every pid, each reach the trap,
+  which completes with rc 7.
+* **A terminal-group signal reaches the command EXACTLY ONCE (B2).** Under unshare one group signal arrived
+  2–3 times: pid 1 and the inner half were in the caller's group, so they got it directly AND forwarded.
+  Detached, only the harness gets it. *Arm:* GOT ×1 on both creators. An every-pid signal still reaches
+  each half directly, so the count varies; measured once: unshare HUP ×2, QUIT ×3, INT ×3, TERM ×5; bwrap
+  HUP ×2, QUIT ×5, INT ×4, TERM ×2 (ib4k §2a item 9). Not asserted.
+* **The teardown never signals a reaped pid (B3).** The early teardown and the post-`started` forward
+  used the creator's pid even once node had reaped it, and a reaped pid can be reused. Now both skip a
+  creator whose exit is recorded, and the teardown runs at most once.
+* **Coverage (B4).** An import-only `teardown` seam on `runIsolated` (never an env var) disables the
+  early teardown. The arm shows the far side reports in, waits for `go`, and never gets it. A second arm
+  SIGKILLs a NESTED harness and finds nothing of its namespace left while the outer run goes on; it is
+  red without `--pdeathsig` on the nested unshare.
+* **The shield is READ BACK (B5).** Before `go`, the running creator's SigIgn
+  (`/proc/<creator>/status`, read from the host) must hold TERM, INT, HUP and QUIT, or the creator is torn
+  down and the run refused: `NOT RUN: <creator> is running WITHOUT its shield (read back: SigIgn …)`. An
+  `env` that accepts `--ignore-signal` and does nothing passes the probe and is caught here.
+* **Docs (B6):** "unshare ignores QUIT" was wrong (above). `runIsolated` must not be called from a Worker:
+  a parent-death signal fires at THREAD exit. The orphan count is 5 for the arm's command (it `exec`s its
+  sleep) and 6 for a command with a child.
+* **Sabotages**, each on a detached copy. Every one is red:
+  * unshare neither shielded nor detached: both arms;
+  * not detached (shield kept): group arm, `got it 3 times, not once`;
+  * not shielded (detached): caught first by the read-back, `NOT RUN: unshare is running WITHOUT its
+    shield`;
+  * not shielded, and the read-back disabled: every-pid arm, `the trap was cut short`;
+  * no `--pdeathsig` on the nested unshare: nested arm, `1 process(es) … outlived`;
+  * `go` after an early signal: B4 arm, `the command RAN after an early signal`;
+  * the read-back trusting: B5 fake-env arm;
+  * the reaped check off: B3 logic arm.
+
 ### Fifth review, smaller items
 
 * **F5:** the claim "`isolated` never executes a setuid binary in its chain" was false. `/usr/bin/mount`
@@ -371,6 +412,36 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
 * **Row 3: a `kill(0)` arm.** In a throwaway `setsid` group, a sentinel and the wrapper that called
   `isolated` both survive the command's `kill -TERM 0`, on all three paths. Without `isolated`, both die.
 * `runIsolated`'s two stacked JSDoc blocks are merged.
+
+### What lanes lose
+
+Expected: nothing, for a lane that runs `isolated` on a current Linux with util-linux and GNU coreutils.
+The changes that can show:
+
+* **Generation 9.** A lane that floors on 8 still passes: 8 is v0.34.1's SIGUSR1 fix, and v0.35.0 contains
+  it. To require this release's behaviour, use `require-generation 9`.
+* **The orphan fix.** A harness that dies — any signal, SIGKILL included — now takes the namespace and the
+  command with it, under both creators. Lost: a command that kept running after `isolated` itself was killed.
+  Nothing should have relied on that, since its result had nowhere to go.
+* **The signal changes:**
+  * QUIT is forwarded, so the command sees a Ctrl-\ and `isolated` dies by QUIT (a core dump, unless
+    `ulimit -c 0`).
+  * A terminal-group signal now reaches the command once, not 2–3 times. A trap that counted deliveries
+    sees one.
+  * The unshare creator is no longer in the caller's process group. A signal to that group still reaches
+    the command, forwarded by the harness.
+  * A HUP or QUIT to the creator, or to every pid, no longer ends the command mid-trap.
+  * USR1 is swallowed, not forwarded (v0.34.1).
+* **The go-handshake.** The command starts only after the harness answers `go`: one more round trip on the
+  status pipe at start-up. A harness that is stopped (SIGSTOP, a debugger) holds the command back until it
+  runs again, and one killed before answering means the command never starts.
+* **Probes now refuse a host without:**
+  * `setpriv --pdeathsig` (util-linux ≥ 2.33);
+  * an `env` that takes `--ignore-signal` / `--default-signal` (GNU coreutils ≥ 8.31) in the system dirs —
+    now for unshare AND bwrap, the nested path included. Before this release only bwrap needed it. A
+    busybox-only or older-coreutils host that ran v0.34 under unshare is REFUSED, named
+    (`its \`env\` cannot reset signal dispositions …`);
+  * a running creator whose SigIgn shows the shield applied.
 
 ### For lanes
 
@@ -418,6 +489,9 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
 * **No `WEBCTL_BWRAP_BIN`.** A host that needs a dedicated bwrap must ask for one, with a measurement.
 * **`--dev`, `--ro-bind`, `--cap-drop` are not bwrap's job here** (the inner half's). A sabotage of one
   of them is not an arm.
+* **v0.34.1's two residuals still apply:** the host harness's short same-uid SIGUSR1 window before its first
+  statement, and pid 1 (the reaping bash) dying of a fatal signal sent from inside, which ends the run.
+* **The nested path's every-pid counts were not measured** (the shield is there; the arm runs on the fresh path).
 * Everything under v0.34.0's "does NOT cover" still applies, on both backends: key descriptions,
   user-writable sysfs attributes, empty child cgroups, stdio that is the terminal, the identity not
   hidden.
