@@ -318,7 +318,7 @@ what each flag carries:
 | `--unshare-pid --as-pid-1` | `--pid --fork` | row 3; pid 1 is OUR reaping bash, as under unshare. Without `--as-pid-1` bwrap's own reaper is pid 1 and the harness's forwarding past the creator reaches it, not bash |
 | `--proc /proc` | `--mount-proc` | a procfs of the new PID namespace (row 3) |
 | `--dev-bind / /` | `-m` | the caller's tree, as `unshare -m` gives it. ⚠ *Measured:* `--bind / /` makes it `nodev`, and `/dev/null` answers EACCES |
-| `--die-with-parent` | `--kill-child` | the namespace dies with bwrap — and with bwrap's PARENT, the harness (stronger: a harness killed under unshare leaves unshare running). ⛔ NOT enough in the early window: bwrap's child sets it only just before it execs (difference 6) |
+| `--die-with-parent` | `--kill-child` + `setpriv --pdeathsig KILL` | the namespace dies with bwrap — and with bwrap's PARENT, the harness. Since v0.35.0 unshare gets the same from `setpriv --pdeathsig KILL` (difference 8); before, a harness killed by a signal it does not forward left unshare running. ⛔ NOT enough in the early window: bwrap's child sets it only just before it execs (difference 6) |
 | `--new-session` | (none) | the privileged halves hold no controlling terminal either. Under unshare they keep it (12b: "ancestors with a tty 2, capless 0"); under bwrap, 0. A strengthening, not a row: the shared chain's setsid carries 12b on both. ⚠ Since bwrap is spawned `detached` (difference 5) this flag is a SECOND layer: either one alone keeps the bwrap-only arm green, both gone turn it red (measured) |
 
 ⛔ **Not `--unshare-all`**: its user and cgroup parts are the `-try` variants, so a namespace bwrap
@@ -397,6 +397,18 @@ Chromium's sandbox, the nested path's drop).
    read-back is "SigCgt has all four after `trap`", not "SigIgn is clear".
    *Arms, on both creators:* a TERM to the harness, its creator and every descendant at once → the
    trap completes (CLEANED), rc 7; a TERM to the creator alone → the command runs to its own end.
+
+8. ⛔ **A signal the harness does not forward (fifth review, item 4) — both creators.** Only INT, TERM and HUP
+   were forwarded. Any other default-fatal signal killed the harness, and `unshare --fork` neither dies with
+   its parent nor by QUIT (it ignores it). The command ran on, orphaned: every released `isolated` up to
+   v0.34.0. *Measured:* QUIT, USR2 and ALRM each left 6 processes of the run alive under unshare, and none under bwrap
+   (`--die-with-parent`). ⇒ QUIT is forwarded like INT (`FORWARDED_SIGNALS`; pid 1 traps it, 131). The
+   unshare creator, and the nested path's `unshare --fork`, run under `setpriv --pdeathsig KILL`: the
+   parent-death signal is set before unshare runs and survives its exec and its user namespace (*measured*:
+   2 left without, 0 with). Whatever kills the harness, SIGKILL included, now ends the namespace on both
+   creators. It is a contract fix: the orphan stayed inside its namespaces, masks and drop.
+   *Arm:* HUP, INT, QUIT, TERM, USR2, ALRM, PIPE and KILL to the harness leave no process of the command
+   alive, under both creators. PIPE leaves the harness alive: node ignores it.
 
 **The probe** is side-effect free, and each step is a NAMED reason:
 

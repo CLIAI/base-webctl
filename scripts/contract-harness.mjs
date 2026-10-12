@@ -1356,7 +1356,7 @@ const HIDE_MODE = '0755';
  *     redirected explicitly (measured) — without it every command reading stdin starves.
  *   * fds 3/4 (the fresh path's status and plan pipes) pass to the background child, which
  *     needs them; bash then closes its OWN copies.
- *   * INT/TERM/HUP are trapped (pid 1 receives nothing it has no handler for) and forwarded to
+ *   * INT/TERM/HUP/QUIT are trapped (pid 1 receives nothing it has no handler for) and forwarded to
  *     the child. A signal after the traps but before the child exists ends pid 1 at once
  *     (128+n), and the namespace with it.
  *   * ⛔ pid 1 NEVER BLOCKS IN THE `wait` BUILTIN WHILE A SIGNAL CAN ARRIVE. It used to (`wait`,
@@ -1372,7 +1372,7 @@ const HIDE_MODE = '0755';
  *     a sleep with no fork, which a trapped signal interrupts so forwarding stays prompt. The
  *     child's exit is REAPED meanwhile by bash's SIGCHLD handler, outside `wait`, and recorded;
  *     once `kill -0` fails (a zombie still passes; only bash reaps it, so failing means bash has
- *     its status), there is nothing left to forward: INT/TERM/HUP are IGNORED and ONE `wait`
+ *     its status), there is nothing left to forward: INT/TERM/HUP/QUIT are IGNORED and ONE `wait`
  *     collects the recorded status, uninterruptibly. Cost ≈ 10 ms of exit latency on average.
  *     ⚠ `kill -0` and pid reuse: inside our PID namespace pid 1 is the only reaper and allocates
  *     upward, so $c cannot name another process until bash reaped it AND pids wrapped (pid_max);
@@ -1402,7 +1402,7 @@ export const PID1_REAPER = [
   'k=$1; shift',
   'c=',
   'f() { if [ -n "$c" ]; then kill -s "$1" "$c" 2>/dev/null; else exit "$2"; fi; }',
-  "trap 'f INT 130' INT; trap 'f TERM 143' TERM; trap 'f HUP 129' HUP",
+  "trap 'f INT 130' INT; trap 'f TERM 143' TERM; trap 'f HUP 129' HUP; trap 'f QUIT 131' QUIT",
   // ⛔ a FAILED join is a refusal (R3), said on the status channel (fd 3) — never `|| :` (review F5)
   "if [ -n \"$k\" ]; then \"$k\" new_session >/dev/null 2>&1 || { echo 'fail cannot join a fresh session keyring "
     + '(`keyctl new_session` failed in pid 1) — the command would run in the session keyring of its caller\' >&3; exit 1; }; fi',
@@ -1414,7 +1414,7 @@ export const PID1_REAPER = [
   'else',
   '  while kill -0 "$c" 2>/dev/null; do wait "$c"; done',
   'fi',
-  "trap '' INT TERM HUP",
+  "trap '' INT TERM HUP QUIT",
   'wait "$c"',
 ].join('\n');
 
@@ -1467,6 +1467,21 @@ function unshareBin() {
   try { fs.accessSync(v, fs.constants.X_OK); } catch { return { bin: '', why: `${rule} — it is not executable`, override: true }; }
   return { bin: v, why: '', override: true };
 }
+
+/**
+ * The fresh path's namespace creator under the unshare backend, up to pid 1's bash.
+ * `--pid --fork --mount-proc`: a private PID namespace with its own /proc, so no host process can be signalled
+ * or even seen. `--kill-child`: if unshare dies, so does everything inside (pid 1 is the reaping bash).
+ * `--uts`/`--ipc`/`--cgroup` (v0.34.0, ib4k rows 10, 8, 3): a hostname, SysV IPC + mqueues, a cgroup namespace of
+ * its own. ⛔ `setpriv --pdeathsig KILL` in front (v0.35.0, fifth review item 4): unshare, unlike bwrap's
+ * `--die-with-parent`, did NOT die with the harness — a harness killed by a signal it does not forward (USR2,
+ * ALRM, any it cannot catch) left unshare and the whole namespace running, the command orphaned (measured on
+ * every released `isolated`). The parent-death signal is set on the process the harness spawned, before
+ * unshare runs, and survives the exec and unshare's own user namespace (measured: 2 processes left without it,
+ * 0 with it). @param {string} unshare @param {string} setpriv @returns {string[]}
+ */
+const unshareCreator = (unshare, setpriv) => [setpriv, '--pdeathsig', 'KILL', '--', unshare, '-rnm', '--uts', '--ipc', '--cgroup',
+  '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private'];
 
 /**
  * The env var that PINS one isolation backend (ib4k §2): `unshare`, `bwrap` or `docker`.
@@ -1687,8 +1702,14 @@ function probeBwrap(bw, ub, ids) {
  */
 function probeUnshare(ub, seen = { stderr: '' }) {
   if (ub.why) return ub.why;
-  const { why } = privilegedTools(ub, false);
+  const { tools, why } = privilegedTools(ub, false);
   if (why) return why;
+  // ⛔ the creator runs under `setpriv --pdeathsig KILL` (unshareCreator): a setpriv without it is refused, NAMED
+  const pd = spawnSync(tools.setpriv, ['--pdeathsig', 'KILL', '--', SYSTEM_TRUE()], { stdio: 'ignore', env: privilegedEnv(process.env) });
+  if (pd.error || pd.status !== 0) {
+    return 'setpriv cannot set a parent-death signal (`setpriv --pdeathsig` needs util-linux ≥ 2.33): unshare would outlive a '
+      + 'killed `isolated`, and the command with it';
+  }
   const r = spawnSync(ub.bin, ['-rnm', '--uts', '--ipc', '--cgroup', '--pid', '--fork', SYSTEM_TRUE()], { encoding: 'utf8',
     stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
   if (r.error) return `cannot run unshare (${errMsg(r.error)})`;
@@ -1792,8 +1813,15 @@ const PID1_BASH_FLAGS = Object.freeze(['--norc', '-p', '-c']);
 const NO_BASH = noSystemTool('bash', 'pid 1 of the isolated PID namespace is a bash that REAPS orphans (node as '
   + 'pid 1 leaves them as zombies), and isolation does not run without it');
 
-/** The termination signals the harness forwards. */
-const FORWARDED_SIGNALS = /** @type {NodeJS.Signals[]} */ (Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP']));
+/**
+ * The termination signals the harness forwards — down the whole chain, to the command's process group.
+ * ⛔ QUIT since v0.35.0 (fifth review, item 4): it was forwarded on NEITHER creator. A QUIT killed the harness
+ * (node's default) while `unshare --fork` IGNORES it: the command ran on, orphaned (measured: 5 processes of the
+ * run left after the harness died — every released `isolated` up to v0.34.0). Ctrl-\ is a terminal's QUIT, as
+ * Ctrl-C is its INT: forwarded like it. Every OTHER default-fatal signal kills the harness without a word to the
+ * command; the namespace then dies with it (the creator's parent-death signal: unshareCreator, `--die-with-parent`).
+ */
+const FORWARDED_SIGNALS = /** @type {NodeJS.Signals[]} */ (Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']));
 
 /**
  * @typedef {{last: () => NodeJS.Signals | null, remove: () => void, early?: () => boolean}} Forwarder
@@ -2202,9 +2230,9 @@ function usageRefusal(why, command) {
  * NO host unix sockets.
  *
  * The outer half spawns
- * `unshare -rnm --pid --fork --mount-proc --kill-child --propagation=private <bash> --norc -p -c PID1_REAPER … <node> <this file> __isolated-inner <netns> -- <cmd…>`
- * (or, on the bwrap backend, `bwrap BWRAP_FLAGS -- <bash> …` — the same argv after the namespace CREATOR,
- * ib4k §2a) — pid 1 is a bash that REAPS orphans (PID1_REAPER), the inner half runs under it — with
+ * `setpriv --pdeathsig KILL -- unshare -rnm … --pid --fork --mount-proc --kill-child --propagation=private <bash> --norc -p -c PID1_REAPER … <node> <this file> __isolated-inner <netns> -- <cmd…>`
+ * (unshareCreator; or, on the bwrap backend, `env --ignore-signal=… bwrap BWRAP_FLAGS -- env --default-signal=… <bash> …`
+ * — bwrapCreator: the same argv after the namespace CREATOR, ib4k §2a) — pid 1 is a bash that REAPS orphans (PID1_REAPER), the inner half runs under it — with
  * two extra pipes: fd 3 is the STATUS channel, fd 4 carries the masking PLAN
  * (host mount-ns id, cwd, paths to re-expose, the host's path sockets — a list that
  * can be long, so never argv). The inner half proves the isolation and masks (below),
@@ -2506,17 +2534,10 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
     let st = null;
     // ⛔ the forwarder BEFORE the spawn (review finding 5): no tick in which a TERM meets the default
     const fwd = forwardSignalsPastUnshare(() => !!st && st.started());
-    // THE NAMESPACE CREATOR — the one thing the two runners do differently (ib4k §2a):
-    // unshare: --pid --fork --mount-proc: a private PID namespace with its own /proc, so no host
-    // process can be signalled or even seen. --kill-child: if unshare dies, so does
-    // everything inside (pid 1 is the reaping bash, PID1_REAPER; the inner half runs under it).
-    // --uts (v0.34.0, ib4k row 10): a hostname of its own, set to NEUTRAL_HOSTNAME by the inner half.
-    // --ipc (v0.34.0, ib4k row 8): SysV IPC and POSIX mqueues of its own (the inner half mounts /dev/mqueue)
-    // --cgroup (v0.34.0, re-review item 2): a cgroup namespace of its own (the tree itself is made read-only)
-    // bwrap: the same namespaces and pid 1 (BWRAP_FLAGS), exec'd with BWRAP_SHIELDED ignored and pid 1 reset (bwrapCreator);
-    // everything after the creator is the same argv.
-    const creator = choice.backend === 'bwrap' ? bwrapCreator(bw)
-      : [ub.bin, '-rnm', '--uts', '--ipc', '--cgroup', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private'];
+    // THE NAMESPACE CREATOR — the one thing the two runners do differently (ib4k §2a): unshareCreator,
+    // or bwrap with the same namespaces and pid 1 (BWRAP_FLAGS), exec'd with BWRAP_SHIELDED ignored and
+    // pid 1 reset (bwrapCreator). Both die with the harness. Everything after the creator is the same argv.
+    const creator = choice.backend === 'bwrap' ? bwrapCreator(bw) : unshareCreator(ub.bin, tools.setpriv);
     try {
       child = spawn(creator[0],
         [...creator.slice(1),
@@ -2645,10 +2666,10 @@ async function runIsolatedInner(a) {
   };
   const [hostNs, sep, ...command] = a;
   if (!hostNs || sep !== '--' || command.length === 0) return refuse('internal: malformed inner invocation');
-  // ⚠ We run under the reaping bash pid 1, which forwards INT/TERM/HUP to us. Until the
+  // ⚠ We run under the reaping bash pid 1, which forwards INT/TERM/HUP/QUIT to us. Until the
   // command runs (runCommand forwards from then on), a termination signal ends us — and the
   // namespace with us — rather than letting the command start after the caller gave up.
-  const SIGS = /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM', 'SIGHUP']);
+  const SIGS = FORWARDED_SIGNALS;
   const early = (/** @type {NodeJS.Signals} */ s) => process.exit(128 + (os.constants.signals[s] || 1));
   for (const s of SIGS) process.on(s, early);
 
@@ -4249,7 +4270,9 @@ function privilegeDrop(ids, tools, { pidns = false } = {}) {
   // stay locked, and the command (a non-root uid after exec) holds no capabilities in it.
   // ⛔ both by ABSOLUTE path from the system dirs (privilegedTools) — never the caller's PATH
   const pid = pidns ? ['-m', '--pid', '--fork', '--mount-proc', '--kill-child'] : [];
-  const prefix = [tools.setpriv, '--no-new-privs', '--', tools.unshare, '-U', '--map-user', String(ids.uid),
+  // ⛔ …and that unshare dies with its caller (fifth review, item 4): `unshare --fork` ignores QUIT, so a nested
+  // call killed by a signal it does not forward left its namespace running (unshareCreator, on the fresh path)
+  const prefix = [tools.setpriv, ...(pidns ? ['--pdeathsig', 'KILL'] : []), '--no-new-privs', '--', tools.unshare, '-U', '--map-user', String(ids.uid),
     '--map-group', String(ids.gid), ...pid, '--'];
   const r = spawnSync(prefix[0], [...prefix.slice(1), process.execPath, '-e',
     'const f = require("fs"); process.stdout.write(JSON.stringify({ status: f.readFileSync("/proc/self/status", "utf8"),'
@@ -4770,7 +4793,7 @@ if (isEntryScript()) {
 // ⛔ INVARIANT that makes LATE.cli safe (review F4): every verb below ENDS IN process.exit (the
 // last line), and a process runs at most ONE forwarder at a time (one isolated half per process).
 // So the no-op listeners a removed forwarder leaves behind (quietLateSignals) live only for the
-// last few ticks of a process that is already exiting — a late INT/TERM/HUP is swallowed there,
+// last few ticks of a process that is already exiting — a late INT/TERM/HUP/QUIT is swallowed there,
 // on purpose. ⚠ A future LONG-LIVED verb (a server, a watch loop, anything that keeps running
 // after its child exits) must NOT inherit this: it would ignore Ctrl-C for the rest of its life.
 // Such a verb clears LATE.cli (or calls loudAgain()) once its forwarder is removed.

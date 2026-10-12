@@ -252,9 +252,9 @@ does bwrap run where unshare cannot. Docker is phase 3. Harness and tests only; 
   a loop and kill(0) behave as under unshare.
   One difference: bwrap sets no_new_privs for the whole sandbox, so a broken `setpriv` cannot remove
   it there.
-* **Stronger than unshare in two places.** `--new-session` means pid 1 and the inner half hold no
-  controlling terminal either. `--die-with-parent` means a harness killed with SIGKILL takes the
-  namespace with it (under unshare, the command runs on).
+* **Stronger than unshare in one place.** `--new-session` means pid 1 and the inner half hold no
+  controlling terminal either. (`--die-with-parent` takes the namespace down with a SIGKILLed harness.
+  It was the second place until unshare got the same, below.)
 * **Refusal text:** an unpinned refusal still LEADS with v0.33's unshare text. The perplexity regex
   `/NOT RUN: unshare exited 1/` keeps matching. bwrap's part of the appended summary is now a real
   reason instead of `not implemented yet (v0.35.0)`.
@@ -309,6 +309,33 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
 * **Arms, under unshare and bwrap:**
   * TERM to the harness, its creator and every descendant at once → the trap completes, rc 7;
   * TERM to the creator alone → the command runs to its own end.
+
+### ⛔ A QUIT to `isolated` orphaned the command under unshare — in every released `isolated` (fifth review, item 4)
+
+* **What was wrong:** `isolated` forwarded INT, TERM and HUP only. Any other default-fatal signal killed
+  the harness (node's default), and `unshare --fork` neither dies with its parent nor dies by QUIT
+  (it ignores it). The namespace ran on with the command in it. *Measured on this branch's previous
+  head under unshare:* QUIT, USR2 and ALRM each left 6 processes running after the harness died (unshare,
+  pid 1's bash, both node halves, the command and its child); the review counted 5 for QUIT. Under
+  bwrap, `--die-with-parent` already took the namespace down.
+* **This closes an orphan leak present in every released `isolated` up to v0.34.0.** It is a contract
+  fix, not an isolation breach. The orphan stayed inside its namespaces, masks and drop; it ran on after
+  its caller had gone, with nothing left to stop it or report its result.
+* **Fix, two layers:**
+  * **QUIT is forwarded like INT** (Ctrl-\ is a terminal's QUIT): to pid 1's trap, the inner half, the
+    helper and the command's group. A command killed by it gives 131, and `isolated` then dies by QUIT.
+  * **The unshare creator dies with the harness:** it runs under `setpriv --pdeathsig KILL`, and so does
+    the nested path's `unshare --fork`. The parent-death signal survives unshare's exec and its user
+    namespace (measured: 2 processes left without it, 0 with it).
+  * So every signal the harness does not forward, SIGKILL included, now ends the namespace with it on
+    both backends. A setpriv without `--pdeathsig` (util-linux < 2.33) is refused by name.
+* **Arm, under unshare and bwrap:** HUP, INT, QUIT, TERM, USR2, ALRM, PIPE and KILL to the harness leave
+  no process of the command alive (by a unique tag). Node ignores PIPE, so the harness lives through
+  it. RED on f3cb50f: `unshare SIGQUIT: 5 process(es) of the command outlived the harness`.
+* Not forwarded: USR1, because node reserves it for its inspector and the harness does not die by it
+  (measured on plain node); PIPE and XFSZ, which node ignores. The synchronous fault signals (SEGV, BUS,
+  FPE, ILL, TRAP, ABRT, SYS) were not measured; whatever kills the harness, the creator's parent-death
+  signal takes the namespace with it.
 
 ### v0.34.0 pre-tag review follow-ups
 

@@ -4323,3 +4323,59 @@ test('⛔ F4: TERM to the CREATOR alone → the command is unaffected (it runs t
     assert.equal(r.left, 0, `${backend}: ${r.left} process(es) outlived the run`);
   }
 });
+
+// ── a default-fatal signal to `isolated`: nothing of the command outlives it (fifth review, item 4) ─────────────
+//
+// ⛔ QUIT was forwarded on NEITHER creator, and a signal the harness does not forward kills it by node's default:
+// under unshare — `unshare --fork` ignores QUIT and outlives its parent — the command then ran on, orphaned
+// (measured: 5 processes of the run left after the harness died; every released `isolated` up to v0.34.0). ⇒ QUIT
+// is forwarded like INT, and the unshare creator dies with the harness (`setpriv --pdeathsig KILL`), as bwrap does
+// (`--die-with-parent`). PIPE: node ignores it, the harness lives (then it is TERMed — nothing to judge but the end).
+// KILL: the one that cannot be forwarded at all. Run under `ulimit -c 0`: QUIT's default is a core dump.
+// ⚠ The command EXECs its sleep: a background job of a non-interactive shell ignores INT and QUIT, and bash ignores
+// QUIT itself (measured) — such a command lives through a forwarded QUIT, and so, rightly, does the harness.
+const FATAL_TO_HARNESS = /** @type {NodeJS.Signals[]} */ (['SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGTERM', 'SIGUSR2', 'SIGALRM', 'SIGPIPE', 'SIGKILL']);
+/**
+ * `isolated -- sh -c 'echo READY; exec sleep "$0"' <tag>` under `backend` (no core dumps); once READY shows, `sig` to
+ * the harness ALONE. Resolves with how it ended (`survived`: still alive 6 s later, then TERMed) and how many processes
+ * carrying the tag were alive 1.5 s after it ended. Leftovers are TERMed, then KILLed, by exact pid.
+ * @param {string} backend @param {NodeJS.Signals} sig @param {number} n a distinct number per call (the tag is a sleep length)
+ * @returns {Promise<{how: string, left: number, stdout: string}>}
+ */
+function fatalToHarness(backend, sig, n) {
+  const tag = `${900 + n}.${process.pid}`;
+  return new Promise((resolve) => {
+    const c = spawn('bash', ['-c', 'ulimit -c 0; exec "$@"', 'bash', process.execPath, TOOL, 'isolated', '--', 'sh', '-c', 'echo READY; exec sleep "$0"', tag],
+      { env: cleanEnv({ WEBCTL_ISOLATION_BACKEND: backend }), stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = ''; let ended = /** @type {string | null} */ (null); let sent = false;
+    c.stderr.on('data', () => {});
+    c.stdout.on('data', (d) => { stdout += d; if (!sent && /READY/.test(stdout)) { sent = true; setTimeout(() => c.kill(sig), 200); } });
+    c.on('exit', (code, s) => { ended = s || `exit ${code}`; });
+    const pause = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
+    (async () => {
+      for (const t0 = Date.now(); !sent && Date.now() - t0 < 180000;) await pause(20);
+      for (const t0 = Date.now(); ended === null && Date.now() - t0 < 6000;) await pause(20);
+      let how = ended ?? 'survived';
+      if (ended === null) { c.kill('SIGTERM'); for (const t0 = Date.now(); ended === null && Date.now() - t0 < 15000;) await pause(20); how = `survived (then ${ended})`; }
+      await pause(1500);
+      const left = pidsTagged(tag);
+      for (const p of left) { try { process.kill(p, 'SIGTERM'); } catch { /* gone */ } }
+      if (left.length) { await pause(300); for (const p of pidsTagged(tag)) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } }
+      c.stdout.destroy(); c.stderr.destroy();
+      resolve({ how, left: left.length, stdout });
+    })();
+  });
+}
+
+test('⛔ a default-fatal signal to `isolated` (HUP INT QUIT TERM USR2 ALRM PIPE, and KILL) → NO process of the command outlives it — unshare AND bwrap', needsIsolation, async () => {
+  let n = 0;
+  for (const backend of bwrapUsable() ? ['unshare', 'bwrap'] : ['unshare']) {
+    for (const sig of FATAL_TO_HARNESS) {
+      const r = await fatalToHarness(backend, sig, n++);
+      assert.match(r.stdout, /READY/, `${backend} ${sig}: the command never started`);
+      // only PIPE may leave the harness alive (node ignores it); every other one must end it
+      if (sig !== 'SIGPIPE') assert.doesNotMatch(r.how, /survived/, `${backend} ${sig}: the harness did not end (${r.how})`);
+      assert.equal(r.left, 0, `${backend} ${sig}: ${r.left} process(es) of the command outlived the harness (it ended by ${r.how})`);
+    }
+  }
+});

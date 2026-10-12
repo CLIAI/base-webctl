@@ -1995,6 +1995,23 @@ still traps it. ⇒ The read-back sets the four traps and requires all four bits
 | B18 | no `env --default-signal` before pid 1 (bwrap still ignoring) | the probe, step 73: every pinned run refused, `pid 1 cannot trap TERM, INT, HUP or QUIT …` |
 | B19 | no `env --ignore-signal` (bwrap not shielded; the reset kept) | the F4 arms: `bwrap: the command's TERM trap never ran` (everything at once) and `bwrap: the command did not run to its end` (the creator alone) — the review's measurement, as an arm |
 
+**Item 4, QUIT and the other fatal signals.** A per-signal measurement (`sigorphan.cjs`) sends the signal to
+the harness alone once the command printed READY. It then counts the processes carrying the run's tag
+1.5 s after the harness ended. The table, before and after, is in the fifth-review report. In short:
+under unshare every signal the harness did not forward left the run alive. Under bwrap nothing was
+left. Node ignores PIPE and XFSZ, and the harness survives them.
+`setpriv --pdeathsig KILL` in front of unshare, measured with a parent SIGKILLed: 2 processes left
+without it, 0 with it. The same holds for the nested shape (`--no-new-privs … unshare -U --map-user …
+--pid --fork`).
+
+⚠ The arm's command `exec`s its sleep. A background job of a non-interactive shell ignores INT and
+QUIT, and bash ignores QUIT for itself, `trap - QUIT` included (measured: `kill -s QUIT $$` left it
+running). Such a command rightly lives through a forwarded QUIT, and so does the harness.
+
+| # | sabotage | caught by |
+|---|---|---|
+| B21 | no `setpriv --pdeathsig` in front of unshare (QUIT forwarded) | the per-signal arm: `unshare SIGUSR2: … outlived the harness` |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have
