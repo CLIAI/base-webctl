@@ -1188,6 +1188,29 @@ const SELF_ROOT = path.resolve(path.dirname(SELF), '..');
 const ISOLATED_INNER = '__isolated-inner';
 /** The node helper under a NESTED call's reaping pid 1: runs the command, forwards signals. */
 const PID1_INNER = '__isolated-pid1';
+
+// ⛔ SIGUSR1 IS SWALLOWED BY EVERY NODE HALF (security, v0.34.1). Node's DEFAULT reaction to
+// SIGUSR1 is to open its inspector: an UNAUTHENTICATED debugger on 127.0.0.1:9229 that evaluates
+// code inside the receiving process. Measured on v0.34.0: the isolated command could signal the
+// node halves in its PID namespace — the privileged `__isolated-inner` among them — and any
+// same-uid process could do the same to the host harness, opening that debugger on host loopback.
+// ⇒ Two layers, each enough on its own, so neither is load-bearing alone:
+//   * swallowUsr1(): a no-op listener, the FIRST statement of the host entry block, of
+//     runIsolatedInner and of runPid1. Each installs its own — never relying on inheritance (a
+//     signal handler does not survive exec; only an IGNORED disposition would).
+//   * NO_USR1_FLAG: `--disable-sigusr1` on the three node re-execs (inner, pid 1, probe), so the
+//     inspector's signal watcher is never armed at all. Only when this node supports it
+//     (≥ 22.14) — the engines floor is 22.12, and a patch release does not raise it.
+// ⚠ RESIDUAL: the HOST top-level node has a window between node start and its first statement
+// (module loading) in which the default still applies — reachable only by the SAME uid, which
+// can already ptrace it. The privileged halves have no window wherever the flag is supported.
+/** `--disable-sigusr1` when this node accepts it, else nothing (see above). */
+const NO_USR1_FLAG = process.allowedNodeEnvironmentFlags.has('--disable-sigusr1') ? ['--disable-sigusr1'] : [];
+const swallowedUsr1 = () => { /* SIGUSR1 must never open the inspector (see above) */ };
+/** Install the no-op SIGUSR1 listener (idempotent). */
+function swallowUsr1() {
+  if (!process.listeners('SIGUSR1').includes(swallowedUsr1)) process.on('SIGUSR1', swallowedUsr1);
+}
 /** The tmpfs source tag `isolated` mounts with; the nesting proof looks for it. */
 const MASK_SOURCE = 'webctl-isolated';
 /**
@@ -1884,6 +1907,7 @@ function statusChannel(child) {
  * @param {string[]} a @returns {Promise<number>}
  */
 export function runPid1(a) {
+  swallowUsr1(); // ⛔ FIRST (v0.34.1): SIGUSR1 must never open this half's inspector
   // `--status`: fd 3 is the nested path's status pipe — write `started` on it, then close it
   const status = a[0] === '--status';
   let rest = status ? a.slice(1) : a;
@@ -1960,7 +1984,7 @@ function isEnvObject(x) {
  * @param {string[]} command @param {number} envFd @param {boolean} status @returns {string[]}
  */
 function pid1HelperArgv(command, envFd, status) {
-  return [process.execPath, SELF, PID1_INNER, ...(status ? ['--status'] : []), '--env', String(envFd), '--', ...command];
+  return [process.execPath, ...NO_USR1_FLAG, SELF, PID1_INNER, ...(status ? ['--status'] : []), '--env', String(envFd), '--', ...command];
 }
 
 /** @param {number|null} code @param {NodeJS.Signals|null} signal */
@@ -1990,7 +2014,7 @@ function usageRefusal(why, command) {
  * NO host unix sockets.
  *
  * The outer half spawns
- * `unshare -rnm --pid --fork --mount-proc --kill-child --propagation=private <bash> --norc -p -c PID1_REAPER … <node> <this file> __isolated-inner <netns> -- <cmd…>`
+ * `unshare -rnm --pid --fork --mount-proc --kill-child --propagation=private <bash> --norc -p -c PID1_REAPER … <node> [--disable-sigusr1] <this file> __isolated-inner <netns> -- <cmd…>`
  * — pid 1 is a bash that REAPS orphans (PID1_REAPER), the inner half runs under it — with
  * two extra pipes: fd 3 is the STATUS channel, fd 4 carries the masking PLAN
  * (host mount-ns id, cwd, paths to re-expose, the host's path sockets — a list that
@@ -2300,7 +2324,7 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
         // --cgroup (v0.34.0, re-review item 2): a cgroup namespace of its own (the tree itself is made read-only)
         ['-rnm', '--uts', '--ipc', '--cgroup', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private',
           tools.bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', tools.keyctl,
-          process.execPath, SELF, ISOLATED_INNER, hostNs, '--', ...command],
+          process.execPath, ...NO_USR1_FLAG, SELF, ISOLATED_INNER, hostNs, '--', ...command],
         // ⛔ the PRIVILEGED env: unshare, pid 1 and the inner half (namespace root, full caps, before
         // any mask) never see NODE_OPTIONS, LD_*, or any --pass-env (PRIVILEGED_PASS_ENV)
         { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'], env: privilegedEnv(cmdEnv) });
@@ -2411,6 +2435,7 @@ function errMsg(e) { return e instanceof Error ? e.message : String(e); }
  * @returns {Promise<number>}
  */
 async function runIsolatedInner(a) {
+  swallowUsr1(); // ⛔ FIRST (v0.34.1): the PRIVILEGED half — SIGUSR1 must never open its inspector
   /** @param {string} line */
   const tell = (line) => { try { fs.writeSync(3, `${line}\n`); return true; } catch { return false; } };
   const refuse = (/** @type {string} */ why) => {
@@ -3994,7 +4019,7 @@ function privilegeDrop(ids, tools, { pidns = false } = {}) {
   const pid = pidns ? ['-m', '--pid', '--fork', '--mount-proc', '--kill-child'] : [];
   const prefix = [tools.setpriv, '--no-new-privs', '--', tools.unshare, '-U', '--map-user', String(ids.uid),
     '--map-group', String(ids.gid), ...pid, '--'];
-  const r = spawnSync(prefix[0], [...prefix.slice(1), process.execPath, '-e',
+  const r = spawnSync(prefix[0], [...prefix.slice(1), process.execPath, ...NO_USR1_FLAG, '-e',
     'const f = require("fs"); process.stdout.write(JSON.stringify({ status: f.readFileSync("/proc/self/status", "utf8"),'
       + ' uidMap: f.readFileSync("/proc/self/uid_map", "utf8"), gidMap: f.readFileSync("/proc/self/gid_map", "utf8"),'
       + ' uid: process.getuid(), gid: process.getgid() }))'],
@@ -4506,6 +4531,7 @@ function isEntryScript() {
 // ⚠ Body deliberately NOT re-indented: keeps this guard a two-line diff against
 // concurrent edits to the dispatch.
 if (isEntryScript()) {
+swallowUsr1(); // ⛔ FIRST statement (v0.34.1): a same-uid SIGUSR1 must never open the host harness's inspector
 // ⛔ INVARIANT that makes LATE.cli safe (review F4): every verb below ENDS IN process.exit (the
 // last line), and a process runs at most ONE forwarder at a time (one isolated half per process).
 // So the no-op listeners a removed forwarder leaves behind (quietLateSignals) live only for the
