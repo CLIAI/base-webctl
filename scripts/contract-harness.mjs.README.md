@@ -41,7 +41,7 @@ Recording `CONTRACT_HARNESS_GENERATION` in a comment is not enforcing it. Put th
 first in your contract, and treat **any** non-zero as FAIL:
 
 ```bash
-node "$H" require-generation 7 || { echo "FAIL: base harness below generation 7 (downgraded submodule?)"; exit 1; }
+node "$H" require-generation 8 || { echo "FAIL: base harness below generation 8 (downgraded submodule?)"; exit 1; }
 ```
 
 * ⭐ **Why a VERB, not `generation --min N`.** Measured: every harness before
@@ -191,8 +191,11 @@ shape that let the original grep pass.
   the backends tried, new FAIL-CLOSED refusals (no `hostname` tool, a refused sysfs, a failed
   keyring join), and private `/var/tmp`, `/dev/shm`, SysV IPC, keyring and identity. Key anything
   that MATCHES `; backend:` on `require-generation 7` (CHANGELOG v0.34.0).
+* **8** (v0.34.1, SECURITY) — no node half of `isolated` honours SIGUSR1 (node's default opened an
+  unauthenticated inspector). Nothing a contract matches changed; `require-generation 8` is how a
+  lane REQUIRES the fix (CHANGELOG v0.34.1).
 
-A sweep asks *"who is below 7?"* — and, since generation 4, *"whose contract does not
+A sweep asks *"who is below 8?"* — and, since generation 4, *"whose contract does not
 call `require-generation`?"*, because a recorded number nobody checks protects nothing.
 
 ### `require-generation <N>`

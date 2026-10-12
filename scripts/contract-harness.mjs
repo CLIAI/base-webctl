@@ -35,7 +35,7 @@
 //
 // Usage:
 //   node <base>/scripts/contract-harness.mjs generation
-//   node <base>/scripts/contract-harness.mjs require-generation 7    # the floor; ANY non-zero = FAIL
+//   node <base>/scripts/contract-harness.mjs require-generation 8    # the floor; ANY non-zero = FAIL
 //   node <base>/scripts/contract-harness.mjs pin         --repo . --sub vendor/base-webctl
 //   node <base>/scripts/contract-harness.mjs no-revendor --repo . --sub vendor/base-webctl
 //   node <base>/scripts/contract-harness.mjs isolated [--keep <path>]… [--keep-ro <path>]… [--pass-env <NAME|PREFIX_*>]… -- <cmd> [args…]   # every mutation arm (xrl4)
@@ -64,7 +64,11 @@ import { fileURLToPath } from 'node:url';
  * wording. A consumer records the generation it was written against; a sweep
  * then asks "who is below N?" rather than diffing five divergent copies.
  */
-export const HARNESS_GENERATION = 7;
+export const HARNESS_GENERATION = 8;
+// ⇧ 8 (v0.34.1, SECURITY): no node half of `isolated` honours SIGUSR1 any more — node's default
+// opened an unauthenticated inspector (the privileged inner half reachable from the command; the
+// host harness from any same-uid process). Nothing a contract matches changed; the bump exists so a
+// lane can REQUIRE the fix: `require-generation 8` answers 0 only on a harness that has it.
 // ⇧ 7 (v0.34.0, ruling R4): `isolated` CHANGED behaviour again — its verdict gained `; backend: <name>`
 // (and `keyring: unverified`), refusals were reworded (v0.33's lead kept, the backends appended), new
 // FAIL-CLOSED refusals (no `hostname` tool, a refused sysfs, a failed keyring join), and rows 7–10
