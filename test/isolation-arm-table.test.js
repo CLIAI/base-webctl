@@ -551,15 +551,44 @@ test('⛔ the table covers EVERY backend the harness can run — extend IMPLEMEN
   assert.deepEqual(ROWS.map((r) => r.n), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 'ib4k §1 has rows 1–12');
 });
 
+// ⛔ F10 (fifth review): the table's world is `unshare -rm --propagation=private`, so on the main [bwrap] path every
+// mount is already private and the inner half's `mount --make-rprivate /` is a no-op there — only row 7's late-mount
+// sub-arm made a SHARED dir. ⇒ One bwrap run in a world whose mounts are SHARED (`--propagation=shared`): bwrap makes
+// `/` an rslave of them (every mount carries `master:`), and the run must still pass — the private step is what
+// lets it (B11a, the step removed with its read-back kept: refused, red). CONTROL: that world's mounts ARE shared.
+test('[bwrap] F10: a world whose mounts are SHARED → the main path runs (make-rprivate does the work there) — CONTROL: the world\'s mounts are shared', async (t) => {
+  if (!IMPLEMENTED.includes('bwrap')) { t.skip('bwrap is not implemented'); return; }
+  const w = await world('bwrap');
+  if (w.skip) { t.skip(w.skip); return; }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ib-arm-shared-'));
+  try {
+    const marker = path.join(dir, 'RAN');
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT')), WEBCTL_ISOLATION_BACKEND: 'bwrap' };
+    const r = spawnSync('unshare', ['-rm', '--propagation=shared', 'sh', '-c',
+      'grep -c " shared:" /proc/self/mountinfo > "$0/shared-count"; exec "$@"', dir,
+      process.execPath, TOOL, 'isolated', '--keep', dir, '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`],
+    { encoding: 'utf8', env, cwd: ROOT });
+    const shared = Number(fs.readFileSync(path.join(dir, 'shared-count'), 'utf8').trim() || 0);
+    assert.ok(shared > 0, 'control: the world\'s mounts are not shared — the arm would not exercise make-rprivate');
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /; backend: bwrap; /, r.stderr);
+    assert.equal(fs.existsSync(marker), true, 'the command did not run');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 /** Row 9 where `keyctl show @s` fails (review F5): a named SKIP — isolated says "keyring: unverified". */
 const KEYRING_UNVERIFIED = 'SKIP (host): `keyctl show @s` fails here — the keyring row is UNVERIFIED (isolated says "keyring: unverified")';
 /** Row 9 without keyctl: a named SKIP — untested, never a pass. */
 const NO_KEYCTL = 'SKIP (host): keyctl not installed — the keyring row is UNTESTED here (isolated says "keyring: shared")';
 
-// ⭐ bwrap only (ib4k §2a, `--new-session`): NO ancestor of the command holds the caller's terminal — the
-// privileged halves (pid 1, the inner half) included. Not a contract row: under unshare those keep it (they
-// hold capabilities the command cannot trace), and the shared chain's setsid carries 12b on both creators.
-test('[bwrap] --new-session: no ancestor of the command holds a terminal, privileged halves included — CONTROL: under unshare they do', async (t) => {
+// ⭐ bwrap only (ib4k §2a): NO ancestor of the command holds the caller's terminal — the privileged halves (pid 1,
+// the inner half) included. Not a contract row: under unshare those keep it (they hold capabilities the command
+// cannot trace), and the shared chain's setsid carries 12b on both creators. ⚠ TWO layers give it under bwrap:
+// bwrap is spawned `detached` (a session of its own) AND runs `--new-session` — either alone keeps the terminal
+// half green (fifth review, F9: the arm was named for the flag it could not see alone). ⇒ The name says what the
+// tty half tests, and the flags are asserted where they live: the RUNNING creator's argv (/proc/<pid>/cmdline),
+// so dropping `--new-session` (B1) — or `--die-with-parent`, `--as-pid-1` — turns this arm red by itself.
+test('[bwrap] detached OR --new-session: no ancestor of the command holds a terminal, privileged halves included — and the running bwrap carries --new-session, --die-with-parent, --as-pid-1 — CONTROL: under unshare they do', async (t) => {
   if (!IMPLEMENTED.includes('bwrap')) { t.skip('bwrap is not implemented'); return; }
   const w = await world('bwrap');
   if (w.skip) { t.skip(w.skip); return; }
@@ -568,4 +597,21 @@ test('[bwrap] --new-session: no ancestor of the command holds a terminal, privil
   assert.ok(w.tty.outside?.ttyAncestors > 0, 'control: no ancestor holds the pty even outside');
   const u = await world('unshare');
   if (!u.skip && !u.tty.unavailable) assert.ok(u.tty.fresh?.ttyAncestors > 0, 'control: under unshare the privileged halves hold no terminal either — the arm cannot tell bwrap\'s flag from the chain\'s setsid');
+  // the creator's argv, read from the RUNNING process — not from BWRAP_FLAGS (a constant can say anything)
+  const tag = `webctl-f9-${process.pid}-${Date.now()}`;
+  const c = spawn(process.execPath, [TOOL, 'isolated', '--', 'sh', '-c', 'echo READY; exec sleep 30', tag], { stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT')), WEBCTL_ISOLATION_BACKEND: 'bwrap' } });
+  /** @type {string[]} */
+  let argv = [];
+  try {
+    await new Promise((resolve) => { let out = ''; c.stdout.on('data', (d) => { out += d; if (/READY/.test(out)) resolve(undefined); }); c.on('close', resolve); });
+    const kid = (() => { try { return Number(fs.readFileSync(`/proc/${c.pid}/task/${c.pid}/children`, 'utf8').trim().split(/\s+/)[0]); } catch { return 0; } })();
+    try { argv = fs.readFileSync(`/proc/${kid}/cmdline`, 'utf8').split('\0'); } catch { /* asserted below */ }
+  } finally {
+    c.kill('SIGTERM');
+    await new Promise((r) => { if (c.exitCode !== null || c.signalCode) r(undefined); else c.on('close', r); });
+  }
+  const upTo = argv.slice(0, argv.indexOf('--'));
+  assert.match(upTo[0] || '', /\/bwrap$/, `the harness's child is not bwrap: ${upTo.join(' ')}`);
+  for (const f of ['--new-session', '--die-with-parent', '--as-pid-1']) assert.ok(upTo.includes(f), `the running bwrap lacks ${f}: ${upTo.join(' ')}`);
 });

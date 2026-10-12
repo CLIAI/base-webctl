@@ -319,7 +319,7 @@ what each flag carries:
 | `--proc /proc` | `--mount-proc` | a procfs of the new PID namespace (row 3) |
 | `--dev-bind / /` | `-m` | the caller's tree, as `unshare -m` gives it. ⚠ *Measured:* `--bind / /` makes it `nodev`, and `/dev/null` answers EACCES |
 | `--die-with-parent` | `--kill-child` + `setpriv --pdeathsig KILL` | the namespace dies with bwrap — and with bwrap's PARENT, the harness. Since v0.35.0 unshare gets the same from `setpriv --pdeathsig KILL` (difference 8); before, a harness killed by a signal it does not forward left unshare running. ⛔ NOT enough in the early window: bwrap's child sets it only just before it execs (difference 6) |
-| `--new-session` | (none) | the privileged halves hold no controlling terminal either. Under unshare they keep it (12b: "ancestors with a tty 2, capless 0"); under bwrap, 0. A strengthening, not a row: the shared chain's setsid carries 12b on both. ⚠ Since bwrap is spawned `detached` (difference 5) this flag is a SECOND layer: either one alone keeps the bwrap-only arm green, both gone turn it red (measured) |
+| `--new-session` | (none) | the privileged halves hold no controlling terminal either. Under unshare they keep it (12b: "ancestors with a tty 2, capless 0"); under bwrap, 0. A strengthening, not a row: the shared chain's setsid carries 12b on both. ⚠ Since bwrap is spawned `detached` (difference 5) this flag is a SECOND layer: either one alone keeps the terminal half of the bwrap-only arm green, both gone turn it red (measured). So that arm also reads the RUNNING bwrap's argv from /proc and requires `--new-session`, `--die-with-parent` and `--as-pid-1`; dropping the flag alone turns it red (fifth review, F9) |
 
 ⛔ **Not `--unshare-all`**: its user and cgroup parts are the `-try` variants, so a namespace bwrap
 cannot make is silently skipped. Each namespace is named, and its absence is a failure.
@@ -337,6 +337,9 @@ Chromium's sandbox, the nested path's drop).
    or `master:` tag. Both creators run this, and so does the nesting proof. *Arm (row 7):* a mount the
    "host" makes after the start never appears inside. *Control:* a raw slave namespace started at the
    same time sees it.
+   ⚠ The table's world has PRIVATE mounts, so on the main bwrap path the private step was a no-op
+   (fifth review, F10). *Arm:* one bwrap run in a world whose mounts are SHARED (*control:* they are)
+   must pass; without the private step it is refused.
 2. **`nodev`** — `--dev-bind`, above.
 3. **The session** — `--new-session`, above.
 4. **NoNewPrivs** is already 1 in the inner half (bwrap always sets it). Harmless: `mount`,
@@ -420,8 +423,10 @@ Chromium's sandbox, the nested path's drop).
    in setuid mode (*not measured here*: this host has no setuid bwrap). The command could not make a
    nested user namespace either, which row 7's control, the drop and the nested path all need. And
    bwrap ≥ 0.11 builds without setuid support by default (*measured*: the 0.11.2 binary here
-   carries "setuid use of bubblewrap is not supported in this build"). `isolated` never executes a
-   setuid binary as part of its chain.
+   carries "setuid use of bubblewrap is not supported in this build"). The refusal rests on those
+   capabilities. It does not rest on "`isolated` never executes a setuid binary", which is false:
+   `/usr/bin/mount` is setuid and runs inside on both creators, where the bit has no effect (fifth
+   review, F5).
 3. `env` from the system dirs, able to ignore and reset signals (`env --ignore-signal=… --default-signal=…
    true`; difference 7). Otherwise: `its \`env\` cannot reset signal dispositions (…GNU coreutils ≥ 8.31)…`.
 4. Every privileged tool, exactly as for unshare (`privilegedTools`). ⚠ bwrap does NOT remove the

@@ -2023,6 +2023,16 @@ under `ulimit -c 0`.
 | C-fwd2 | the harness re-raises a forwarded signal on itself WITHOUT forwarding it (the review's sabotage, re-run) | the exit-code arm: `unshare: SIGINT to isolated never reached the command` (green before this change) |
 | B20 | QUIT not forwarded (dropped from FORWARDED_SIGNALS; the parent-death signal kept) | the exit-code arm: `unshare: SIGQUIT to isolated never reached the command`. The per-signal arm stays green: the harness dies by QUIT and takes the namespace with it, so nothing outlives it |
 
+**Item 7, the smaller findings.** F5 rewords the setuid claim: `mount` is setuid and runs inside, and
+the refusal rests on capabilities alone. F7 makes bwrap's drop refusal say `(WEBCTL_UNSHARE_BIN)` when
+the override is set; it is asserted absent in the depth suite's too-old-unshare arm, where the system
+unshare is bound over. F8 is a CHANGELOG line for lanes. F9 and F10 are arm-table arms:
+
+| # | sabotage | caught by |
+|---|---|---|
+| B1 (re-run, F9) | no `--new-session` (detached kept) | the renamed arm, by itself now: `the running bwrap lacks --new-session: …/bwrap --unshare-user … --die-with-parent --dev-bind / / --proc /proc`. The terminal half alone stays green, as before |
+| B11a (re-run, F10) | no `--make-rprivate` (read-back kept) | the new shared-world arm: the run is refused (rc 1, `still receive propagation`). The table's rows themselves run in a private world and stay green |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

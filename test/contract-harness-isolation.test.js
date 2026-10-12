@@ -2741,6 +2741,8 @@ exec ${JSON.stringify(real)} "$@"
     assert.match(r.stderr, BACKEND === 'bwrap'
       ? probeRefusal(/FAIL {2}isolated: NOT RUN: the privilege drop \(`setpriv … unshare -U --map-user`\) fails inside bwrap \(.*--map-user.*\) — util-linux ≥ 2\.38/)
       : /FAIL {2}isolated: NOT RUN: cannot enter the uid-mapped child user namespace: .* exited 1 .*util-linux ≥ 2\.38/);
+    // F7: the SYSTEM unshare here (bound over, no override) — so no `(WEBCTL_UNSHARE_BIN)` in bwrap's text
+    assert.doesNotMatch(r.stderr, /\(WEBCTL_UNSHARE_BIN\)/);
     assert.ok(!new RegExp(`\\b${process.getuid?.()}\\b`).test(r.stderr), 'the refusal printed the real uid');
     assert.equal(r.ran, false, 'the command ran without the child user namespace');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }

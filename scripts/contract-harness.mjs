@@ -1608,10 +1608,12 @@ const bwrapCreator = (bw) => [bw.env, `--ignore-signal=${BWRAP_SHIELDED}`, bw.bi
 
 /**
  * The bwrap to run: from the SYSTEM dirs only (no override — ib4k §2a). `why` names the rule broken.
- * ⛔ A SETUID bwrap is refused by RULE, before it is ever run: `isolated` never executes a setuid binary
- * in its chain; in setuid mode bwrap refuses `--cap-add` to a non-root caller (so nothing could be
- * masked) and the command would get no nested user namespace (the drop, row 7). bwrap ≥ 0.11 is built
- * without setuid support by default anyway. `env`: the one from the system dirs, able to ignore and reset signals (BWRAP_SHIELDED).
+ * ⛔ A SETUID bwrap is refused by RULE, before it is ever run — on its CAPABILITIES: in setuid mode bwrap
+ * refuses `--cap-add` to a non-root caller (so nothing could be masked) and the command would get no nested
+ * user namespace (the drop, row 7). bwrap ≥ 0.11 is built without setuid support by default anyway.
+ * ⚠ NOT "isolated never executes a setuid binary" (fifth review, F5): /usr/bin/mount is setuid and runs
+ * inside on both creators, where the bit has no effect (its owner, host root, is not mapped in the user namespace).
+ * `env`: the one from the system dirs, able to ignore and reset signals (BWRAP_SHIELDED).
  * @returns {{bin: string, env: string, why: string}}
  */
 function bwrapBin() {
@@ -1620,7 +1622,7 @@ function bwrapBin() {
   if (!bin) return { bin, env, why: noSystemTool('bwrap', 'install bubblewrap') };
   try {
     if (fs.statSync(bin).mode & 0o4000) {
-      return { bin: '', env, why: 'setuid — refused by rule: isolated never runs a setuid binary in its chain, and a setuid bwrap can neither '
+      return { bin: '', env, why: 'setuid — refused by rule: a setuid bwrap can neither '
         + 'give the namespace root the capabilities the masks need nor the command a nested user namespace (ib4k §2a)' };
     }
   } catch (e) { return { bin: '', env, why: `cannot stat it (${errMsg(e)})` }; }
@@ -1653,7 +1655,7 @@ function apparmorNote(stderr) {
  * (71) runs the inner half's FIRST mount, `mount --make-rprivate /` — proving the namespace root holds
  * CAP_SYS_ADMIN, not only that bwrap starts (a tmpfs on /tmp, as first written, hid a WEBCTL_UNSHARE_BIN
  * kept there from step 72) — and (72) runs the privilege drop exactly as the inner half will. Ids are never printed.
- * @param {{bin: string, env: string, why: string}} bw bwrapBin() @param {{bin: string, why: string}} ub unshareBin()
+ * @param {{bin: string, env: string, why: string}} bw bwrapBin() @param {{bin: string, why: string, override?: boolean}} ub unshareBin()
  * @param {{uid: number, gid: number}} ids the REAL uid/gid @returns {string}
  */
 function probeBwrap(bw, ub, ids) {
@@ -1684,8 +1686,9 @@ function probeBwrap(bw, ub, ids) {
       + 'the command\'s own traps for them would never run';
   }
   if (r.status === 72) {
+    // ⚠ the unshare of the drop is WEBCTL_UNSHARE_BIN when set (fifth review, F7): say so — it is not the system one
     return `the privilege drop (\`setpriv … unshare -U --map-user\`) fails inside bwrap (${last || `exit ${r.status}`}) — util-linux ≥ 2.38 `
-      + `(unshare --map-user) is required${apparmorNote(err)}`;
+      + `(unshare --map-user) is required${apparmorNote(err)}${ub.override ? ` (${UNSHARE_BIN_ENV})` : ''}`;
   }
   return `bwrap exited ${r.status ?? r.signal} before the isolated side reported in (${last || 'no message'})${apparmorNote(err)}`;
 }

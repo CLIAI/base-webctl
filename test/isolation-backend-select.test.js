@@ -356,6 +356,22 @@ test('⛔ unshare fails AND bwrap is absent → REFUSED: unshare\'s v0.33 reason
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('⛔ F7: bwrap\'s privilege drop fails with WEBCTL_UNSHARE_BIN set → bwrap\'s part of the refusal says WHICH unshare: `(WEBCTL_UNSHARE_BIN)`; nothing run', needsBwrap, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ib-select-'));
+  try {
+    // fails unshare's probe (EPERM on -rnm) AND the drop inside bwrap (a too-old unshare: no --map-user)
+    const fake = path.join(dir, 'old-unshare');
+    fs.writeFileSync(fake, '#!/bin/sh\nif [ "$1" = -rnm ]; then echo "unshare: unshare failed: Operation not permitted" >&2; exit 1; fi\n'
+      + 'for a in "$@"; do case "$a" in --map-user*) echo "unshare: unrecognized option \'$a\'" >&2; exit 1;; --) break;; esac; done\n'
+      + `exec ${JSON.stringify(sysTool('unshare'))} "$@"\n`, { mode: 0o755 });
+    const marker = path.join(dir, 'RAN');
+    const r = await run(['isolated', '--keep', dir, '--', ...markerCmd(marker)], { WEBCTL_UNSHARE_BIN: fake });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /; no isolation backend can be used here — bwrap: the privilege drop \(`setpriv … unshare -U --map-user`\) fails inside bwrap \([^\n]*\) — util-linux ≥ 2\.38 \(unshare --map-user\) is required \(WEBCTL_UNSHARE_BIN\), docker: /);
+    assert.equal(fs.existsSync(marker), false, 'the command ran');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 /**
  * Pin bwrap with a FAKE bwrap over the system one (in a throwaway `unshare -rm`), and the real one
  * reachable at `<dir>/real-bwrap` — `$REAL` in `body` (the fake may exec it). The fake records every run

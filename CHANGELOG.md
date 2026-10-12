@@ -226,9 +226,10 @@ does bwrap run where unshare cannot. Docker is phase 3. Harness and tests only; 
   `--dev`, `--tmpfs`, `--hostname`, `--setenv`, `--cap-drop`) are deliberately not used. They would be a
   second, weaker implementation: bwrap cannot make a fresh sysfs or cgroup2, and its `--dev` adds
   `core` and `console`.
-* **argv:** `bwrap --unshare-user --uid 0 --gid 0 --cap-add ALL --unshare-net --unshare-ipc
-  --unshare-uts --unshare-cgroup --unshare-pid --as-pid-1 --die-with-parent --new-session --dev-bind / /
-  --proc /proc -- <pid 1 …>`. ib4k §2a says what each flag carries.
+* **argv:** `env --ignore-signal=TERM,INT,HUP,QUIT bwrap --unshare-user --uid 0 --gid 0 --cap-add ALL
+  --unshare-net --unshare-ipc --unshare-uts --unshare-cgroup --unshare-pid --as-pid-1 --die-with-parent
+  --new-session --dev-bind / / --proc /proc -- env --default-signal=TERM,INT,HUP,QUIT <pid 1 …>` (the
+  `env` parts: F4, below). ib4k §2a says what each flag carries.
 * **Probe** (named reasons). Steps:
   * bwrap is taken from the system dirs only, with no override (`not found … — install bubblewrap`).
   * A **setuid** bwrap is refused by rule before it is ever run (`setuid — refused by rule …`).
@@ -341,6 +342,22 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   FPE, ILL, TRAP, ABRT, SYS) were not measured; whatever kills the harness, the creator's parent-death
   signal takes the namespace with it.
 
+### Fifth review, smaller items
+
+* **F5:** the claim "`isolated` never executes a setuid binary in its chain" was false. `/usr/bin/mount`
+  is setuid and runs inside on both backends, where the bit has no effect. The setuid-bwrap refusal
+  stands on its capability argument alone, and its text no longer makes the claim.
+* **F7:** when `WEBCTL_UNSHARE_BIN` is set and bwrap's privilege drop fails, bwrap's part of the
+  refusal ends ` (WEBCTL_UNSHARE_BIN)`, naming which unshare failed.
+* **F9:** the bwrap-only terminal arm is named for what it tests: "detached OR --new-session". Either
+  layer alone keeps the terminal half green. It now also reads the RUNNING bwrap's argv from /proc and
+  requires `--new-session`, `--die-with-parent` and `--as-pid-1`. Dropping `--new-session` alone (B1)
+  turns it red.
+* **F10:** the arm table's world has private mounts, so on the main bwrap path the inner half's
+  `mount --make-rprivate /` was a no-op. Only row 7's late-mount sub-arm exercised it. One more arm runs
+  bwrap in a world whose mounts are SHARED. Control: they are. Removing the private step (B11a) turns it
+  red.
+
 ### v0.34.0 pre-tag review follow-ups
 
 * **Row 12b's TIOCSTI half could not fail where `dev.tty.legacy_tiocsti=0`.** The kernel answers EIO
@@ -359,6 +376,11 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   with bwrap.
 * A lane matching `; backend: unshare` should match `; backend: [a-z]+` (generation ≥ 7, as v0.34.0
   says).
+* **Refusal text where bwrap runs (fifth review, F8).** On a host where unshare's probe fails but bwrap
+  runs, a run that then fails reads `NOT RUN: bwrap exited <n> before the isolated side reported in — …`
+  or the inner half's own refusal, not v0.33's unshare text. Every shape where NO backend runs still
+  LEADS with v0.33's unshare reason. So the regex `NOT RUN: unshare exited 1 before the isolated side
+  reported in — ` matches wherever it matched on v0.33.
 
 ### ⛔ What this does NOT cover
 
