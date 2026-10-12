@@ -316,7 +316,7 @@ the masks:
 | `--proc /proc` | `--mount-proc` | a procfs of the new PID namespace (row 3) |
 | `--dev-bind / /` | `-m` | the caller's tree, as `unshare -m` gives it. ⚠ *Measured:* `--bind / /` makes it `nodev`, and `/dev/null` answers EACCES |
 | `--die-with-parent` | `--kill-child` | the namespace dies with bwrap — and with bwrap's PARENT, the harness (stronger: a harness killed under unshare leaves unshare running). The early-signal SIGKILL of the creator (`forwardSignalsPastUnshare`) relies on it |
-| `--new-session` | (none) | the privileged halves hold no controlling terminal either. Under unshare they keep it (12b: "ancestors with a tty 2, capless 0"); under bwrap, 0. A strengthening, not a row: the shared chain's setsid carries 12b on both |
+| `--new-session` | (none) | the privileged halves hold no controlling terminal either. Under unshare they keep it (12b: "ancestors with a tty 2, capless 0"); under bwrap, 0. A strengthening, not a row: the shared chain's setsid carries 12b on both. ⚠ Since bwrap is spawned `detached` (difference 5) this flag is a SECOND layer: either one alone keeps the bwrap-only arm green, both gone turn it red (measured) |
 
 ⛔ **Not `--unshare-all`**: its user and cgroup parts are the `-try` variants, so a namespace bwrap
 cannot make is silently skipped. Each namespace is named, and its absence is a failure.

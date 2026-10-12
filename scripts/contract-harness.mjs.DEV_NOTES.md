@@ -1883,7 +1883,8 @@ command's own INT trap, rc 7. RED on 77ea37e for bwrap (unshare green), GREEN af
 
 | # | sabotage | caught by |
 |---|---|---|
-| B1 | no `--new-session` | the bwrap-only arm: `fresh: 2 ancestor(s) of the command hold the caller's terminal under bwrap` (the contract rows stay green: the chain's setsid carries 12b) |
+| B1 | no `--new-session` | before the `detached` fix: the bwrap-only arm, `fresh: 2 ancestor(s) of the command hold the caller's terminal under bwrap`. ⚠ AFTER it: **not caught alone** — the detached spawn already puts bwrap and everything under it in a session with no terminal, so the flag is now a second layer (kept: bwrap's own answer to CVE-2017-5226, and free) |
+| B1+B15 | no `--new-session` AND not `detached` | the bwrap-only arm: `fresh: 2 ancestor(s) … hold the caller's terminal` |
 | B2 | `--bind / /` for `--dev-bind` | every bwrap run refused (`/dev/null` is EACCES on the nodev tree: pid 1's `>/dev/null` makes the keyring join fail — `cannot join a fresh session keyring`); 22 of 25 red |
 | B3 | no `--unshare-net` | every run refused: `still in the CALLER'S network namespace`; 22 red |
 | B4 | no `--unshare-pid` (and `--as-pid-1`) | 22 red (row 3's ESRCH and the rest) |
