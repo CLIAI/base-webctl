@@ -1513,8 +1513,8 @@ function unshareBin() {
  * unshare runs, and survives the exec and unshare's own user namespace (measured: 2 processes left without it,
  * 0 with it).
  * ⛔ SHIELDED like bwrap (v0.35.0, sixth review B1): `env --ignore-signal=CREATOR_SHIELDED` in front of unshare,
- * `env --default-signal` before pid 1's bash, and spawned `detached`. `unshare --fork` blocks TERM and ignores INT
- * on its own — but NOT HUP or QUIT (measured: a QUIT or HUP to the caller's process group killed unshare, and
+ * `env --default-signal` before pid 1's bash, and spawned `detached`. `unshare --fork` BLOCKS INT and TERM on its
+ * own and ignores nothing (read back: SigIgn 0, SigBlk 0x4002) — so NOT HUP or QUIT (measured: a QUIT or HUP to the caller's process group killed unshare, and
  * `--kill-child` then ended the command mid-trap, rc 131/129, its cleanup never run). The same reaches it from an
  * every-pid stop. @param {string} unshare @param {string} setpriv @param {string} env @returns {string[]}
  */
@@ -1905,8 +1905,11 @@ const NO_BASH = noSystemTool('bash', 'pid 1 of the isolated PID namespace is a b
 /**
  * The termination signals the harness forwards — down the whole chain, to the command's process group.
  * ⛔ QUIT since v0.35.0 (fifth review, item 4): it was forwarded on NEITHER creator. A QUIT killed the harness
- * (node's default) while `unshare --fork` IGNORES it: the command ran on, orphaned (measured: 5 processes of the
- * run left after the harness died — every released `isolated` up to v0.34.0). Ctrl-\ is a terminal's QUIT, as
+ * (node's default) and `unshare --fork`, which does not die with its parent, ran on with the command orphaned
+ * (measured: 5 processes of the run left after the harness died — 6 when the command has a child — every released
+ * `isolated` up to v0.34.0). ⚠ NOT because unshare ignores QUIT (an earlier claim, wrong — sixth review B6): it
+ * DIES by it; the QUIT went to the harness alone. The parent-death signal is the fix for that (unshareCreator).
+ * ⚠ USR1 is NOT here: every node half SWALLOWS it (swallowUsr1, v0.34.1) — node's default opened an inspector. Ctrl-\ is a terminal's QUIT, as
  * Ctrl-C is its INT: forwarded like it. Every OTHER default-fatal signal kills the harness without a word to the
  * command; the namespace then dies with it (the creator's parent-death signal: unshareCreator, `--die-with-parent`).
  */
@@ -2108,9 +2111,9 @@ function earlyTeardown(creator) {
 /**
  * Forward termination signals THROUGH `unshare --fork` to the inner half.
  *
- * ⛔ `unshare --fork` BLOCKS SIGTERM (and ignores SIGINT/SIGQUIT) in its own process until
- * its child exits — measured: a SIGTERM to it never reached the child, which ran to the
- * end. So the signal goes to unshare's CHILD, the reaping bash (pid 1 of the new namespace;
+ * ⛔ `unshare --fork` BLOCKS SIGTERM and SIGINT in its own process until its child exits —
+ * measured: a SIGTERM to it never reached the child, which ran to the end. ⚠ It does NOT ignore
+ * QUIT or HUP: they killed it (sixth review B1) — it is now shielded from all four (unshareCreator). So the signal goes to unshare's CHILD, the reaping bash (pid 1 of the new namespace;
  * it traps them, which a namespace init needs to receive anything) and on to the node half
  * (PID1_REAPER).
  *
@@ -2416,6 +2419,9 @@ function usageRefusal(why, command) {
  *   ⛔ TESTS ONLY, reached by importing this module (never an env var or a flag): `readHostMounts`, the mount table
  *   the cgroup2 `nsdelegate` check reads (F2); `teardown`, what an EARLY signal does to the fresh path's creator
  *   (earlyTeardown) — disabled, it proves the far side never gets `go` on the strength of statusChannel ALONE (B4).
+ * ⚠ NOT FROM A WORKER THREAD: the creator runs under `setpriv --pdeathsig KILL` (bwrap: `--die-with-parent`), and a
+ * parent-death signal fires when the THREAD that forked it exits, not the process — a Worker that ends SIGKILLs a
+ * run still in progress. Call it from the main thread (the CLI always does).
  * @returns {Promise<number>}
  */
 export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earlyTeardown } = {}) {

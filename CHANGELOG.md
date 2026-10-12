@@ -215,7 +215,7 @@ fails. It runs every row on the fresh, nested and stripped paths, with the same 
 and drop as unshare. Building it found a hole bwrap opens, mount propagation, now closed for every
 backend. ⚠ **It does NOT unblock a host that forbids user namespaces** (below): on no measured host
 does bwrap run where unshare cannot. Docker is phase 3. Harness and tests only; no `lib/` change.
-`HARNESS_GENERATION` is **8** (it was 7, see "For lanes").
+`HARNESS_GENERATION` is **9** (it was 7; v0.34.1 took 8 — see "For lanes").
 
 ### The bwrap backend (ib4k §2a)
 
@@ -318,8 +318,12 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
 ### ⛔ A QUIT to `isolated` orphaned the command under unshare — in every released `isolated` (fifth review, item 4)
 
 * **What was wrong:** `isolated` forwarded INT, TERM and HUP only. Any other default-fatal signal killed
-  the harness (node's default), and `unshare --fork` neither dies with its parent nor dies by QUIT
-  (it ignores it). The namespace ran on with the command in it. *Measured on this branch's previous
+  the harness (node's default), and `unshare --fork` does not die with its parent. The namespace ran on
+  with the command in it. ⚠ *Corrected (sixth review B6):* this entry used to add that unshare "ignores
+  QUIT". It does not — it DIES by it. Spawned by the harness, `unshare --fork` ignores nothing and blocks
+  only INT and TERM (read back: SigIgn 0, SigBlk 0x4002). The earlier measurement ran unshare as a
+  background job of a shell, which ignores INT and QUIT for it. A QUIT that reached unshare itself killed
+  it and, by `--kill-child`, the command mid-trap — fixed below ("The unshare creator is shielded"). *Measured on this branch's previous
   head under unshare:* QUIT, USR2 and ALRM each left 6 processes running after the harness died (unshare,
   pid 1's bash, both node halves, the command and its child); the review counted 5 for QUIT. Under
   bwrap, `--die-with-parent` already took the namespace down.
@@ -337,8 +341,8 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
 * **Arm, under unshare and bwrap:** HUP, INT, QUIT, TERM, USR2, ALRM, PIPE and KILL to the harness leave
   no process of the command alive (by a unique tag). Node ignores PIPE, so the harness lives through
   it. RED on f3cb50f: `unshare SIGQUIT: 5 process(es) of the command outlived the harness`.
-* Not forwarded: USR1, because node reserves it for its inspector and the harness does not die by it
-  (measured on plain node); PIPE and XFSZ, which node ignores. The synchronous fault signals (SEGV, BUS,
+* Not forwarded: USR1 — every node half SWALLOWS it (v0.34.1, SECURITY): node's default opened an
+  unauthenticated inspector, so no half honours it and none forwards it; PIPE and XFSZ, which node ignores. The synchronous fault signals (SEGV, BUS,
   FPE, ILL, TRAP, ABRT, SYS) were not measured; whatever kills the harness, the creator's parent-death
   signal takes the namespace with it.
 

@@ -4621,7 +4621,7 @@ test('⛔ F4: TERM to the CREATOR alone → the command is unaffected (it runs t
 // ── a default-fatal signal to `isolated`: nothing of the command outlives it (fifth review, item 4) ─────────────
 //
 // ⛔ QUIT was forwarded on NEITHER creator, and a signal the harness does not forward kills it by node's default:
-// under unshare — `unshare --fork` ignores QUIT and outlives its parent — the command then ran on, orphaned
+// under unshare — `unshare --fork` outlives its parent (it does not IGNORE QUIT, it dies by it: sixth review B6) — the command ran on, orphaned
 // (measured: 5 processes of the run left after the harness died; every released `isolated` up to v0.34.0). ⇒ QUIT
 // is forwarded like INT, and the unshare creator dies with the harness (`setpriv --pdeathsig KILL`), as bwrap does
 // (`--die-with-parent`). PIPE: node ignores it, the harness lives (then it is TERMed — nothing to judge but the end).

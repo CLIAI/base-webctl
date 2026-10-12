@@ -388,7 +388,8 @@ Chromium's sandbox, the nested path's drop).
    aim a TERM at bwrap. bwrap died, and `--die-with-parent` then SIGKILLed the command in the middle of its
    own trap. *Measured by the review:* with the trap `echo GOT-TERM; sleep 0.5; echo CLEANED; exit 7`,
    unshare (which blocks TERM) completed it 3/3, while under bwrap CLEANED was never printed (3/3).
-   ⇒ bwrap is exec'd through `env --ignore-signal=TERM,INT,HUP,QUIT` (`BWRAP_SHIELDED`).
+   ⇒ bwrap is exec'd through `env --ignore-signal=TERM,INT,HUP,QUIT` (`CREATOR_SHIELDED`; since the sixth
+   review the unshare creators too, item 9).
    *Measured:* bwrap installs no handler of its own that would undo this; in /proc its SigIgn has the
    four and its SigCgt is 0. Its child inherits the ignore. A non-interactive bash cannot trap a signal
    that was ignored when it started (*measured:* `trap … TERM` was then silently a no-op), and the
@@ -398,20 +399,55 @@ Chromium's sandbox, the nested path's drop).
    command's signals ignored.
    ⚠ bash ignores QUIT for itself (SigIgn 0x4 even after the reset) and still traps it. So the
    read-back is "SigCgt has all four after `trap`", not "SigIgn is clear".
+   ⛔ *And the shield itself is READ BACK (sixth review B5):* an `env` that accepts `--ignore-signal` and does
+   nothing passes the probe. So when the far side reports `started`, before `go`, the harness reads the
+   running creator's SigIgn from the host side (`/proc/<creator>/status`); without all four it tears the
+   creator down and refuses, naming the read-back (`creatorShieldWhy`). An unreadable SigIgn is a refusal too.
    *Arms, on both creators:* a TERM to the harness, its creator and every descendant at once → the
    trap completes (CLEANED), rc 7; a TERM to the creator alone → the command runs to its own end.
 
 8. ⛔ **A signal the harness does not forward (fifth review, item 4) — both creators.** Only INT, TERM and HUP
-   were forwarded. Any other default-fatal signal killed the harness, and `unshare --fork` neither dies with
-   its parent nor by QUIT (it ignores it). The command ran on, orphaned: every released `isolated` up to
-   v0.34.0. *Measured:* QUIT, USR2 and ALRM each left 6 processes of the run alive under unshare, and none under bwrap
-   (`--die-with-parent`). ⇒ QUIT is forwarded like INT (`FORWARDED_SIGNALS`; pid 1 traps it, 131). The
+   were forwarded. Any other default-fatal signal killed the harness, and `unshare --fork` does not die with
+   its parent. The command ran on, orphaned: every released `isolated` up to v0.34.0. ⚠ *Corrected (sixth
+   review B6):* this item said unshare also "ignores QUIT". It does not; it DIES by it (item 9). Spawned by
+   the harness it ignores nothing and blocks only INT and TERM (SigIgn 0, SigBlk 0x4002); the `SigIgn 0x6`
+   once recorded was unshare run as a background job of a shell, which ignores INT and QUIT for it. The
+   orphan came from the missing parent-death signal alone: the QUIT went to the harness, not to unshare.
+   *Measured:* QUIT, USR2 and ALRM each left processes of the run alive under unshare, and none under bwrap
+   (`--die-with-parent`). The count depends on the command: **6** with a command that has a child (unshare,
+   pid 1's bash, both node halves, the command, its child), **5** in the arm, whose command `exec`s its sleep
+   (the arm's message, and sabotage B21: `unshare SIGUSR2: 5 process(es) … outlived the harness`). ⇒ QUIT is forwarded like INT (`FORWARDED_SIGNALS`; pid 1 traps it, 131). The
    unshare creator, and the nested path's `unshare --fork`, run under `setpriv --pdeathsig KILL`: the
    parent-death signal is set before unshare runs and survives its exec and its user namespace (*measured*:
    2 left without, 0 with). Whatever kills the harness, SIGKILL included, now ends the namespace on both
    creators. It is a contract fix: the orphan stayed inside its namespaces, masks and drop.
    *Arm:* HUP, INT, QUIT, TERM, USR2, ALRM, PIPE and KILL to the harness leave no process of the command
-   alive, under both creators. PIPE leaves the harness alive: node ignores it.
+   alive, under both creators. PIPE leaves the harness alive: node ignores it. USR1 is not in the list: every
+   node half SWALLOWS it (v0.34.1, SECURITY — node's default opened an unauthenticated inspector), so it
+   neither kills the harness nor is forwarded.
+
+9. ⛔ **A stop signal to the caller's GROUP, or to every pid (sixth review B1, B2) — the unshare creators.**
+   *Measured by the review, unshare only:* a QUIT or HUP to the caller's process group killed `unshare --fork`
+   (it blocks INT and TERM, nothing else), and `--kill-child` ended the command mid-trap, rc 131/129, with no
+   cleanup. The INT/TERM it survived reached pid 1 and the inner half directly — they were in the caller's
+   group — as well as forwarded, so the command got one group signal 2–3 times. bwrap, detached and shielded,
+   was fine. ⇒ The fresh path's unshare is spawned `detached` and exec'd through the same `env` shield as
+   bwrap (`unshareCreator`); the nested path's `unshare --fork` gets the shield too (`privilegeDrop`).
+   `probeUnshare` refuses an `env` without the options and reads back that pid 1 can trap all four through a
+   shielded unshare; the running creator's SigIgn is read back before `go` (item 7).
+   * **A terminal-group signal reaches the command EXACTLY ONCE** on both creators: only the harness is in
+     the caller's group, and each half forwards it once. *Arm:* group HUP/QUIT/INT/TERM → `GOT` ×1, the trap
+     completes, rc 7.
+   * **An every-pid signal reaches each half directly as well as forwarded**, so the count varies (standard
+     signals coalesce while pending). *Measured once, 2026-10-12:* unshare HUP ×2, QUIT ×3, INT ×3, TERM ×5;
+     bwrap HUP ×2, QUIT ×5, INT ×4, TERM ×2. Not asserted; the arm asserts the trap completes, rc 7.
+   * **B3:** the early teardown and the post-`started` forward never signal a creator node has REAPED (its pid
+     may be reused) or that pid's children, and the teardown runs at most once.
+   * **B4:** an import-only `teardown` seam on `runIsolated` (never an env var) disables the early teardown;
+     the arm proves the inner half reports in, waits in `read` on the status pipe, and is never answered.
+     Another arm SIGKILLs a nested harness and finds nothing of its namespace left while the outer run goes on.
+   ⚠ **`runIsolated` must not be called from a Worker thread.** PDEATHSIG fires when the THREAD that forked
+   the creator exits, not the process: a Worker that ends would SIGKILL a run still in progress.
 
 **The probe** is side-effect free, and each step is a NAMED reason:
 

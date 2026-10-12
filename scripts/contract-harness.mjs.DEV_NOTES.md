@@ -596,7 +596,9 @@ pid ns) and `/proc` showed every host process. ⇒ `unshare -rnm --pid --fork --
 kernel SIGKILLs everything left in it — an arm's stray background processes included.
 
 * ⛔ **`unshare --fork` BLOCKS SIGTERM in its own process until its child exits** (and
-  ignores INT/QUIT: `SigIgn 0x6`). Measured: TERM to unshare never reached the child, which
+  ignores INT/QUIT: `SigIgn 0x6` — ⚠ **corrected, sixth review B6:** that reading was unshare run as a
+  background job of a shell, which ignores INT and QUIT for it. Spawned by the harness, unshare ignores
+  nothing and BLOCKS INT and TERM (SigIgn 0, SigBlk 0x4002); QUIT and HUP kill it. It is now shielded). Measured: TERM to unshare never reached the child, which
   ran to completion. The old `forwardSignals(unshare)` would have silently stopped
   delivering — no test covered it (the brief assumed one did). ⇒
   `forwardSignalsPastUnshare`: signal unshare's CHILD (from
