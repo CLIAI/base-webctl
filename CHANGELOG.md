@@ -346,7 +346,7 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   FPE, ILL, TRAP, ABRT, SYS) were not measured; whatever kills the harness, the creator's parent-death
   signal takes the namespace with it.
 
-### Sixth review (B1–B6)
+### Sixth review (B1–B6, B9)
 
 * **The unshare creator is shielded and detached, as bwrap is (B1).** `unshare --fork` blocks INT and
   TERM and nothing else. A QUIT or HUP to the caller's process group — a terminal's Ctrl-\ or a hangup —
@@ -373,6 +373,15 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   (`/proc/<creator>/status`, read from the host) must hold TERM, INT, HUP and QUIT, or the creator is torn
   down and the run refused: `NOT RUN: <creator> is running WITHOUT its shield (read back: SigIgn …)`. An
   `env` that accepts `--ignore-signal` and does nothing passes the probe and is caught here.
+* **pid 1 survives a fatal signal sent from inside (B9).** v0.34.1 recorded this as a residual: the reaping
+  bash spends nearly all its time in `read -t`, during which bash CATCHES the fatal signals, so a namespace
+  init's kernel protection no longer applied. USR1, USR2, ALRM, PIPE or VTALRM sent from inside ended pid 1
+  and the run (138, 140, 142, 141, 154), and XCPU, XFSZ, SYS, TRAP or ABRT crashed bash (139). pid 1 now
+  traps these as no-ops while it polls and ignores them for its final `wait`. A trapped signal is reset in
+  every child, so the command's own dispositions are unchanged. *Arm:* each one is sent twice to pid 1 from
+  inside, on the fresh and nested paths, under both creators, and the run ends with the command's 5. The
+  inside SIGUSR1 arm signals pid 1 again. ⚠ SEGV, BUS, ILL and FPE are NOT swallowed: a trap that returns
+  would re-run a genuine fault in bash for ever. Sent with `kill` from inside, they still end the run (139).
 * **Docs (B6):** "unshare ignores QUIT" was wrong (above). `runIsolated` must not be called from a Worker:
   a parent-death signal fires at THREAD exit. The orphan count is 5 for the arm's command (it `exec`s its
   sleep) and 6 for a command with a child.
@@ -385,7 +394,8 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   * no `--pdeathsig` on the nested unshare: nested arm, `1 process(es) … outlived`;
   * `go` after an early signal: B4 arm, `the command RAN after an early signal`;
   * the read-back trusting: B5 fake-env arm;
-  * the reaped check off: B3 logic arm.
+  * the reaped check off: B3 logic arm;
+  * pid 1's swallow trap removed: the B9 arm and the inside SIGUSR1 arm.
 
 ### Fifth review, smaller items
 
@@ -489,8 +499,9 @@ The changes that can show:
 * **No `WEBCTL_BWRAP_BIN`.** A host that needs a dedicated bwrap must ask for one, with a measurement.
 * **`--dev`, `--ro-bind`, `--cap-drop` are not bwrap's job here** (the inner half's). A sabotage of one
   of them is not an arm.
-* **v0.34.1's two residuals still apply:** the host harness's short same-uid SIGUSR1 window before its first
-  statement, and pid 1 (the reaping bash) dying of a fatal signal sent from inside, which ends the run.
+* **v0.34.1's residuals, narrowed:** the host harness's short same-uid SIGUSR1 window before its first
+  statement still applies. pid 1 dying of a signal sent from inside is fixed (B9) except for SEGV, BUS, ILL
+  and FPE sent with `kill`: those still end the run (139).
 * **The nested path's every-pid counts were not measured** (the shield is there; the arm runs on the fresh path).
 * Everything under v0.34.0's "does NOT cover" still applies, on both backends: key descriptions,
   user-writable sysfs attributes, empty child cgroups, stdio that is the terminal, the identity not

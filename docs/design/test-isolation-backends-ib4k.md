@@ -446,6 +446,10 @@ Chromium's sandbox, the nested path's drop).
    * **B4:** an import-only `teardown` seam on `runIsolated` (never an env var) disables the early teardown;
      the arm proves the inner half reports in, waits in `read` on the status pipe, and is never answered.
      Another arm SIGKILLs a nested harness and finds nothing of its namespace left while the outer run goes on.
+   * **B9:** pid 1 (the reaping bash) SWALLOWS USR1, USR2, ALRM, PIPE, VTALRM, XCPU, XFSZ, SYS, TRAP and ABRT
+     (`PID1_SWALLOWED`: a no-op trap while it polls, ignored for its final `wait`). Its `read -t` made bash
+     catch them, so one sent from inside used to end pid 1 and the run. Not SEGV, BUS, ILL or FPE: a returning
+     trap would re-run a genuine fault for ever. *Arm:* each sent twice from inside → the command's status.
    ⚠ **`runIsolated` must not be called from a Worker thread.** PDEATHSIG fires when the THREAD that forked
    the creator exits, not the process: a Worker that ends would SIGKILL a run still in progress.
 
