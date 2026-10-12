@@ -387,6 +387,13 @@ measurement.
 | the same, with Ubuntu's `bwrap-userns-restrict` profile (*not measured*: no AppArmor here) | EPERM | bwrap gets its namespace, but its children run with every capability denied, so the probe's mount fails | refused, named |
 | the same, with an admin's profile granting `userns,` to `/usr/bin/bwrap`, children unconfined (*not measured*) | EPERM | passes | **bwrap**. The one class found. The same admin could profile a dedicated unshare (`WEBCTL_UNSHARE_BIN`) instead |
 
+⇒ **The honest answer (ruling, `webctl:base`, 2026-10-12): bwrap runs where unshare can't ONLY when an
+admin's AppArmor profile grants `userns` to `/usr/bin/bwrap`. That case is UNMEASURED. The
+policy-blocked lane waits for docker.** ⛔ **Its arm is UNTESTED here:** no table row, selection test or
+gate run in this repo exercises an AppArmor-profiled bwrap. This host has no AppArmor, and the
+selection tests reach bwrap only with a FAKE unshare that fails its probe. Until a host with that
+profile runs the table pinned to bwrap, "bwrap works under that profile" is a claim, not a result.
+
 ⇒ **On no measured host does bwrap run where unshare cannot.** It is a second, independently built
 namespace creator. A host can pin it, or reach it in the one AppArmor case above, and the same
 table judges it. A host blocked by policy (§0) is not unblocked by bwrap; that host waits for docker
