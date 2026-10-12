@@ -215,7 +215,7 @@ fails. It runs every row on the fresh, nested and stripped paths, with the same 
 and drop as unshare. Building it found a hole bwrap opens, mount propagation, now closed for every
 backend. ⚠ **It does NOT unblock a host that forbids user namespaces** (below): on no measured host
 does bwrap run where unshare cannot. Docker is phase 3. Harness and tests only; no `lib/` change.
-`HARNESS_GENERATION` stays **7**.
+`HARNESS_GENERATION` is **8** (it was 7, see "For lanes").
 
 ### The bwrap backend (ib4k §2a)
 
@@ -376,6 +376,14 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   with bwrap.
 * A lane matching `; backend: unshare` should match `; backend: [a-z]+` (generation ≥ 7, as v0.34.0
   says).
+* **`HARNESS_GENERATION` 7 → 8.** `isolated`'s behaviour changed:
+  * a bwrap pin runs, and some hosts that were refused now run under bwrap;
+  * there is a new propagation refusal;
+  * QUIT is forwarded, the command starts only on the harness's `go`, and the namespace dies with the
+    harness on both backends.
+
+  Find v0.34-vendored harnesses with "who is below 8". A contract that depends on any of this keys it
+  on `require-generation 8`. `require-generation 7` still gates `; backend:`.
 * **Refusal text where bwrap runs (fifth review, F8).** On a host where unshare's probe fails but bwrap
   runs, a run that then fails reads `NOT RUN: bwrap exited <n> before the isolated side reported in — …`
   or the inner half's own refusal, not v0.33's unshare text. Every shape where NO backend runs still

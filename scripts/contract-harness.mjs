@@ -64,7 +64,12 @@ import { fileURLToPath } from 'node:url';
  * wording. A consumer records the generation it was written against; a sweep
  * then asks "who is below N?" rather than diffing five divergent copies.
  */
-export const HARNESS_GENERATION = 7;
+export const HARNESS_GENERATION = 8;
+// ⇧ 8 (v0.35.0, fifth review of phase 2): `isolated` CHANGED behaviour again. A bwrap pin runs, and a host
+// whose unshare probe fails may now run under bwrap instead of being refused. There is a new FAIL-CLOSED
+// refusal (`… still receive propagation`). The signal semantics changed: QUIT is forwarded, the command
+// starts only on the harness's `go`, an early signal tears the namespace down, and every creator dies
+// with the harness. Lanes find v0.34-vendored harnesses with "who is below 8".
 // ⇧ 7 (v0.34.0, ruling R4): `isolated` CHANGED behaviour again — its verdict gained `; backend: <name>`
 // (and `keyring: unverified`), refusals were reworded (v0.33's lead kept, the backends appended), new
 // FAIL-CLOSED refusals (no `hostname` tool, a refused sysfs, a failed keyring join), and rows 7–10
