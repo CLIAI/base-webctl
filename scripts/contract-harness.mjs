@@ -1431,11 +1431,26 @@ const HIDE_MODE = '0755';
  *     channel on BOTH paths — and exits before starting anything (it was `|| :`, which passed
  *     silently on the nested path: review F5). The fresh path also READS BACK the keyring (inner half).
  */
+/**
+ * ⛔ The default-fatal signals pid 1 SWALLOWS (v0.35.0, sixth review B9) — a no-op trap while it polls, ignored for
+ * its final `wait`. Measured on v0.34.x: pid 1 spends nearly all its time in `read -t`, during which bash installs
+ * catching handlers for the fatal signals — so the kernel's protection of a namespace init (it drops what init does
+ * not handle) no longer applied, and ANY of these sent from inside ended pid 1 and the run: USR1 138, USR2 140,
+ * ALRM 142, PIPE 141, VTALRM 154; XCPU, XFSZ, SYS, TRAP and ABRT 139 (bash 5.3.15 itself crashed). With the trap:
+ * all of them → the command's own status (measured, each sent twice). A trapped signal is reset to the default in
+ * every child, so the command's dispositions are unchanged. ⚠ Only `trap :` while polling: `trap : USR1` alone
+ * made the stale timer of an interrupted `read -t` kill pid 1 with ALRM instead (measured) — hence ALRM here too.
+ * ⚠ NOT SEGV, BUS, ILL or FPE: a trap that returns re-runs a GENUINE faulting instruction for ever (pid 1 would
+ * spin instead of dying with its namespace). Sent with `kill` from inside, they still end the run (139). Not
+ * listed: PROF, IO, PWR and the real-time signals — measured harmless (bash does not catch them during `read -t`).
+ */
+const PID1_SWALLOWED = 'USR1 USR2 ALRM PIPE VTALRM XCPU XFSZ SYS TRAP ABRT';
 export const PID1_REAPER = [
   'k=$1; shift',
   'c=',
   'f() { if [ -n "$c" ]; then kill -s "$1" "$c" 2>/dev/null; else exit "$2"; fi; }',
   "trap 'f INT 130' INT; trap 'f TERM 143' TERM; trap 'f HUP 129' HUP; trap 'f QUIT 131' QUIT",
+  `trap : ${PID1_SWALLOWED}`,
   // ⛔ a FAILED join is a refusal (R3), said on the status channel (fd 3) — never `|| :` (review F5)
   "if [ -n \"$k\" ]; then \"$k\" new_session >/dev/null 2>&1 || { echo 'fail cannot join a fresh session keyring "
     + '(`keyctl new_session` failed in pid 1) — the command would run in the session keyring of its caller\' >&3; exit 1; }; fi',
@@ -1447,7 +1462,7 @@ export const PID1_REAPER = [
   'else',
   '  while kill -0 "$c" 2>/dev/null; do wait "$c"; done',
   'fi',
-  "trap '' INT TERM HUP QUIT",
+  `trap '' INT TERM HUP QUIT ${PID1_SWALLOWED}`,
   'wait "$c"',
 ].join('\n');
 
