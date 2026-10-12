@@ -3202,12 +3202,19 @@ test('⭐ CONTROL: the same trapper WITHOUT `isolated` → GOT-TERM, rc 7', asyn
 // dies by the signal. Nested path: the pid-1 helper reports `started` the same way.
 
 /**
- * argv[2] = N, argv[3…] = a harness invocation. N times: start it, poll /proc until the
- * `unshare` that carries pid 1's reaper (its argv names `webctl-isolated-pid1`) HAS A CHILD,
- * TERM the harness at once, and classify the end. Prints one line:
- * `EARLY term=<n> notrun=<n> bad=<n> other=<n> missed=<n> hung=<n>` — bad = the command RAN and the
- * harness exited 0; missed = the moment was never seen (the run finished first); hung = the run did
- * not end within 20 s (killed and counted — a failure, never a wait).
+ * argv[2] = N, argv[3…] = a harness invocation. N times: start it with a UNIQUE TAG appended to its argv
+ * (the command's last argument — every process of the run carries it), poll /proc until the creator that
+ * carries pid 1's reaper (its argv names `webctl-isolated-pid1`) HAS A CHILD, TERM the harness at once, and
+ * classify the end. Prints one line:
+ * `EARLY term=<n> notrun=<n> bad=<n> other=<n> missed=<n> hung=<n> left=<n>` — bad = the command printed RAN
+ * after the TERM, HOWEVER the harness ended; missed = the moment was never seen, or RAN was already out when
+ * the TERM went; hung = the run did not end within 20 s (counted — a failure, never a wait); left = runs
+ * after which a process carrying the tag was still alive (each is TERMed, then KILLed, by exact pid).
+ *
+ * ⛔ F3 (fifth review): RAN is judged FIRST. It used to be checked only after `sig === 'SIGTERM'` — and under
+ * bwrap the harness DID die by TERM, but only after the command had run: 27 of 30 runs, all counted `term`.
+ * ⛔ A hang must not stall the test file: on the deadline our pipe ends are destroyed, leftovers found by the
+ * tag are TERMed and then KILLed — a pid-namespace init IGNORES TERM — and the probe process.exit()s.
  */
 const EARLY_PROBE = `
 const fs = require('fs'); const { spawn } = require('child_process');
@@ -3215,35 +3222,45 @@ const [n, ...argv] = process.argv.slice(2);
 const kids = (p) => { try { return fs.readFileSync('/proc/' + p + '/task/' + p + '/children', 'utf8').trim().split(/\\s+/).filter(Boolean).map(Number); } catch { return []; } };
 const cmd = (p) => { try { return fs.readFileSync('/proc/' + p + '/cmdline', 'utf8'); } catch { return ''; } };
 const desc = (p) => { const out = []; const q = [p]; while (q.length) { const x = q.shift(); for (const k of kids(x)) { out.push(k); q.push(k); } } return out; };
-const tally = { term: 0, notrun: 0, bad: 0, other: 0, missed: 0, hung: 0 };
-const once = () => new Promise((resolve) => {
-  const c = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
-  let out = ''; let err = ''; let sent = false; let done = false;
+const tagged = (tag) => fs.readdirSync('/proc').filter((d) => /^\\d+$/.test(d)).map(Number)
+  .filter((p) => p !== process.pid && cmd(p).split('\\0').includes(tag));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// TERM first, then KILL, by EXACT pid — never a pattern kill; a pid-namespace init ignores TERM
+const reap = async (tag) => { const l = tagged(tag); for (const p of l) { try { process.kill(p, 'SIGTERM'); } catch {} }
+  if (l.length) { await sleep(300); for (const p of tagged(tag)) { try { process.kill(p, 'SIGKILL'); } catch {} } } return l.length; };
+const tally = { term: 0, notrun: 0, bad: 0, other: 0, missed: 0, hung: 0, left: 0 };
+const once = (i) => new Promise((resolve) => {
+  const tag = 'webctl-early-' + process.pid + '-' + i;
+  const c = spawn(argv[0], [...argv.slice(1), tag], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = ''; let err = ''; let sent = false; let done = false; let ranAtSend = false;
   c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; });
   const poll = () => {
     if (done || sent) return;
     const u = desc(c.pid).find((p) => /^(?:[^\\0]*\\/)?(?:unshare|bwrap)\\0/.test(cmd(p)) && cmd(p).includes('webctl-isolated-pid1') && kids(p).length > 0);
-    if (u) { sent = true; c.kill('SIGTERM'); return; }
+    if (u) { sent = true; ranAtSend = /^RAN$/m.test(out); c.kill('SIGTERM'); return; }
     setImmediate(poll);
   };
   poll();
+  const finish = async () => { if (await reap(tag)) tally.left++; resolve(); };
   // ⛔ a run that never ENDS is a failure, not a wait: an orphaned pid 1 holding our pipes hung the arm for
-  // ever (measured: bwrap without --as-pid-1 or --die-with-parent, sabotaged) — count it and move on
-  const deadline = setTimeout(() => { if (done) return; done = true; tally.hung++; try { c.kill('SIGKILL'); } catch {} resolve(); }, 20000);
+  // ever (measured: bwrap without --as-pid-1 or --die-with-parent, sabotaged; and the fifth review's F2) —
+  // count it, let go of its pipes, kill what is left by the tag, move on
+  const deadline = setTimeout(() => { if (done) return; done = true; tally.hung++; try { c.kill('SIGKILL'); } catch {}
+    c.stdout.destroy(); c.stderr.destroy(); finish(); }, 20000);
   c.on('close', (code, sig) => {
     clearTimeout(deadline);
     if (done) return;
     done = true;
-    if (!sent) tally.missed++;
+    if (!sent || ranAtSend) tally.missed++;
+    else if (/^RAN$/m.test(out)) { tally.bad++; process.stderr.write('BAD code=' + code + ' sig=' + sig + '\\n'); }
     else if (sig === 'SIGTERM') tally.term++;
     else if (/NOT RUN/.test(err)) tally.notrun++;
-    else if (code === 0 && /^RAN$/m.test(out)) tally.bad++;
     else { tally.other++; process.stderr.write('OTHER code=' + code + ' sig=' + sig + ' ' + err.slice(-300) + '\\n'); }
-    resolve();
+    finish();
   });
 });
-(async () => { for (let i = 0; i < Number(n); i++) await once();
-  console.log('EARLY ' + Object.entries(tally).map(([k, v]) => k + '=' + v).join(' ')); })();
+(async () => { for (let i = 0; i < Number(n); i++) await once(i);
+  console.log('EARLY ' + Object.entries(tally).map(([k, v]) => k + '=' + v).join(' ')); process.exit(0); })();
 `;
 /** @param {string} out */
 const earlyOf = (out) => Object.fromEntries([...(out.match(/^EARLY (.*)$/m) || ['', ''])[1].matchAll(/(\w+)=(\d+)/g)].map((m) => [m[1], Number(m[2])]));
@@ -3279,6 +3296,7 @@ test('⛔ EARLY TERM, fresh path: a TERM the moment unshare\'s child appears →
     assert.equal(t.bad, 0, `the command RAN after the caller's TERM in ${t.bad} of ${EARLY_N} runs:\n${r.stdout}${r.stderr}`);
     assert.equal(t.other, 0, `${r.stdout}${r.stderr}`);
     assert.equal(t.hung ?? 0, 0, `${t.hung} run(s) never ended — something inside outlived the killed creator and holds the harness's pipes:\n${r.stdout}`);
+    assert.equal(t.left ?? -1, 0, `${t.left} run(s) left a process carrying their tag alive:\n${r.stdout}${r.stderr}`);
     assert.ok(t.term + t.notrun >= EARLY_N / 2, `the window was hit too rarely to judge (missed ${t.missed}):\n${r.stdout}`);
     // ⭐ and it DIES BY the signal (no verdict), as a Ctrl-C must — a NOT RUN exit 1 would be a lane FAIL upstream
     assert.equal(t.notrun, 0, `a caller's TERM became an ordinary NOT RUN exit:\n${r.stdout}`);
@@ -3298,6 +3316,7 @@ test('⛔ EARLY TERM, NESTED path: the same, for an `isolated` called inside `is
     assert.equal(t.bad, 0, `the nested command RAN after the caller's TERM in ${t.bad} of ${EARLY_N} runs:\n${r.stdout}`);
     assert.equal(t.other, 0, `${r.stdout}${r.stderr}`);
     assert.equal(t.hung ?? 0, 0, `${t.hung} run(s) never ended — something inside outlived the killed creator and holds the harness's pipes:\n${r.stdout}`);
+    assert.equal(t.left ?? -1, 0, `${t.left} run(s) left a process carrying their tag alive:\n${r.stdout}${r.stderr}`);
     assert.ok(t.term + t.notrun >= EARLY_N / 2, `the window was hit too rarely to judge (missed ${t.missed}):\n${r.stdout}`);
     // ⭐ and it DIES BY the signal (no verdict), as a Ctrl-C must — a NOT RUN exit 1 would be a lane FAIL upstream
     assert.equal(t.notrun, 0, `a caller's TERM became an ordinary NOT RUN exit:\n${r.stdout}`);
@@ -4015,6 +4034,7 @@ test('⛔ [bwrap] EARLY TERM: a TERM the moment bwrap\'s child appears → the h
     assert.equal(t.bad, 0, `the command RAN after the caller's TERM in ${t.bad} of ${EARLY_N} runs:\n${r.stdout}${r.stderr}`);
     assert.equal(t.other, 0, `${r.stdout}${r.stderr}`);
     assert.equal(t.hung ?? 0, 0, `${t.hung} run(s) never ended — something inside outlived the killed creator and holds the harness's pipes:\n${r.stdout}`);
+    assert.equal(t.left ?? -1, 0, `${t.left} run(s) left a process carrying their tag alive:\n${r.stdout}${r.stderr}`);
     assert.ok(t.term + t.notrun >= EARLY_N / 2, `the window was hit too rarely to judge (missed ${t.missed}):\n${r.stdout}`);
     assert.equal(t.notrun, 0, `a caller's TERM became an ordinary NOT RUN exit:\n${r.stdout}`);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
