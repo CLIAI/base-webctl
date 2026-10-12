@@ -1569,22 +1569,56 @@ const BWRAP_FLAGS = Object.freeze(['--unshare-user', '--uid', '0', '--gid', '0',
   '--as-pid-1', '--die-with-parent', '--new-session', '--dev-bind', '/', '/', '--proc', '/proc']);
 
 /**
+ * The signals bwrap runs IGNORING, reset to the default again before pid 1's bash (ib4k §2a difference 7;
+ * fifth review, F4) — as `env --ignore-signal=…` / `env --default-signal=…` take them.
+ *
+ * ⛔ Measured by the review: a TERM that reached bwrap ITSELF — every process of a unit at once (a systemd stop,
+ * a CI cancel), or aimed at it — killed it, and `--die-with-parent` then SIGKILLed the namespace while the
+ * command ran its own trap: `echo GOT-TERM; sleep 0.5; echo CLEANED; exit 7` never printed CLEANED (3/3), where
+ * `unshare --fork` (it blocks TERM) let it finish (3/3). ⇒ bwrap is exec'd through `env --ignore-signal`. bwrap
+ * installs no handler of its own that would undo that (read in /proc: SigIgn has them, SigCgt is 0), and its
+ * child inherits the ignore — so pid 1's bash is exec'd through `env --default-signal`: a NON-interactive bash
+ * cannot trap a signal ignored when it started (measured: `trap … TERM` was silently a no-op), and the command
+ * would inherit the ignore too. The probe reads back that pid 1 CAN trap them (SigCgt, step 73). The harness itself still gets
+ * these signals and forwards them (FORWARDED_SIGNALS), exactly as past unshare.
+ */
+const BWRAP_SHIELDED = 'TERM,INT,HUP,QUIT';
+/** The signal-mask bits of BWRAP_SHIELDED, as hex for bash's `(( 0x$SigCgt & 0x… ))`. */
+const BWRAP_SHIELDED_MASK = BWRAP_SHIELDED.split(',').reduce((m, n) => m | (1n << BigInt((os.constants.signals[/** @type {NodeJS.Signals} */ (`SIG${n}`)] || 1) - 1)), 0n).toString(16);
+/**
+ * The namespace creator's argv for bwrap, up to pid 1's bash: bwrap shielded from BWRAP_SHIELDED, pid 1 not.
+ * @param {{bin: string, env: string}} bw bwrapBin() @returns {string[]}
+ */
+const bwrapCreator = (bw) => [bw.env, `--ignore-signal=${BWRAP_SHIELDED}`, bw.bin, ...BWRAP_FLAGS, '--', bw.env, `--default-signal=${BWRAP_SHIELDED}`];
+
+/**
  * The bwrap to run: from the SYSTEM dirs only (no override — ib4k §2a). `why` names the rule broken.
  * ⛔ A SETUID bwrap is refused by RULE, before it is ever run: `isolated` never executes a setuid binary
  * in its chain; in setuid mode bwrap refuses `--cap-add` to a non-root caller (so nothing could be
  * masked) and the command would get no nested user namespace (the drop, row 7). bwrap ≥ 0.11 is built
- * without setuid support by default anyway. @returns {{bin: string, why: string}}
+ * without setuid support by default anyway. `env`: the one from the system dirs, able to ignore and reset signals (BWRAP_SHIELDED).
+ * @returns {{bin: string, env: string, why: string}}
  */
 function bwrapBin() {
   const bin = systemTool('bwrap');
-  if (!bin) return { bin, why: noSystemTool('bwrap', 'install bubblewrap') };
+  const env = systemTool('env');
+  if (!bin) return { bin, env, why: noSystemTool('bwrap', 'install bubblewrap') };
   try {
     if (fs.statSync(bin).mode & 0o4000) {
-      return { bin: '', why: 'setuid — refused by rule: isolated never runs a setuid binary in its chain, and a setuid bwrap can neither '
+      return { bin: '', env, why: 'setuid — refused by rule: isolated never runs a setuid binary in its chain, and a setuid bwrap can neither '
         + 'give the namespace root the capabilities the masks need nor the command a nested user namespace (ib4k §2a)' };
     }
-  } catch (e) { return { bin: '', why: `cannot stat it (${errMsg(e)})` }; }
-  return { bin, why: '' };
+  } catch (e) { return { bin: '', env, why: `cannot stat it (${errMsg(e)})` }; }
+  // ⛔ bwrap runs with BWRAP_SHIELDED ignored, and pid 1 gets them back through `env --default-signal` — an `env`
+  // without it (GNU coreutils < 8.31, or another env) would leave the command unable to trap them: refused, NAMED
+  if (!env) return { bin: '', env, why: noSystemTool('env', 'install coreutils') };
+  const r = spawnSync(env, [`--ignore-signal=${BWRAP_SHIELDED}`, `--default-signal=${BWRAP_SHIELDED}`, SYSTEM_TRUE()], { stdio: 'ignore' });
+  if (r.error || r.status !== 0) {
+    return { bin: '', env, why: 'its `env` cannot reset signal dispositions (`env --ignore-signal` / `--default-signal` need GNU coreutils '
+      + '≥ 8.31): bwrap must run with TERM, INT, HUP and QUIT ignored — a stop signal aimed at it would SIGKILL the command mid-trap — '
+      + 'and pid 1 must get them back, or the command could not trap them' };
+  }
+  return { bin, env, why: '' };
 }
 
 /** The AppArmor note for a user namespace refused while its sysctl reads 1 (bwrap's wording too), else ''. @param {string} stderr */
@@ -1604,7 +1638,7 @@ function apparmorNote(stderr) {
  * (71) runs the inner half's FIRST mount, `mount --make-rprivate /` — proving the namespace root holds
  * CAP_SYS_ADMIN, not only that bwrap starts (a tmpfs on /tmp, as first written, hid a WEBCTL_UNSHARE_BIN
  * kept there from step 72) — and (72) runs the privilege drop exactly as the inner half will. Ids are never printed.
- * @param {{bin: string, why: string}} bw bwrapBin() @param {{bin: string, why: string}} ub unshareBin()
+ * @param {{bin: string, env: string, why: string}} bw bwrapBin() @param {{bin: string, why: string}} ub unshareBin()
  * @param {{uid: number, gid: number}} ids the REAL uid/gid @returns {string}
  */
 function probeBwrap(bw, ub, ids) {
@@ -1612,9 +1646,15 @@ function probeBwrap(bw, ub, ids) {
   if (ub.why) return `${ub.why} (bwrap's privilege drop runs it too)`;
   const { tools, why } = privilegedTools(ub, false);
   if (why) return why;
-  const r = spawnSync(bw.bin, [...BWRAP_FLAGS, '--', tools.bash, ...PID1_BASH_FLAGS,
-    '"$1" --make-rprivate / || exit 71; "$2" --no-new-privs -- "$3" -U --map-user "$4" --map-group "$5" -- "$6" || exit 72',
-    'webctl-isolated-probe', tools.mount, tools.setpriv, tools.unshare, String(ids.uid), String(ids.gid), SYSTEM_TRUE()],
+  const [cr0, ...cr] = bwrapCreator(bw);
+  const r = spawnSync(cr0, [...cr, tools.bash, ...PID1_BASH_FLAGS,
+    // 73 FIRST: pid 1 must be able to TRAP every BWRAP_SHIELDED signal — read back from its SigCgt, not trusted.
+    // ⚠ Not "SigIgn is clear": bash ignores QUIT for ITSELF (measured: SigIgn 0x4 even under `env --default-signal`)
+    // and still traps it; a signal ignored at ENTRY is the one it cannot trap (the trap is silently a no-op)
+    `trap : ${BWRAP_SHIELDED.split(',').join(' ')}; c=; while read -r k v; do [ "$k" = SigCgt: ] && c=$v; done < /proc/$$/status; `
+      + `trap - ${BWRAP_SHIELDED.split(',').join(' ')}; [ -n "$c" ] || exit 73; (( (0x$c & 0x$7) == 0x$7 )) || exit 73; `
+      + '"$1" --make-rprivate / || exit 71; "$2" --no-new-privs -- "$3" -U --map-user "$4" --map-group "$5" -- "$6" || exit 72',
+    'webctl-isolated-probe', tools.mount, tools.setpriv, tools.unshare, String(ids.uid), String(ids.gid), SYSTEM_TRUE(), BWRAP_SHIELDED_MASK],
   { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
   if (r.error) return `cannot run bwrap (${errMsg(r.error)})`;
   if (r.status === 0) return '';
@@ -1623,6 +1663,10 @@ function probeBwrap(bw, ub, ids) {
   if (r.status === 71) {
     return `its namespace root cannot mount (${last || 'mount failed'}) — the masks need it; an LSM policy may deny `
       + `capabilities inside bwrap (e.g. Ubuntu's bwrap-userns-restrict)${apparmorNote(err)}`;
+  }
+  if (r.status === 73) {
+    return 'pid 1 cannot trap TERM, INT, HUP or QUIT (still ignored after `env --default-signal`, or its SigCgt is unreadable) — '
+      + 'the command\'s own traps for them would never run';
   }
   if (r.status === 72) {
     return `the privilege drop (\`setpriv … unshare -U --map-user\`) fails inside bwrap (${last || `exit ${r.status}`}) — util-linux ≥ 2.38 `
@@ -2469,8 +2513,9 @@ export function runIsolated(a, { readHostMounts = readMountinfo } = {}) {
     // --uts (v0.34.0, ib4k row 10): a hostname of its own, set to NEUTRAL_HOSTNAME by the inner half.
     // --ipc (v0.34.0, ib4k row 8): SysV IPC and POSIX mqueues of its own (the inner half mounts /dev/mqueue)
     // --cgroup (v0.34.0, re-review item 2): a cgroup namespace of its own (the tree itself is made read-only)
-    // bwrap: the same namespaces and pid 1 (BWRAP_FLAGS); everything after the creator is the same argv.
-    const creator = choice.backend === 'bwrap' ? [bw.bin, ...BWRAP_FLAGS, '--']
+    // bwrap: the same namespaces and pid 1 (BWRAP_FLAGS), exec'd with BWRAP_SHIELDED ignored and pid 1 reset (bwrapCreator);
+    // everything after the creator is the same argv.
+    const creator = choice.backend === 'bwrap' ? bwrapCreator(bw)
       : [ub.bin, '-rnm', '--uts', '--ipc', '--cgroup', '--pid', '--fork', '--mount-proc', '--kill-child', '--propagation=private'];
     try {
       child = spawn(creator[0],

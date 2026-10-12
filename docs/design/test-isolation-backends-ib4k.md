@@ -297,13 +297,16 @@ the masks:
 * A mask done twice means two writers to keep in step, and a read-back that passes only because one
   creator happened to do it is a defect.
 
-**The argv** (`BWRAP_FLAGS`; bwrap is spawned `detached`, difference 5), and what each flag carries:
+**The argv** (`BWRAP_FLAGS`; bwrap is spawned `detached`, difference 5, and through `env`, difference 7), and
+what each flag carries:
 
-    bwrap --unshare-user --uid 0 --gid 0 --cap-add ALL
-          --unshare-net --unshare-ipc --unshare-uts --unshare-cgroup --unshare-pid
-          --as-pid-1 --die-with-parent --new-session
-          --dev-bind / / --proc /proc
-          -- <bash> --norc -p -c PID1_REAPER webctl-isolated-pid1 <keyctl> <node> <harness> __isolated-inner <netns> -- <cmd…>
+    env --ignore-signal=TERM,INT,HUP,QUIT
+      bwrap --unshare-user --uid 0 --gid 0 --cap-add ALL
+            --unshare-net --unshare-ipc --unshare-uts --unshare-cgroup --unshare-pid
+            --as-pid-1 --die-with-parent --new-session
+            --dev-bind / / --proc /proc
+            -- env --default-signal=TERM,INT,HUP,QUIT
+               <bash> --norc -p -c PID1_REAPER webctl-isolated-pid1 <keyctl> <node> <harness> __isolated-inner <netns> -- <cmd…>
 
 | flag | unshare's equivalent | carries |
 |---|---|---|
@@ -377,6 +380,24 @@ Chromium's sandbox, the nested path's drop).
    alone does not outlive the early teardown. Sabotage: (A) off → the teardown arm is red (B16), and
    (B) off → the GO arm is red (B17).
 
+7. ⛔ **A signal sent to bwrap ITSELF (fifth review, F4).** It does not come from a terminal (difference 5) but
+   from a supervisor: a systemd stop or a CI cancel signals every process of the unit at once, and anyone may
+   aim a TERM at bwrap. bwrap died, and `--die-with-parent` then SIGKILLed the command in the middle of its
+   own trap. *Measured by the review:* with the trap `echo GOT-TERM; sleep 0.5; echo CLEANED; exit 7`,
+   unshare (which blocks TERM) completed it 3/3, while under bwrap CLEANED was never printed (3/3).
+   ⇒ bwrap is exec'd through `env --ignore-signal=TERM,INT,HUP,QUIT` (`BWRAP_SHIELDED`).
+   *Measured:* bwrap installs no handler of its own that would undo this; in /proc its SigIgn has the
+   four and its SigCgt is 0. Its child inherits the ignore. A non-interactive bash cannot trap a signal
+   that was ignored when it started (*measured:* `trap … TERM` was then silently a no-op), and the
+   command would inherit the ignore too. So pid 1's bash is exec'd through `env
+   --default-signal=TERM,INT,HUP,QUIT`, and the probe reads back that pid 1 can trap all four (probe step 6).
+   An `env` without those options (GNU coreutils < 8.31) is refused by name: bwrap never runs with the
+   command's signals ignored.
+   ⚠ bash ignores QUIT for itself (SigIgn 0x4 even after the reset) and still traps it. So the
+   read-back is "SigCgt has all four after `trap`", not "SigIgn is clear".
+   *Arms, on both creators:* a TERM to the harness, its creator and every descendant at once → the
+   trap completes (CLEANED), rc 7; a TERM to the creator alone → the command runs to its own end.
+
 **The probe** is side-effect free, and each step is a NAMED reason:
 
 1. `bwrap` from the system dirs only. Otherwise: `bwrap: not installed (no bwrap in /usr/sbin,
@@ -389,14 +410,19 @@ Chromium's sandbox, the nested path's drop).
    bwrap ≥ 0.11 builds without setuid support by default (*measured*: the 0.11.2 binary here
    carries "setuid use of bubblewrap is not supported in this build"). `isolated` never executes a
    setuid binary as part of its chain.
-3. Every privileged tool, exactly as for unshare (`privilegedTools`). ⚠ bwrap does NOT remove the
+3. `env` from the system dirs, able to ignore and reset signals (`env --ignore-signal=… --default-signal=…
+   true`; difference 7). Otherwise: `its \`env\` cannot reset signal dispositions (…GNU coreutils ≥ 8.31)…`.
+4. Every privileged tool, exactly as for unshare (`privilegedTools`). ⚠ bwrap does NOT remove the
    need for util-linux: the drop is `setpriv … unshare -U --map-user` (util-linux ≥ 2.38), and so
    is the nested path.
-4. The argv above around the inner half's own first mount, `mount --make-rprivate /` (it needs
+5. The argv above around the inner half's own first mount, `mount --make-rprivate /` (it needs
    CAP_SYS_ADMIN, so it proves the namespace root can MOUNT, not only that bwrap starts), then
    the privilege drop exactly as the inner half runs it (`setpriv … unshare -U --map-user`). A
    tmpfs on `/tmp`, as first planned, hid a `WEBCTL_UNSHARE_BIN` kept there from the drop step
-   (measured). Its failure reads `bwrap exited <n> before the
+   (measured).
+6. Before both, inside the same run: pid 1 sets a trap for TERM, INT, HUP and QUIT and reads its own
+   SigCgt back. All four must be caught; otherwise: `pid 1 cannot trap TERM, INT, HUP or QUIT …`
+   (difference 7). Its failure reads `bwrap exited <n> before the
    isolated side reported in (<bwrap's last stderr line>)`. When the AppArmor sysctl reads 1, it
    adds `kernel.apparmor_restrict_unprivileged_userns = 1 — AppArmor denies bwrap a user namespace
    too`.

@@ -1980,6 +1980,21 @@ blocked in read, as an init, holding the caller's stdio. The command would not r
 | B16 | the early path SIGKILLs the creator ALONE (no `killCreatorTree`; the handshake and pipe close kept) | the teardown logic arm: `1 process(es) of the namespace outlived the early teardown`. ⚠ The `[bwrap] EARLY TERM` arm stays GREEN: with the handshake, the command never runs, and the stuck-child window is hit too rarely for an 8-run arm. That is why the teardown arm builds its outcome directly |
 | B17 | no wait for `go` (the inner half and the nested helper take it as given) | the GO arm: `unshare: the command RAN while the harness was frozen — it never said \`go\`` |
 
+**F4, a signal aimed at bwrap itself.** The review measured it: a TERM to bwrap, or to every process at
+once, cut the command's trap short (CLEANED 0/3, against 3/3 under unshare). bwrap's dispositions,
+read in /proc: with `env --ignore-signal=TERM,INT,HUP,QUIT`, bwrap's SigIgn is `0x4007` and its SigCgt
+is `0`. It installs no handler that would undo the ignore. Its child inherits the ignore. Without the
+reset, pid 1's `trap … TERM` was silently a no-op (SigCgt `0x400`, SigIgn `0x4007`).
+
+⚠ The first probe read-back checked "SigIgn has none of the four", and it refused every bwrap run. bash
+ignores QUIT for itself (SigIgn `0x4` even under `env --default-signal`, and outside bwrap too), and it
+still traps it. ⇒ The read-back sets the four traps and requires all four bits in SigCgt.
+
+| # | sabotage | caught by |
+|---|---|---|
+| B18 | no `env --default-signal` before pid 1 (bwrap still ignoring) | the probe, step 73: every pinned run refused, `pid 1 cannot trap TERM, INT, HUP or QUIT …` |
+| B19 | no `env --ignore-signal` (bwrap not shielded; the reset kept) | the F4 arms: `bwrap: the command's TERM trap never ran` (everything at once) and `bwrap: the command did not run to its end` (the creator alone) — the review's measurement, as an arm |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

@@ -290,6 +290,26 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   and a SIGKILL of the harness ends the run with nothing left. A teardown arm covers a pid 1 that
   outlives a SIGKILL of its creator.
 
+### ⛔ A stop signal aimed at bwrap cut the command's trap short (fifth review, F4)
+
+* **What was wrong:** a TERM, INT or HUP that reached bwrap itself killed it, and `--die-with-parent`
+  then SIGKILLed the command in the middle of its own trap. Such a signal comes from a supervisor: a
+  systemd stop or a CI cancel signals every process of the unit at once. *Measured by the review:* with
+  the trap `echo GOT-TERM; sleep 0.5; echo CLEANED; exit 7`, unshare (which blocks TERM) completed it
+  3/3, while under bwrap CLEANED was never printed (3/3).
+* **Fix:** bwrap is exec'd through `env --ignore-signal=TERM,INT,HUP,QUIT`. Its pid 1 gets them back
+  through `env --default-signal=…`. Without that reset, a non-interactive bash cannot trap a signal
+  ignored at its start, and the command would inherit the ignore. `isolated` itself still receives
+  these signals and forwards them, as under unshare.
+* **Probe:** two new named reasons.
+  * An `env` without these options (GNU coreutils < 8.31) is refused:
+    `its \`env\` cannot reset signal dispositions …`.
+  * pid 1 must read back from its own SigCgt that it can trap all four:
+    `pid 1 cannot trap TERM, INT, HUP or QUIT …`.
+* **Arms, under unshare and bwrap:**
+  * TERM to the harness, its creator and every descendant at once → the trap completes, rc 7;
+  * TERM to the creator alone → the command runs to its own end.
+
 ### v0.34.0 pre-tag review follow-ups
 
 * **Row 12b's TIOCSTI half could not fail where `dev.tty.legacy_tiocsti=0`.** The kernel answers EIO

@@ -4242,3 +4242,84 @@ test('⭐ exit codes under unshare AND bwrap: a command killed by INT/TERM/HUP �
     }
   }
 });
+
+// ── signals sent to the CREATOR itself, or to everything at once (fifth review, F4) ─────────────────────────────
+//
+// ⛔ Measured by the review: a TERM that reaches bwrap ITSELF — cgroup-wide (a systemd stop, a CI cancel signals
+// every process of the unit) or aimed at it — killed bwrap, and `--die-with-parent` then SIGKILLed the namespace
+// mid-trap: `echo GOT-TERM; sleep 0.5; echo CLEANED; exit 7` never printed CLEANED (3/3), where under unshare —
+// `unshare --fork` blocks TERM — it completed (3/3). ⇒ bwrap is spawned with TERM/INT/HUP/QUIT IGNORED, and they
+// are reset to the default before pid 1's bash (`env --default-signal`): a non-interactive bash cannot trap a
+// signal that was ignored when it started, so without the reset the command's own traps would be dead.
+/** @param {number} p */
+const childPids = (p) => { try { return fs.readFileSync(`/proc/${p}/task/${p}/children`, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number); } catch { return []; } };
+/** Every descendant of `p`, breadth first. @param {number} p */
+const descendants = (p) => { /** @type {number[]} */ const out = []; const q = [p]; while (q.length) { for (const k of childPids(/** @type {number} */ (q.shift()))) { out.push(k); q.push(k); } } return out; };
+/** Live host pids whose argv has `tag` as one whole argument. @param {string} tag */
+const pidsTagged = (tag) => fs.readdirSync('/proc').filter((d) => /^\d+$/.test(d)).map(Number).filter((p) => {
+  try { return fs.readFileSync(`/proc/${p}/cmdline`, 'utf8').split('\0').includes(tag); } catch { return false; }
+});
+const CLEANUP_TRAPPER = 'trap \'echo GOT-TERM; sleep 0.5; echo CLEANED; exit 7\' TERM; echo READY; i=0; '
+  + 'while [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; echo TIMEOUT; exit 9';
+/**
+ * `isolated -- sh -c <script> <tag>` under `backend`; once READY shows, TERM `who`: 'all' — the harness, its creator
+ * and every descendant, at once (what a cgroup-wide stop does; signalled by pid, no cgroup is made) — or 'creator',
+ * the harness's child alone. A run still going 15 s after the TERM is KILLed by tag and reported `hung`; leftovers by
+ * tag are TERMed, then KILLed (a pid-namespace init ignores TERM). Resolves with how the harness ended, its stdout, `left`.
+ * @param {string} backend @param {'all' | 'creator'} who @param {string} [script]
+ * @returns {Promise<{status: number|null, signal: string|null, stdout: string, stderr: string, hung: boolean, left: number}>}
+ */
+function termWho(backend, who, script = CLEANUP_TRAPPER) {
+  const tag = `webctl-f4-${process.pid}-${Date.now()}`;
+  return new Promise((resolve) => {
+    const c = spawn(process.execPath, [TOOL, 'isolated', '--', 'sh', '-c', script, tag], { env: cleanEnv({ WEBCTL_ISOLATION_BACKEND: backend }) });
+    let stdout = ''; let stderr = ''; let sent = false; let hung = false;
+    // 15 s from the TERM (a loaded host can take longer than that just to start); 180 s overall
+    const giveUp = () => { hung = true; for (const p of pidsTagged(tag)) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } c.kill('SIGKILL'); };
+    let deadline = setTimeout(giveUp, 180000);
+    c.stderr.on('data', (d) => { stderr += d; });
+    c.stdout.on('data', (d) => {
+      stdout += d;
+      if (sent || !/READY/.test(stdout)) return;
+      sent = true;
+      const creator = childPids(c.pid ?? 0)[0];
+      const targets = who === 'all' ? [c.pid ?? 0, ...descendants(c.pid ?? 0)] : [creator];
+      for (const p of targets) { try { process.kill(p, 'SIGTERM'); } catch { /* gone */ } }
+      clearTimeout(deadline);
+      deadline = setTimeout(giveUp, 15000);
+    });
+    c.on('close', (status, signal) => {
+      clearTimeout(deadline);
+      setTimeout(() => {
+        const left = pidsTagged(tag);
+        for (const p of left) { try { process.kill(p, 'SIGTERM'); } catch { /* gone */ } }
+        setTimeout(() => { for (const p of pidsTagged(tag)) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } }
+          resolve({ status, signal, stdout, stderr, hung, left: left.length }); }, left.length ? 300 : 0);
+      }, 500);
+    });
+  });
+}
+
+test('⛔ F4: TERM to the harness, its creator and every descendant AT ONCE (a cgroup-wide stop) → the command\'s trap COMPLETES, rc 7 — unshare AND bwrap', needsIsolation, async () => {
+  for (const backend of bwrapUsable() ? ['unshare', 'bwrap'] : ['unshare']) {
+    const r = await termWho(backend, 'all');
+    assert.equal(r.hung, false, `${backend}: still running 15 s after the TERM`);
+    assert.match(r.stdout, /^GOT-TERM$/m, `${backend}: the command's TERM trap never ran:\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /^CLEANED$/m, `${backend}: the trap was cut short (killed mid-cleanup):\n${r.stdout}`);
+    assert.equal(r.status, 7, `${backend}: ${r.status} ${r.signal}:\n${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, new RegExp(`; backend: ${backend}; `), `${backend}: not run under it`);
+    assert.equal(r.left, 0, `${backend}: ${r.left} process(es) outlived the run`);
+  }
+});
+
+test('⛔ F4: TERM to the CREATOR alone → the command is unaffected (it runs to its own end, rc 5) — unshare AND bwrap', needsIsolation, async () => {
+  const script = 'trap \'echo GOT-TERM; exit 7\' TERM; echo READY; sleep 1; echo DONE; exit 5';
+  for (const backend of bwrapUsable() ? ['unshare', 'bwrap'] : ['unshare']) {
+    const r = await termWho(backend, 'creator', script);
+    assert.equal(r.hung, false, `${backend}: still running 15 s after the TERM`);
+    assert.doesNotMatch(r.stdout, /GOT-TERM/, `${backend}: a TERM to the creator reached the command`);
+    assert.match(r.stdout, /^DONE$/m, `${backend}: the command did not run to its end:\n${r.stdout}${r.stderr}`);
+    assert.equal(r.status, 5, `${backend}: ${r.status} ${r.signal}:\n${r.stdout}${r.stderr}`);
+    assert.equal(r.left, 0, `${backend}: ${r.left} process(es) outlived the run`);
+  }
+});
