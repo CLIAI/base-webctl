@@ -45,6 +45,23 @@ two things at once:
 * **Service-agnostic.** Specs and lib never name a specific platform.
 * Bash `set -euo pipefail`; markdown blank-line-before-list + `*` bullets; small
   focused commits; non-trivial scripts ship `.README.md` + `.DEV_NOTES.md`.
+* ⛔ **No test, measurement or agent ever puts a window or prompt on a REAL
+  display.** Any GUI step (an xpra client, a password prompt, a headful
+  browser, anything that can draw) runs inside a **private Xvfb**, driven
+  there with `xdotool`, or inside a throwaway container or VM with no display.
+  Concretely:
+  * unset `DISPLAY`, `WAYLAND_DISPLAY` and `XAUTHORITY` in every test spawn;
+  * always pass non-interactive credentials (e.g. `--password-file`), so
+    nothing can prompt;
+  * make test helpers REFUSE to start a GUI-capable client while `DISPLAY` is
+    set.
+
+  Agent shells inherit the desktop session of whoever is logged in. ⚠ Measured
+  2026-10-13: a test ran the host's `xpra info` against an auth-protected
+  server with no password file, and xpra's password dialog kept reopening on a
+  person's live desktop during their calls. The host admin had to deploy a guard
+  that killed those runs. A shared host's other users have desktops too. If a
+  host admin's guard or STOP file appears, respect it; never work around it.
 
 ## ⛔ Roughly HALF of base's callable surface is not a module export
 
