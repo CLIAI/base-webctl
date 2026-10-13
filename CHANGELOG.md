@@ -270,6 +270,9 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   * xpra's TCP counts as authenticated only with an **allowlisted** module: `auth=file`, naming
     the secret base mounts. `auth=none` and `auth=allow` are local-users; another filename is
     unknown.
+  * On a non-loopback bind, the secret dir's **host source** is judged as the channel and
+    profile dirs are: not sealed is local-users (whoever reads the password reaches xpra), and
+    no bind mount there at all is unknown. The right filename alone is not the right file.
   * **Unknown is never owner-only.** These are all unknown: a network mode base does not start,
     a relay command that is not base's socat, a relay mounting another channel dir, any other
     `XPRA_*BIND`, an `XPRA_BIND` that is not base's exact value, and an unparseable bind.
@@ -342,6 +345,8 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   * by `docker-ctl.runDetached()` for any caller that starts a container through it. That
     includes a publish or the host network smuggled in `extra` or `network`: short-flag
     clusters (`-dP`, `-dp <v>`), `--publish-all=TRUE`, a publish with no host (the wildcard).
+    The shorthand-with-equals form (`-p=<v>`) is read as docker reads it, so a loopback one
+    passes.
     ⚠ A raw `docker-ctl.run(['run', …])` is NOT judged (its argv cannot be, without docker's
     whole grammar). No base code starts a container that way, and a source arm holds lib to
     it.
@@ -364,7 +369,9 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   endpoint, `cdpHttpUrl` is `null`, and one line says so. It is never refused and never
   downgraded (gvlx Q4). A TCP-only caller of such a target needs the per-call `tcp-forward`,
   which is NOT in this release. A pair that cannot be inspected is refused, never read as
-  absent.
+  absent — a running one too, rather than reused. Adoption is refused as well when a container
+  labelled owner-only names no channel dir, or when the containers' channel-dir labels
+  disagree: which dir the pair serves cannot then be read.
 * ⛔ **A RUNNING browser is never recreated automatically, in any mode.** Two cases changed:
   * A running pair whose CDP does not answer used to log "containers present but CDP
     unreachable — recreating" and RESTART the browser. A partial pair whose browser ran was
@@ -372,7 +379,8 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   * Both are now refused, with the likely causes and the remedy: stop it yourself, then retry.
 
   An owner-only pair whose relay is missing or stopped gets **the relay alone** recreated. If
-  that repair fails, only the relay is removed; the browser and xpra are left running.
+  that repair fails (its socket check, or CDP still silent), only the relay is removed; the
+  browser and xpra are left running.
 * ⛔ **Owner-only channels are refused under an unsafe state root.** The refusal fires on ANY
   non-sticky group/other-writable ancestor of the channel or secret dir. It names the
   directory, the bit and both remedies: its owner runs `chmod go-w <dir>`, or points
@@ -413,10 +421,17 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   * A18 (tcp) — every request and the upgrade carry `host_header`, red on the old code;
   * rule zero — the test runner and test helper scrub the display vars, and the presence
     probe hands xpra none. The test spawn helper refuses ANY spawn whose env names a display,
-    and a docker argv that passes one in or mounts the X11 socket. Each layer is sabotaged and
-    caught;
+    and a docker argv that passes one in or mounts the X11 socket. The argv is read as docker
+    reads it: short-flag clusters and the `-e=<v>` form. Any `--env-file` is refused, and so is
+    a bind of a PARENT of the X11 dir, a runtime dir or an Xauthority. A volume bound to such a
+    path through a device option is refused too. A plain named volume (the private Xvfb) passes.
+    Each layer is sabotaged and caught;
   * the review fixes (F1–F12, N1, item 8, N4, the lows) — each with an arm red on the reviewed
-    commit.
+    commit;
+  * review 3: the secret dir's host source; adoption's channel-dir labels; a running
+    tcp-legacy pair with silent CDP refused, never recreated (red on the code before item 8); a
+    failed inspection refused on reuse too (red on `a83403f`); the relay-repair cleanup;
+    `-p=<v>`.
 * **Integration (opt-in, `test/integration-owner-channels.test.js`).** I1–I10 run against
   throwaway containers from a consumer's own images, through the real driver. Set
   `WEBCTL_IT_XPRA_IMAGE` and `WEBCTL_IT_CHROMIUM_IMAGE`; without them the arms skip and say
@@ -454,6 +469,11 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
 * **The sidecar** is replaced later by a joint entrypoint contract with xq (gvlx F1).
 * **`xpra attach` still opens a client window** — that is its job, run by a human. Rule zero
   covers tests and probes, not an attach a person asked for.
+* **The test guard judges a docker ARGV, not a shell.** A docker command run through a shell
+  string (`sh -c 'docker run …'`) with a display-free env is not parsed, so a display named
+  inside that string is NOT caught. The env scrub only keeps the host's own display vars out.
+  The argv check does not try to be docker's whole grammar. The integration arms make their own
+  docker calls through it, never through a shell.
 
 ## v0.34.1 — 2026-10-12
 
