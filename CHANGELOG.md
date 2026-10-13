@@ -267,6 +267,14 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   local-users | not-running | unknown`, with reasons. It reports **local-users for an
   unauthenticated wildcard listener even with no publish**, and for a profile dir with no
   sealed ancestor. **`formatExposureLine()`** gives the doctor / `gui status` line.
+  * xpra's TCP counts as authenticated only with an **allowlisted** module: `auth=file`, naming
+    the secret base mounts. `auth=none` and `auth=allow` are local-users; another filename is
+    unknown.
+  * **Unknown is never owner-only.** These are all unknown: a network mode base does not start,
+    a relay command that is not base's socat, a relay mounting another channel dir, any other
+    `XPRA_*BIND`, an `XPRA_BIND` that is not base's exact value, and an unparseable bind.
+  * These are local-users: the host network mode, `PublishAllPorts`, and a non-loopback
+    `--remote-debugging-address`.
 * **`inspect()`** gains:
   * `channels`, `html5`, `channelDir` and `xpra` (socket, auth, tcp);
   * `exposure` (what this cfg would expose);
@@ -278,7 +286,16 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
 * **`lib/cdp-client.js` speaks CDP over a unix socket.** Every entry point accepts a control
   endpoint as well as a URL. HTTP goes over `http.request({socketPath})` with `Host:
   host_header`, and the websocket over **`lib/unix-websocket.js`**, a zero-dep RFC 6455
-  client. Before any byte is sent, the socket's path must have a **sealed ancestor**.
+  client.
+  * ⛔ **Before any byte is sent, the socket's WHOLE path is judged, and the client connects to
+    exactly the real path that was checked.** Every component of the path as given, and of its
+    real path, must be owned by this uid or root and not group/other-writable unless sticky.
+    A directory of ours with no group/other bits must seal it, and the socket must be a socket
+    we own. *Measured on a policy-blocked host:* under another uid's 0777 parent, or through
+    another uid's symlink, the client CONNECTED to an impostor before this check.
+  * The client reassembles frames in **linear** time. *Measured:* 32 MiB in 16 KiB chunks
+    took 22 s before, 70 ms after. Its handshake has a total deadline. It refuses a non-websocket
+    101 and a 1-byte close frame. A throwing listener no longer drops the frames after it.
 * **A tcp control endpoint's `host_header` is sent as the Host header** (6gi0 A18 tcp). Before,
   `fetch` and the built-in WebSocket sent the URL's authority, so an app behind a forward that
   checks Host (Chromium, BiDi) answered 400. Such an endpoint now goes through `http.request`
@@ -288,11 +305,18 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
 * **`lib/control-endpoint.js`**:
   * `parseControlEndpoint` consumes xq's `wait-ready --json` shape exactly;
   * `isLoopbackHost`;
-  * `findSealedAncestor` / `assertSealedPath`.
+  * `inspectSocketPath` (the whole-path judgement, with the offending component as data),
+    `findSealedAncestor`, and `assertSealedPath`, which now RETURNS the real path to connect to.
 * **`lib/browser-location/owner-channels.js`** — channel paths, private dirs, secret
   mint/rotate, bind strings, `judgeExposure`.
-* `xpra-attach`: `attachArgs({socketPath})` → `socket://…`; `passwordFile` for TCP.
-  `xpra-presence`: `xpraInfoArgs` / `isXpraClientAttached({socketPath})`.
+* `xpra-attach`: `attachArgs({socketPath})` → `socket://…`; `passwordFile` for TCP. ⛔ The
+  socket path is judged first (as above): an unsafe one is refused with exit 4, because an
+  impostor xpra would receive every keystroke, passwords included.
+  `xpra-presence`: `xpraInfoArgs` / `isXpraClientAttached({socketPath})`, judged the same way;
+  an unsafe path answers `false` without spawning anything.
+* Owner-only starts Chromium **without `--remote-allow-origins=*`**. Base's clients send no
+  Origin header; the flag only widened the debug port to web content. The legacy image's
+  entrypoint still passes it under tcp-legacy.
 * `docker-ctl.build` takes `labels`, and `buildImage` labels images with the uid they are
   built for (`<PROJECT>.image-uid`).
 
@@ -306,8 +330,8 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
    endpoint `ensureRunning()` returns). A caller that builds a URL from `cdpHttpUrl` gets
    `null` under owner-only and must fail on it.
 4. **Restart the pair when its owner decides.** Base never restarts it. Under an
-   owner-only cfg, a running legacy pair is **refused**, not reused. Then confirm
-   `exposure  owner-only`.
+   owner-only cfg, a legacy pair that is running (whole or in part) is **refused**, not reused;
+   a fully STOPPED one is recreated owner-only. Then confirm `exposure  owner-only`.
 
 ### What lanes lose
 
@@ -315,7 +339,12 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   string, or any non-loopback address is refused:
   * by the driver's `ensureRunning()` before any docker call (exit 4, naming where the host
     came from);
-  * by `docker-ctl.runDetached()` for any caller.
+  * by `docker-ctl.runDetached()` for any caller that starts a container through it. That
+    includes a publish or the host network smuggled in `extra` or `network`: short-flag
+    clusters (`-dP`, `-dp <v>`), `--publish-all=TRUE`, a publish with no host (the wildcard).
+    ⚠ A raw `docker-ctl.run(['run', …])` is NOT judged (its argv cannot be, without docker's
+    whole grammar). No base code starts a container that way, and a source arm holds lib to
+    it.
 
   An explicit `host: ''` no longer falls back to 127.0.0.1.
 * **Every directory base creates is 0700** — profile dirs, lock and mutex dirs, the
@@ -323,11 +352,35 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   workflow that relied on group or other access to them loses it. Existing directories are
   untouched.
 * **A tcp-legacy bring-up or reuse now WARNs** (`exposure LOCAL-USERS …`) every time.
-* **A running pair whose channel mode differs from an EXPLICIT cfg is refused**, in both
-  directions, instead of being reused or recreated. A cfg that sets no `channels` facing a pair
-  started owner-only **adopts** it: `inspect()` then shows the unix endpoint, `cdpHttpUrl` is
-  `null`, and one line says so. It is never refused and never downgraded (gvlx Q4). A TCP-only
-  caller of such a target needs the per-call `tcp-forward`, which is NOT in this release.
+* **A pair whose channel mode differs from an EXPLICIT cfg is refused, in every state:**
+  running, stopped or partial.
+  * A downgrade (an owner-only pair under an explicit `'tcp-legacy'`) is always refused.
+  * So is any mismatch while any container of the pair runs.
+  * Only a fully stopped legacy pair under an explicit `'owner-only'` is recreated: an upgrade
+    that restarts nothing.
+
+  A cfg that sets no `channels`, facing any container of a pair started owner-only (a stopped
+  browser or a leftover relay included), **adopts** it. `inspect()` then shows the unix
+  endpoint, `cdpHttpUrl` is `null`, and one line says so. It is never refused and never
+  downgraded (gvlx Q4). A TCP-only caller of such a target needs the per-call `tcp-forward`,
+  which is NOT in this release. A pair that cannot be inspected is refused, never read as
+  absent.
+* ⛔ **A RUNNING browser is never recreated automatically, in any mode.** Two cases changed:
+  * A running pair whose CDP does not answer used to log "containers present but CDP
+    unreachable — recreating" and RESTART the browser. A partial pair whose browser ran was
+    torn down to repair it.
+  * Both are now refused, with the likely causes and the remedy: stop it yourself, then retry.
+
+  An owner-only pair whose relay is missing or stopped gets **the relay alone** recreated. If
+  that repair fails, only the relay is removed; the browser and xpra are left running.
+* ⛔ **Owner-only channels are refused under an unsafe state root.** The refusal fires on ANY
+  non-sticky group/other-writable ancestor of the channel or secret dir. It names the
+  directory, the bit and both remedies: its owner runs `chmod go-w <dir>`, or points
+  `XDG_STATE_HOME` at a private directory. Base never chmods a directory it did not create.
+  ⚠ **It fires even when no other user is in the group.** On a user-private-group host with
+  umask 002, `~/.local/state` is often group-writable, and this is then a false refusal. The
+  remedy is the same. *Measured on a policy-blocked host:* `~/.local/state` was 0775 with
+  another user in the group, so the refusal was correct there.
 * **New refusals at construction (exit 4):**
   * an unknown `channels` value;
   * `containerEnv.LWC_CDP_PORT` with owner-only;
@@ -358,13 +411,23 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   * A15 — X11 stays on the named volume;
   * A16/A17 — endpoint parsing and the sealed-ancestor check;
   * A18 (tcp) — every request and the upgrade carry `host_header`, red on the old code;
-  * rule zero — the test runner and test helper scrub the display vars, the helper refuses
-    any xpra spawn while one is set, and the presence probe hands xpra none. Each layer is
-    sabotaged and caught.
+  * rule zero — the test runner and test helper scrub the display vars, and the presence
+    probe hands xpra none. The test spawn helper refuses ANY spawn whose env names a display,
+    and a docker argv that passes one in or mounts the X11 socket. Each layer is sabotaged and
+    caught;
+  * the review fixes (F1–F12, N1, item 8, N4, the lows) — each with an arm red on the reviewed
+    commit.
 * **Integration (opt-in, `test/integration-owner-channels.test.js`).** I1–I10 run against
   throwaway containers from a consumer's own images, through the real driver. Set
   `WEBCTL_IT_XPRA_IMAGE` and `WEBCTL_IT_CHROMIUM_IMAGE`; without them the arms skip and say
-  why.
+  why. Two arms need a host's allowance and an opt-in:
+  * `WEBCTL_IT_HOST_NETWORK=1` for the uid-65534 probes on the host network;
+  * `WEBCTL_IT_PUBLISH=1` for the loopback publishes.
+
+  Without one, those arms are named skips. The pair is capped, and every probe is locked down
+  (no capability, a read-only root, no mount, at most 60 s). *Run on a policy-blocked host:*
+  every arm green, including a websocket session over the socket without
+  `--remote-allow-origins`.
 
 ### ⛔ What this does NOT cover
 
