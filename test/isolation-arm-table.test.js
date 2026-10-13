@@ -590,19 +590,13 @@ const NO_KEYCTL = 'SKIP (host): keyctl not installed — the keyring row is UNTE
 // half green (fifth review, F9: the arm was named for the flag it could not see alone). ⇒ The name says what the
 // tty half tests, and the flags are asserted where they live: the RUNNING creator's argv (/proc/<pid>/cmdline),
 // so dropping `--new-session` (B1) — or `--die-with-parent`, `--as-pid-1` — turns this arm red by itself.
-test('[bwrap] detached OR --new-session: no ancestor of the command holds a terminal, privileged halves included — under unshare too (detached, B1) — and the running bwrap carries --new-session, --die-with-parent, --as-pid-1 — CONTROL: outside, an ancestor does', async (t) => {
+test('[bwrap] detached OR --new-session: no ancestor of the command holds a terminal, privileged halves included — and the running bwrap carries --new-session, --die-with-parent, --as-pid-1 — CONTROL: outside, an ancestor does', async (t) => {
   if (!IMPLEMENTED.includes('bwrap')) { t.skip('bwrap is not implemented'); return; }
   const w = await world('bwrap');
   if (w.skip) { t.skip(w.skip); return; }
   if (w.tty.unavailable) { t.skip(`SKIP (host): ${w.tty.unavailable}`); return; }
   assert.equal(w.tty.fresh?.ttyAncestors, 0, `fresh: ${w.tty.fresh?.ttyAncestors} ancestor(s) of the command hold the caller's terminal under bwrap`);
   assert.ok(w.tty.outside?.ttyAncestors > 0, 'control: no ancestor holds the pty even outside');
-  const u = await world('unshare');
-  // B1: the unshare creator is detached too — its pid 1 and inner half hold no terminal (they used to: 2)
-  if (!u.skip && !u.tty.unavailable) {
-    assert.equal(u.tty.fresh?.ttyAncestors, 0, `unshare: ${u.tty.fresh?.ttyAncestors} ancestor(s) of the command hold the caller's terminal — the creator is not detached`);
-    assert.ok(u.tty.outside?.ttyAncestors > 0, 'control (unshare world): no ancestor holds the pty even outside');
-  }
   // the creator's argv, read from the RUNNING process — not from BWRAP_FLAGS (a constant can say anything)
   const tag = `webctl-f9-${process.pid}-${Date.now()}`;
   const c = spawn(process.execPath, [TOOL, 'isolated', '--', 'sh', '-c', 'echo READY; exec sleep 30', tag], { stdio: ['ignore', 'pipe', 'pipe'],
@@ -620,4 +614,15 @@ test('[bwrap] detached OR --new-session: no ancestor of the command holds a term
   const upTo = argv.slice(0, argv.indexOf('--'));
   assert.match(upTo[0] || '', /\/bwrap$/, `the harness's child is not bwrap: ${upTo.join(' ')}`);
   for (const f of ['--new-session', '--die-with-parent', '--as-pid-1']) assert.ok(upTo.includes(f), `the running bwrap lacks ${f}: ${upTo.join(' ')}`);
+});
+
+// ⛔ The unshare half of the above, in an arm of its OWN (seventh review, item 4): it sat inside the [bwrap] arm, which
+// skips wholesale where bwrap is unusable — so on a bwrap-less host "unshare's halves hold no terminal" was never tested.
+test('[unshare] detached (B1): no ancestor of the command holds a terminal, its pid 1 and inner half included — CONTROL: outside, an ancestor does', async (t) => {
+  const u = await world('unshare');
+  if (u.skip) { t.skip(u.skip); return; }
+  if (u.tty.unavailable) { t.skip(`SKIP (host): ${u.tty.unavailable}`); return; }
+  // B1: the unshare creator is detached — its pid 1 and inner half hold no terminal (they used to: 2)
+  assert.equal(u.tty.fresh?.ttyAncestors, 0, `unshare: ${u.tty.fresh?.ttyAncestors} ancestor(s) of the command hold the caller's terminal — the creator is not detached`);
+  assert.ok(u.tty.outside?.ttyAncestors > 0, 'control (unshare world): no ancestor holds the pty even outside');
 });
