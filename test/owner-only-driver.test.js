@@ -87,6 +87,8 @@ function harness(o = {}) {
         closers.push(() => new Promise((r) => srv.close(() => r(undefined))));
       }
       if (/-cdprelay-/.test(a.name)) {
+        // as the real relay's socat does (`unlink-early`): a stale cdp.sock from a relay that is gone is replaced
+        try { fs.unlinkSync(CH.cdpSock); } catch { /* none */ }
         const f = await startFakeCdp({ hostHeader: '127.0.0.1:9222', socketPath: CH.cdpSock });
         closers.push(() => f.close());
       }
@@ -501,4 +503,95 @@ test('buildDriverCfg: channels/html5 from JSONC (CLI wins), absent when unset', 
   assert.equal(j.html5, true);
   const cli = c.buildDriverCfg({ args: { channels: 'tcp-legacy' }, dotenv: {}, env: {}, jsonc: { channels: 'owner-only' } });
   assert.equal(cli.channels, 'tcp-legacy');
+});
+
+// ── review of v0.34.2, F7 and F8: every PARTIAL state, and a relay that is gone ──
+
+test('⛔ review F7 (a): an explicit tcp-legacy cfg facing a STOPPED owner-only pair is REFUSED — never recreated as legacy (a downgrade)', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning();
+    for (const [, c] of h.running) c.up = false;
+    const n = h.calls.length;
+    await assert.rejects(h.driver({ channels: 'tcp-legacy' }).ensureRunning(), /DOWNGRADE/);
+    assert.equal(h.calls.length, n, 'a container was started');
+    assert.deepEqual(h.removed, [], 'a container of the owner-only pair was removed');
+  } finally { await h.done(); }
+});
+
+test('⛔ review F7 (a): the same for a HALF-running owner-only pair (its browser up, its relay and xpra stopped)', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning();
+    for (const [name, c] of h.running) c.up = /-chromium-/.test(name);
+    const n = h.calls.length;
+    await assert.rejects(h.driver({ channels: 'tcp-legacy' }).ensureRunning(), /DOWNGRADE/);
+    assert.equal(h.calls.length, n);
+    assert.deepEqual(h.removed, []); assert.deepEqual(h.stops, []);
+  } finally { await h.done(); }
+});
+
+test('⛔ review F7 (b): an explicit owner-only cfg facing a HALF-running legacy pair whose BROWSER runs is REFUSED — the browser is never torn down', async () => {
+  const pre = harness();
+  const names = pre.driver(OO).inspect().names;
+  await pre.done();
+  const h = harness({ preRunning: [
+    { name: names.xpraContainer, labels: L('xpra'), binds: [] },
+    { name: names.chromiumContainer, labels: L('chromium'), binds: [] },
+  ] });
+  try {
+    h.running.get(names.chromiumContainer).args.mounts = [[h.udd, '/x', 'rw']];
+    h.running.get(names.xpraContainer).up = false; // xpra died; the browser runs on
+    await assert.rejects(h.driver(OO).ensureRunning(), /RESTARTING/);
+    assert.deepEqual(h.calls, []); assert.deepEqual(h.stops, []); assert.deepEqual(h.removed, []);
+  } finally { await h.done(); }
+});
+
+test('review F7 CONTROL: a FULLY STOPPED legacy pair under an explicit owner-only cfg IS recreated owner-only — an upgrade restarts nothing', async () => {
+  const pre = harness();
+  const names = pre.driver(OO).inspect().names;
+  await pre.done();
+  const h = harness({ preRunning: [
+    { name: names.xpraContainer, labels: L('xpra'), binds: [] },
+    { name: names.chromiumContainer, labels: L('chromium'), binds: [] },
+  ] });
+  try {
+    h.running.get(names.chromiumContainer).args.mounts = [[h.udd, '/x', 'rw']];
+    for (const [, c] of h.running) c.up = false;
+    const r = await h.driver(OO).ensureRunning();
+    assert.equal(r.endpoint.transport, 'unix');
+    assert.ok(h.calls.some((c) => /-cdprelay-/.test(c.name)), 'it was not brought up owner-only');
+  } finally { await h.done(); }
+});
+
+test('⛔ review F8: a MISSING relay is recreated ALONE — the running browser and xpra are never stopped, removed or restarted', async () => {
+  const h = harness();
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    const relay = d.inspect().names.cdpRelayContainer;
+    h.running.delete(relay); // the relay is gone; the pair runs on
+    const before = h.calls.length;
+    const r = await h.driver(OO).ensureRunning();
+    assert.equal(r.endpoint.transport, 'unix');
+    assert.deepEqual(h.calls.slice(before).map((c) => c.name), [relay], 'anything but the relay was (re)started');
+    assert.deepEqual(h.stops, []);
+    assert.ok(!h.removed.some((n) => !/-cdprelay-/.test(n)), `removed: ${h.removed.join(', ')}`);
+    assert.ok(h.logs.some((l) => /recreating it ALONE/.test(l)));
+  } finally { await h.done(); }
+});
+
+test('⛔ review F8: a STOPPED relay is recreated ALONE as well (removed by its exact name first)', async () => {
+  const h = harness();
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    const relay = d.inspect().names.cdpRelayContainer;
+    /** @type {any} */ (h.running.get(relay)).up = false;
+    const before = h.calls.length;
+    await h.driver(OO).ensureRunning();
+    assert.deepEqual(h.calls.slice(before).map((c) => c.name), [relay]);
+    assert.deepEqual(h.removed, [relay]);
+    assert.deepEqual(h.stops, []);
+  } finally { await h.done(); }
 });
