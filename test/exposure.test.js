@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { judgeExposure, formatExposureLine } from '../lib/browser-location/owner-channels.js';
+import { judgeExposure, formatExposureLine, relayCmd } from '../lib/browser-location/owner-channels.js';
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
 import { guardedDocker, assertHermetic, INSPECT_ABSENT } from './helpers/fake-docker-inspect.mjs';
@@ -26,27 +26,32 @@ function scratch() {
   return { root, chan, prof, done: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 
+/** The xpra container's Id in these fixtures; the others join it as docker records it (measured: `container:<Id>`). */
+const XID = 'a'.repeat(64);
 /**
- * One container as `docker inspect` shows it (the fields exposure reads).
+ * One container as `docker inspect` shows it (the fields exposure reads). Shapes MEASURED on a real daemon:
+ * xpra `NetworkMode: 'bridge'`, a joined container `container:<xpra Id>`, `Path` + `Args` the real argv.
  * @param {{env?: Record<string,string>, binds?: Array<[string,string]>, ports?: Array<[string,number]>,
- *   labels?: Record<string,string>, running?: boolean}} o
+ *   labels?: Record<string,string>, running?: boolean, net?: string, path?: string, args?: string[], id?: string, name?: string}} o
  */
 function ctr(o) {
   return {
+    Id: o.id || 'b'.repeat(64), Name: o.name || '/some-container', Path: o.path || 'entry', Args: o.args || [],
     Config: { Env: Object.entries(o.env || {}).map(([k, v]) => `${k}=${v}`), Labels: o.labels || {} },
     State: { Running: o.running !== false },
-    HostConfig: { PortBindings: Object.fromEntries((o.ports || []).map(([ip, p]) => [`${p}/tcp`, [{ HostIp: ip, HostPort: String(p) }]])) },
+    HostConfig: { NetworkMode: o.net === undefined ? `container:${XID}` : o.net,
+      PortBindings: Object.fromEntries((o.ports || []).map(([ip, p]) => [`${p}/tcp`, [{ HostIp: ip, HostPort: String(p) }]])) },
     Mounts: (o.binds || []).map(([src, dst]) => ({ Type: 'bind', Source: src, Destination: dst })),
   };
 }
 
 /** @param {string} chan @param {string} prof */
 const ownerOnlyPair = (chan, prof) => ({
-  xpra: ctr({ env: { XPRA_BIND: '/run/webctl/xpra.sock,auth=peercred',
+  xpra: ctr({ id: XID, name: '/demo-webctl-u1-xpra-oo', net: 'bridge', env: { XPRA_BIND: '/run/webctl/xpra.sock,auth=peercred',
     XPRA_TCP_BIND: '127.0.0.1:45999,auth=file,filename=/run/webctl-secret/xpra.pass' },
   binds: [[chan, '/run/webctl']], labels: { 'demo-webctl.channels': 'owner-only' } }),
-  chromium: ctr({ env: { DISPLAY: ':99' }, binds: [[prof, '/home/user/.config/chromium']] }),
-  relay: ctr({ binds: [[chan, '/run/webctl']] }),
+  chromium: ctr({ env: { DISPLAY: ':99' }, binds: [[prof, '/home/user/.config/chromium']], args: ['--remote-debugging-port=9222'] }),
+  relay: ctr({ binds: [[chan, '/run/webctl']], path: 'socat', args: relayCmd() }),
 });
 
 test('A10 control: a fake OWNER-ONLY pair reads owner-only, sealed by its own dirs', () => {
@@ -164,14 +169,83 @@ test('driver.exposure(): reads ONLY `docker inspect` — a legacy pair reads loc
         verbs.push(a.join(' '));
         const n = a[a.length - 1];
         const c = /-xpra-/.test(n) ? legacy.xpra : /-chromium-/.test(n) ? legacy.chromium : null;
-        return c ? { code: 0, stderr: '', stdout: JSON.stringify([{ Name: `/${n}`, ...c }]) } : INSPECT_ABSENT;
+        return c ? { code: 0, stderr: '', stdout: JSON.stringify([{ ...c, Name: `/${n}` }]) } : INSPECT_ABSENT;
       },
     } });
     const d = createChromiumDockerXpra(C, { mounts, docker, uid: 4242, stateRoot: path.join(s.root, 'state') })
       .createDriver({ port: 4999, host: '127.0.0.1', slug: 'e' });
     const e = await d.exposure();
     assertHermetic(violations);
-    assert.equal(e.level, 'local-users');
+    assert.equal(e.level, 'local-users', e.reasons.join('; '));
     assert.ok(verbs.length >= 2 && verbs.every((v) => v.startsWith('inspect ')), 'inspect only');
+  } finally { s.done(); }
+});
+
+// ── review of v0.34.2: findings 1 and 5 ────────────────────────────────────
+
+test('⛔ review F1: an xpra TCP bind on 0.0.0.0 with ANY auth base does not mint is LOCAL-USERS — auth=none, auth=allow; CONTROL: auth=file is owner-only', () => {
+  const s = scratch();
+  try {
+    for (const auth of ['none', 'allow', 'env', 'tcp']) {
+      const p = ownerOnlyPair(s.chan, s.prof);
+      p.xpra.Config.Env = [`XPRA_TCP_BIND=0.0.0.0:14500,auth=${auth}`];
+      const e = judgeExposure(p);
+      assert.equal(e.level, 'local-users', `auth=${auth}: ${e.reasons.join('; ')}`);
+      assert.ok(e.reasons.some((r) => new RegExp(`auth=${auth} \\(not an auth base mints\\)`).test(r)), e.reasons.join('; '));
+    }
+    const ok = ownerOnlyPair(s.chan, s.prof);
+    ok.xpra.Config.Env = ['XPRA_TCP_BIND=0.0.0.0:14500,auth=file,filename=/run/webctl-secret/xpra.pass'];
+    assert.equal(judgeExposure(ok).level, 'owner-only', 'CONTROL: auth=file (what base mints) is owner-only');
+  } finally { s.done(); }
+});
+
+test('⛔ review F1: an UNPARSEABLE xpra TCP bind, or two auth= options, is UNKNOWN — never owner-only', () => {
+  const s = scratch();
+  try {
+    for (const v of ['0.0.0.0', 'nonsense', '0.0.0.0:99999,auth=file', '127.0.0.1:1,auth=file,auth=none']) {
+      const p = ownerOnlyPair(s.chan, s.prof);
+      p.xpra.Config.Env = [`XPRA_TCP_BIND=${v}`];
+      assert.equal(judgeExposure(p).level, 'unknown', v);
+    }
+  } finally { s.done(); }
+});
+
+test('⛔ review F5: network mode HOST (xpra or chromium) is LOCAL-USERS; a foreign or missing network mode is UNKNOWN — never owner-only', () => {
+  const s = scratch();
+  try {
+    /** @param {(p: any) => void} f */
+    const judge = (f) => { const p = ownerOnlyPair(s.chan, s.prof); f(p); return judgeExposure(p).level; };
+    assert.equal(judge((p) => { p.xpra.HostConfig.NetworkMode = 'host'; }), 'local-users');
+    assert.equal(judge((p) => { p.chromium.HostConfig.NetworkMode = 'host'; }), 'local-users');
+    assert.equal(judge((p) => { p.relay.HostConfig.NetworkMode = 'host'; }), 'local-users');
+    assert.equal(judge((p) => { p.xpra.HostConfig.NetworkMode = 'some-user-net'; }), 'unknown');
+    assert.equal(judge((p) => { p.chromium.HostConfig.NetworkMode = `container:${'c'.repeat(64)}`; }), 'unknown', 'joined to ANOTHER container');
+    assert.equal(judge((p) => { delete p.xpra.HostConfig.NetworkMode; }), 'unknown', 'no network mode read');
+    // CONTROL: joined by NAME instead of id is still our xpra
+    assert.equal(judge((p) => { p.chromium.HostConfig.NetworkMode = 'container:demo-webctl-u1-xpra-oo'; }), 'owner-only');
+  } finally { s.done(); }
+});
+
+test('⛔ review F5: chromium with --remote-debugging-address on a non-loopback address is LOCAL-USERS; CONTROL: loopback is owner-only', () => {
+  const s = scratch();
+  try {
+    const p = ownerOnlyPair(s.chan, s.prof);
+    p.chromium.Args = ['--remote-debugging-port=9222', '--remote-debugging-address=0.0.0.0'];
+    assert.equal(judgeExposure(p).level, 'local-users');
+    const q = ownerOnlyPair(s.chan, s.prof);
+    q.chromium.Config.Cmd = ['--remote-debugging-address=127.0.0.1'];
+    assert.equal(judgeExposure(q).level, 'owner-only');
+  } finally { s.done(); }
+});
+
+test('⛔ review F5: a relay whose command is not base\'s socat relay, or another xpra bind env, is UNKNOWN', () => {
+  const s = scratch();
+  try {
+    const p = ownerOnlyPair(s.chan, s.prof);
+    p.relay.Args = ['TCP-LISTEN:9333,fork,bind=0.0.0.0', 'TCP:127.0.0.1:9222'];
+    assert.equal(judgeExposure(p).level, 'unknown');
+    const q = ownerOnlyPair(s.chan, s.prof);
+    q.xpra.Config.Env.push('XPRA_WS_BIND=0.0.0.0:14600');
+    assert.equal(judgeExposure(q).level, 'unknown');
   } finally { s.done(); }
 });
