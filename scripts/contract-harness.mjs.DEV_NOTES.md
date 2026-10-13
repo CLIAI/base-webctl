@@ -1239,6 +1239,35 @@ shell`. In plain bash too (no namespace, a node child: 13 of 240), so not pid-1 
   `wait` (traps still ignored after) → the burst arm (`not a child`); `trap ''` dropped → the
   burst arm; fd 9 opened before the fork → the fd arm.
 
+### ⛔ A signal between the fork and `c=$!` stranded the command (the BURST flake; v0.35.0)
+
+The burst arm above stayed green in isolation but **hung twice under load** on the measuring host
+(0 of 16 on reruns). The ruling: don't dismiss a hang that only shows under load; find what held
+the pipe.
+* **What held it (2026-10-13, captured while hung):** an orphan with `PPid 1`, `SID` and `PGID`
+  those of the test's spawn. Its command line was the arm's child (`sh -c trap "exit 7" TERM; echo
+  READY; …`), with `SigCgt 0x14000` (TERM and CHLD caught) and no children. fd 0 was `/dev/null`;
+  fds 1 and 2 were the sockets of the test's stdout and stderr pipes. So `close` never fired.
+  **Its parent, the reaper's bash, was gone.** The child's TERM trap had never run (it was still
+  looping).
+* **Cause, read from PID1_REAPER:** `f() { if [ -n "$c" ]; then kill …; else exit "$2"; fi; }`.
+  A trapped signal that lands AFTER `"$@" <&0 &` has forked but BEFORE `c=$!` runs finds `$c`
+  empty, so pid 1 exits 143 at once, with the child already running. Under load the child can
+  print READY before its parent runs `c=$!`, and the arm's burst starts on READY. Outside a pid
+  namespace (the arm) the child is orphaned and holds the pipes. Inside one (every real run) it
+  dies with pid 1, but its trap never runs, and the status is lost either way.
+* **Fix:** a marker `s=1` set just before the fork. A signal with `$s` set and no `$c` is recorded
+  as pending (`p="$p $1"`) and delivered right after `c=$!`. Before the fork nothing changes: pid
+  1 still exits 128+n, and the harness tears down a run that never reported `started`.
+* **Arm (deterministic):** a copy of the reaper with `kill -s TERM $$` spliced in right after the
+  fork line. The splice point is asserted, so a reworded reaper fails the arm instead of passing it
+  vacuously. Its stdio is not piped: an orphan holding pid 1's stdout would make the runner wait it
+  out, and the orphan would be gone by the time it was checked. Red on `24affa8`: pid 1 exited 143
+  and left `sleep 5` running. After the fix: 143 from `sleep` itself, in under 4 s, child gone, 5
+  of 5. The 150-run burst arm stays green.
+* **Full suite, base vs fix, same host:** the same 52 failures (the userns arms, host policy), one
+  more test, one more pass.
+
 ### ⛔ The 0555 hide answered a write CHECK with EACCES (gate regression, v0.33.0)
 
 Measured by the lead on the release gate — 8 of a consumer lane's 10 failures (earlier blamed
