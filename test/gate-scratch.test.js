@@ -589,7 +589,10 @@ test('scratch: ORPHANED clones (their gate is gone) are pruned at start; a LIVE 
     const live = mk('LIVE01', `${process.pid} ${myStart}\n`);   // this test process: alive
     const legacy = mk('LEGC01', null);                          // no owner record, fresh
     const r = w.gate(['--against-head', '--scratch']);
-    assert.equal(r.status, 0, r.out);
+    // the prune runs at START, before any isolation: on a host with no user namespaces the run itself is a named
+    // GATE-ENVIRONMENT fault, and the prune is judged all the same (it used to FAIL there on the run's status)
+    if (USERNS) assert.equal(r.status, 0, r.out);
+    else assert.match(r.out, /GATE-ENVIRONMENT/, r.out);
     assert.equal(fs.existsSync(dead), false, 'a dead gate\'s clone is pruned');
     assert.equal(fs.existsSync(recycled), false, 'a recycled pid does not keep a clone alive');
     assert.equal(fs.existsSync(live), true, 'CONTROL: a live gate\'s clone is never touched');

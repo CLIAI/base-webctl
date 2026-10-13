@@ -93,6 +93,19 @@ function world(backend) {
   return /** @type {Promise<any>} */ (worlds.get(backend));
 }
 
+/**
+ * A world that printed no record: a named HOST-POLICY skip when the kernel refused the world's own unprivileged user
+ * namespace (`harness.userNamespaceRefusal` — the same judgement the gate makes), otherwise BROKEN (a red arm).
+ * ⛔ Narrow on purpose: only that refusal skips. Any other failure stays red, so a world broken by a code change can
+ * never pass as "this host cannot". On a host with user namespaces the world builds and every row runs.
+ * @param {{status: number|null, stderr: string}} r @param {string} [sysctlPath] injectable for the arm below
+ */
+function worldFailed(r, sysctlPath) {
+  const policy = sysctlPath === undefined ? harness.userNamespaceRefusal(r.stderr) : harness.userNamespaceRefusal(r.stderr, sysctlPath);
+  if (policy) return { skip: `SKIP (host policy): the arm world needs an unprivileged user namespace — ${policy.split('. Fix')[0]}` };
+  return { skip: '', broken: `the world printed no record (exit ${r.status}):\n${String(r.stderr).slice(-3000)}` };
+}
+
 /** @param {string} backend */
 async function buildWorld(backend) {
   const neutral = neutralDir();
@@ -135,7 +148,7 @@ try { fs.appendFileSync(${JSON.stringify(hits)}, JSON.stringify({ pid: process.p
       c.on('close', (code) => resolve({ status: code, stdout, stderr }));
     });
     const line = /** @type {any} */ (r).stdout.split('\n').find((/** @type {string} */ l) => l.startsWith('WORLD '));
-    if (!line) return { skip: '', broken: `the world printed no record (exit ${/** @type {any} */ (r).status}):\n${/** @type {any} */ (r).stderr.slice(-3000)}` };
+    if (!line) return worldFailed(/** @type {any} */ (r));
     const w = JSON.parse(line.slice('WORLD '.length));
     if (w.unavailable) return { skip: `SKIP (host): cannot build the arm world here — ${w.unavailable}` };
     let hitLines = [];
@@ -636,4 +649,24 @@ test('[unshare] detached (B1): no ancestor of the command holds a terminal, its 
   // B1: the unshare creator is detached — its pid 1 and inner half hold no terminal (they used to: 2)
   assert.equal(u.tty.fresh?.ttyAncestors, 0, `unshare: ${u.tty.fresh?.ttyAncestors} ancestor(s) of the command hold the caller's terminal — the creator is not detached`);
   assert.ok(u.tty.outside?.ttyAncestors > 0, 'control (unshare world): no ancestor holds the pty even outside');
+});
+
+test('the arm world\'s failure: ONLY a host-policy userns refusal skips (by name) — any other failure is BROKEN, a red arm', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ib-arm-sysctl-'));
+  const sysctl = path.join(dir, 'apparmor_restrict_unprivileged_userns');
+  const EPERM = 'unshare: write failed /proc/self/uid_map: Operation not permitted';
+  try {
+    fs.writeFileSync(sysctl, '1\n');
+    const p = worldFailed({ status: 1, stderr: EPERM }, sysctl);
+    assert.match(p.skip, /^SKIP \(host policy\): .*HOST POLICY.*apparmor_restrict_unprivileged_userns = 1/);
+    assert.equal(/** @type {any} */ (p).broken, undefined);
+    // CONTROLS: the same EPERM where the knob is 0 or absent, and an unrelated failure → BROKEN, never a skip
+    fs.writeFileSync(sysctl, '0\n');
+    assert.match(String(/** @type {any} */ (worldFailed({ status: 1, stderr: EPERM }, sysctl)).broken), /printed no record/);
+    assert.match(String(/** @type {any} */ (worldFailed({ status: 1, stderr: EPERM }, path.join(dir, 'absent'))).broken), /printed no record/);
+    fs.writeFileSync(sysctl, '1\n');
+    const other = worldFailed({ status: 1, stderr: 'TypeError: cfg.home is undefined' }, sysctl);
+    assert.equal(other.skip, '');
+    assert.match(String(/** @type {any} */ (other).broken), /cfg\.home is undefined/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
