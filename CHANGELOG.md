@@ -454,6 +454,9 @@ The changes that can show:
     `ulimit -c 0`).
   * A terminal-group signal now reaches the command once, not 2–3 times. A trap that counted deliveries
     sees one.
+    ⚠ "Exactly once" is per group signal: a terminal HANGUP can arrive twice. The harness gets HUP from both
+    the tty driver and the shell's job HUP, and forwards each once (measured: twice under unshare, once under
+    bwrap; without `isolated`, the command gets HUP then CONT).
   * The unshare creator is no longer in the caller's process group. A signal to that group still reaches
     the command, forwarded by the harness.
   * A HUP or QUIT to the creator, or to every pid, no longer ends the command mid-trap.
