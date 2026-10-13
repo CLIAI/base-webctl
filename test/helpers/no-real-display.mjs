@@ -14,6 +14,8 @@
 export const DISPLAY_VARS = Object.freeze(['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY']);
 
 import { spawnSync } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
 
 for (const k of DISPLAY_VARS) delete process.env[k];
 
@@ -73,23 +75,72 @@ export function guardedSpawnSync(cmd, args, opts = {}) {
   return spawnSync(cmd, args, { ...opts, env });
 }
 
+/** docker run's short flags that take NO value — in a cluster (`-ite`), the first other letter takes the rest, or the next arg. */
+const DOCKER_SHORT_BOOLS = new Set(['d', 'i', 't', 'P', 'q']);
+const DISPLAY_SRC = /\/tmp\/\.X11-unix|\.Xauthority|wayland-\d|\/run\/user\/\d+/;
+
+/**
+ * Whether a HOST path reaches the display: the X11/Wayland socket, a user runtime dir or an Xauthority, or a PARENT of
+ * one (`/tmp`, `/`, `/run`, the home dir — review 3 item 3). Only an absolute path is a host path; a name is a volume.
+ * @param {string} src @returns {boolean}
+ */
+function hostSrcReachesDisplay(src) {
+  if (!src.startsWith('/')) return false;
+  const p = path.posix.normalize(src).replace(/(.)\/+$/, '$1');
+  if (DISPLAY_SRC.test(p)) return true;
+  const inside = (/** @type {string} */ dir) => p === '/' || dir === p || dir.startsWith(`${p}/`);
+  return ['/tmp/.X11-unix', '/run/user', path.posix.join(os.homedir(), '.Xauthority')].some(inside);
+}
+
 /**
  * Why a docker argv hands a container a DISPLAY, or '': `-e DISPLAY…` / `--env DISPLAY…` / `--env=DISPLAY…` /
- * `-eDISPLAY…` (with or without a value), or a mount of the X11 socket dir. @param {string[]} args @returns {string}
+ * `-eDISPLAY…` / a short-flag cluster ending in e (`-ite DISPLAY=:0`), any `--env-file` (what it holds is not in the
+ * argv), or a mount whose HOST source reaches the display or is a parent of it — `-v`, a cluster ending in v, `--mount`
+ * bind, a `--mount` volume with `volume-opt=device=<path>`, and `docker volume create --opt device=<path>`.
+ * ⚠ Argv only: a shell that runs docker (`sh -c 'docker run …'`) is not parsed (CHANGELOG v0.34.2, the guard's limits).
+ * @param {string[]} args @returns {string}
  */
 export function displayIntoContainer(args) {
+  const MOUNT_WHY = 'it mounts the host\'s X11/Wayland socket, its runtime dir, an Xauthority, or a parent of one into the container';
+  const isVolumeCreate = args[0] === 'volume' && args[1] === 'create';
   for (let i = 0; i < args.length; i++) {
     const a = String(args[i]);
     const next = String(args[i + 1] || '');
-    const envVal = a === '-e' || a === '--env' ? next : a.startsWith('--env=') ? a.slice(6) : /^-e[A-Z_]/.test(a) ? a.slice(2) : null;
+    if (a === '--env-file' || a.startsWith('--env-file=')) return 'it passes an --env-file, whose contents the guard cannot judge (refused in tests)';
+    if (isVolumeCreate) {
+      const opt = a === '--opt' || a === '-o' ? next : a.startsWith('--opt=') ? a.slice(6) : /^-o./.test(a) ? a.slice(2) : null;
+      if (opt !== null && opt.startsWith('device=') && hostSrcReachesDisplay(opt.slice(7))) return MOUNT_WHY;
+      continue;
+    }
+    /** @type {string|null} */ let envVal = a === '--env' ? next : a.startsWith('--env=') ? a.slice(6) : null;
+    /** @type {string|null} */ let mountVal = a === '--volume' || a === '--mount' ? next : /^--(volume|mount)=/.test(a) ? a.replace(/^--(volume|mount)=/, '') : null;
+    const isMount = a === '--mount' || a.startsWith('--mount=');
+    // a short flag or a CLUSTER of them: the boolean letters, then the first letter that takes a value takes the rest
+    if (/^-[A-Za-z]/.test(a)) {
+      for (let j = 1; j < a.length; j++) {
+        const f = a[j];
+        if (DOCKER_SHORT_BOOLS.has(f)) continue;
+        const val = j + 1 < a.length ? a.slice(j + 1) : next;
+        if (f === 'e') envVal = val;
+        if (f === 'v') mountVal = val;
+        break;
+      }
+    }
     if (envVal !== null && /^(DISPLAY|WAYLAND_DISPLAY|XAUTHORITY)(=|$)/.test(envVal)) return `it passes ${envVal.split('=')[0]} into the container`;
     // the HOST SOURCE of a mount is what is judged — a named docker VOLUME at /tmp/.X11-unix inside (the pair's own
     // private Xvfb, integration arm I9) is not the host's display
-    const isMount = a === '--mount' || a.startsWith('--mount=');
-    const mountVal = a === '-v' || a === '--volume' || a === '--mount' ? next : /^--(volume|mount)=/.test(a) ? a.replace(/^--(volume|mount)=/, '') : /^-v./.test(a) ? a.slice(2) : null;
     if (mountVal !== null) {
-      const src = isMount ? ((mountVal.match(/(?:^|,)(?:src|source)=([^,]+)/) || [])[1] || '') : mountVal.split(':')[0];
-      if (src.startsWith('/') && /\/tmp\/\.X11-unix|\.Xauthority|wayland-\d|\/run\/user\/\d+/.test(src)) return 'it mounts the host\'s X11/Wayland socket, its runtime dir or an Xauthority into the container';
+      /** @type {string[]} */ const srcs = [];
+      if (isMount) {
+        const fields = mountVal.split(',');
+        for (const fl of fields) {
+          const m = fl.match(/^(?:src|source)=(.*)$/) || fl.match(/^volume-opt=device=(.*)$/);
+          if (m) srcs.push(m[1]);
+        }
+      } else {
+        srcs.push(mountVal.split(':')[0]);
+      }
+      if (srcs.some(hostSrcReachesDisplay)) return MOUNT_WHY;
     }
   }
   return '';

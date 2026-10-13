@@ -134,3 +134,25 @@ test('⛔ review 2 (low): a docker argv that hands a container a display is refu
   assert.equal(displayIntoContainer(['run', '-v', 'webctl-it-p1-x11:/tmp/.X11-unix', 'img']), '', 'a private Xvfb volume was refused');
   assert.equal(displayIntoContainer(['run', '--mount', 'type=volume,src=webctl-x11,dst=/tmp/.X11-unix', 'img']), '');
 });
+
+test('⛔ review 3 item 3: the docker-argv guard reads short-flag CLUSTERS, refuses --env-file, a bind of a PARENT of the X11 dir, and a volume that binds one — CONTROL: the I9 private-Xvfb volume still passes', () => {
+  for (const args of [
+    ['run', '-ite', 'DISPLAY=:0', 'img'], ['run', '-itv', '/tmp/.X11-unix:/x', 'img'], ['run', '-dieDISPLAY=:0', 'img'], ['run', '-itv/tmp/.X11-unix:/x', 'img'],
+    ['run', '--env-file', '/dev/null', 'img'], ['run', '--env-file=/dev/null', 'img'],
+    ['run', '-v', '/tmp:/tmp', 'img'], ['run', '-v', '/:/host', 'img'], ['run', '-v', '/tmp/:/t', 'img'], ['run', '-v', '//tmp:/t', 'img'],
+    ['run', '-v', '/run:/r', 'img'], ['run', '--mount', 'type=bind,source=/,target=/host', 'img'],
+    ['run', '--mount', 'type=volume,src=v1,dst=/x,volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/tmp/.X11-unix', 'img'],
+    ['run', '--mount', 'type=volume,src=v1,dst=/x,volume-opt=o=bind,volume-opt=device=/tmp', 'img'],
+    ['volume', 'create', '--opt', 'type=none', '--opt', 'o=bind', '--opt', 'device=/tmp/.X11-unix', 'v1'],
+    ['volume', 'create', '-o', 'device=/', 'v1'], ['volume', 'create', '--opt=device=/tmp', 'v1'],
+  ]) {
+    assert.notEqual(displayIntoContainer(args), '', args.join(' '));
+    assert.throws(() => guardedSpawnSync('docker', args, { env: { PATH: '/nonexistent' } }), /RULE ZERO/, args.join(' '));
+  }
+  // CONTROLS: clusters without -e/-v, an ordinary env and bind, the I9 private-Xvfb named volume, a sh -c after the image
+  for (const args of [['run', '-it', '--rm', 'img'], ['run', '-ite', 'HOME=/tmp', 'img'], ['run', '-itv', '/tmp/webctl-x/a:/a', 'img'],
+    ['run', '-v', 'webctl-it-p1-x11:/tmp/.X11-unix', 'img'], ['run', '--mount', 'type=volume,src=webctl-x11,dst=/tmp/.X11-unix', 'img'],
+    ['run', '--rm', '--entrypoint', 'sh', 'img', '-ec', 'true'], ['volume', 'create', 'webctl-x11'], ['run', '-v', '/tmp/webctl-a:/tmp', 'img']]) {
+    assert.equal(displayIntoContainer(args), '', `CONTROL: ${args.join(' ')}`);
+  }
+});
