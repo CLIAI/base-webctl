@@ -513,6 +513,21 @@ HOST's xq **before entering any backend** and passes the names in, read-only, at
   red when a name is printed). ⚠ The unshare and bwrap paths are written but **not run here**: the
   measuring host blocks user namespaces. They run on a host that allows them.
 
+### ⛔ The docker backend left its host channel dir behind when the harness died
+
+The channel dir (`$TMPDIR/webctl-iso-XXXXXX`, 0700) holds `plan.json` (the command's env) and the
+machine names. It was removed only on a normal end. On a SIGKILL, an early signal, or a command that
+died by a signal, the harness exited before its cleanup ran (measured: 74 left in `/tmp` after
+about 12 suite runs, roughly 6 per run).
+* The harness now cleans up BEFORE dying by a forwarded signal.
+* For SIGKILL, the reaper removes it once the container is gone. It does so only for a dir it
+  re-judges right then: mkdtemp's `webctl-iso-XXXXXX` name, a real directory (not a symlink),
+  owned by the uid, mode 0700.
+* Arms: the two §3a.4 SIGKILL arms and the early-TERM arm each run with a TMPDIR of their own and
+  require it to be empty afterwards. All three were red before the fix, and both SIGKILL arms are
+  red with the reaper's removal sabotaged. ⚠ The in-process cleanup has no red arm of its own: with
+  it sabotaged, the reaper still removes the dir, only a moment later.
+
 ### v0.34.0 pre-tag review follow-ups
 
 * **Row 12b's TIOCSTI half could not fail where `dev.tty.legacy_tiocsti=0`.** The kernel answers EIO

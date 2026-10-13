@@ -3069,7 +3069,20 @@ function dockerBinds(items) {
 }
 
 /**
- * `__isolated-reaper <docker> <name>` — the host-side half that guarantees no container outlives its harness, SIGKILL
+ * Is `p` a docker channel dir THIS uid made (dockerChannel)? The reaper removes one only if so: an absolute path whose
+ * basename is mkdtemp's `webctl-iso-XXXXXX`, a real directory (never a symlink), owned by us, mode 0700.
+ * @param {string} p @returns {boolean}
+ */
+function ownChannelDir(p) {
+  if (!path.isAbsolute(p) || path.normalize(p) !== p || !/^webctl-iso-[A-Za-z0-9]{6}$/.test(path.basename(p))) return false;
+  try {
+    const st = fs.lstatSync(p);
+    return st.isDirectory() && !st.isSymbolicLink() && st.uid === process.getuid?.() && (st.mode & 0o777) === 0o700;
+  } catch { return false; }
+}
+
+/**
+ * `__isolated-reaper <docker> <name> [<channel dir>]` — the host-side half that guarantees no container outlives its harness, SIGKILL
  * included (ib4k §3b, hard point (a); §3a.4). It reads stdin, whose only write end the harness holds: `id <id>` once
  * the container exists, `done` when the run ended normally. On `done`: one `rm -f` of the id (a no-op after `--rm`),
  * exit. On EOF without `done` — the harness DIED, by any signal — `rm -f` by exact id and exact name, retried while
@@ -3085,8 +3098,9 @@ export function runDockerReaper(a) {
   // hold for it — measured: SigIgn 0), so the stop signals a supervisor sends every process are CAUGHT and dropped.
   // The reaper must outlive its harness long enough to remove the container; it ends on EOF, bounded.
   for (const s of FORWARDED_SIGNALS) process.on(s, () => { /* the reaper's job is to outlive this */ });
-  const [bin, name] = a;
+  const [bin, name, chan] = a;
   if (!bin || !path.isAbsolute(bin) || !/^webctl-iso-u\d+-[a-z0-9-]{1,24}-\d+$/.test(name || '')) return Promise.resolve(EXIT.usage);
+  if (chan !== undefined && !ownChannelDir(chan)) return Promise.resolve(EXIT.usage);
   let id = '';
   let done = false;
   let buf = '';
@@ -3111,6 +3125,9 @@ export function runDockerReaper(a) {
         sleepMs(1000);
       }
       if (Date.now() >= until) process.stderr.write(`isolated: reaper: container ${name} may be left — its removal did not finish in ${REAPER_TOTAL_MS / 1000}s\n`);
+      // ⛔ the harness DIED: its host channel dir (plan.json — the command's env; machine-names) goes too, judged again
+      // right before the removal (ownChannelDir), never followed through a link
+      if (chan && ownChannelDir(chan)) { try { fs.rmSync(chan, { recursive: true, force: true }); } catch { /* private, 0700 */ } }
       resolve(EXIT.pass);
     };
     process.stdin.setEncoding('utf8');
@@ -3195,11 +3212,16 @@ function runDockerBackend(o) {
       for (const c of [creating, cli]) { try { c?.kill('SIGKILL'); } catch { /* gone */ } }
     });
     // detached: a terminal's group signals never reach it; shielded IN-PROCESS (runDockerReaper) from the rest
-    const reaper = spawn(process.execPath, [...NO_USR1_FLAG, SELF, DOCKER_REAPER, o.cli.bin, o.name],
+    const reaper = spawn(process.execPath, [...NO_USR1_FLAG, SELF, DOCKER_REAPER, o.cli.bin, o.name, ch.dir],
       { stdio: ['pipe', 'ignore', 'inherit'], env: dockerEnv(), detached: true });
     reaper.on('error', () => { /* below: no reaper, no run */ });
     reaper.stdin?.on('error', () => { /* it exited */ });
     reaper.unref();
+    // ⛔ CLEAN UP BEFORE DYING BY A SIGNAL: dieByForwarded / exitOrDieBy may kill this process with the forwarded signal
+    // before end() runs — the host channel dir (plan.json: the command's env; machine-names) was left in TMPDIR on every
+    // early signal and every command that died by one (measured: ~6 per suite run). SIGKILL: the reaper (below) does it.
+    const dieBy = () => { cleanup(); dieByForwarded(fwd); };
+    const exitBy = (/** @type {number|null} */ c, /** @type {NodeJS.Signals|null} */ sg) => { cleanup(); return exitOrDieBy(fwd, c, sg); };
     const end = (/** @type {number} */ rc) => {
       if (ended) return;
       ended = true;
@@ -3207,7 +3229,7 @@ function runDockerBackend(o) {
       cleanup();
       resolve(rc);
     };
-    const fail = (/** @type {string} */ why) => { dieByForwarded(fwd); end(refuse(why)); };
+    const fail = (/** @type {string} */ why) => { dieBy(); end(refuse(why)); };
     if (!reaper.pid) { fail('cannot start the docker backend\'s reaper — without it a killed harness could leave its container running'); return; }
     // pid 1 is OUR reaping bash (PID1_REAPER, no keyctl: docker's seccomp denies the keyring), as on the namespace
     // backends — ⛔ NOT `--init`: it binds the host's docker-init as a SLAVE mount (measured: `master:1`), which the
@@ -3226,13 +3248,13 @@ function runDockerBackend(o) {
       creating = null;
       const cid = out.trim();
       if (code !== 0 || !/^[0-9a-f]{64}$/.test(cid)) {
-        if (early) { dieByForwarded(fwd); end(EXIT.fail); return; }
+        if (early) { dieBy(); end(EXIT.fail); return; }
         fail(`docker could not create the container (${lastLine(err) || `exit ${code}`})`);
         return;
       }
       id = cid;
       try { reaper.stdin?.write(`id ${id}\n`); } catch { /* the reaper is gone: refused below */ }
-      if (early) { call(['rm', '-f', id]); dieByForwarded(fwd); end(EXIT.fail); return; }
+      if (early) { call(['rm', '-f', id]); dieBy(); end(EXIT.fail); return; }
       startIt();
     });
     const startIt = () => {
@@ -3275,13 +3297,13 @@ function runDockerBackend(o) {
           const w = spawn(o.cli.bin, ['-H', DOCKER_ENDPOINT, 'wait', id], { stdio: ['ignore', 'pipe', 'ignore'], env: dockerEnv() });
           let wout = '';
           w.stdout?.on('data', (d) => { wout += d; });
-          w.on('error', () => { end(exitOrDieBy(fwd, code, signal)); });
-          w.on('close', (wc) => { const n = Number(wout.trim()); end(wc === 0 && /^\d+$/.test(wout.trim()) ? exitOrDieBy(fwd, n, null) : exitOrDieBy(fwd, code, signal)); });
+          w.on('error', () => { end(exitBy(code, signal)); });
+          w.on('close', (wc) => { const n = Number(wout.trim()); end(wc === 0 && /^\d+$/.test(wout.trim()) ? exitBy(n, null) : exitBy(code, signal)); });
           return;
         }
-        if (went && !early) { end(exitOrDieBy(fwd, code, signal)); return; }
+        if (went && !early) { end(exitBy(code, signal)); return; }
         call(['rm', '-f', id]);
-        dieByForwarded(fwd);
+        dieBy();
         const f = text.match(/^fail (.*)$/m);
         end(refuse(f ? f[1] : `docker exited ${code ?? signal} before the isolated side reported in${err ? ` (${err})` : ''}`));
       });

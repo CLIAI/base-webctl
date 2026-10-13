@@ -356,35 +356,58 @@ test('[docker] 128+n: a forwarded TERM the command does not trap → the harness
 
 test('[docker] §3a.4: the harness SIGKILLed mid-run → its reaper removes the container (by exact name) — nothing left', needsDocker, async () => {
   const w = await world();
-  const r = start(['--', 'bash', '-c', 'echo READY; sleep 300'], { cwd: w.work });
-  assert.ok(await until(() => r.out().includes('READY'), 30_000), r.err());
-  assert.notEqual(containerOf('work', r.c.pid || 0), '', 'CONTROL: the container is not running');
-  r.c.kill('SIGKILL');
-  await r.exited;
-  assert.ok(await until(() => containerOf('work', r.c.pid || 0) === '', 15_000), 'the container outlived its harness');
+  const t = privateTmp();
+  try {
+    const r = start(['--', 'bash', '-c', 'echo READY; sleep 300'], { cwd: w.work, env: cleanEnv({ TMPDIR: t.dir }) });
+    assert.ok(await until(() => r.out().includes('READY'), 30_000), r.err());
+    assert.notEqual(containerOf('work', r.c.pid || 0), '', 'CONTROL: the container is not running');
+    assert.equal(t.left().length, 1, 'CONTROL: no channel dir in the arm\'s TMPDIR while the run is live');
+    r.c.kill('SIGKILL');
+    await r.exited;
+    assert.ok(await until(() => containerOf('work', r.c.pid || 0) === '', 15_000), 'the container outlived its harness');
+    // ⛔ and its host channel dir (plan.json: the command's env; machine-names) with it — the reaper's job too
+    assert.ok(await until(() => t.left().length === 0, 15_000), `the channel dir outlived its harness: ${t.left().join(', ')}`);
+  } finally { t.done(); }
 });
 
 test('[docker] §3a.4: the harness SIGKILLed during the CREATE → no container is left once the reaper\'s bound has passed', needsDocker, async () => {
   const w = await world();
-  const r = start(['--', 'bash', '-c', 'echo RAN; sleep 300'], { cwd: w.work });
-  // the create is in flight once docker was called: the probe takes several CLI calls first
-  await until(() => false, 900);
-  r.c.kill('SIGKILL');
-  await r.exited;
-  assert.ok(await until(() => containerOf('work', r.c.pid || 0) === '', 45_000), 'a container outlived its harness');
+  const t = privateTmp();
+  try {
+    const r = start(['--', 'bash', '-c', 'echo RAN; sleep 300'], { cwd: w.work, env: cleanEnv({ TMPDIR: t.dir }) });
+    // the create is in flight once docker was called: the probe takes several CLI calls first
+    await until(() => false, 900);
+    r.c.kill('SIGKILL');
+    await r.exited;
+    assert.ok(await until(() => containerOf('work', r.c.pid || 0) === '', 45_000), 'a container outlived its harness');
+    assert.ok(await until(() => t.left().length === 0, 45_000), `the channel dir outlived its harness: ${t.left().join(', ')}`);
+  } finally { t.done(); }
 });
 
 test('[docker] an EARLY TERM (before the inner half reports in) → the command never runs, the harness dies by TERM, nothing left', needsDocker, async () => {
   const w = await world();
   const marker = path.join(w.work, `RAN-${process.pid}`);
-  const r = start(['--', 'sh', '-c', `touch ${marker}`], { cwd: w.work });
-  await until(() => false, 400);
-  process.kill(-(r.c.pid || 0), 'SIGTERM');
-  const end = await r.done;
-  assert.equal(end.signal, 'SIGTERM', `${end.code}/${end.signal}\n${r.err()}`);
-  assert.equal(fs.existsSync(marker), false, 'the command RAN after an early TERM');
-  assert.ok(await until(() => containerOf('work', r.c.pid || 0) === '', 10_000), 'a container is left');
+  const t = privateTmp();
+  try {
+    const r = start(['--', 'sh', '-c', `touch ${marker}`], { cwd: w.work, env: cleanEnv({ TMPDIR: t.dir }) });
+    await until(() => false, 400);
+    process.kill(-(r.c.pid || 0), 'SIGTERM');
+    const end = await r.done;
+    assert.equal(end.signal, 'SIGTERM', `${end.code}/${end.signal}\n${r.err()}`);
+    assert.equal(fs.existsSync(marker), false, 'the command RAN after an early TERM');
+    assert.ok(await until(() => containerOf('work', r.c.pid || 0) === '', 10_000), 'a container is left');
+    assert.ok(await until(() => t.left().length === 0, 15_000), `the channel dir outlived the run: ${t.left().join(', ')}`);
+  } finally { t.done(); }
 });
+
+/**
+ * A TMPDIR of the arm's own, so the run's host channel dir (`webctl-iso-XXXXXX`, mkdtemp'd there) can be looked for.
+ * `left()` lists what of it is still there once the run is over (it holds plan.json, the command's env).
+ */
+function privateTmp() {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ib-dtmp-')));
+  return { dir, left: () => fs.readdirSync(dir).filter((n) => n.startsWith('webctl-iso-')), done: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
 
 /** Host pids whose cmdline holds every one of `parts` (the container's processes are visible from the host). @param {string[]} parts */
 const pidsWith = (parts) => fs.readdirSync('/proc').filter((d) => /^\d+$/.test(d)).filter((d) => {
