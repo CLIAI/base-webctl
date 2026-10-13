@@ -221,8 +221,9 @@ three paths (the table's rows 8–10).
   node's `detached`): the `__isolated-pid1` helper and, on the nested path, its pid 1 — both capless,
   the command's uid in its user namespace, so traceable by it where yama's `ptrace_scope` is 0 — hold
   no CONTROLLING terminal either (fds 0/1/2 that are the terminal stay open: readable, writable,
-  termios-settable — a residual, §6, as under `bwrap --new-session`); the fresh path's pid 1 and inner half keep it, holding capabilities the command
-  cannot trace. Signals: a terminal's Ctrl-C reaches the caller's group, `isolated` forwards it down
+  termios-settable — a residual, §6, as under `bwrap --new-session`). The fresh path's pid 1 and inner half
+  hold none either: since the sixth review (B1) the creator itself is spawned detached on both backends
+  (*measured:* tty_nr 0 throughout; they hold capabilities the command cannot trace as well). Signals: a terminal's Ctrl-C reaches the caller's group, `isolated` forwards it down
   the chain, and the helper — which spawns the command in a session and GROUP of its own — forwards
   INT/TERM/HUP to that whole group, as the terminal did (to the command alone, a shell loop ran on:
   its `sleep` never saw the INT). Exit codes are unchanged. Arms (row 12b, all three paths, under a
@@ -344,8 +345,8 @@ Chromium's sandbox, the nested path's drop).
 3. **The session** — `--new-session`, above.
 4. **NoNewPrivs** is already 1 in the inner half (bwrap always sets it). Harmless: `mount`,
    `hostname`, `keyctl`, `ip` and `setpriv` need no new privileges.
-5. ⛔ **A terminal's signals.** `unshare --fork` ignores SIGINT and blocks SIGTERM; bwrap does
-   neither. A group Ctrl-C reached the bwrap process, which died by it, and `--die-with-parent` then
+5. ⛔ **A terminal's signals.** `unshare --fork` BLOCKS SIGINT and SIGTERM and ignores nothing
+   (*read back:* SigIgn 0, SigBlk 0x4002; item 8); bwrap does neither. A group Ctrl-C reached the bwrap process, which died by it, and `--die-with-parent` then
    SIGKILLed the namespace. *Measured:* the command's own INT trap never ran (unshare: `GOT-INT`,
    rc 7; bwrap: nothing). ⇒ bwrap is spawned in a session of its own (`detached`), so a terminal's
    signals reach only `isolated`, which forwards them past the creator exactly as past unshare.

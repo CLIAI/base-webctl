@@ -4521,8 +4521,8 @@ export function runCommand(command, prefix = [], { pastUnshare = false, env = /*
     // the caller's terminal (kernels < 6.2, or dev.tty.legacy_tiocsti=1). HERE, above the whole chain —
     // not only around the command: the `__isolated-pid1` helper (and the nested path's pid 1) run capless,
     // as the command's uid in its user namespace, so a command allowed to ptrace them (yama ptrace_scope 0)
-    // could TIOCSTI through one still holding the terminal. The fresh path's pid 1 and inner half keep it:
-    // they hold capabilities the command does not, so it cannot trace them. A terminal's Ctrl-C still reaches
+    // could TIOCSTI through one still holding the terminal. The fresh path's pid 1 and inner half hold none either:
+    // their creator is spawned detached too (sixth review B1; measured tty_nr 0 throughout). A terminal's Ctrl-C still reaches
     // our caller, which forwards it down the chain (the helper on to the command's group).
     /** @type {import('node:child_process').ChildProcess} */
     let child;
