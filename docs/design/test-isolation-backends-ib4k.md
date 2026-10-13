@@ -581,7 +581,9 @@ the harness). Lanes find v0.34-vendored harnesses with "who is below 9".
    the image (libc). The docker backend REFUSES with a clear message when the cwd's
    `node_modules` holds any, rather than flaking. Most lanes have no native dependencies.
 
-### 3b. The docker backend as built (v0.35.0, phase 3) — DRAFT for approval
+### 3b. The docker backend as built (v0.35.0, phase 3)
+
+*Approved 2026-10-13 by the gating instance, with the rulings and additions marked **(ruling)**.*
 
 §3 and §3a were written on 2026-10-07, before v0.34/v0.35 hardened the contract. This section replaces
 them as the spec; they stay above as the original conditions, each answered here. *Measured* below
@@ -618,6 +620,13 @@ backends.
 2. **Backend-specific refusals after selection** (FAIL, never a fallback): a native addon
    (`*.node`) under the cwd's `node_modules` (§3a.6); a `--keep`/`--keep-ro`/cwd that is or
    contains a docker socket; a keep or cwd beneath `/dev`, `/proc` or `/sys`.
+   ⛔ **(ruling) A symlink anywhere in a bind source is REFUSED.** The bind sources are resolved
+   by a ROOT daemon, not by the caller. So the cwd, every `--keep`, every `--keep-ro` and base's
+   root must each equal their own `realpath`, component by component. Otherwise the run is
+   refused, naming the option and its position, never the path. A link swapped in between our
+   check and the daemon's resolve would bind whatever it then points at, with root's reach. The
+   check makes the daemon bind exactly what the caller named. *Arm:* a `--keep` and a cwd through a
+   symlinked component → refused before any `create` (fake CLI).
 3. **The reaper first** (§3a.4, hard point (a)). A host-side process, spawned `detached`
    through `env --ignore-signal=TERM,INT,HUP,QUIT`, reads a pipe whose only write end the
    harness holds. On EOF it runs `docker rm -f <exact name>` and, once the harness has written
@@ -626,8 +635,13 @@ backends.
    the create, so the reaper can remove a container whose create was still in flight; it retries
    by exact name for a short window. *Measured (prototype):* harness SIGKILLed mid-run, 3/3, no
    container left. ⚠ The write end must reach no other process (the CLI children are spawned with
-   explicit stdio only). Residual: a SIGKILL to every pid of the uid (`kill -9 -1`) kills the
-   reaper too. That is named, not closed.
+   explicit stdio only).
+   ⛔ **(ruling) The reaper is BOUNDED and always exits.** After EOF, each `docker rm -f` gets 10 s
+   (`timeout`) and the retries stop at **30 s** in total; then it exits, whatever docker did. A
+   run that ended normally writes `done` first, and the reaper exits after one `rm -f` by exact
+   id. *Arm:* a fake CLI whose `rm` hangs for ever → the reaper is gone within the bound, and it
+   reports what it could not remove on stderr, by exact name. Residual (also in §6): a SIGKILL to
+   every pid of the uid (`kill -9 -1`) kills the reaper too. Named, not closed.
 4. **`docker create`, then `docker start -a -i`**, split so the id is known before anything runs
    and the reaper holds it. The flags:
 
@@ -686,7 +700,7 @@ backends.
 | 9 | the default seccomp denies `add_key` and `keyctl`; `/proc/keys` is masked | `add_key` → EPERM | MET, more strongly: the §1a description residual is closed. ⛔ **CONTROL NOT MET:** a key added inside is EPERM. Verdict `; keyring: none (docker seccomp)` |
 | 10 | `--hostname webctl-isolated`; the neutral machine-id bound read-only; a fresh sysfs per netns | `identityGaps` | MET: hostname, machine-id, `/sys/class/net` and `/sys/devices/virtual/net` = lo |
 | 11 | the CLI gets `privilegedEnv` minus `DOCKER_*`; the env travels by FIFO | as today | MET by construction (arm: an `LD_PRELOAD` in the caller never runs in the CLI or the inner half) |
-| 12 | docker's own `/dev`, which cannot be replaced | `devGaps` (docker branch) | ⛔ **NOT MET AS WRITTEN:** docker's `/dev` holds the 15 listed names plus **`core` → `/proc/kcore`**, which docker masks. Its `/dev` is a rw tmpfs (mode 755, root's), so the command's create there is EACCES, not EROFS. `/dev/pts` is a new instance; `uinput` and `snd` are absent. **Ruling asked:** accept exactly `core`, read back as a link to a masked file, or refuse the backend |
+| 12 | docker's own `/dev`, which cannot be replaced | `devGaps` (docker branch) | MET with ONE accepted extra **(ruling)**: `core`. Docker's `/dev` holds the 15 listed names plus `core` → `/proc/kcore`. Read back: `/dev/core` is a symlink whose target is exactly `/proc/kcore`, and `/proc/kcore` is docker's mask: a char device 1:3, bind-mounted from `/dev`'s `null` (*measured*), whose read is EACCES (*measured*, AppArmor) or 0 bytes. Any OTHER extra name → REFUSED. Docker's `/dev` is a rw tmpfs (mode 755, root's): a create there must be EACCES or EROFS (*measured:* EACCES), nothing else. `/dev/pts` is a new instance; `uinput` and `snd` are absent. Verdict `; dev: +core` |
 | 12b | no tty: stdio via the CLI's pipes | `/dev/tty` → ENXIO | MET, more strongly (no terminal at all) |
 
 **Rows docker cannot meet, named (never papered over):**
@@ -694,10 +708,9 @@ backends.
 1. **Row 7's control:** no namespaces of the command's own. Chromium's own sandbox fails inside, so a
    lane that runs Chromium inside needs `--no-sandbox`, which is a weaker browser.
 2. **Row 9's control:** no keyring at all.
-3. **Row 12:** `/dev/core`, as above.
-4. **The nested path cannot drop or re-isolate** (below): a nested command shares its nested
+3. **The nested path cannot drop or re-isolate** (below): a nested command shares its nested
    caller's PID namespace and uid.
-5. **The userland is the IMAGE's.** The host's PATH tools are not re-bound (another libc). A lane
+4. **The userland is the IMAGE's.** The host's PATH tools are not re-bound (another libc). A lane
    calling a host tool inside finds the image's, or ENOENT.
 
 ⇒ The verdict names this backend's deviations. The table marks each unmet control as a named
@@ -730,6 +743,26 @@ marker (the env set, plus a plain file) is refused, both on the host and inside 
   (node 22.23.3 ≥ engines 22.12), plus a short, listed tool set. *Measured:* the base image has
   `bash setpriv unshare mount hostname`, but no `git`, `ps`, `python3` or `keyctl`. Each added tool
   is an explicit line; lanes ask for more through webctl:mgr.
+* **(ruling) The tool survey.** It covers what the consumers' contract runs invoke under `isolated`. Two wired
+  consumers on the policy-blocked host each run their WHOLE `test-against-base.sh` under
+  `isolated` (their `npm test`). They are named here by role only, as A and B: both are private
+  repos. The public registry's consumers have no clone on that host, so the gating instance runs
+  the same survey there. *Measured in the base image:* `hostname diff sed awk grep sort mktemp
+  timeout id env realpath stat find tar gzip script` are present; `git ps xq uv python3 curl jq`
+  are absent.
+
+  | tool | needed by | in the base image | decision |
+  |---|---|---|---|
+  | `git` | A, B: the pin check (`ls-tree`, `rev-parse`), the downgrade arms (`checkout`), the PASS line (`describe`) | no | **added** |
+  | `ps` (procps) | none of A and B; base's own arms read `/proc` | no | **added**: diagnostics in a shared harness, small |
+  | `hostname`, `diff`, `sed`, `awk`, `grep`, `sort`, `mktemp`, `timeout`, `id`, `env` | A, B | yes | (base) |
+  | `xq` | A, B: the no-host-literals step lists machine names with `xq machine ls --json` | no | **REFUSED**: a host-specific tool whose checkout lives under the hidden home, and it needs uv and python. Under docker that step takes the lanes' documented path for an absent xq (NO VERDICT, exit 2, "xq is not installed"). The acceptance runs (below) show what each lane's verdict then is |
+  | `uv`, `python3`, `curl`, `jq` | none of A and B | no | not added until a lane names one |
+* **(ruling) Acceptance on the real target.** Before the merge, each consumer on the policy-blocked
+  host that waits on docker passes its OWN `./test-against-base.sh` there, under the docker
+  backend. It runs in a SCRATCH clone (never the lane's live tree), by the method of
+  `scripts/test-all-consumers.sh --scratch`. The report gives pass/fail and the verdict line for
+  each consumer.
 * It is built ONLY by an explicit verb (`contract-harness.mjs isolated-image build`). The pull of
   the digest-pinned base happens there and never at test time. It is tagged
   `webctl-iso/node22:<first 12 hex of the recipe's sha256>` and labelled with that recipe hash
@@ -745,12 +778,13 @@ marker (the env set, plus a plain file) is refused, both on the host and inside 
   unshare's v0.33 text, then `…; no isolation backend can be used here — bwrap: <why>, docker:
   <why>`. A probe failure falls through; a failure after selection is a FAIL.
 * Verdict: `…; backend: docker (skipped unshare: …, skipped bwrap: …)` is the LAST `; backend:`
-  clause, then `; keyring: none (docker seccomp)`, then `; dev: +core`. **Ruling asked** on
-  `; cgroup2: nsdelegate`: it does not apply (the command cannot make a cgroup namespace), so the
-  proposal is to omit it under docker rather than claim a check that did not run. The JSONL
-  carries `"backend": "docker"` and `"skipped"` as today.
-* `HARNESS_GENERATION` → **10**: a new backend whose verdict carries new clauses, and a nested
-  proof an older outer cannot satisfy. **Ruling asked.**
+  clause, then `; keyring: none (docker seccomp)`, then `; dev: +core`. **(ruling)** `; cgroup2:
+  nsdelegate` is OMITTED under docker, and nothing replaces it. That check does not run there
+  (the command cannot make a cgroup namespace), and a verdict never claims a check that did not
+  run. The JSONL carries `"backend": "docker"` and `"skipped"` as today.
+* **(ruling) `HARNESS_GENERATION` stays 9.** The number marks a RELEASE's behaviour change, and docker
+  lands in the same unreleased v0.35.0 that took 9. Every older outer is v0.34.x (≤ 8), so "who
+  is below 9" still finds exactly the lanes without v0.35.
 
 #### Arms (§3a.5: fake docker CLI for units; real docker within limits)
 
@@ -764,7 +798,9 @@ marker (the env set, plus a plain file) is refused, both on the host and inside 
   * the command's env appears in no argv;
   * selection order and pin refusals;
   * a missing image names the build command;
-  * a native addon is refused.
+  * a native addon is refused;
+  * a symlinked bind source is refused (ruling 7);
+  * the reaper exits within its bound against a hanging `rm` (ruling 6).
 * **Real docker:** the table (§1) pinned to docker, on the fresh, nested and stripped paths.
 * **§3a.2:** `docker inspect` of the RUNNING container: `Privileged` false, `SecurityOpt` is
   exactly `no-new-privileges`, AppArmor `docker-default`.
@@ -776,7 +812,10 @@ marker (the env set, plus a plain file) is refused, both on the host and inside 
   * the sig-proxy back → the HUP arm is red;
   * the `/dev/null` socket mask dropped → row 2 is red;
   * the env passed as `-e` → the argv arm is red;
-  * the proof skips its mount check → the forged-marker arm is red.
+  * the proof skips its mount check → the forged-marker arm is red;
+  * the symlink check off → its arm is red;
+  * the reaper unbounded → the bound arm is red;
+  * any extra `/dev` name accepted → a planted one (in a fake `/dev` read-back) is not refused.
 
 ## 4. Verdict and gate
 
@@ -875,4 +914,5 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with b
   blocked in `read`, as a pid-namespace init holding the caller's stdio, and nothing in it can be
   signalled except by SIGKILL. *Measured:* 160 harness SIGKILLs spread over the setup window gave
   0 runs, 0 hangs and 0 leaks.
-* **v0.35.0 phase 3 — docker (§3b): design drafted (2026-10-13), awaiting approval; three rulings asked (/dev/core, the nsdelegate clause, generation 10).**
+* **v0.35.0 phase 3 — docker (§3b): design approved (2026-10-13) with rulings: `/dev/core` accepted with a read-back; `; cgroup2: nsdelegate` omitted under docker; generation stays 9; a tool survey; acceptance per consumer on the policy-blocked host; a bounded reaper; a refusal of symlinked bind sources. Implementation in progress.**
+* **Residual (phase 3): `kill -9 -1` as the user.** It kills the docker backend's reaper with everything else, so a container may outlive it. Named; no layer closes it.
