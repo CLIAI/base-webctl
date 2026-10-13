@@ -49,7 +49,9 @@ function hermeticMounts(C) {
  *   imageLabels?: Record<string,string>,
  *   preRunning?: Array<{name: string, labels: Record<string,string>, binds: string[], cdpTcpPort?: number}>,
  *   noXpraSocket?: boolean,
+ *   relayNoCdp?: () => boolean,
  * }} [o]
+ *   `relayNoCdp`: while it returns true, a relay this harness starts serves NO CDP (it runs, CDP stays silent).
  */
 function harness(o = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'webctl-oo-'));
@@ -88,7 +90,7 @@ function harness(o = {}) {
         await new Promise((r) => srv.listen(CH.xpraSock, () => r(undefined)));
         closers.push(() => new Promise((r) => srv.close(() => r(undefined))));
       }
-      if (/-cdprelay-/.test(a.name)) {
+      if (/-cdprelay-/.test(a.name) && !(o.relayNoCdp && o.relayNoCdp())) {
         // as the real relay's socat does (`unlink-early`): a stale cdp.sock from a relay that is gone is replaced
         try { fs.unlinkSync(CH.cdpSock); } catch { /* none */ }
         const f = await startFakeCdp({ hostHeader: '127.0.0.1:9222', socketPath: CH.cdpSock });
@@ -710,4 +712,29 @@ test('⛔ review 3 item 2: an IMPLICIT cfg facing an owner-only-labelled pair wi
       assert.ok(!h.logs.some((l) => /channels: adopted/.test(l)), `${what}: adopted`);
     } finally { await h.done(); }
   }
+});
+
+test('⛔ review 3 nit 6b: a relay recreated ALONE whose CDP still does not answer is REMOVED — only it; the running browser and xpra survive, and the message says so', async () => {
+  let silent = false;
+  const h = harness({ relayNoCdp: () => silent });
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    const names = d.inspect().names;
+    h.running.delete(names.cdpRelayContainer); // the relay is gone …
+    await h.relayFakes[h.relayFakes.length - 1].close(); // … with its CDP
+    silent = true; // and the relay this call starts serves none
+    await assert.rejects(h.driver(OO).ensureRunning(), (/** @type {any} */ e) => {
+      assert.equal(e.exitCode, 3);
+      assert.match(e.message, /was recreated, but CDP still does not answer/);
+      assert.match(e.message, /Only the relay this call started was removed/);
+      assert.doesNotMatch(e.message, /Nothing else was stopped, removed or started/);
+      return true;
+    });
+    assert.ok(!h.running.has(names.cdpRelayContainer), 'the relay this call started was left running');
+    assert.deepEqual(h.removed, [names.cdpRelayContainer], `removed: ${h.removed.join(', ')}`);
+    assert.ok(h.running.get(names.chromiumContainer)?.up, 'the running BROWSER was touched');
+    assert.ok(h.running.get(names.xpraContainer)?.up, 'the running xpra was touched');
+    assert.deepEqual(h.stops, []);
+  } finally { await h.done(); }
 });
