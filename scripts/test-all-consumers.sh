@@ -393,8 +393,19 @@ declare -a breaches=() envfaults=()
 # ⭐ the isolation backend per consumer, tallied for the summary (ib4k §4: "the summary shows the mix")
 declare -A iso_mix=()
 
-while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localDir; do
+# ⛔ The registry is read on fd 3, and the loop's stdin is /dev/null. Measured
+# 2026-10-13: fed on stdin, the rows were inherited by every consumer's test, so
+# one that read stdin swallowed the rest of the registry, and the gate summed up
+# the lanes it had reached as if they were all of them. ⇒ Read once into a file,
+# count the rows, and refuse a summary that covers fewer lanes than registered.
+consumers_tsv="$RUN_LOG_DIR/consumers.tsv"
+node "$HERE/read-consumers.mjs" ${WEBCTL_CONSUMERS_FILE:+"$WEBCTL_CONSUMERS_FILE"} > "$consumers_tsv"
+registered="$(grep -c . "$consumers_tsv" || true)"
+seen=0
+
+while IFS=$'\t' read -r -u 3 name submodulePath testCmd tier dockerOptIn wired localDir; do
   [ -n "$name" ] || continue
+  seen=$((seen + 1))
   ENVELOPE_ISOLATION=""
 
   if [ "$wired" != "true" ]; then
@@ -909,9 +920,9 @@ while IFS=$'\t' read -r name submodulePath testCmd tier dockerOptIn wired localD
        if [ -n "$tested_note" ]; then echo "        $tested_note" >&2; fi
        fail=$((fail + 1)); fails+=("$name") ;;
   esac
-done < <(node "$HERE/read-consumers.mjs" ${WEBCTL_CONSUMERS_FILE:+"$WEBCTL_CONSUMERS_FILE"})
+done 3< "$consumers_tsv" </dev/null
 
-echo "----- gate summary: pass=$pass skip=$skip fail=$fail -----" >&2
+echo "----- gate summary: pass=$pass skip=$skip fail=$fail (lanes reached: $seen of $registered registered) -----" >&2
 if [ "$SCRATCH" = "1" ]; then
   echo "----- scratch: $scratch_n consumer(s) cloned; live trees verified byte-identical=$live_same CHANGED=$breach; gate-environment faults=$envfault -----" >&2
   mix=""
@@ -947,6 +958,12 @@ if [ "$probe_bad" -gt 0 ]; then
   exit 1
 fi
 blocked=0
+if [ "$seen" -ne "$registered" ]; then
+  # ⇒ Blocks: a lane the loop never reached is a lane nobody validated, and the
+  # counts above would read as complete.
+  echo "BLOCKED: the gate reached $seen of $registered registered lanes. The rest were NOT RUN." >&2
+  blocked=1
+fi
 if [ "$breach" -gt 0 ]; then
   echo "BLOCKED: the scratch run CHANGED the live tree of ${breaches[*]} — the one thing it promises not to do." >&2
   blocked=1

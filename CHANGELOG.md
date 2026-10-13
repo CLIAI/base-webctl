@@ -429,6 +429,16 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   every arm green, including a websocket session over the socket without
   `--remote-allow-origins`.
 
+### Gate (affects consumers only via base's release process)
+
+* **A consumer that read stdin could swallow the rest of the registry.** The release gate fed
+  its registry rows to its loop on stdin, and every consumer's test inherited that stdin. A
+  contract that read it (`cat`, `read`, a prompt) ate the rows after it, and the summary counted
+  only the lanes reached, as if they were all of them. The registry is now read on its own file
+  descriptor, the loop's stdin is `/dev/null`, and the gate is BLOCKED when it reaches fewer lanes
+  than are registered. The summary prints `lanes reached: N of M registered`. Arm:
+  `test/gate-registry-stdin.test.js`, red on the old gate.
+
 ### ⛔ What this does NOT cover
 
 * **The default.** Until Phase 2, a lane that does nothing stays exposed exactly as before;
