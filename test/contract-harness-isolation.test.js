@@ -4067,6 +4067,37 @@ test('⛔ pid 1\'s reaper: a BURST of TERMs as the child exits never loses its s
   assert.deepEqual(tally, { 7: 150 }, `the reaper lost the child's status (before the fix: ~8% of runs):\n${odd}`);
 });
 
+// ⛔ The BURST flake's root cause (measured 2026-10-13, an orphan left with PPid 1): a signal that lands AFTER the
+// fork but BEFORE `c=$!` found $c empty, so pid 1 exited 128+n at once — the child's status lost and, outside a pid
+// namespace, the child orphaned. Under load the child can print READY before its parent runs `c=$!`, so a burst hits
+// it. The window is one bash line wide, so this arm WIDENS it deterministically: a copy of the reaper with
+// `kill -s TERM $$` spliced in right after the fork (the trap then runs before `c=$!`). The splice point is asserted,
+// so a reworded reaper fails this arm instead of passing it vacuously.
+test('⛔ pid 1\'s reaper: a TERM between the fork and `c=$!` is FORWARDED once the child is known — never an exit that strands it', async () => {
+  const FORK = '"$@" <&0 &';
+  const lines = PID1_REAPER.split('\n');
+  const at = lines.indexOf(FORK);
+  assert.ok(at > 0, `the reaper has no line ${FORK} to splice after — this arm must be rewritten, not skipped`);
+  const dir = tmpdir();
+  const pidFile = path.join(dir, 'child.pid');
+  try {
+    const script = [...lines.slice(0, at + 1), `echo $! > ${JSON.stringify(pidFile)}; kill -s TERM $$`, ...lines.slice(at + 1)].join('\n');
+    const t0 = Date.now();
+    const r = spawnSync('/bin/bash', ['--norc', '-p', '-c', script, 'webctl-isolated-pid1', '', 'sleep', '5'],
+      // ⚠ no pipes: an orphan holding pid 1's stdout would make spawnSync wait it out, and the orphan be gone by then
+      { stdio: 'ignore', timeout: 15000 });
+    const ms = Date.now() - t0;
+    const child = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    let alive = false;
+    try { process.kill(child, 0); alive = true; } catch { /* gone */ }
+    if (alive) process.kill(child, 'SIGKILL');
+    assert.equal(alive, false, `pid 1 exited (${r.status ?? r.signal}) and left its child ${child} running — the TERM was not forwarded`);
+    // the child died of the forwarded TERM, and pid 1 reported THAT (sleep's 143), promptly
+    assert.equal(r.status, 143, `pid 1 said ${r.status ?? r.signal}`);
+    assert.ok(ms < 4000, `took ${ms} ms — the TERM reached the child late or not at all`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('pid 1\'s reaper: the child\'s status as is (no signal), and its sleep fd (9) is NOT inherited by the child', async () => {
   const r = await reaperBurst(['sh', '-c', 'echo READY; if [ -e /proc/$$/fd/9 ]; then echo FD9-LEAKED; fi; exit 5'], 0, 0);
   assert.equal(r.status, '5', r.out);

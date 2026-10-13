@@ -1390,8 +1390,11 @@ const HIDE_MODE = '0755';
  *   * fds 3/4 (the fresh path's status and plan pipes) pass to the background child, which
  *     needs them; bash then closes its OWN copies.
  *   * INT/TERM/HUP/QUIT are trapped (pid 1 receives nothing it has no handler for) and forwarded to
- *     the child. A signal after the traps but before the child exists ends pid 1 at once
- *     (128+n), and the namespace with it.
+ *     the child. A signal after the traps but before the fork ends pid 1 at once (128+n), and
+ *     the namespace with it. ⛔ One from the fork on (`s=1`) is PENDING until `c=$!`, then
+ *     forwarded: it used to find $c empty and end pid 1 with the child already running — its
+ *     status lost, and outside a pid ns the child orphaned (the BURST flake, measured
+ *     2026-10-13: an orphan with PPid 1, its TERM trap never run).
  *   * ⛔ pid 1 NEVER BLOCKS IN THE `wait` BUILTIN WHILE A SIGNAL CAN ARRIVE. It used to (`wait`,
  *     interrupted by a trap → >128 → wait again) and LOST the child's status: `TERM ×3` → 127 in
  *     1 of 150 runs under load, `wait: pid 2 is not a child of this shell`. Traced (strace, bash
@@ -1447,15 +1450,19 @@ const HIDE_MODE = '0755';
 const PID1_SWALLOWED = 'USR1 USR2 ALRM PIPE VTALRM XCPU XFSZ SYS TRAP ABRT';
 export const PID1_REAPER = [
   'k=$1; shift',
-  'c=',
-  'f() { if [ -n "$c" ]; then kill -s "$1" "$c" 2>/dev/null; else exit "$2"; fi; }',
+  'c=; s=; p=',
+  // ⛔ once the fork is under way ($s), a signal with no $c yet is PENDING, delivered right after `c=$!` — it used to
+  // end pid 1 (128+n) with the child running: the status lost, the child orphaned outside a pid ns (the BURST flake)
+  'f() { if [ -n "$c" ]; then kill -s "$1" "$c" 2>/dev/null; elif [ -n "$s" ]; then p="$p $1"; else exit "$2"; fi; }',
   "trap 'f INT 130' INT; trap 'f TERM 143' TERM; trap 'f HUP 129' HUP; trap 'f QUIT 131' QUIT",
   `trap : ${PID1_SWALLOWED}`,
   // ⛔ a FAILED join is a refusal (R3), said on the status channel (fd 3) — never `|| :` (review F5)
   "if [ -n \"$k\" ]; then \"$k\" new_session >/dev/null 2>&1 || { echo 'fail cannot join a fresh session keyring "
     + '(`keyctl new_session` failed in pid 1) — the command would run in the session keyring of its caller\' >&3; exit 1; }; fi',
+  's=1',
   '"$@" <&0 &',
   'c=$!',
+  'for g in $p; do kill -s "$g" "$c" 2>/dev/null; done',
   'exec 3>&- 4<&-',
   'if { exec 9<> <(:); } 2>/dev/null; then',
   '  while kill -0 "$c" 2>/dev/null; do read -t 0.02 -u 9 -r _; done',
