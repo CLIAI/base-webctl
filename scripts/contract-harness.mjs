@@ -1616,8 +1616,6 @@ function refusalText(c, pinned, probeStderr) {
     + ' (the command is never run unisolated)';
 }
 
-/** Placeholders: these backends are specified (ib4k §3) but not implemented yet (bwrap landed in v0.35.0, §2a). */
-const NOT_IMPLEMENTED = Object.freeze({ docker: 'not implemented yet (v0.35.0)' });
 
 /**
  * bwrap's argv up to its `--` (ib4k §2a): the NAMESPACES and the reaping pid 1 — nothing else. bwrap is the
@@ -2458,16 +2456,17 @@ function usageRefusal(why, command) {
  * (userNamespaceRefusal). WEBCTL_UNSHARE_BIN — an absolute path to an executable — replaces
  * `unshare` in EVERY invocation, so a host can grant userns to one dedicated binary.
  * @param {string[]} a
- * @param {{readHostMounts?: () => MountRow[] | null, teardown?: (c: import('node:child_process').ChildProcess) => void}} [seam]
+ * @param {{readHostMounts?: () => MountRow[] | null, teardown?: (c: import('node:child_process').ChildProcess) => void, dockerBin?: string}} [seam]
  *   ⛔ TESTS ONLY, reached by importing this module (never an env var or a flag): `readHostMounts`, the mount table
  *   the cgroup2 `nsdelegate` check reads (F2); `teardown`, what an EARLY signal does to the fresh path's creator
- *   (earlyTeardown) — disabled, it proves the far side never gets `go` on the strength of statusChannel ALONE (B4).
+ *   (earlyTeardown) — disabled, it proves the far side never gets `go` on the strength of statusChannel ALONE (B4);
+ *   `dockerBin`, a FAKE docker CLI that records its argv (ib4k §3a.5) — the real one comes from the system dirs only.
  * ⚠ NOT FROM A WORKER THREAD: the creator runs under `setpriv --pdeathsig KILL` (bwrap: `--die-with-parent`), and a
  * parent-death signal fires when the THREAD that forked it exits, not the process — a Worker that ends SIGKILLs a
  * run still in progress. Call it from the main thread (the CLI always does).
  * @returns {Promise<number>}
  */
-export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earlyTeardown } = {}) {
+export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earlyTeardown, dockerBin = '' } = {}) {
   const sep = a.indexOf('--');
   const opts = sep < 0 ? a : a.slice(0, sep);
   const command = sep < 0 ? [] : a.slice(sep + 1);
@@ -2495,6 +2494,28 @@ export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earl
       return Promise.resolve(usageRefusal(`--pass-env #${i + 1} names a var isolation always REMOVES (a host socket, `
         + 'display, address or state root) — set it inside the command instead', command));
     }
+  }
+  // ⛔ UNDER THE DOCKER BACKEND (ib4k §3b): nothing can unshare in here, so a nested call — and a stripped-markers one:
+  // the proof does not rest on the env — runs the command IN PLACE, once the channel BIND and every property are read
+  // back (dockerInsideProof). A channel dir that is NOT that bind is a forgery: refused, nothing run.
+  const dk = dockerMarker();
+  if (dk !== 'absent') {
+    const pin = process.env[BACKEND_ENV];
+    if (pin && !ISOLATION_BACKENDS.includes(pin)) {
+      return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${selectBackend(pin, ISOLATION_BACKENDS.map((name) => ({ name, probe: () => '' }))).refuse}. `
+        + 'The command was NOT started.', { command }));
+    }
+    const proof = dockerInsideProof();
+    if (!proof.inside) {
+      return Promise.resolve(report('isolated', EXIT.noVerdict, `REFUSED, nothing run: this claims to be inside the docker backend's `
+        + `container, but ${proof.why}.`, { command }));
+    }
+    for (const [label, p] of [...keeps.map((p, i) => [`--keep #${i + 1}`, p]), ...keepsRo.map((p, i) => [`--keep-ro #${i + 1}`, p])]) {
+      if (!fs.existsSync(p)) {
+        return Promise.resolve(usageRefusal(`${label} is not visible inside the docker backend's container — keep it in the OUTER call instead`, command));
+      }
+    }
+    return runInPlace(command, isolatedEnv(process.env, pass));
   }
   const ub = unshareBin();
   // ⛔ NESTED CALL: "already inside" is proven from the KERNEL. The marker alone is
@@ -2626,14 +2647,24 @@ export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earl
   // Each probe answers '' or a NAMED reason; a pinned one that cannot run is refused, never replaced.
   const seen = { stderr: '' };
   const bw = bwrapBin();
+  const dseen = { image: '' };
+  /** @type {{bin: string, why: string}} */ let dcli = { bin: '', why: '' };
   const choice = selectBackend(process.env[BACKEND_ENV], [
     { name: 'unshare', probe: () => probeUnshare(ub, seen) },
     { name: 'bwrap', probe: () => probeBwrap(bw, ub, ident) },
-    { name: 'docker', probe: () => NOT_IMPLEMENTED.docker },
+    { name: 'docker', probe: () => { dcli = dockerCli(dockerBin); return probeDocker(dcli, dseen); } },
   ]);
   if (choice.refuse) {
     return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${refusalText(choice, process.env[BACKEND_ENV], seen.stderr)}. `
       + 'The command was NOT started.', { command, backend: null, skipped: choice.skipped }));
+  }
+  if (choice.backend === 'docker') {
+    // the unshare probe's own message goes above the verdict, as for bwrap
+    if (choice.skipped.some((x) => x.backend === 'unshare') && seen.stderr.trim()) {
+      process.stderr.write(seen.stderr.endsWith('\n') ? seen.stderr : `${seen.stderr}\n`);
+    }
+    return runDockerFresh({ command, keeps, keepsRo, pass, plan, prot, ident, sockets, choice, cli: dcli, image: dseen.image,
+      ns: { hostNs, hostMnt, hostIpc, hostCgroup, hostPid } });
   }
   // ⛔ THE RUNNERS BELOW ARE UNSHARE'S AND BWRAP'S (review F7) — they differ only in the namespace CREATOR
   // (ib4k §2a). A backend whose probe lands before its runner would otherwise run here, on another's
@@ -2749,6 +2780,799 @@ export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earl
         { command, backend: choice.backend, skipped: choice.skipped }));
     });
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// ⭐ THE DOCKER BACKEND (ib4k §3b, v0.35.0 phase 3). Docker is the WHOLE sandbox here, not a namespace
+// creator: inside a container nothing can mount or unshare (measured: `unshare -rn` EPERM, `mount`
+// refused, a tmpfs over /dev fails container init), so the DAEMON builds the sandbox from `docker create`
+// flags, and a capless inner half (`__isolated-docker`, the caller's uid) READS BACK every property
+// before the command runs. Every failed read-back is a refusal, as on the namespace backends.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The ONE endpoint every docker call addresses (ib4k §3a.1): the local daemon's unix socket, on every call (`-H`). */
+const DOCKER_ENDPOINT = 'unix:///var/run/docker.sock';
+/** The same socket by its other usual name: a DOCKER_HOST naming it is still the local daemon. */
+const DOCKER_ENDPOINTS = Object.freeze([DOCKER_ENDPOINT, 'unix:///run/docker.sock']);
+/** The daemon's socket paths — never bound into a container (ib4k §3a.5). */
+const DOCKER_SOCKETS = Object.freeze(['/var/run/docker.sock', '/run/docker.sock']);
+/** The image: `webctl-iso/node22:<first 12 hex of the Dockerfile's sha256>` (dockerRecipe). */
+const DOCKER_IMAGE_REPO = 'webctl-iso/node22';
+/** The recipe, in base's own checkout (a consumer's submodule carries it). */
+const DOCKERFILE = path.join(SELF_ROOT, 'docker', 'isolated', 'Dockerfile');
+/** The label namespace: `<ns>.recipe` (the full recipe hash) and `<ns>.owner` (`u<uid>` of the builder or runner). */
+const DOCKER_LABEL = 'org.cliai.webctl-iso';
+/** Where the channel dir is bound, read-only, inside the container: plan.json, status, go, marker, machine-id. */
+const DOCKER_CHANNEL = '/run/webctl-isolated';
+/** What the marker file holds. Its PRESENCE proves nothing on its own: the read-only BIND at DOCKER_CHANNEL does. */
+const DOCKER_MARKER = 'webctl-isolated docker backend\n';
+const DOCKER_INNER = '__isolated-docker';
+const DOCKER_REAPER = '__isolated-reaper';
+/** The container's resource caps: [env var, flag, default, accepted form]. Overridable, never absent (ib4k §3a.5). */
+const DOCKER_LIMITS = /** @type {readonly [string, string, string, RegExp][]} */ (Object.freeze([
+  ['WEBCTL_ISOLATION_DOCKER_CPUS', '--cpus', '2', /^\d{1,3}(\.\d{1,2})?$/],
+  ['WEBCTL_ISOLATION_DOCKER_MEMORY', '--memory', '4g', /^\d{1,6}[kmg]?$/i],
+  ['WEBCTL_ISOLATION_DOCKER_PIDS', '--pids-limit', '4096', /^\d{1,7}$/]]));
+/** The reaper's bound (ib4k §3b, ruling 6): each `docker rm -f` gets this long … */
+const REAPER_CALL_MS = 10_000;
+/** … and after the harness is gone, every retry together this long. Then it exits, whatever docker did. */
+const REAPER_TOTAL_MS = 30_000;
+/** Native addons in the cwd's node_modules may not load against the image's libc (ib4k §3a.6): refused, never a flake. */
+const NATIVE_ADDON_SCAN_LIMIT = 200_000;
+/** The /dev name docker adds that the contract's list lacks (ib4k §3b, ruling 1): accepted ONLY as a link to a masked /proc/kcore. */
+const DOCKER_DEV_EXTRA = 'core';
+
+/**
+ * The docker CLI to run — from the system dirs only, as every privileged tool (§2). ⚠ NOT shielded like a namespace
+ * creator: Go resets an ignored signal it installs a handler for (measured: `start --attach` under `env
+ * --ignore-signal` read SigIgn 0). It is not the run's authority instead (runDockerBackend: `docker wait`, the reaper).
+ * @param {string} [override] ⛔ TESTS ONLY (runIsolated's import-only seam): a fake CLI's absolute path
+ * @returns {{bin: string, why: string}}
+ */
+function dockerCli(override) {
+  const bin = override || systemTool('docker');
+  return bin ? { bin, why: '' } : { bin, why: noSystemTool('docker', 'install the docker CLI') };
+}
+
+/**
+ * '' when the docker endpoint the caller's env names is the LOCAL daemon (or none is named), else the REFUSAL
+ * (ib4k §3a.1). ⛔ A remote context would run a lane's tests on ANOTHER machine with the cwd shipped there. Every
+ * call carries `-H` anyway (measured: it wins over DOCKER_HOST and DOCKER_CONTEXT), but a caller who set one meant
+ * something, so it is refused by name, never silently overridden. ⚠ Values are never printed: they name hosts.
+ * @param {NodeJS.ProcessEnv} env @returns {string}
+ */
+export function dockerEndpointRefusal(env) {
+  if (env.DOCKER_HOST && !DOCKER_ENDPOINTS.includes(env.DOCKER_HOST)) {
+    return 'DOCKER_HOST names another docker endpoint than the local daemon\'s unix socket — the docker backend runs only on '
+      + 'the local daemon (a remote one would run the command on another machine, with the cwd shipped there); unset it';
+  }
+  if (env.DOCKER_CONTEXT && env.DOCKER_CONTEXT !== 'default') {
+    return 'DOCKER_CONTEXT names a docker context other than `default` — the docker backend runs only on the local daemon '
+      + '(a remote one would run the command on another machine, with the cwd shipped there); unset it';
+  }
+  return '';
+}
+
+/** The CLI's env: the privileged one (row 11: it talks to a root-equivalent daemon), no DOCKER_* at all. @returns {NodeJS.ProcessEnv} */
+function dockerEnv() {
+  const env = privilegedEnv(process.env);
+  for (const k of Object.keys(env)) if (k.startsWith('DOCKER_')) delete env[k];
+  return env;
+}
+
+/**
+ * Run the docker CLI synchronously against the local daemon (`-H`), with a timeout.
+ * @param {string} bin @param {string[]} args @param {number} [ms]
+ * @returns {{status: number | null, stdout: string, stderr: string, error?: Error}}
+ */
+function dockerSync(bin, args, ms = 20_000) {
+  const r = spawnSync(bin, ['-H', DOCKER_ENDPOINT, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: dockerEnv(),
+    timeout: ms, killSignal: 'SIGKILL' });
+  return { status: r.status, stdout: String(r.stdout || ''), stderr: String(r.stderr || ''), error: r.error };
+}
+
+/**
+ * The last non-empty line of a CLI's stderr, for a reason — every absolute PATH in it replaced by `<path>`: docker names
+ * bind sources (home paths) in its errors, and refusals get pasted into public logs. @param {string} s
+ */
+const lastLine = (s) => (s.trim().split('\n').pop() || '').trim().replace(/(^|[\s'"(=:])\/[^\s'",)]+/g, '$1<path>');
+/** An error's errno code, else a fixed word — never its message, which names paths. @param {unknown} e */
+const errCode = (e) => /** @type {NodeJS.ErrnoException} */ (e)?.code || 'failed';
+
+/**
+ * The recipe: the Dockerfile's sha256, and the tag that names its build. `why` when the recipe cannot be read.
+ * @returns {{hash: string, tag: string, why: string}}
+ */
+export function dockerRecipe() {
+  try {
+    const hash = createHash('sha256').update(fs.readFileSync(DOCKERFILE)).digest('hex');
+    return { hash, tag: `${DOCKER_IMAGE_REPO}:${hash.slice(0, 12)}`, why: '' };
+  } catch (e) {
+    // ⚠ the errno, never the message: it carries base's path, and refusals get pasted into public logs
+    return { hash: '', tag: '', why: `its recipe (docker/isolated/Dockerfile in base's checkout) cannot be read (${/** @type {NodeJS.ErrnoException} */ (e).code || 'unreadable'})` };
+  }
+}
+
+/** The command that builds the image, as a refusal names it (base's path elided: it is a home path). */
+const DOCKER_BUILD_HINT = 'node <base>/scripts/contract-harness.mjs isolated-image build';
+
+/**
+ * Is the host kernel's AppArmor on? Then docker's own profile must be in force (ib4k §3a.2).
+ * @returns {boolean}
+ */
+function hostAppArmor() {
+  try { return fs.readFileSync('/sys/module/apparmor/parameters/enabled', 'utf8').trim() === 'Y'; } catch { return false; }
+}
+
+/**
+ * Can the docker backend run here (ib4k §3b)? '' when yes, else the NAMED reason. ⛔ Side-effect free: `version`,
+ * `info` and `image inspect` — nothing is created, pulled or built. On success `seen.image` is the image ID the run
+ * uses (resolved ONCE: a retag mid-run cannot swap it).
+ * @param {{bin: string, why: string}} cli dockerCli() @param {{image: string}} seen
+ * @returns {string}
+ */
+function probeDocker(cli, seen) {
+  if (cli.why) return cli.why;
+  const ep = dockerEndpointRefusal(process.env);
+  if (ep) return ep;
+  const v = dockerSync(cli.bin, ['version', '--format', '{{.Server.Version}}']);
+  if (v.error || v.status !== 0 || !v.stdout.trim()) {
+    return `the local docker daemon does not answer (${v.error ? errCode(v.error) : lastLine(v.stderr) || `exit ${v.status}`})`;
+  }
+  const i = dockerSync(cli.bin, ['info', '--format', '{{json .SecurityOptions}}']);
+  /** @type {string[]} */ let sec = [];
+  try { sec = JSON.parse(i.stdout); } catch { /* below */ }
+  if (i.status !== 0 || !Array.isArray(sec)) return `cannot read the daemon's security options (${lastLine(i.stderr) || `exit ${i.status}`})`;
+  const has = (/** @type {string} */ n) => sec.some((s) => typeof s === 'string' && s.split(',').includes(`name=${n}`));
+  if (has('rootless')) return 'the daemon is ROOTLESS — its socket and uid mapping differ, and it is not supported (ib4k §3b)';
+  if (!has('seccomp')) return 'the daemon runs containers WITHOUT seccomp — its default profile is part of the sandbox (ib4k §3a.2)';
+  if (hostAppArmor() && !has('apparmor')) {
+    return 'the host has AppArmor, but the daemon does not apply it — its default profile is part of the sandbox (ib4k §3a.2)';
+  }
+  const r = dockerRecipe();
+  if (r.why) return r.why;
+  const img = dockerSync(cli.bin, ['image', 'inspect', '--format', `{{.Id}} {{index .Config.Labels "${DOCKER_LABEL}.recipe"}}`, r.tag]);
+  if (img.status !== 0) return `its image ${r.tag} is not built here — build it once with: ${DOCKER_BUILD_HINT}`;
+  const [id, recipe] = img.stdout.trim().split(/\s+/);
+  if (!/^sha256:[0-9a-f]{64}$/.test(id || '')) return `its image ${r.tag} has no readable ID`;
+  if (recipe !== r.hash) {
+    return `its image ${r.tag} does not carry this recipe's label — it was not built by \`${DOCKER_BUILD_HINT}\`; rebuild it`;
+  }
+  seen.image = id;
+  return '';
+}
+
+/**
+ * The refusals that apply once docker is SELECTED (ib4k §3b) — a FAIL, never a reason to try another backend.
+ *   * ⛔ a SYMLINK in any bind source (ruling 7): the sources are resolved by a ROOT daemon, so each must equal its
+ *     own realpath — a link swapped in between our check and its resolve would bind whatever it then points at;
+ *   * a bind at or beneath /dev, /proc or /sys, or one that is or contains the daemon's socket;
+ *   * a native addon (`*.node`) in the cwd's node_modules (§3a.6): built on the host, it may not load in the image.
+ * ⚠ Names the option and its position, never the path.
+ * @param {{p: string, label: string}[]} sources every bind source, as given @returns {string}
+ */
+export function dockerPreflight(sources) {
+  for (const s of sources) {
+    const abs = path.resolve(s.p);
+    let real = '';
+    try { real = fs.realpathSync.native(abs); } catch { continue; } // an absent implicit item is skipped, as by planKeeps
+    if (real !== abs) {
+      return `${s.label} passes through a SYMLINK — the docker daemon resolves bind sources as root, so each must be its own `
+        + 'real path (name the real path instead)';
+    }
+    if (['/dev', '/proc', '/sys'].some((d) => isWithin(real, d))) return `${s.label} is at or beneath /dev, /proc or /sys — never bound into a container`;
+    for (const sock of DOCKER_SOCKETS) {
+      let rs = '';
+      try { rs = fs.realpathSync.native(sock); } catch { continue; }
+      if (isWithin(rs, real)) return `${s.label} is or contains the docker daemon's socket — it is never bound into a container`;
+    }
+  }
+  const nm = path.join(process.cwd(), 'node_modules');
+  let seen = 0;
+  /** @type {string[]} */ const stack = [nm];
+  while (stack.length) {
+    const d = /** @type {string} */ (stack.pop());
+    /** @type {fs.Dirent[]} */ let ents = [];
+    try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; }
+    for (const e of ents) {
+      if (++seen > NATIVE_ADDON_SCAN_LIMIT) return `the working directory's node_modules has over ${NATIVE_ADDON_SCAN_LIMIT} entries — too many to check for native addons`;
+      if (e.isDirectory()) stack.push(path.join(d, e.name));
+      else if (e.isFile() && e.name.endsWith('.node')) {
+        return 'the working directory\'s node_modules holds a NATIVE addon (*.node) built on the host — it may not load against '
+          + 'the image\'s libc, so the docker backend refuses rather than flakes (ib4k §3a.6)';
+      }
+    }
+  }
+  return '';
+}
+
+/**
+ * The container's name (ib4k §3a.5): `webctl-iso-u<uid>-<lane>-<pid>`. `<lane>` from WEBCTL_LANE, else the cwd's
+ * basename: lower-case `[a-z0-9-]`, at most 24 characters.
+ * @param {number} uid @returns {string}
+ */
+export function dockerName(uid) {
+  const raw = process.env.WEBCTL_LANE || path.basename(process.cwd());
+  const lane = raw.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, '').slice(0, 24).replace(/-+$/, '') || 'run';
+  return `webctl-iso-u${uid}-${lane}-${process.pid}`;
+}
+
+/**
+ * The resource caps (ib4k §3a.5): each WEBCTL_ISOLATION_DOCKER_* override, else its default. `why` names a malformed
+ * override (by its NAME — the value is caller input).
+ * @returns {{args: string[], why: string}}
+ */
+function dockerLimits() {
+  /** @type {string[]} */ const args = [];
+  for (const [name, flag, dflt, form] of DOCKER_LIMITS) {
+    const v = process.env[name];
+    if (v !== undefined && v !== '' && !form.test(v)) return { args, why: `${name} is malformed (expected ${form.source})` };
+    args.push(flag, v || dflt);
+  }
+  return { args, why: '' };
+}
+
+/**
+ * The `docker create` argv (after `-H <endpoint>`), ib4k §3b. ⛔ What is NOT here is the contract too: no
+ * `--privileged`, no unconfined profile, no published port, no host network/pid/ipc/userns, no docker.sock, no `-e`
+ * (the command's env travels in the channel's plan.json — never an argv, never `docker inspect`).
+ * @param {{name: string, uid: number, gid: number, limits: string[], binds: Bind[], masks: string[], channel: string, image: string, inner: string[]}} o
+ * @returns {string[]}
+ */
+export function dockerCreateArgv(o) {
+  return ['create', '--name', o.name, '--label', `${DOCKER_LABEL}.owner=u${o.uid}`,
+    '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+    '--user', `${o.uid}:${o.gid}`, '--hostname', NEUTRAL_HOSTNAME, ...o.limits,
+    '--tmpfs', '/tmp:mode=1777', '--tmpfs', '/var/tmp:mode=1777', '--tmpfs', '/run:mode=1777',
+    ...o.binds.flatMap((b) => ['--mount', `type=bind,src=${b.p},dst=${b.p}${b.rw ? '' : ',readonly'}`]),
+    ...o.masks.flatMap((s) => ['--mount', `type=bind,src=/dev/null,dst=${s},readonly`]),
+    '--mount', `type=bind,src=${path.join(o.channel, 'machine-id')},dst=/etc/machine-id,readonly`,
+    '--mount', `type=bind,src=${o.channel},dst=${DOCKER_CHANNEL},readonly`,
+    '--interactive', o.image, ...o.inner];
+}
+
+/**
+ * Every bind the container gets: unlike the namespace backends, NOTHING of the host is visible unless bound, so every
+ * item is (planKeeps decides only what to re-bind over a visible tree). A path beneath another bind is covered by it,
+ * unless the outer is read-only and the inner writable. ⚠ Real paths (dockerPreflight refused any symlink).
+ * @param {{p: string, rw: boolean, label?: string, named?: boolean}[]} items @returns {Bind[]}
+ */
+function dockerBinds(items) {
+  /** @type {Bind[]} */ const all = [];
+  for (const k of items) {
+    let real = '';
+    try { real = fs.realpathSync.native(path.resolve(k.p)); } catch { continue; }
+    all.push({ p: real, rw: k.rw, label: k.label, named: k.named });
+  }
+  const sorted = all.sort((x, y) => x.p.length - y.p.length || Number(y.rw) - Number(x.rw));
+  /** @type {Bind[]} */ const out = [];
+  for (const b of sorted) if (!out.some((o) => isWithin(b.p, o.p) && (o.rw || !b.rw))) out.push(b);
+  return out;
+}
+
+/**
+ * `__isolated-reaper <docker> <name>` — the host-side half that guarantees no container outlives its harness, SIGKILL
+ * included (ib4k §3b, hard point (a); §3a.4). It reads stdin, whose only write end the harness holds: `id <id>` once
+ * the container exists, `done` when the run ended normally. On `done`: one `rm -f` of the id (a no-op after `--rm`),
+ * exit. On EOF without `done` — the harness DIED, by any signal — `rm -f` by exact id and exact name, retried while
+ * the name may still be in a create in flight. ⛔ BOUNDED (ruling 6): each call REAPER_CALL_MS, all of them
+ * REAPER_TOTAL_MS; then it exits whatever docker did, naming on stderr what it could not remove (by exact name).
+ * ⛔ Never a prune, never a pattern: exact id, exact name. Spawned `detached`; TERM/INT/HUP/QUIT CAUGHT and dropped
+ * in-process (node resets an inherited ignore); a `kill -9 -1` by the user kills it too (named residual, ib4k §6).
+ * @param {string[]} a @returns {Promise<number>}
+ */
+export function runDockerReaper(a) {
+  swallowUsr1();
+  // ⛔ SHIELDED IN-PROCESS: node RESETS every inherited disposition at start (an `env --ignore-signal` shield does not
+  // hold for it — measured: SigIgn 0), so the stop signals a supervisor sends every process are CAUGHT and dropped.
+  // The reaper must outlive its harness long enough to remove the container; it ends on EOF, bounded.
+  for (const s of FORWARDED_SIGNALS) process.on(s, () => { /* the reaper's job is to outlive this */ });
+  const [bin, name] = a;
+  if (!bin || !path.isAbsolute(bin) || !/^webctl-iso-u\d+-[a-z0-9-]{1,24}-\d+$/.test(name || '')) return Promise.resolve(EXIT.usage);
+  let id = '';
+  let done = false;
+  let buf = '';
+  return new Promise((resolve) => {
+    const finish = () => {
+      const rm = (/** @type {string} */ ref) => {
+        const r = spawnSync(bin, ['-H', DOCKER_ENDPOINT, 'rm', '-f', ref], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'],
+          env: dockerEnv(), timeout: REAPER_CALL_MS, killSignal: 'SIGKILL' });
+        if (r.status === 0) return 'gone';
+        return /no such container/i.test(String(r.stderr || '')) ? 'absent' : 'failed';
+      };
+      if (done) { if (id) rm(id); resolve(EXIT.pass); return; }
+      const until = Date.now() + REAPER_TOTAL_MS;
+      let removed = false;
+      while (Date.now() < until) {
+        const byId = id ? rm(id) : 'absent';
+        const byName = rm(name);
+        if (byId === 'gone' || byName === 'gone') removed = true;
+        // the id was known: the create had completed, so one pass is enough. Unknown: a create may still land
+        if (id && byId !== 'failed' && byName !== 'failed') break;
+        if (!id && removed) break;
+        sleepMs(1000);
+      }
+      if (Date.now() >= until) process.stderr.write(`isolated: reaper: container ${name} may be left — its removal did not finish in ${REAPER_TOTAL_MS / 1000}s\n`);
+      resolve(EXIT.pass);
+    };
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (d) => {
+      buf += d;
+      for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        const m = line.match(/^id ([0-9a-f]{12,64})$/);
+        if (m) id = m[1];
+        else if (line === 'done') done = true;
+      }
+    });
+    process.stdin.on('end', finish);
+    process.stdin.on('error', finish);
+  });
+}
+
+/**
+ * Make the channel dir (ib4k §3b item 5): private (`mkdtemp`, 0700) on the host, bound read-only at DOCKER_CHANNEL.
+ * `plan.json` (0600: the command's env), `marker`, `machine-id` (the neutral one), and two FIFOs: `status` (the inner
+ * half writes `started` / `fail …`) and `go` (the harness's answer). ⚠ node has no mkfifo: the system tool makes them.
+ * @param {object} plan @returns {{dir: string, why: string}}
+ */
+function dockerChannel(plan) {
+  /** @type {string} */ let dir = '';
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webctl-iso-'));
+    fs.chmodSync(dir, 0o700);
+    fs.writeFileSync(path.join(dir, 'plan.json'), JSON.stringify(plan), { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, 'marker'), DOCKER_MARKER, { mode: 0o444 });
+    fs.writeFileSync(path.join(dir, 'machine-id'), `${NEUTRAL_MACHINE_ID}\n`, { mode: 0o444 });
+    const mkfifo = systemTool('mkfifo');
+    if (!mkfifo) return { dir, why: noSystemTool('mkfifo', 'install coreutils: the docker backend\'s status channel is a FIFO') };
+    const r = spawnSync(mkfifo, ['-m', '600', path.join(dir, 'status'), path.join(dir, 'go')], { stdio: 'ignore', env: privilegedEnv(process.env) });
+    if (r.status !== 0) return { dir, why: 'cannot make the status channel\'s FIFOs (mkfifo failed)' };
+  } catch (e) {
+    return { dir, why: `cannot make the docker backend's private channel dir (${errCode(e)})` };
+  }
+  return { dir, why: '' };
+}
+
+/**
+ * Run `command` under the DOCKER backend (ib4k §3b) — called by runIsolated once docker is selected.
+ * The order is the contract: reaper → create (the id known before anything runs) → start (CLI shielded, detached,
+ * `--sig-proxy=false`) → the inner half reports `started` on the status FIFO → `go` only if no early signal came and
+ * the CLI is READ BACK as shielded → the command runs. Signals: each FORWARDED_SIGNALS entry ONCE, by `docker kill
+ * --signal=<sig> <exact id>` (pid 1, the reaping bash → the inner half → the command's group); before `go` a signal tears the
+ * container down (`rm -f` by exact id) and the command never runs. The harness then dies by it (exitOrDieBy).
+ * @param {{cli: {bin: string}, image: string, name: string, ids: {uid: number, gid: number}, binds: Bind[],
+ *   masks: string[], plan: object, command: string[], choice: BackendChoice, verdict: string}} o
+ * @returns {Promise<number>}
+ */
+function runDockerBackend(o) {
+  const refuse = (/** @type {string} */ why) => report('isolated', EXIT.fail, `NOT RUN: ${why}. The command was NOT started, and is never `
+    + 'run on the host as a fallback.', { command: o.command, backend: o.choice.backend, skipped: o.choice.skipped });
+  const lim = dockerLimits();
+  if (lim.why) return Promise.resolve(refuse(lim.why));
+  const ch = dockerChannel(o.plan);
+  const cleanup = () => { if (ch.dir) { try { fs.rmSync(ch.dir, { recursive: true, force: true }); } catch { /* left: private, 0700 */ } } };
+  if (ch.why) { cleanup(); return Promise.resolve(refuse(ch.why)); }
+  process.stderr.write(`${o.verdict}\n`);
+  return new Promise((resolve) => {
+    let id = '';
+    let went = false;
+    let early = false;
+    let ended = false;
+    /** @type {import('node:child_process').ChildProcess | null} */ let cli = null;
+    /** @type {import('node:child_process').ChildProcess | null} */ let creating = null;
+    const call = (/** @type {string[]} */ args) => {
+      try { spawn(o.cli.bin, ['-H', DOCKER_ENDPOINT, ...args], { stdio: 'ignore', env: dockerEnv(), detached: true }).unref(); } catch { /* the reaper is the backstop */ }
+    };
+    // ⛔ THE FORWARDER FIRST (review finding 5): no tick in which a TERM meets node's default
+    const fwd = installForwarder((s) => {
+      if (went && id) { call(['kill', `--signal=${s}`, id]); return; }
+      if (went) return;
+      // ⛔ EARLY: the command never runs — the container goes (by exact id, else by exact name) and the CLIs with it
+      early = true;
+      call(['rm', '-f', id || o.name]);
+      for (const c of [creating, cli]) { try { c?.kill('SIGKILL'); } catch { /* gone */ } }
+    });
+    // detached: a terminal's group signals never reach it; shielded IN-PROCESS (runDockerReaper) from the rest
+    const reaper = spawn(process.execPath, [...NO_USR1_FLAG, SELF, DOCKER_REAPER, o.cli.bin, o.name],
+      { stdio: ['pipe', 'ignore', 'inherit'], env: dockerEnv(), detached: true });
+    reaper.on('error', () => { /* below: no reaper, no run */ });
+    reaper.stdin?.on('error', () => { /* it exited */ });
+    reaper.unref();
+    const end = (/** @type {number} */ rc) => {
+      if (ended) return;
+      ended = true;
+      try { reaper.stdin?.end('done\n'); } catch { /* gone */ }
+      cleanup();
+      resolve(rc);
+    };
+    const fail = (/** @type {string} */ why) => { dieByForwarded(fwd); end(refuse(why)); };
+    if (!reaper.pid) { fail('cannot start the docker backend\'s reaper — without it a killed harness could leave its container running'); return; }
+    // pid 1 is OUR reaping bash (PID1_REAPER, no keyctl: docker's seccomp denies the keyring), as on the namespace
+    // backends — ⛔ NOT `--init`: it binds the host's docker-init as a SLAVE mount (measured: `master:1`), which the
+    // propagation read-back refuses. Then the IMAGE's node (on its PATH), never the host's: another libc.
+    // ⛔ `--disable-sigusr1`: the image's node has it (22.23.3)
+    const inner = ['/bin/bash', ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', '', 'node', '--disable-sigusr1', SELF, DOCKER_INNER, '--', ...o.command];
+    const argv = ['-H', DOCKER_ENDPOINT, ...dockerCreateArgv({ name: o.name, uid: o.ids.uid, gid: o.ids.gid, limits: lim.args, binds: o.binds,
+      masks: o.masks, channel: ch.dir, image: o.image, inner })];
+    let out = '';
+    let err = '';
+    creating = spawn(o.cli.bin, argv, { stdio: ['ignore', 'pipe', 'pipe'], env: dockerEnv() });
+    creating.stdout?.on('data', (d) => { out += d; });
+    creating.stderr?.on('data', (d) => { err += d; });
+    creating.on('error', (e) => { err = errCode(e); });
+    creating.on('close', (code) => {
+      creating = null;
+      const cid = out.trim();
+      if (code !== 0 || !/^[0-9a-f]{64}$/.test(cid)) {
+        if (early) { dieByForwarded(fwd); end(EXIT.fail); return; }
+        fail(`docker could not create the container (${lastLine(err) || `exit ${code}`})`);
+        return;
+      }
+      id = cid;
+      try { reaper.stdin?.write(`id ${id}\n`); } catch { /* the reaper is gone: refused below */ }
+      if (early) { call(['rm', '-f', id]); dieByForwarded(fwd); end(EXIT.fail); return; }
+      startIt();
+    });
+    const startIt = () => {
+      /** @type {number} */ let st = -1;
+      /** @type {number} */ let go = -1;
+      try {
+        // ⚠ O_RDWR on a FIFO never blocks (Linux): we hold a writer of `status` (the inner half's open never waits,
+        // and no EOF until we close) and a writer of `go` (closing it unanswered is EOF for the inner half)
+        st = fs.openSync(path.join(ch.dir, 'status'), fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
+        go = fs.openSync(path.join(ch.dir, 'go'), fs.constants.O_RDWR);
+      } catch (e) { call(['rm', '-f', id]); fail(`cannot open the status channel (${errCode(e)})`); return; }
+      const status = new net.Socket({ fd: st, readable: true, writable: false });
+      let text = '';
+      const closeGo = () => { if (go >= 0) { try { fs.closeSync(go); } catch { /* closed */ } go = -1; } };
+      status.on('data', (d) => {
+        text += String(d);
+        if (went || early || !/^started$/m.test(text)) return;
+        // ⚠ NO shield read-back for the CLI (unlike a namespace creator): Go resets an ignored signal it installs a handler
+        // for — measured: `start --attach` under `env --ignore-signal` reads SigIgn 0. The CLI is not the run's authority
+        // instead: a CLI that dies does not end the run (`docker wait`, below), and the reaper keeps the no-leftover rule
+        went = true;
+        try { fs.writeSync(go, `${GO}\n`); } catch { /* the inner half is gone: it never starts the command */ }
+        closeGo();
+      });
+      status.on('error', () => { /* closed below */ });
+      // ⚠ `start --attach` has no `--sig-proxy=false`: the CLI proxies what reaches IT. Detached, only a signal aimed at the
+      // CLI itself reaches it (a supervisor signalling every process — as an every-pid signal reaches every half); the
+      // harness's own forwarding is `docker kill`, once per signal
+      cli = spawn(o.cli.bin, ['-H', DOCKER_ENDPOINT, 'start', '--attach', '--interactive', id], { stdio: 'inherit', env: dockerEnv(), detached: true });
+      cli.on('error', (e) => { err = errCode(e); });
+      cli.on('close', (code, signal) => {
+        closeGo();
+        status.destroy();
+        if (went && !early && signal) {
+          // ⛔ the CLI DIED by a signal aimed at it (measured: the 29.1.3 CLI dies by HUP, QUIT, USR2, ALRM, USR1) while the
+          // container may run on: the run is the CONTAINER's — follow it to its end by exact id, then report its status
+          const w = spawn(o.cli.bin, ['-H', DOCKER_ENDPOINT, 'wait', id], { stdio: ['ignore', 'pipe', 'ignore'], env: dockerEnv() });
+          let wout = '';
+          w.stdout?.on('data', (d) => { wout += d; });
+          w.on('error', () => { end(exitOrDieBy(fwd, code, signal)); });
+          w.on('close', (wc) => { const n = Number(wout.trim()); end(wc === 0 && /^\d+$/.test(wout.trim()) ? exitOrDieBy(fwd, n, null) : exitOrDieBy(fwd, code, signal)); });
+          return;
+        }
+        if (went && !early) { end(exitOrDieBy(fwd, code, signal)); return; }
+        call(['rm', '-f', id]);
+        dieByForwarded(fwd);
+        const f = text.match(/^fail (.*)$/m);
+        end(refuse(f ? f[1] : `docker exited ${code ?? signal} before the isolated side reported in${err ? ` (${err})` : ''}`));
+      });
+    };
+  });
+}
+
+/**
+ * The fresh path under docker: from runIsolated's checked plan to the container (ib4k §3b). The preflight refusals
+ * (symlinks, /dev /proc /sys, the daemon's socket, native addons), then EVERY item bound (dockerBinds) — the cwd and
+ * each `--keep` writable, each `--keep-ro`, base's root and an absolute command read-only, a throwaway HOME writable —
+ * and each host socket inside a bind covered with /dev/null (row 2), except beneath an explicit `--keep`.
+ * ⚠ The home is never bound: what of it is visible inside are only the dirs leading to a bind beneath it.
+ * @param {{command: string[], keeps: string[], keepsRo: string[], pass: string[], plan: {exempt: string[], notes: string[]},
+ *   prot: Prot, ident: {uid: number, gid: number, home: string}, sockets: string[], choice: BackendChoice,
+ *   cli: {bin: string, why: string}, image: string, ns: {hostNs: string, hostMnt: string, hostIpc: string, hostCgroup: string, hostPid: string}}} o
+ * @returns {Promise<number>}
+ */
+function runDockerFresh(o) {
+  const refuse = (/** @type {string} */ why) => Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${why}. The command was NOT started.`,
+    { command: o.command, backend: o.choice.backend, skipped: o.choice.skipped }));
+  const named = [{ p: process.cwd(), label: 'the working directory' }, ...o.keeps.map((p, i) => ({ p, label: `--keep #${i + 1}` })),
+    ...o.keepsRo.map((p, i) => ({ p, label: `--keep-ro #${i + 1}` })), { p: SELF_ROOT, label: "base's repo root" }];
+  const pre = dockerPreflight(named);
+  if (pre) return refuse(pre);
+  const home = throwawayHome(o.ident.home);
+  const binds = dockerBinds([
+    { p: process.cwd(), rw: true, label: 'the working directory', named: true },
+    ...o.keeps.map((p, i) => ({ p, rw: true, label: `--keep #${i + 1}`, named: true })),
+    ...o.keepsRo.map((p, i) => ({ p, rw: false, label: `--keep-ro #${i + 1}`, named: true })),
+    { p: SELF_ROOT, rw: false, label: "base's repo root" },
+    ...(path.isAbsolute(o.command[0]) ? [{ p: o.command[0], rw: false, label: 'the command' }] : []),
+    ...(home ? [{ p: home, rw: true, label: 'HOME' }] : []),
+  ]);
+  const inBinds = o.sockets.filter((s) => binds.some((b) => isWithin(s, b.p)));
+  const masks = inBinds.filter((s) => !o.plan.exempt.some((k) => isWithin(s, k)));
+  for (const n of o.plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
+  const cmdEnv = isolatedEnv(process.env, o.pass, { [HOST_NETNS_ENV]: o.ns.hostNs, [HOST_MNTNS_ENV]: o.ns.hostMnt, [HOST_PIDNS_ENV]: o.ns.hostPid,
+    [RO_ROOTS_ENV]: JSON.stringify([o.prot.home, ...o.prot.roots]), [HIDDEN_ENV]: JSON.stringify([o.prot.home, ...o.prot.hidden]),
+    [HOST_IDS_ENV]: JSON.stringify({ uid: o.ident.uid, gid: o.ident.gid }) });
+  const plan = { ...o.ns, cwd: process.cwd(), binds, home: o.prot.home, hidden: [...new Set([...o.prot.hideRule, ...o.prot.hidden])],
+    exempt: o.plan.exempt, sockets: inBinds, env: cmdEnv };
+  // ⛔ `; cgroup2: nsdelegate` is OMITTED (ruling 2): that check does not run here — the command cannot make a cgroup namespace
+  const verdict = verdictLine(binds, o.prot.home, process.env[VERBOSE_ENV] === '1',
+    `; ${backendClause(o.choice)}; keyring: none (docker seccomp); dev: +${DOCKER_DEV_EXTRA}`);
+  return runDockerBackend({ cli: o.cli, image: o.image, name: dockerName(o.ident.uid), ids: { uid: o.ident.uid, gid: o.ident.gid },
+    binds, masks, plan, command: o.command, choice: o.choice, verdict });
+}
+
+/**
+ * Is THIS process inside the docker backend's container (ib4k §3b, nested)? 'mount': a READ-ONLY BIND at
+ * DOCKER_CHANNEL holding the marker — which a process inside cannot make (it can mount nothing: measured);
+ * 'forged': a DOCKER_CHANNEL dir with no such mount (refused: only a forgery makes one); 'absent'.
+ * @returns {'mount' | 'forged' | 'absent'}
+ */
+export function dockerMarker() {
+  let dir = false;
+  try { dir = fs.lstatSync(DOCKER_CHANNEL).isDirectory(); } catch { return 'absent'; }
+  if (!dir) return 'forged';
+  const m = resolveMount(readMountinfo() || [], DOCKER_CHANNEL);
+  if (!m || m.at !== DOCKER_CHANNEL || !m.opts.includes('ro') || m.fstype === 'tmpfs') return 'forged';
+  try { if (fs.readFileSync(path.join(DOCKER_CHANNEL, 'marker'), 'utf8') !== DOCKER_MARKER) return 'forged'; } catch { return 'forged'; }
+  return 'mount';
+}
+
+/** The fields of /proc/self/status the docker proof reads. @returns {Record<string, string>} */
+function selfStatus() {
+  try { return statusFields(fs.readFileSync('/proc/self/status', 'utf8')); } catch { return {}; }
+}
+
+/**
+ * What of the HOST's /dev is visible HERE under docker (ib4k §3b row 12, ruling 1) — [] when nothing. Docker's own
+ * /dev cannot be replaced (measured), so: the names are MINIMAL_DEV plus exactly `core`, read back as a symlink to
+ * exactly /proc/kcore whose target is docker's mask (a char device 1:3) or unreadable; each node the device it is
+ * named for; each link to its target; /dev/pts a devpts; and a create in /dev fails EACCES or EROFS, nothing else.
+ * @param {string} [dev] ⛔ TESTS: the dir read in place of /dev (a fake /dev with a planted name) @returns {string[]}
+ */
+export function dockerDevGaps(dev = '/dev') {
+  /** @type {string[]} */ const gaps = [];
+  /** @type {string[]} */ let names = [];
+  try { names = fs.readdirSync(dev); } catch (e) { return [`${dev} (unreadable: ${/** @type {NodeJS.ErrnoException} */ (e).code || errMsg(e)})`]; }
+  const extra = names.filter((n) => !MINIMAL_DEV.includes(n) && n !== DOCKER_DEV_EXTRA).length;
+  if (extra) gaps.push(`${extra} entr${extra === 1 ? 'y' : 'ies'} in ${dev} beyond the minimal set and \`${DOCKER_DEV_EXTRA}\``);
+  if (names.includes(DOCKER_DEV_EXTRA)) {
+    let ok = false;
+    try {
+      const p = path.join(dev, DOCKER_DEV_EXTRA);
+      if (fs.lstatSync(p).isSymbolicLink() && fs.readlinkSync(p) === '/proc/kcore') {
+        let masked = false;
+        try { const s = fs.statSync('/proc/kcore'); masked = s.isCharacterDevice() && s.rdev === 1 * 256 + 3; } catch { masked = true; }
+        let fd = -1;
+        try { fd = fs.openSync('/proc/kcore', 'r'); masked = masked && fs.readSync(fd, Buffer.alloc(1), 0, 1, null) === 0; } catch (e) {
+          masked = masked && ['EACCES', 'EPERM'].includes(/** @type {NodeJS.ErrnoException} */ (e).code || '');
+        } finally { if (fd >= 0) fs.closeSync(fd); }
+        ok = masked;
+      }
+    } catch { /* named below */ }
+    if (!ok) gaps.push(`${dev}/${DOCKER_DEV_EXTRA} (not a link to a masked /proc/kcore)`);
+  }
+  for (const [n, maj, min] of DEV_NODES) {
+    let ok = false;
+    try { const s = fs.statSync(path.join(dev, n)); ok = s.isCharacterDevice() && s.rdev === maj * 256 + min; } catch { /* named below */ }
+    if (!ok) gaps.push(`${dev}/${n} (not the ${maj}:${min} device)`);
+  }
+  gaps.push(...devLinkGaps(dev));
+  if (dev === '/dev') {
+    const pts = resolveMount(readMountinfo() || [], '/dev/pts');
+    if (!pts || pts.at !== '/dev/pts' || pts.fstype !== 'devpts') gaps.push('/dev/pts (not a devpts)');
+  }
+  const probe = path.join(dev, `.webctl-probe-${process.pid}`);
+  try {
+    fs.closeSync(fs.openSync(probe, 'wx'));
+    try { fs.unlinkSync(probe); } catch { /* named */ }
+    gaps.push(`${dev} (WRITABLE by the command)`);
+  } catch (e) {
+    const code = /** @type {NodeJS.ErrnoException} */ (e).code || '';
+    if (!['EACCES', 'EROFS'].includes(code)) gaps.push(`${dev} (a create there answered ${code || errMsg(e)}, not EACCES or EROFS)`);
+  }
+  return gaps;
+}
+
+/**
+ * Every property of the table, read back IN PLACE under docker (ib4k §3b) — the fresh path's inner half and the
+ * nested proof both use it. `plan`: what the harness planned (writable binds, hidden dirs, the host's ns ids).
+ * [] when every property holds. ⚠ Names what fails, never a host value.
+ * @param {{hostNs: string, hostMnt: string, hostIpc: string, hostCgroup: string, hostPid: string, binds: Bind[], home: string, hidden: string[], exempt: string[]}} plan
+ * @returns {string[]}
+ */
+function dockerGaps(plan) {
+  /** @type {string[]} */ const gaps = [];
+  const st = selfStatus();
+  // rows 5 and 9: no capability (the bounding set too), no new privileges, docker's seccomp filter in force
+  if (st.CapEff !== '0000000000000000' || st.CapBnd !== '0000000000000000') gaps.push('the command would hold capabilities (CapEff/CapBnd not 0)');
+  if (st.NoNewPrivs !== '1') gaps.push('NoNewPrivs is not 1');
+  if (st.Seccomp !== '2') gaps.push('no seccomp filter is in force (Seccomp is not 2)');
+  // row 1 and the namespaces: none of them is the caller's
+  /** @type {[string, string][]} */
+  const ns = [['net', plan.hostNs], ['mnt', plan.hostMnt], ['ipc', plan.hostIpc], ['cgroup', plan.hostCgroup], ['pid', plan.hostPid]];
+  for (const [n, host] of ns) {
+    let here = '';
+    try { here = fs.readlinkSync(`/proc/self/ns/${n}`); } catch { /* named */ }
+    if (!here || !host || here === host) gaps.push(`the ${n} namespace is the caller's (or unreadable)`);
+  }
+  const extra = extraInterfaces();
+  if (extra !== 0) gaps.push(extra < 0 ? '/proc/self/net/dev is unreadable' : `${extra} interface(s) besides 'lo'`);
+  let listeners = 0;
+  for (const f of ['/proc/self/net/tcp', '/proc/self/net/tcp6']) {
+    try { listeners += fs.readFileSync(f, 'utf8').split('\n').slice(1).filter((l) => l.trim().split(/\s+/)[3] === '0A').length; } catch { /* absent */ }
+  }
+  if (listeners) gaps.push(`${listeners} TCP listener(s) visible`);
+  const mounts = readMountinfo();
+  if (!mounts) return [...gaps, '/proc/self/mountinfo is unreadable'];
+  // row 8: a private /dev/mqueue and private scratch
+  const mq = resolveMount(mounts, '/dev/mqueue');
+  if (!mq || mq.at !== '/dev/mqueue' || mq.fstype !== 'mqueue') gaps.push('/dev/mqueue is not a mqueue of its own');
+  for (const d of ['/tmp', '/var/tmp', '/run', '/dev/shm']) {
+    const m = resolveMount(mounts, d);
+    if (!m || m.at !== d || m.fstype !== 'tmpfs') gaps.push(`${d} is not a private tmpfs`);
+  }
+  // row 12, row 10, row 3
+  gaps.push(...dockerDevGaps());
+  gaps.push(...identityGaps());
+  const top = resolveMount(mounts, '/sys/fs/cgroup');
+  const rwCg = mounts.filter((m) => (m.fstype === 'cgroup2' || m.fstype === 'cgroup') && !m.opts.includes('ro')).length;
+  if (rwCg) gaps.push(`${rwCg} cgroup mount(s) are WRITABLE`);
+  if (mounts.some((m) => m.fstype === 'cgroup2') && (!top || top.fstype !== 'cgroup2' || top.root !== '/')) gaps.push('/sys/fs/cgroup is not a cgroup2 rooted at this cgroup namespace');
+  // row 7: every mount reachable from / is read-only, except the declared writable set; and nothing receives propagation
+  const writable = [...plan.binds.filter((b) => b.rw).map((b) => b.p), '/tmp', '/var/tmp', '/run', '/dev/shm', ...ROOT_RW_TREES];
+  const ro = readOnlyGaps(mounts, ['/'], writable).filter((g) => !g.at || !pathUnreachable(g.at));
+  if (ro.length) gaps.push(`${ro.length} mount(s) outside the declared writable set are WRITABLE`);
+  const prop = propagationGaps(mounts).length;
+  if (prop) gaps.push(`${prop} mount(s) receive propagation from outside`);
+  // row 4: the home is never bound — what of it is visible are only the dirs leading to a bind beneath it, and every
+  // hidden dir is absent unless an explicit --keep re-exposes it
+  if (plan.home) {
+    const leading = new Set(plan.binds.filter((b) => isWithin(b.p, plan.home) && b.p !== plan.home).map((b) => path.relative(plan.home, b.p).split(path.sep)[0]));
+    /** @type {string[]} */ let names = [];
+    try { names = fs.readdirSync(plan.home); } catch { /* absent: nothing shown */ }
+    const shown = names.filter((n) => !leading.has(n)).length;
+    if (shown) gaps.push(`${shown} entr${shown === 1 ? 'y' : 'ies'} of the home are visible`);
+    if (plan.binds.some((b) => b.p === plan.home || isWithin(plan.home, b.p))) gaps.push('the home itself is bound');
+  }
+  const hiddenShown = plan.hidden.filter((h) => !plan.exempt.some((k) => isWithin(k, h) || isWithin(h, k)) && fs.existsSync(h)).length;
+  if (hiddenShown) gaps.push(`${hiddenShown} hidden dir(s) (~/.ssh, a state root) are visible`);
+  return gaps;
+}
+
+/**
+ * The plan.json the harness wrote, validated — or null. Read from the read-only channel bind.
+ * @returns {{hostNs: string, hostMnt: string, hostIpc: string, hostCgroup: string, hostPid: string, cwd: string, binds: Bind[], home: string,
+ *   hidden: string[], exempt: string[], sockets: string[], env: Record<string, string>} | null}
+ */
+function dockerPlan() {
+  try {
+    const p = JSON.parse(fs.readFileSync(path.join(DOCKER_CHANNEL, 'plan.json'), 'utf8'));
+    const strs = (/** @type {unknown} */ x) => Array.isArray(x) && x.every((s) => typeof s === 'string');
+    const ok = ['hostNs', 'hostMnt', 'hostIpc', 'hostCgroup', 'hostPid', 'cwd', 'home'].every((k) => typeof p[k] === 'string')
+      && Array.isArray(p.binds) && p.binds.every((/** @type {Bind} */ b) => b && typeof b.p === 'string' && typeof b.rw === 'boolean')
+      && strs(p.hidden) && strs(p.exempt) && strs(p.sockets) && isEnvObject(p.env);
+    return ok ? p : null;
+  } catch { return null; }
+}
+
+/**
+ * The nested proof under docker (ib4k §3b, hard point (b)): the read-only channel BIND with the marker (dockerMarker),
+ * AND every property of the table read back in place (dockerGaps). A process inside can mount nothing, so it cannot
+ * make the bind; and a forger who built every property elsewhere has built an equally isolated place.
+ * @returns {{inside: boolean, why: string}}
+ */
+function dockerInsideProof() {
+  const mk = dockerMarker();
+  if (mk !== 'mount') return { inside: false, why: mk === 'forged' ? `${DOCKER_CHANNEL} exists but is not the docker backend's read-only bind (a forged marker)` : 'no docker backend channel' };
+  const plan = dockerPlan();
+  if (!plan) return { inside: false, why: `${DOCKER_CHANNEL}/plan.json is missing or malformed` };
+  const gaps = dockerGaps(plan);
+  return gaps.length ? { inside: false, why: gaps.join('; ') } : { inside: true, why: '' };
+}
+
+/**
+ * Run `command` IN PLACE (the nested and stripped-markers paths under docker): nothing can unshare in here, so no
+ * drop and no new namespace — the env allowlist again, a session and group of its own, signals forwarded to it.
+ * @param {string[]} command @param {NodeJS.ProcessEnv} env @returns {Promise<number>}
+ */
+function runInPlace(command, env) {
+  const fwd = forwardSignalsToGroup();
+  return new Promise((resolve) => {
+    /** @type {import('node:child_process').ChildProcess} */
+    let child;
+    try { child = spawn(command[0], command.slice(1), { stdio: 'inherit', env, detached: true }); } catch (e) {
+      fwd.remove();
+      resolve(report('isolated', EXIT.fail, `NOT RUN: cannot start '${command[0]}': ${errMsg(e)}. The command was NOT started.`));
+      return;
+    }
+    fwd.attach(child);
+    child.on('error', (e) => { fwd.remove(); resolve(report('isolated', 127, `NOT RUN: cannot start '${command[0]}': ${errMsg(e)}`)); });
+    child.on('close', (code, signal) => resolve(exitOrDieBy(fwd, code, signal)));
+  });
+}
+
+/**
+ * `__isolated-docker` — the half INSIDE the container (under pid 1, the reaping bash), as the caller's uid with NO
+ * capability. It masks nothing (it cannot): it READS BACK every property (dockerGaps) and the host sockets planned
+ * as masked, reports `started` on the status FIFO, waits for `go`, then runs the command in a session and group of
+ * its own, forwarding signals to the group. A refusal is `fail <why>` on the FIFO, and nothing runs.
+ * @returns {Promise<number>}
+ */
+async function runDockerInner() {
+  swallowUsr1(); // ⛔ FIRST (v0.34.1)
+  const early = (/** @type {NodeJS.Signals} */ s) => process.exit(128 + (os.constants.signals[s] || 1));
+  for (const s of FORWARDED_SIGNALS) process.on(s, early);
+  /** @type {number} */ let st = -1;
+  try { st = fs.openSync(path.join(DOCKER_CHANNEL, 'status'), 'w'); } catch { /* not run via `isolated` */ }
+  const tell = (/** @type {string} */ line) => { try { fs.writeSync(st, `${line}\n`); return true; } catch { return false; } };
+  const refuse = (/** @type {string} */ why) => {
+    if (!tell(`fail ${why}`)) report('isolated', EXIT.fail, `NOT RUN: ${why}. The command was NOT started.`);
+    return EXIT.fail;
+  };
+  if (dockerMarker() !== 'mount') return refuse('internal: not inside the docker backend\'s container (no channel bind)');
+  const plan = dockerPlan();
+  if (!plan) return refuse('internal: the docker backend\'s plan is missing or malformed');
+  const gaps = dockerGaps(plan);
+  if (gaps.length) return refuse(`inside the container, ${gaps.join('; ')}`);
+  try { await loopbackSelfTest(); } catch (e) { return refuse(`the container's loopback does not work (${errMsg(e)})`); }
+  // row 2: every host socket in a bind was covered with /dev/null by the daemon; any that still answers → refused
+  const live = (await connectAll(plan.sockets.filter((s) => !plan.exempt.some((k) => isWithin(s, k))))).filter((x) => !SOCKET_UNREACHABLE.has(x)).length;
+  if (live) return refuse(`${live} host path socket(s) still ANSWER inside the container`);
+  try { process.chdir(plan.cwd); } catch (e) { return refuse(`cannot enter the working directory (${/** @type {NodeJS.ErrnoException} */ (e).code || errMsg(e)})`); }
+  // ⛔ OPEN `go` BEFORE saying `started` (measured: a hang, 2 runs of a parallel suite). The harness answers `started`
+  // by writing `go` and CLOSING its end: if no reader had the FIFO open by then, the pipe lost its last reference and
+  // the answer with it, and this open then blocked for ever. Opened first — the harness holds a writer from before the
+  // start, so the open does not block — the answer waits in the pipe, and a close unanswered is EOF.
+  let g = -1;
+  try { g = fs.openSync(path.join(DOCKER_CHANNEL, 'go'), 'r'); } catch (e) { return refuse(`internal: cannot open the status channel's \`go\` (${errCode(e)})`); }
+  if (!tell('started')) { fs.closeSync(g); return refuse('internal: the status channel is missing — run via `isolated`'); }
+  let go = /** @type {'go' | 'eof' | 'other'} */ ('other');
+  try { go = awaitGo(g); } catch { /* never `go` */ }
+  try { fs.closeSync(g); } catch { /* the command must not inherit it */ }
+  try { fs.closeSync(st); } catch { /* the command must not inherit it */ }
+  if (go === 'eof') return EXIT.fail;
+  if (go !== 'go') return refuse('internal: the harness did not answer `go` on the status channel');
+  const ran = runInPlace(dockerCommand(), plan.env);
+  for (const s of FORWARDED_SIGNALS) process.off(s, early);
+  return ran;
+}
+/** The command after `--` on this half's argv. @returns {string[]} */
+function dockerCommand() {
+  const i = process.argv.indexOf('--');
+  return i < 0 ? [] : process.argv.slice(i + 1);
+}
+
+/**
+ * `isolated-image [build]` — the docker backend's image (ib4k §3b). No argument: say whether this recipe's image is
+ * built here. `build`: build it — the ONLY place a pull of the digest-pinned base may happen; tagged and labelled.
+ * @param {string[]} a @returns {number}
+ */
+function runIsolatedImage(a) {
+  const cli = dockerCli();
+  if (cli.why) return report('isolated-image', EXIT.fail, cli.why);
+  const ep = dockerEndpointRefusal(process.env);
+  if (ep) return report('isolated-image', EXIT.fail, ep);
+  const r = dockerRecipe();
+  if (r.why) return report('isolated-image', EXIT.fail, r.why);
+  if (a[0] === undefined) {
+    const img = dockerSync(cli.bin, ['image', 'inspect', '--format', '{{.Id}} {{.Size}}', r.tag]);
+    if (img.status !== 0) return report('isolated-image', EXIT.noVerdict, `${r.tag} is not built here — build it with: ${DOCKER_BUILD_HINT}`);
+    const [id, size] = img.stdout.trim().split(/\s+/);
+    return report('isolated-image', EXIT.pass, `${r.tag} is built (${id.slice(0, 19)}, ${Math.round(Number(size) / 1e6)} MB)`);
+  }
+  if (a[0] !== 'build' || a.length > 1) { process.stderr.write('usage: contract-harness.mjs isolated-image [build]\n'); return EXIT.usage; }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : -1;
+  const b = spawnSync(cli.bin, ['-H', DOCKER_ENDPOINT, 'build', '--tag', r.tag, '--label', `${DOCKER_LABEL}.recipe=${r.hash}`,
+    '--label', `${DOCKER_LABEL}.owner=u${uid}`, '--file', DOCKERFILE, path.dirname(DOCKERFILE)], { stdio: ['ignore', 'inherit', 'inherit'], env: dockerEnv() });
+  if (b.status !== 0) return report('isolated-image', EXIT.fail, `docker build exited ${b.status ?? b.signal}`);
+  return report('isolated-image', EXIT.pass, `built ${r.tag}`);
 }
 
 /** `1`: the verdict line lists EVERY re-bound path (as `~/…`), implicit ones included. */
@@ -4800,7 +5624,8 @@ async function checkIsolation(a) {
     control = /** @type {NodeJS.ErrnoException} */ (e).code || errMsg(e);
     fails.push(`the control listener on the namespace loopback is NOT reachable (${control})`);
   }
-  const proof = kernelInsideProof();
+  // under the docker backend the proof is the channel bind plus every property read back (ib4k §3b)
+  const proof = dockerMarker() === 'absent' ? kernelInsideProof() : { ...dockerInsideProof(), facts: { docker: true } };
   if (!proof.inside) fails.push(`not provably inside a private network namespace: ${proof.why}`);
 
   const portsTxt = ports.map((x) => `127.0.0.1:${x.port} → ${x.error}`).join(', ');
@@ -5022,6 +5847,9 @@ switch (cmd) {
   case 'isolated': code = await runIsolated(args); break;
   case ISOLATED_INNER: code = await runIsolatedInner(args); break;
   case PID1_INNER: code = await runPid1(args); break;
+  case DOCKER_INNER: code = await runDockerInner(); break;
+  case DOCKER_REAPER: code = await runDockerReaper(args); break;
+  case 'isolated-image': code = runIsolatedImage(args); break;
   case 'sandbox-port': code = await checkSandboxPort(args); break;
   case 'guard-live-port': code = await checkGuardLivePort(args); break;
   case 'isolation-check': code = await checkIsolation(args); break;
@@ -5029,6 +5857,7 @@ switch (cmd) {
     process.stderr.write(
       'usage: contract-harness.mjs <generation|require-generation N|pin|no-revendor|gate-probe> [--repo D] [--sub P] [--lib D]\n'
       + '       contract-harness.mjs isolated [--keep <path>]… [--keep-ro <path>]… [--pass-env <NAME|PREFIX_*>]… -- <cmd> [args…] | isolation-check <port>… | sandbox-port [--bare] | guard-live-port <port> [--pin-verified]\n'
+      + '       contract-harness.mjs isolated-image [build]   (the docker backend\'s image)\n'
       + '⇒ exit 0 pass · 1 fail · 2 no verdict (reason on the last line) · 3 usage\n');
     code = EXIT.usage;
 }

@@ -27,7 +27,10 @@ const TOOL = path.join(ROOT, 'scripts', 'contract-harness.mjs');
 
 /** Env for spawned processes: never leak the parent test protocol. */
 function cleanEnv(/** @type {Record<string,string>} */ extra = {}) {
-  const env = { ...process.env, ...extra };
+  // ⛔ the NAMESPACE backends' depth: docker (ib4k §3b) is refused by name here — a remote endpoint planted (TEST-NET,
+  // never contacted) — so an arm that breaks unshare to see a refusal never runs the command under docker instead.
+  // The docker backend's own arms are isolation-docker.test.js and isolation-docker-table.test.js.
+  const env = { ...process.env, DOCKER_HOST: 'ssh://192.0.2.1', ...extra };
   delete env.NODE_TEST_CONTEXT;
   return env;
 }

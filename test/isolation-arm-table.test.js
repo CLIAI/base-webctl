@@ -38,6 +38,14 @@ const WORLD = path.join(ROOT, 'test', 'helpers', 'isolation-arm-world.cjs');
  * backend lands (phase 2: bwrap, phase 3: docker); the guard test below fails until you do.
  */
 const IMPLEMENTED = ['unshare', 'bwrap'];
+/**
+ * Backends judged by a table of their OWN, with the reason. ⛔ docker (ib4k §3b): this file's world is a throwaway
+ * `unshare -rm` with a fake home on a tmpfs, but the docker daemon resolves bind sources in the HOST's mount
+ * namespace — inside the world it would bind the real host's dirs at the world's paths. Its rows 1–12 live in
+ * isolation-docker-table.test.js, on the real host, with throwaway dirs; the guard below checks that table exists
+ * and covers every row.
+ */
+const JUDGED_ELSEWHERE = /** @type {Record<string, string>} */ ({ docker: 'isolation-docker-table.test.js' });
 const PATHS = /** @type {const} */ (['fresh', 'nested', 'stripped']);
 const NEUTRAL_HOSTNAME = 'webctl-isolated';
 /** @param {string} s */
@@ -545,7 +553,10 @@ test('⛔ the table covers EVERY backend the harness can run — extend IMPLEMEN
   for (const b of harness.ISOLATION_BACKENDS) {
     const r = spawnSync(process.execPath, [TOOL, 'isolated', '--', 'true'], { encoding: 'utf8',
       env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT')), WEBCTL_ISOLATION_BACKEND: b } });
-    if (r.status === 0) assert.ok(IMPLEMENTED.includes(b), `the harness runs the ${b} backend, but the arm table does not judge it`);
+    if (r.status === 0 && JUDGED_ELSEWHERE[b]) {
+      const other = fs.readFileSync(path.join(ROOT, 'test', JUDGED_ELSEWHERE[b]), 'utf8');
+      for (let n = 1; n <= 12; n++) assert.match(other, new RegExp(`\\[${b}\\] row ${n} — `), `${JUDGED_ELSEWHERE[b]} does not judge row ${n}`);
+    } else if (r.status === 0) assert.ok(IMPLEMENTED.includes(b), `the harness runs the ${b} backend, but the arm table does not judge it`);
     else assert.match(r.stderr, new RegExp(`NOT RUN: WEBCTL_ISOLATION_BACKEND pins the ${b} backend`), r.stderr);
   }
   assert.deepEqual(ROWS.map((r) => r.n), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 'ib4k §1 has rows 1–12');

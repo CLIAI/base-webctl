@@ -6,8 +6,9 @@
 // a pinned backend that cannot be used is a REFUSAL naming why — never a silent fallback.
 //
 // v0.34.0 (unshare only): bwrap and docker answered "not implemented yet (v0.35.0)". v0.35.0 phase 2:
-// bwrap has its probe and runner (ib4k §2a); docker still answers that (phase 3), so a pin to it is
-// refused and a host where neither namespace backend can run is refused naming all three.
+// bwrap has its probe and runner (ib4k §2a); phase 3: docker too (ib4k §3b). ⚠ A test that needs EVERY backend
+// refused plants a remote DOCKER_HOST (NO_DOCKER): docker is then refused by name before any call, on a host
+// with a daemon and the image as on one without — never "selected, and the command ran".
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -77,6 +78,10 @@ async function withBinds(binds, argv, env = cleanEnv()) {
   return r.status === 97 ? null : r;
 }
 const NO_BINDS = 'SKIP (host): cannot bind a fake tool in a throwaway `unshare -rm` here';
+/** Docker refused by name on ANY host (ib4k §3a.1): a remote endpoint planted. TEST-NET, never contacted. */
+const NO_DOCKER = { DOCKER_HOST: 'ssh://192.0.2.1' };
+/** docker's skip reason under NO_DOCKER — or, on a host without the CLI, its absence. */
+const DOCKER_SKIP = String.raw`docker: (?:DOCKER_HOST names another docker endpoint[^\n]*?|'docker' not found[^\n]*?)`;
 /**
  * A fake `unshare` (for WEBCTL_UNSHARE_BIN) that FAILS the selection probe — `-rnm …`, printing the
  * EPERM a host that forbids user namespaces prints — and runs the real one for everything else (the
@@ -178,22 +183,21 @@ test('⭐ WEBCTL_ISOLATION_BACKEND=unshare pins the implemented backend → runs
   assert.match(r.stderr, /; backend: unshare; cgroup2: nsdelegate(?: —|$)/m);
 });
 
-test('⛔ WEBCTL_ISOLATION_BACKEND=docker (not implemented until phase 3) → REFUSED naming why, the command NOT run, no fallback to unshare', needsNs, async () => {
+test('⛔ WEBCTL_ISOLATION_BACKEND=docker where docker cannot be used (a remote endpoint planted) → REFUSED naming why, the command NOT run, no fallback to unshare', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ib-select-'));
   try {
-    for (const b of ['docker']) {
-      const marker = path.join(dir, `RAN-${b}`);
-      const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`],
-        { WEBCTL_ISOLATION_BACKEND: String(b) });
-      assert.equal(r.status, 1, `${b}: ${r.stdout}${r.stderr}`);
-      assert.match(r.stderr, new RegExp(`^FAIL {2}isolated: NOT RUN: WEBCTL_ISOLATION_BACKEND pins the ${b} backend, which cannot be used here — `
-        + `${b}: not implemented yet \\(v0\\.35\\.0\\) \\(a pinned backend never falls back`, 'm'));
-      assert.doesNotMatch(r.stderr, /^isolated: home HIDDEN/m, `${b}: a verdict was printed, so something ran`);
-      assert.equal(fs.existsSync(marker), false, `${b}: the command ran`);
-      const rec = recordOf(r.stdout);
-      assert.equal(rec?.backend, null);
-      assert.deepEqual(rec?.skipped, [{ backend: b, why: 'not implemented yet (v0.35.0)' }]);
-    }
+    const marker = path.join(dir, 'RAN-docker');
+    const r = await run(['isolated', '--keep', dir, '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`],
+      { WEBCTL_ISOLATION_BACKEND: 'docker', ...NO_DOCKER });
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, new RegExp(`^FAIL {2}isolated: NOT RUN: WEBCTL_ISOLATION_BACKEND pins the docker backend, which cannot be used here — `
+      + `${DOCKER_SKIP} \\(a pinned backend never falls back`, 'm'));
+    assert.doesNotMatch(r.stderr, /^isolated: home HIDDEN/m, 'a verdict was printed, so something ran');
+    assert.doesNotMatch(r.stderr + r.stdout, /192\.0\.2\.1/, 'the endpoint is printed');
+    assert.equal(fs.existsSync(marker), false, 'the command ran');
+    const rec = recordOf(r.stdout);
+    assert.equal(rec?.backend, null);
+    assert.deepEqual(rec?.skipped.map((/** @type {{backend: string}} */ s) => s.backend), ['docker']);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -215,10 +219,10 @@ test('⛔ an unknown WEBCTL_ISOLATION_BACKEND → refused by rule (value not pri
 });
 
 test('⛔ unshare unavailable (a bad WEBCTL_UNSHARE_BIN) → REFUSED naming all three backends; the JSONL record lists each skip', async () => {
-  const r = await run(['isolated', '--', 'true'], { WEBCTL_UNSHARE_BIN: '/nonexistent/unshare' });
+  const r = await run(['isolated', '--', 'true'], { WEBCTL_UNSHARE_BIN: '/nonexistent/unshare', ...NO_DOCKER });
   assert.equal(r.status, 1, r.stderr);
   // ⚠ bwrap is skipped for the SAME reason: its privilege drop runs that unshare too (ib4k §2a)
-  assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file — it does not exist; no isolation backend can be used here — bwrap: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file — it does not exist \(bwrap's privilege drop runs it too\), docker: not implemented yet \(v0\.35\.0\) \(the command is never run unisolated\)/m);
+  assert.match(r.stderr, new RegExp(String.raw`^FAIL {2}isolated: NOT RUN: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file — it does not exist; no isolation backend can be used here — bwrap: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path to an EXECUTABLE regular file — it does not exist \(bwrap's privilege drop runs it too\), ${DOCKER_SKIP} \(the command is never run unisolated\)`, 'm'));
   assert.doesNotMatch(r.stderr, /nonexistent/, 'the path is printed');
   const rec = recordOf(r.stdout);
   assert.equal(rec?.backend, null);
@@ -235,7 +239,7 @@ test('⛔ end to end: uid_map EPERM with the AppArmor sysctl at 1 → the unshar
     const r = await runRaw(['unshare', '-rm', 'sh', '-c',
       'mount -t tmpfs fake /proc/sys/kernel || exit 97; echo 1 > /proc/sys/kernel/apparmor_restrict_unprivileged_userns || exit 97; exec "$@"',
       'sh', process.execPath, TOOL, 'isolated', '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`],
-    { env: cleanEnv({ WEBCTL_UNSHARE_BIN: fake }) });
+    { env: cleanEnv({ WEBCTL_UNSHARE_BIN: fake, ...NO_DOCKER }) });
     if (r.status === 97) { t.skip('SKIP (host): cannot fake the AppArmor sysctl in a throwaway namespace here'); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /NOT RUN: HOST POLICY, not a fault of this lane: .*kernel\.apparmor_restrict_unprivileged_userns = 1.*\(1\) `sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0`.*\(2\) an AppArmor profile .*WEBCTL_UNSHARE_BIN=.*; no isolation backend can be used here — bwrap: /);
@@ -245,7 +249,7 @@ test('⛔ end to end: uid_map EPERM with the AppArmor sysctl at 1 → the unshar
     let hostSysctl = '';
     try { hostSysctl = fs.readFileSync('/proc/sys/kernel/apparmor_restrict_unprivileged_userns', 'utf8').trim(); } catch { /* absent */ }
     if (hostSysctl === '1') { t.diagnostic('control not run: the host sysctl is 1'); return; }
-    const c = await run(['isolated', '--', 'true'], { WEBCTL_UNSHARE_BIN: fake });
+    const c = await run(['isolated', '--', 'true'], { WEBCTL_UNSHARE_BIN: fake, ...NO_DOCKER });
     assert.equal(c.status, 1, c.stderr);
     assert.match(c.stderr, /NOT RUN: unshare exited 1 before the isolated side reported in/);
     assert.doesNotMatch(c.stderr, /HOST POLICY/);
@@ -260,12 +264,12 @@ test('⛔ v0.33\'s refusal text is KEPT (review F4): a fake WEBCTL_UNSHARE_BIN p
   try {
     const fake = path.join(dir, 'fake-unshare');
     fs.writeFileSync(fake, '#!/bin/sh\necho "unshare: unshare failed: Operation not permitted" >&2\nexit 1\n', { mode: 0o755 });
-    const r = await run(['isolated', '--', 'true'], { WEBCTL_UNSHARE_BIN: fake });
+    const r = await run(['isolated', '--', 'true'], { WEBCTL_UNSHARE_BIN: fake, ...NO_DOCKER });
     assert.equal(r.status, 1, r.stderr);
     // the lane's regex, verbatim
     assert.match(r.stderr, /NOT RUN: unshare exited 1/);
     // ⚠ bwrap (v0.35.0) is skipped too: its probe runs the privilege drop — this fake unshare — inside bwrap
-    assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: unshare exited 1 before the isolated side reported in — unprivileged user namespaces may be disabled \(kernel\.unprivileged_userns_clone \/ user\.max_user_namespaces\); unshare's own message, if any, is above; no isolation backend can be used here — bwrap: [^\n]*, docker: not implemented yet \(v0\.35\.0\) \(the command is never run unisolated\)\. The command was NOT started\.$/m);
+    assert.match(r.stderr, new RegExp(String.raw`^FAIL {2}isolated: NOT RUN: unshare exited 1 before the isolated side reported in — unprivileged user namespaces may be disabled \(kernel\.unprivileged_userns_clone \/ user\.max_user_namespaces\); unshare's own message, if any, is above; no isolation backend can be used here — bwrap: [^\n]*, ${DOCKER_SKIP} \(the command is never run unisolated\)\. The command was NOT started\.$`, 'm'));
     // "unshare's own message … is above" stays TRUE: the probe's stderr is printed before the FAIL line
     assert.ok(r.stderr.indexOf('unshare: unshare failed: Operation not permitted') >= 0
       && r.stderr.indexOf('unshare: unshare failed: Operation not permitted') < r.stderr.indexOf('FAIL  isolated:'), r.stderr);
@@ -282,8 +286,11 @@ test('⛔ a selected backend with NO RUNNER is refused (review F7) — never run
   try {
     fs.mkdirSync(path.join(tree, 'scripts'));
     const src = fs.readFileSync(TOOL, 'utf8');
-    const mutant = src.replace("{ name: 'docker', probe: () => NOT_IMPLEMENTED.docker }", "{ name: 'docker', probe: () => '' }");
+    // phase 3: the docker runner landed — the mutant REMOVES it again, so its probe passes with no runner behind it
+    const mutant = src.replace("{ name: 'docker', probe: () => { dcli = dockerCli(dockerBin); return probeDocker(dcli, dseen); } }", "{ name: 'docker', probe: () => '' }")
+      .replace("  if (choice.backend === 'docker') {\n    // the unshare probe's own message", "  if (false) {\n    // the unshare probe's own message");
     assert.notEqual(mutant, src, 'the mutation did not apply — the probe list changed shape');
+    assert.ok(mutant.includes("  if (false) {\n    // the unshare probe's own message"), 'the mutation did not remove the docker runner');
     const tool = path.join(tree, 'scripts', 'contract-harness.mjs');
     fs.writeFileSync(tool, mutant);
     const marker = path.join(tree, 'RAN');
@@ -342,10 +349,10 @@ test('⛔ unshare fails AND bwrap is absent → REFUSED: unshare\'s v0.33 reason
     const marker = path.join(dir, 'RAN');
     if (!BWRAP) { t.diagnostic('bwrap is not installed here: the bind is not even needed'); }
     const r = await withBinds(BWRAP ? overTool(noexec, 'bwrap') : [], [process.execPath, TOOL, 'isolated', '--', ...markerCmd(marker)],
-      cleanEnv({ WEBCTL_UNSHARE_BIN: probeFailingUnshare(dir) }));
+      cleanEnv({ WEBCTL_UNSHARE_BIN: probeFailingUnshare(dir), ...NO_DOCKER }));
     if (!r) { t.skip(NO_BINDS); return; }
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /^FAIL {2}isolated: NOT RUN: unshare exited 1 before the isolated side reported in — [^\n]*; no isolation backend can be used here — bwrap: 'bwrap' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install bubblewrap [^\n]*, docker: not implemented yet \(v0\.35\.0\) \(the command is never run unisolated\)\. The command was NOT started\.$/m);
+    assert.match(r.stderr, new RegExp(String.raw`^FAIL {2}isolated: NOT RUN: unshare exited 1 before the isolated side reported in — [^\n]*; no isolation backend can be used here — bwrap: 'bwrap' not found in \/usr\/sbin, \/usr\/bin, \/sbin, \/bin — install bubblewrap [^\n]*, ${DOCKER_SKIP} \(the command is never run unisolated\)\. The command was NOT started\.$`, 'm'));
     assert.equal(fs.existsSync(marker), false, 'the command ran');
     assert.deepEqual(recordOf(r.stdout)?.skipped.map((/** @type {{backend: string}} */ s) => s.backend), ['unshare', 'bwrap', 'docker']);
     // pinned: the pin's text, naming bwrap's reason — never a fallback to the unshare that works here
@@ -365,7 +372,7 @@ test('⛔ F7: bwrap\'s privilege drop fails with WEBCTL_UNSHARE_BIN set → bwra
       + 'for a in "$@"; do case "$a" in --map-user*) echo "unshare: unrecognized option \'$a\'" >&2; exit 1;; --) break;; esac; done\n'
       + `exec ${JSON.stringify(sysTool('unshare'))} "$@"\n`, { mode: 0o755 });
     const marker = path.join(dir, 'RAN');
-    const r = await run(['isolated', '--keep', dir, '--', ...markerCmd(marker)], { WEBCTL_UNSHARE_BIN: fake });
+    const r = await run(['isolated', '--keep', dir, '--', ...markerCmd(marker)], { WEBCTL_UNSHARE_BIN: fake, ...NO_DOCKER });
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /; no isolation backend can be used here — bwrap: the privilege drop \(`setpriv … unshare -U --map-user`\) fails inside bwrap \([^\n]*\) — util-linux ≥ 2\.38 \(unshare --map-user\) is required \(WEBCTL_UNSHARE_BIN\), docker: /);
     assert.equal(fs.existsSync(marker), false, 'the command ran');
