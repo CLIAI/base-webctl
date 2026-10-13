@@ -3,7 +3,7 @@ id: ib4k
 title: "Isolation backends — one contract, unshare → bwrap → docker → refuse"
 category: test
 created: "2026-10-07"
-updated: "2026-10-11"
+updated: "2026-10-13"
 status: draft
 tags: [isolation, sandbox, unshare, bubblewrap, docker, apparmor, mutation-arms, gate, portability]
 tech:
@@ -12,7 +12,7 @@ tech:
   - name: "bubblewrap"
     version: ">=0.11 (measured: 0.11.2 only)"
   - name: "Docker Engine"
-    version: "any"
+    version: "any (measured: 29.1.3)"
 relates_to: [xrl4, k3wn, dip7]
 depends_on: [xrl4]
 expands: [xrl4]
@@ -581,6 +581,203 @@ the harness). Lanes find v0.34-vendored harnesses with "who is below 9".
    the image (libc). The docker backend REFUSES with a clear message when the cwd's
    `node_modules` holds any, rather than flaking. Most lanes have no native dependencies.
 
+### 3b. The docker backend as built (v0.35.0, phase 3) — DRAFT for approval
+
+§3 and §3a were written on 2026-10-07, before v0.34/v0.35 hardened the contract. This section replaces
+them as the spec; they stay above as the original conditions, each answered here. *Measured* below
+means on a policy-blocked host: `kernel.apparmor_restrict_unprivileged_userns=1`, Docker Engine
+29.1.3 (rootful, local unix socket, cgroup v2, `cgroupns` on, default seccomp and AppArmor
+profiles), kernel 7.0, a throwaway container per measurement removed by exact name.
+
+**What docker is, here: the WHOLE sandbox, not a creator.** bwrap could be a mere namespace creator
+(§2a) because the inner half then masks with capabilities. Under docker it cannot. *Measured:*
+`unshare -rn` inside → EPERM (default seccomp, and the host's AppArmor userns rule), `mount -t
+tmpfs` → refused, and a `/dev` tmpfs replacement fails container init. Giving the inner half
+`CAP_SYS_ADMIN` would need the AppArmor or seccomp profile off, which §3a.2 forbids. ⇒ The
+DAEMON builds the sandbox from `docker create` flags. A capless inner half (`__isolated-docker`,
+node, the caller's uid) then READS BACK every property with the shared gap functions before
+anything runs. Where a gap function assumes our own masks (the `webctl-isolated` tmpfs sources,
+the HIDE tmpfs), it gets a docker branch that checks the same PROPERTY (e.g. a hidden dir is
+ENOENT, not "under our hide"). Every read-back that fails is a REFUSAL, as on the namespace
+backends.
+
+#### The run, host side
+
+1. **Probe** (side-effect free; each failure a NAMED reason, §2):
+   1. `docker` from the system dirs only.
+   2. ⛔ `DOCKER_HOST` or `DOCKER_CONTEXT` set to anything but the local unix socket → REFUSED
+      by name (§3a.1). Not silently overridden: a lane that set one meant something.
+   3. Every docker call carries `-H unix:///var/run/docker.sock` explicitly. *Measured:* `-H`
+      wins over both `DOCKER_HOST=ssh://…` and `DOCKER_CONTEXT`. The CLI gets
+      `privilegedEnv` with every `DOCKER_*` removed (row 11: it is the half that talks to a
+      root-equivalent daemon).
+   4. `docker version` answers; `docker info` lists `seccomp`, and `apparmor` when the host
+      kernel has AppArmor; the daemon is not rootless. ⚠ A rootless daemon's socket is elsewhere
+      and its uid mapping differs: a NAMED reason (unmeasured, not supported in phase 3).
+   5. The image (below) exists locally. A missing one is a reason that names the build command.
+2. **Backend-specific refusals after selection** (FAIL, never a fallback): a native addon
+   (`*.node`) under the cwd's `node_modules` (§3a.6); a `--keep`/`--keep-ro`/cwd that is or
+   contains a docker socket; a keep or cwd beneath `/dev`, `/proc` or `/sys`.
+3. **The reaper first** (§3a.4, hard point (a)). A host-side process, spawned `detached`
+   through `env --ignore-signal=TERM,INT,HUP,QUIT`, reads a pipe whose only write end the
+   harness holds. On EOF it runs `docker rm -f <exact name>` and, once the harness has written
+   it, `<exact id>`. EOF is how the reaper learns the harness died, by ANY signal, SIGKILL
+   included. It needs no parent-death signal and no polling. The container name is fixed BEFORE
+   the create, so the reaper can remove a container whose create was still in flight; it retries
+   by exact name for a short window. *Measured (prototype):* harness SIGKILLed mid-run, 3/3, no
+   container left. ⚠ The write end must reach no other process (the CLI children are spawned with
+   explicit stdio only). Residual: a SIGKILL to every pid of the uid (`kill -9 -1`) kills the
+   reaper too. That is named, not closed.
+4. **`docker create`, then `docker start -a -i`**, split so the id is known before anything runs
+   and the reaper holds it. The flags:
+
+       --name webctl-iso-u<uid>-<lane>-<pid>   --label org.cliai.webctl-iso.owner=u<uid>
+       --init --rm  --network none  --read-only  --cap-drop ALL
+       --security-opt no-new-privileges  --user <uid>:<gid>  --hostname webctl-isolated
+       --cpus <c> --memory <m> --pids-limit <p>
+       --tmpfs /tmp:mode=1777 --tmpfs /var/tmp:mode=1777 --tmpfs /run:mode=1777
+       -v <cwd>:<cwd>  -v <keep>:<keep>  -v <keep-ro>:<keep-ro>:ro  -v <base root>:<base root>:ro
+       --mount type=bind,src=/dev/null,dst=<host socket under a bind>,readonly   (each one)
+       -v <channel>/machine-id:/etc/machine-id:ro   (and /var/lib/dbus/machine-id)
+       -v <channel dir>:/run/webctl-isolated:ro
+       <image id> node … __isolated-docker
+
+   ⛔ Never `--privileged`, `seccomp=unconfined`, `apparmor=unconfined`, a published port, the host
+   network, `--pid host`, `--ipc host`, `--userns host`, or a docker.sock mount (§3a.2,
+   §3a.5). `<lane>` is `[a-z0-9-]{1,24}` from `WEBCTL_LANE`, else from the cwd's basename. The
+   defaults are `--cpus 2 --memory 4g --pids-limit 4096`, overridable via `WEBCTL_ISOLATION_DOCKER_CPUS`,
+   `_MEMORY` and `_PIDS`. ⛔ Never prune. Removal is only by exact id or exact name (§3a.5).
+5. **The channel** is a private `0700` dir (`mkdtemp`) holding three FIFOs: `plan` (in), `status`
+   (out) and `go` (in). It is bound read-only at `/run/webctl-isolated`. *Measured:* a FIFO in a
+   read-only bind is read and written across the container boundary. The plan is the same JSON
+   the namespace backends send on fd 4: the command's env, the binds, the host socket list and
+   the ids. ⇒ The command's env is never on any argv, never in the CLI's env, never in `docker
+   inspect` (row 11). The dir is removed when the run ends.
+6. **Signals.** *Measured:* the 29.1.3 CLI proxies TERM, but it DIES by HUP, QUIT, USR2, ALRM
+   and USR1, and the container RUNS ON (5 of 5 left running). After a SIGKILL of the CLI the
+   container runs on. ⇒ The CLI's sig-proxy is not used (`--sig-proxy=false`). The CLI is spawned
+   `detached` and shielded like a creator (§2a difference 7), and its SigIgn is read back before
+   `go`. The harness forwards each signal in `FORWARDED_SIGNALS` ONCE as `docker kill
+   --signal=<sig> <exact id>`. It reaches docker-init (pid 1, `--init`), which forwards it to the
+   inner half, which forwards it to the command's group (as the pid-1 helper does). That gives
+   **exactly once** for a terminal-group signal. **128+n**: docker-init exits 128+n when its
+   child dies by n (*measured:* self-TERM → 143); the harness then dies by n as it does on the
+   other backends (`exitOrDieBy`). **Nothing outlives the harness, SIGKILL included:** the
+   reaper, item 3. **An early signal means the command never runs:** the go-handshake over the
+   FIFOs (§2a difference 6 (B)), and an early signal also means no `docker start`. **SIGUSR1:** every node
+   half swallows it, the inner half included; it is not forwarded.
+7. **Stdio:** the command's stdio are the CLI's pipes (`-a -i`, never `-t`). The command
+   therefore never holds the caller's terminal. Row 12b holds (`/dev/tty` → ENXIO, TIOCSTI has no
+   terminal to reach), and §6's "stdio that IS the terminal" residual does not exist on this
+   backend.
+
+#### Every row of §1, mapped
+
+| # | docker mechanism | read back by the inner half | status (*measured*) |
+|---|---|---|---|
+| 1 | `--network none` | lo only, no listener, self-connect | MET: lo only |
+| 2 | only declared binds; a host socket under one masked by a `/dev/null` bind | connect-test of the planned list, as today | MET: an unmasked socket in a bind answered CONNECTED; masked → ECONNREFUSED |
+| 3 | own PID ns; `cgroupns` private; `/sys/fs/cgroup` a read-only cgroup2 rooted at `/`; container in its own session | `cgroupGaps` (docker branch: no `nsdelegate` needed, see below); host pid → ESRCH | MET: `0::/`, cgroup2 ro. kill(0) cannot reach the caller's group (no shared session) |
+| 4 | the home is never mounted | `hiddenGaps` (docker branch: ENOENT) | MET |
+| 5 | `--cap-drop ALL`, `no-new-privileges`, `--user` | CapEff/CapBnd 0, NoNewPrivs 1, mount refused | MET: CapBnd 0, NNP 1, Seccomp 2 |
+| 6 | the plan's env, applied when the command is spawned | as today | MET |
+| 7 | `--read-only`, each bind's mode, the tmpfs set | `readOnlyGaps` over `/` | MET for writes. ⛔ **CONTROL NOT MET:** a nested `unshare -rn`, procfs and sysfs mount are EPERM inside (seccomp + AppArmor). Late-mount: docker binds are `rprivate`; the arm needs a mount the HOST makes, so it runs where the table's world can make one |
+| 8 | `--tmpfs` `/tmp` and `/var/tmp` (1777); private IPC ns, `/dev/shm` and mqueue | `maskIpc`'s read-back | MET: all four writable, private |
+| 9 | the default seccomp denies `add_key` and `keyctl`; `/proc/keys` is masked | `add_key` → EPERM | MET, more strongly: the §1a description residual is closed. ⛔ **CONTROL NOT MET:** a key added inside is EPERM. Verdict `; keyring: none (docker seccomp)` |
+| 10 | `--hostname webctl-isolated`; the neutral machine-id bound read-only; a fresh sysfs per netns | `identityGaps` | MET: hostname, machine-id, `/sys/class/net` and `/sys/devices/virtual/net` = lo |
+| 11 | the CLI gets `privilegedEnv` minus `DOCKER_*`; the env travels by FIFO | as today | MET by construction (arm: an `LD_PRELOAD` in the caller never runs in the CLI or the inner half) |
+| 12 | docker's own `/dev`, which cannot be replaced | `devGaps` (docker branch) | ⛔ **NOT MET AS WRITTEN:** docker's `/dev` holds the 15 listed names plus **`core` → `/proc/kcore`**, which docker masks. Its `/dev` is a rw tmpfs (mode 755, root's), so the command's create there is EACCES, not EROFS. `/dev/pts` is a new instance; `uinput` and `snd` are absent. **Ruling asked:** accept exactly `core`, read back as a link to a masked file, or refuse the backend |
+| 12b | no tty: stdio via the CLI's pipes | `/dev/tty` → ENXIO | MET, more strongly (no terminal at all) |
+
+**Rows docker cannot meet, named (never papered over):**
+
+1. **Row 7's control:** no namespaces of the command's own. Chromium's own sandbox fails inside, so a
+   lane that runs Chromium inside needs `--no-sandbox`, which is a weaker browser.
+2. **Row 9's control:** no keyring at all.
+3. **Row 12:** `/dev/core`, as above.
+4. **The nested path cannot drop or re-isolate** (below): a nested command shares its nested
+   caller's PID namespace and uid.
+5. **The userland is the IMAGE's.** The host's PATH tools are not re-bound (another libc). A lane
+   calling a host tool inside finds the image's, or ENOENT.
+
+⇒ The verdict names this backend's deviations. The table marks each unmet control as a named
+DEVIATION for docker, never a pass. A lane that needs one of them is refused nothing: it fails
+visibly inside.
+
+#### Nested under docker (§3a.3, hard point (b))
+
+**The proof** (`dockerInsideProof`) must be something a process inside cannot forge, and the
+process inside can mount nothing (*measured:* mount refused, `unshare` EPERM). So:
+
+* a read-only bind at `/run/webctl-isolated` whose mountinfo row is a bind (not our tmpfs, not a
+  plain dir) and holds the run's marker file;
+* CapBnd 0, NoNewPrivs 1, Seccomp 2;
+* hostname `webctl-isolated`;
+* lo only, no listener;
+* AND every read-back of the table above, run again in place.
+
+A forged marker means the env is set and/or a marker file exists, but there is no such mount, or
+any property fails. That is REFUSED (exit 2, as `kernelInsideProof`). The nested call cannot
+unshare, so it runs the command IN PLACE: the env allowlist is applied again, and it runs in a
+session and group of its own, forwarding signals. The **stripped-markers** path is the same:
+under docker the proof does not depend on the env at all. `isolation-check` accepts this proof
+too. *Arms:* nested and stripped calls pass the table (minus the named deviations); a forged
+marker (the env set, plus a plain file) is refused, both on the host and inside an unshare outer.
+
+#### The image
+
+* `docker/isolated/Dockerfile`: `FROM node:22.23.3-trixie-slim@sha256:b26b04c123d9ff8ab646ceb18b9d75a1173acf64b9a401094b906d27b29338d4`
+  (node 22.23.3 ≥ engines 22.12), plus a short, listed tool set. *Measured:* the base image has
+  `bash setpriv unshare mount hostname`, but no `git`, `ps`, `python3` or `keyctl`. Each added tool
+  is an explicit line; lanes ask for more through webctl:mgr.
+* It is built ONLY by an explicit verb (`contract-harness.mjs isolated-image build`). The pull of
+  the digest-pinned base happens there and never at test time. It is tagged
+  `webctl-iso/node22:<first 12 hex of the recipe's sha256>` and labelled with that recipe hash
+  and the owner `u<uid>`. The run resolves the tag to an image ID once, checks the label, and
+  runs by ID, so a retag mid-run cannot swap it. ⚠ Any user of a shared daemon is root-equivalent
+  and could build a same-tagged image. The label check catches an accident, not an attacker.
+* Size: the base is 231 MB. The image adds well under 1 GB.
+
+#### Selection, verdict, generation
+
+* §2 is unchanged: docker is probed only after unshare and bwrap fail their probes, or when it is
+  pinned. A pinned docker that cannot run is a REFUSAL. An unpinned refusal still LEADS with
+  unshare's v0.33 text, then `…; no isolation backend can be used here — bwrap: <why>, docker:
+  <why>`. A probe failure falls through; a failure after selection is a FAIL.
+* Verdict: `…; backend: docker (skipped unshare: …, skipped bwrap: …)` is the LAST `; backend:`
+  clause, then `; keyring: none (docker seccomp)`, then `; dev: +core`. **Ruling asked** on
+  `; cgroup2: nsdelegate`: it does not apply (the command cannot make a cgroup namespace), so the
+  proposal is to omit it under docker rather than claim a check that did not run. The JSONL
+  carries `"backend": "docker"` and `"skipped"` as today.
+* `HARNESS_GENERATION` → **10**: a new backend whose verdict carries new clauses, and a nested
+  proof an older outer cannot satisfy. **Ruling asked.**
+
+#### Arms (§3a.5: fake docker CLI for units; real docker within limits)
+
+* **Unit**, against a FAKE `docker` on a throwaway system-dir path that records every argv:
+  * the name matches `^webctl-iso-u\d+-[a-z0-9-]{1,24}-\d+$`;
+  * `--cpus`, `--memory`, `--pids-limit`, `--init`, `--rm`, `--read-only` and `--network none`
+    are present;
+  * none of the forbidden flags appears, and no `prune` verb appears anywhere;
+  * `-H unix:///var/run/docker.sock` is on every call;
+  * a planted `DOCKER_HOST=ssh://192.0.2.1` is refused before any `create`;
+  * the command's env appears in no argv;
+  * selection order and pin refusals;
+  * a missing image names the build command;
+  * a native addon is refused.
+* **Real docker:** the table (§1) pinned to docker, on the fresh, nested and stripped paths.
+* **§3a.2:** `docker inspect` of the RUNNING container: `Privileged` false, `SecurityOpt` is
+  exactly `no-new-privileges`, AppArmor `docker-default`.
+* **§3a.4:** harness SIGKILLed after `started` and before it (in the create window), and every
+  forwarded and unforwarded fatal signal → no container by exact name, no process of the run.
+* **The v0.35 signal arms:** group HUP/QUIT/INT/TERM → `GOT` ×1, rc 7; an early TERM → never RAN.
+* **Sabotages** on a copy, logged in DEV_NOTES:
+  * no reaper → the §3a.4 arm is red;
+  * the sig-proxy back → the HUP arm is red;
+  * the `/dev/null` socket mask dropped → row 2 is red;
+  * the env passed as `-e` → the argv arm is red;
+  * the proof skips its mount check → the forged-marker arm is red.
+
 ## 4. Verdict and gate
 
 * The verdict line and JSONL record name the backend used and, for each skipped one, the
@@ -678,4 +875,4 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with b
   blocked in `read`, as a pid-namespace init holding the caller's stdio, and nothing in it can be
   signalled except by SIGKILL. *Measured:* 160 harness SIGKILLs spread over the setup window gave
   0 runs, 0 hangs and 0 leaks.
-* **v0.35.0 phase 3 — docker (§3, §3a):** not started.
+* **v0.35.0 phase 3 — docker (§3b): design drafted (2026-10-13), awaiting approval; three rulings asked (/dev/core, the nsdelegate clause, generation 10).**
