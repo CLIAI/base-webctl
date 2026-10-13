@@ -3,13 +3,13 @@ id: rx9q
 title: "The runtime layer is xq — base speaks the protocol, xq runs the app"
 category: arch
 created: "2026-10-03"
-updated: "2026-10-03"
+updated: "2026-10-13"
 status: review
 tags: [xq, runtime, dependency, boundary, containers, remote, firefox, bidi, capabilities]
 tech:
   - name: "xq"
     version: "capability-pinned (no semver yet)"
-relates_to: [rb7s, rm7t, nl0c, lg1n, ow9k, btg4, v8p3, sb7q, k3wn]
+relates_to: [rb7s, rm7t, nl0c, lg1n, ow9k, btg4, v8p3, sb7q, k3wn, gvlx]
 depends_on: [nl0c]
 expands: [rm7t]
 similar_to: []
@@ -107,6 +107,13 @@ controlEndpoint(...)  -> {name, kind: "tcp", adapter: "cdp"|"bidi", host: "127.0
 ownedForward(...)     -> a tunnel with a handle: started, reported, torn down by its owner
 appVersion(...)       -> the existing schema-1 contract
 ```
+
+⚠ **`controlEndpoint` gains a unix form (`gvlx` §6.3, 2026-10-13).** Both xq and base now
+put the CDP relay on a unix socket in a 0700 directory, with nothing on TCP reachable from
+outside the zone. ⇒ The endpoint becomes `{name, kind: "unix", adapter: "cdp", path}`
+beside today's `kind: "tcp"`, and a forward of it stays unix → unix (`ssh -L <0700 dir>/cdp.sock:<path>`).
+A local TCP forward is a named fallback, never the default. **Provisional until xq's
+schema lands**: one field name (`kind`), not a second one.
 
 ⛔ **Three seam rules from xq's landed work (2026-10-03):**
 
