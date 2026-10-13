@@ -172,3 +172,15 @@ test('parseXpraTcpBind: reads host, port and auth from a bind string (exposure()
   assert.deepEqual(parseXpraTcpBind('0.0.0.0:2,auth=file:filename=/x'), { host: '0.0.0.0', port: 2, auth: 'file:filename=/x', filename: null });
   assert.equal(parseXpraTcpBind(undefined), null);
 });
+
+test('⛔ review 2 (low): ensurePrivateDir walks the ANCESTORS with an injected lstat too — a group-writable parent is refused; CONTROL: a sealed one passes', () => {
+  const me = typeof process.getuid === 'function' ? process.getuid() : 1000;
+  /** @param {number} parentMode */
+  const lstatWith = (parentMode) => (/** @type {string} */ p) => {
+    const t = { '/': { uid: 0, mode: 0o755 }, '/s': { uid: me, mode: parentMode }, '/s/run': { uid: me, mode: 0o700 } }[/** @type {'/'} */ (p)];
+    if (!t) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    return { uid: t.uid, mode: t.mode | 0o40000, isDirectory: () => true, isSymbolicLink: () => false };
+  };
+  assert.throws(() => ensurePrivateDir('/s/run', { uid: me, lstat: lstatWith(0o775), mkdir: () => {} }), /writable by group or others/);
+  assert.doesNotThrow(() => ensurePrivateDir('/s/run', { uid: me, lstat: lstatWith(0o755), mkdir: () => {} }));
+});

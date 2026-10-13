@@ -183,3 +183,12 @@ test('⛔ review F6, source: no lib code starts a container with a raw `run([\'r
   walk(lib);
   assert.deepEqual(hits, []);
 });
+
+test('⛔ review 2 (low): SHORT-flag clusters and case variants do not slip past B4 — -dP, -itP, -dp <v>, -dp<v>, --publish-all=TRUE; CONTROL: harmless clusters pass', () => {
+  for (const bad of [['-dP'], ['-itP'], ['-dp', '0.0.0.0:1:1'], ['-dp0.0.0.0:1:1'], ['-dp', '8080:80'], ['--publish-all=TRUE'], ['--publish-all=t'], ['--publish-all=True']]) {
+    assert.notEqual(reviewExposureFlagsWhy(bad), '', bad.join(' '));
+  }
+  for (const ok of [['-dp', '127.0.0.1:1:1'], ['-it'], ['-e', 'P=1'], ['-ePATH=/x'], ['-v', '/a:/b'], ['--publish-all=false'], ['-dit']]) {
+    assert.equal(reviewExposureFlagsWhy(ok), '', ok.join(' '));
+  }
+});

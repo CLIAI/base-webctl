@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { xpraSpawnGuard, guiSpawnGuard, guardedSpawnSync, displayless, DISPLAY_VARS } from './helpers/no-real-display.mjs';
+import { xpraSpawnGuard, guiSpawnGuard, guardedSpawnSync, displayless, displayIntoContainer, DISPLAY_VARS } from './helpers/no-real-display.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HELPER = path.join(ROOT, 'test', 'helpers', 'no-real-display.mjs');
@@ -110,4 +110,24 @@ test('⛔ review F12: guardedSpawnSync judges the env the child REALLY gets — 
     guardedSpawnSync(bin, ['info'], { env: { PATH: `${dir}:/usr/bin:/bin` } });
     assert.equal(fs.existsSync(marker), true, 'CONTROL: the guarded spawn did not run at all');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ review 2 (low): guardedSpawnSync refuses ANY spawn whose env names a display — the denylist was sidestepped by `sh -c \'/usr/bin/xpra …\'` and `$(command -v xpra)`', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rule-zero-any-'));
+  try {
+    const marker = path.join(dir, 'RAN');
+    for (const [cmd, args] of /** @type {[string, string[]][]} */ ([['sh', ['-c', `/usr/bin/xpra info; touch ${marker}`]], ['sh', ['-c', `$(command -v xpra) info; touch ${marker}`]], ['true', []]])) {
+      assert.throws(() => guardedSpawnSync(cmd, args, { env: { PATH: '/usr/bin:/bin', DISPLAY: FAKE.DISPLAY } }), /RULE ZERO/, `${cmd} ${args.join(' ')}`);
+    }
+    assert.equal(fs.existsSync(marker), false, 'something ran with a display in its env');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ review 2 (low): a docker argv that hands a container a display is refused even with NO display on the host — `-e DISPLAY=:0`, an X11 socket mount; CONTROL: an ordinary run passes', () => {
+  for (const args of [['run', '-e', 'DISPLAY=:0', 'img'], ['run', '--env=DISPLAY=:1', 'img'], ['run', '-eDISPLAY', 'img'], ['run', '--env', 'XAUTHORITY=/x', 'img'],
+    ['run', '-v', '/tmp/.X11-unix:/tmp/.X11-unix', 'img'], ['run', '--mount', 'type=bind,src=/tmp/.X11-unix,dst=/x', 'img'], ['run', '-v/tmp/.X11-unix:/x', 'img']]) {
+    assert.notEqual(displayIntoContainer(args), '', args.join(' '));
+    assert.throws(() => guardedSpawnSync('docker', args, { env: { PATH: '/nonexistent' } }), /RULE ZERO/, args.join(' '));
+  }
+  assert.equal(displayIntoContainer(['run', '--rm', '-e', 'HOME=/tmp', '-v', '/a:/b', 'img']), '', 'CONTROL');
 });

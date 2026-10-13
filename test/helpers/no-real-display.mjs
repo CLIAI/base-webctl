@@ -59,6 +59,32 @@ export const xpraSpawnGuard = guiSpawnGuard;
  */
 export function guardedSpawnSync(cmd, args, opts = {}) {
   const env = opts.env || process.env;
-  guiSpawnGuard([cmd, ...args], env);
+  // ⛔ ANY spawn whose env names a display is refused (review 2, low): a program DENYLIST was measured to be sidestepped
+  // — `sh -c '/usr/bin/xpra …'`, `$(command -v xpra)` — so what is judged is the env, not the program's name
+  const set = DISPLAY_VARS.filter((k) => env[k] !== undefined && env[k] !== '');
+  if (set.length) {
+    throw new Error(`RULE ZERO: refusing to spawn ${cmd} with ${set.join(', ')} in its env — whatever it runs could draw on a real `
+      + 'display. Spawn with displayless(env).');
+  }
+  if (/(^|\/)docker$/.test(cmd)) {
+    const why = displayIntoContainer(args);
+    if (why) throw new Error(`RULE ZERO: refusing docker ${args[0] || ''}: ${why} — a container handed a display draws on it`);
+  }
   return spawnSync(cmd, args, { ...opts, env });
+}
+
+/**
+ * Why a docker argv hands a container a DISPLAY, or '': `-e DISPLAY…` / `--env DISPLAY…` / `--env=DISPLAY…` /
+ * `-eDISPLAY…` (with or without a value), or a mount of the X11 socket dir. @param {string[]} args @returns {string}
+ */
+export function displayIntoContainer(args) {
+  for (let i = 0; i < args.length; i++) {
+    const a = String(args[i]);
+    const next = String(args[i + 1] || '');
+    const envVal = a === '-e' || a === '--env' ? next : a.startsWith('--env=') ? a.slice(6) : /^-e[A-Z_]/.test(a) ? a.slice(2) : null;
+    if (envVal !== null && /^(DISPLAY|WAYLAND_DISPLAY|XAUTHORITY)(=|$)/.test(envVal)) return `it passes ${envVal.split('=')[0]} into the container`;
+    const mountVal = a === '-v' || a === '--volume' || a === '--mount' ? next : /^--(volume|mount)=/.test(a) ? a.replace(/^--(volume|mount)=/, '') : /^-v./.test(a) ? a.slice(2) : null;
+    if (mountVal !== null && /\/tmp\/\.X11-unix|\.Xauthority|wayland-\d/.test(mountVal)) return 'it mounts the X11/Wayland socket or an Xauthority into the container';
+  }
+  return '';
 }

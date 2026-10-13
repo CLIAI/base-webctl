@@ -64,7 +64,7 @@ function harness(o = {}) {
   /** the fake CDP servers the relay "runs" — a test silences one to model CDP going quiet @type {any[]} */
   const relayFakes = [];
   for (const p of o.preRunning || []) {
-    running.set(p.name, { up: true, args: { name: p.name, labels: p.labels,
+    running.set(p.name, { up: p.up !== false, args: { name: p.name, labels: p.labels,
       mounts: p.binds.map((b) => [b, '/x', 'rw']) } });
   }
   const C = fakeC();
@@ -640,5 +640,36 @@ test('⛔ review item 8: a RUNNING pair whose relay RUNS while CDP stays silent 
     await assert.rejects(h.driver(OO).ensureRunning(), /is RUNNING, but CDP did not answer.*\n.*never recreated automatically/);
     assert.equal(h.calls.length, before, 'something was (re)started');
     assert.deepEqual(h.stops, []); assert.deepEqual(h.removed, []);
+  } finally { await h.done(); }
+});
+
+// ── review 2 of v0.34.2: lows (the implicit cfg's wrong refusal text) ──────
+
+test('⛔ review 2 (low): an IMPLICIT cfg facing ONLY a stopped owner-only chromium (no xpra) ADOPTS — never refused as if it "explicitly says tcp-legacy"', async () => {
+  const pre = harness();
+  const names = pre.driver(OO).inspect().names;
+  await pre.done();
+  const h = harness({ preRunning: [{ name: names.chromiumContainer, labels: L('chromium', 'owner-only'), binds: [], up: false }] });
+  try {
+    h.running.get(names.chromiumContainer).args.mounts = [[h.udd, '/x', 'rw']];
+    const d = h.driver({});
+    const r = await d.ensureRunning();
+    assert.equal(r.endpoint.transport, 'unix');
+    assert.equal(d.inspect().channels, 'owner-only');
+    assert.ok(h.logs.some((l) => /channels: adopted 'owner-only'/.test(l)));
+  } finally { await h.done(); }
+});
+
+test('⛔ review 2 (low): an IMPLICIT cfg facing ONLY a leftover owner-only RELAY ADOPTS as well', async () => {
+  const pre = harness();
+  const names = pre.driver(OO).inspect().names;
+  await pre.done();
+  const h = harness({ preRunning: [{ name: names.cdpRelayContainer, labels: { 'demo-webctl.role': 'cdp-relay', 'demo-webctl.slug': 'oo', 'demo-webctl.owner.uid': ME, 'demo-webctl.channels': 'owner-only' }, binds: [], up: false }] });
+  try {
+    // a real leftover relay mounts THIS driver's channel dir — what proves it ours
+    h.running.get(names.cdpRelayContainer).args.mounts = [[h.CH.channelDir, '/run/webctl', 'rw']];
+    const d = h.driver({});
+    await d.ensureRunning();
+    assert.equal(d.inspect().channels, 'owner-only');
   } finally { await h.done(); }
 });

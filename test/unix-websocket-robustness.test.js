@@ -179,3 +179,28 @@ test('⛔ review F10: a 101 that is not a websocket upgrade (Upgrade: h2c) is RE
     ws.close();
   } finally { await good.close(); }
 });
+
+test('⛔ review 2 (low): the handshake deadline is TOTAL — a server dripping one byte every 100 ms still fails it (an idle timeout never fired)', { timeout: 10000 }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webctl-wsd-'));
+  const socketPath = path.join(dir, 's.sock');
+  /** @type {Set<net.Socket>} */ const conns = new Set();
+  const srv = net.createServer((sock) => {
+    conns.add(sock);
+    const drip = 'HTTP/1.1 101 Switching Protocols\r\nX-Slow: ' + 'a'.repeat(200);
+    let k = 0;
+    const t = setInterval(() => { if (k < drip.length && !sock.destroyed) sock.write(drip[k++]); else clearInterval(t); }, 100);
+    sock.on('close', () => clearInterval(t));
+    sock.on('error', () => {});
+  });
+  await new Promise((r) => srv.listen(socketPath, () => r(null)));
+  try {
+    const { opened } = client(socketPath, { handshakeTimeoutMs: 500 });
+    const t0 = Date.now();
+    await assert.rejects(opened, /handshake timed out/);
+    assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0} ms`);
+  } finally {
+    for (const c of conns) c.destroy();
+    await new Promise((r) => srv.close(() => r(null)));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
