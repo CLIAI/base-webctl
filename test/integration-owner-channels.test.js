@@ -32,7 +32,7 @@ import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docke
 import * as dockerCtl from '../lib/browser-location/docker-ctl.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
 import { rotateSecret } from '../lib/browser-location/owner-channels.js';
-import { getVersion } from '../lib/cdp-client.js';
+import { getVersion, connectBrowser } from '../lib/cdp-client.js';
 
 const XPRA_IMAGE = process.env.WEBCTL_IT_XPRA_IMAGE || '';
 const CHROMIUM_IMAGE = process.env.WEBCTL_IT_CHROMIUM_IMAGE || '';
@@ -196,8 +196,11 @@ test('I1 + I2 + I6 + I4 + I8 + I9 + I10 — one owner-only pair (html5 off)', { 
     const i = drv.inspect();
     const chan = /** @type {string} */ (i.channelDir);
 
-    // I6: CDP over the socket, through base's own client …
+    // I6: CDP over the socket, through base's own client — HTTP AND a websocket session: owner-only starts Chromium
+    // without --remote-allow-origins (review F9), and base's client sends no Origin, which Chromium admits
     assert.match((await getVersion(r.endpoint)).Browser, /Chrome\//);
+    const ws = await connectBrowser(r.endpoint);
+    try { assert.match(String((await ws.cdp('Browser.getVersion')).product), /Chrome\//); } finally { ws.close(); }
     // … and another uid is refused at the 0700 dir.
     const c6 = asOther(['--network', 'none', '-v', `${chan}:/run/webctl`], CHROMIUM_IMAGE,
       'curl -sS --unix-socket /run/webctl/cdp.sock http://127.0.0.1:9222/json/version 2>&1 | head -2');

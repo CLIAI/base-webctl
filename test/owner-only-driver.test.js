@@ -199,7 +199,7 @@ test('A4: no LWC_CDP_PORT; chromium gets the debug flag as args; a socat relay s
     await h.driver(OO).ensureRunning();
     const ch = h.byRole('-chromium-');
     assert.ok(!('LWC_CDP_PORT' in ch.env), 'LWC_CDP_PORT starts the 0.0.0.0 TCP relay — it must be ABSENT');
-    assert.deepEqual(ch.cmd, ['--remote-debugging-port=9222', '--remote-allow-origins=*']);
+    assert.deepEqual(ch.cmd, ['--remote-debugging-port=9222']); // no --remote-allow-origins (review F9)
     const relay = h.byRole('-cdprelay-');
     assert.ok(relay, 'a relay sidecar is started');
     assert.deepEqual(relay.extra.slice(-2), ['--entrypoint', 'socat']);
@@ -593,5 +593,16 @@ test('⛔ review F8: a STOPPED relay is recreated ALONE as well (removed by its 
     assert.deepEqual(h.calls.slice(before).map((c) => c.name), [relay]);
     assert.deepEqual(h.removed, [relay]);
     assert.deepEqual(h.stops, []);
+  } finally { await h.done(); }
+});
+
+test('⛔ review F9: owner-only starts Chromium WITHOUT --remote-allow-origins=* — base\'s clients send no Origin, and the flag only widened the port to web content', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning();
+    const chromium = h.calls.find((c) => /-chromium-/.test(c.name));
+    assert.ok(chromium && Array.isArray(chromium.cmd), 'no chromium run recorded');
+    assert.ok(chromium.cmd.includes('--remote-debugging-port=9222'));
+    assert.ok(!chromium.cmd.some((/** @type {string} */ a) => a.startsWith('--remote-allow-origins')), chromium.cmd.join(' '));
   } finally { await h.done(); }
 });
