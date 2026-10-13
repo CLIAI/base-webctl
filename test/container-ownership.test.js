@@ -632,10 +632,18 @@ test('⛔ M1: a pair migrated EARLIER whose xpra later died is NOT repaired by r
   assert.ok(r.ctrs.get(CHROMIUM).running, 'the browser still runs');
 });
 
-test('M1 CONTROL: a NON-migrated partial pair (owner-named volume) is still recreated, as before', async () => {
+test('⛔ review item 8 (v0.34.2): a NON-migrated partial pair whose BROWSER RUNS is refused — a running browser is never recreated automatically (it was, before)', async () => {
   const r = await up({ [CHROMIUM]: ours({ running: true, volumes: [VOLUME] }), [XPRA]: xpraOf({ running: false, volumes: [VOLUME] }) });
+  assert.ok(r.error, 'must refuse');
+  assert.match(String(r.error.message), /is RUNNING but its xpra partner .* is not/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), [], 'nothing stopped, removed or started');
+  assert.ok(r.ctrs.get(CHROMIUM).running, 'the browser still runs');
+});
+
+test('review item 8 CONTROL: a partial pair whose browser is STOPPED (its xpra up) is still recreated — no running browser is touched', async () => {
+  const r = await up({ [CHROMIUM]: ours({ running: false, volumes: [VOLUME] }), [XPRA]: xpraOf({ running: true, volumes: [VOLUME] }) });
   assert.equal(r.error, undefined, r.error && r.error.message);
-  assert.ok(r.removed.length > 0, 'pre-existing behaviour for a non-migrated pair: torn down and recreated');
+  assert.ok(r.removed.length > 0, 'a pair with no running browser is torn down and recreated, as before');
 });
 
 test('⭐ MIGRATION: a pre-owner pair NOT provably ours is ABSENT to us — untouched, not blocking', async () => {

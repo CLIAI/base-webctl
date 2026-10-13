@@ -61,6 +61,8 @@ function harness(o = {}) {
   /** @type {string[]} */ const stops = [];
   /** @type {string[]} */ const removed = [];
   /** @type {Array<() => Promise<any>>} */ const closers = [];
+  /** the fake CDP servers the relay "runs" — a test silences one to model CDP going quiet @type {any[]} */
+  const relayFakes = [];
   for (const p of o.preRunning || []) {
     running.set(p.name, { up: true, args: { name: p.name, labels: p.labels,
       mounts: p.binds.map((b) => [b, '/x', 'rw']) } });
@@ -90,6 +92,7 @@ function harness(o = {}) {
         // as the real relay's socat does (`unlink-early`): a stale cdp.sock from a relay that is gone is replaced
         try { fs.unlinkSync(CH.cdpSock); } catch { /* none */ }
         const f = await startFakeCdp({ hostHeader: '127.0.0.1:9222', socketPath: CH.cdpSock });
+        relayFakes.push(f);
         closers.push(() => f.close());
       }
       return { code: 0, stderr: '' };
@@ -114,7 +117,7 @@ function harness(o = {}) {
     mounts: hermeticMounts(C), docker, stateRoot, uid: ME, ...dopts,
   }).createDriver({ port: TEST_CDP_PORT, host: '127.0.0.1', slug: 'oo', userDataDir: udd, logger, ...cfg });
   return {
-    root, stateRoot, udd, CH, calls, stops, removed, running, logs, violations, driver,
+    root, stateRoot, udd, CH, calls, stops, removed, running, logs, violations, driver, relayFakes,
     byRole: (/** @type {string} */ re) => calls.find((c) => new RegExp(re).test(c.name)),
     done: async () => {
       for (const c of closers) await c();
@@ -604,5 +607,38 @@ test('⛔ review F9: owner-only starts Chromium WITHOUT --remote-allow-origins=*
     assert.ok(chromium && Array.isArray(chromium.cmd), 'no chromium run recorded');
     assert.ok(chromium.cmd.includes('--remote-debugging-port=9222'));
     assert.ok(!chromium.cmd.some((/** @type {string} */ a) => a.startsWith('--remote-allow-origins')), chromium.cmd.join(' '));
+  } finally { await h.done(); }
+});
+
+// ── review 2 of v0.34.2: N1 and item 8 ─────────────────────────────────────
+
+test('⛔ review N1: the relay-only repair whose socket check FAILS removes ONLY the relay — the running browser and xpra survive, and the run is refused', async () => {
+  const h = harness();
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    const names = d.inspect().names;
+    h.running.delete(names.cdpRelayContainer); // the relay is gone …
+    fs.rmSync(h.CH.xpraSock, { force: true }); // … and xpra's socket vanished: the check after the relay repair fails
+    await assert.rejects(h.driver(OO, { socketWaitMs: 300 }).ensureRunning(), /Only the relay this call started was removed/);
+    assert.ok(h.running.has(names.chromiumContainer), 'the running BROWSER was removed');
+    assert.ok(h.running.has(names.xpraContainer), 'the running xpra was removed');
+    assert.ok(!h.removed.some((n) => n === names.chromiumContainer || n === names.xpraContainer), `removed: ${h.removed.join(', ')}`);
+    assert.deepEqual(h.stops, []);
+  } finally { await h.done(); }
+});
+
+test('⛔ review item 8: a RUNNING pair whose relay RUNS while CDP stays silent is REFUSED — the browser is never recreated automatically', async () => {
+  const h = harness();
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    // the relay RUNS but CDP goes silent: its server closes every connection — ⚠ NOT an unlinked socket path: a
+    // keep-alive connection pooled during the bring-up would still answer through it (the first draft of this arm did that)
+    await h.relayFakes[h.relayFakes.length - 1].close();
+    const before = h.calls.length;
+    await assert.rejects(h.driver(OO).ensureRunning(), /is RUNNING, but CDP did not answer.*\n.*never recreated automatically/);
+    assert.equal(h.calls.length, before, 'something was (re)started');
+    assert.deepEqual(h.stops, []); assert.deepEqual(h.removed, []);
   } finally { await h.done(); }
 });
