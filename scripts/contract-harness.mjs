@@ -2627,8 +2627,6 @@ export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earl
   const xqWritable = [process.cwd(), ...keeps, ...keepsRo, ...maskedScratch, os.tmpdir(), '/var/tmp',
     '/dev/shm', throwawayHome(ident.home), ...carried.filter((b) => b.rw).map((b) => b.p)];
   const xq = xqRoot(prot.home, prot.hideRule, xqWritable);
-  // ⭐ the machine names for a no-host-literals check (ib4k §3b): asked HERE, on the host, before any backend
-  const names = hostMachineNames({ home: prot.home, writable: xqWritable, outer: !!outer });
   const plan = planKeeps(keeps, [
     { p: process.cwd(), label: 'the working directory', rw: true, named: true, noHidden: true },
     // ⛔ READ-ONLY: under the release gate ONE base checkout serves every consumer in turn,
@@ -2674,6 +2672,9 @@ export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earl
     return Promise.resolve(report('isolated', EXIT.fail, `NOT RUN: ${refusalText(choice, process.env[BACKEND_ENV], seen.stderr)}. `
       + 'The command was NOT started.', { command, backend: null, skipped: choice.skipped }));
   }
+  // ⭐ the machine names for a no-host-literals check (ib4k §3b): asked HERE, on the host, before entering any backend —
+  // and only once one was selected (a refused run asks nothing; xq costs ~0.1 s)
+  const names = hostMachineNames({ home: prot.home, writable: xqWritable, outer: !!outer });
   if (choice.backend === 'docker') {
     // the unshare probe's own message goes above the verdict, as for bwrap
     if (choice.skipped.some((x) => x.backend === 'unshare') && seen.stderr.trim()) {
