@@ -238,6 +238,13 @@ connected the remote end. That is the same trap xq documented for socat in front
 Firefox. ⇒ Readiness is the **adapter's** probe through the local socket, sending
 `host_header`:
 
+⛔ **And health is never "ssh is alive".** When the REMOTE socket refuses (the app stopped, its
+container restarted), ssh does **not** exit; *measured by xq:* it stays up, and only its log says
+`open failed` for each connection it could not complete. A forward judged by its ssh pid is
+reported healthy while every request through it fails. ⇒ Health, like readiness, is the
+adapter's probe through the local socket. A failed probe surfaces ssh's `open failed` line, so
+the report names the remote refusal and does not read as a local fault. A19 carries it.
+
 * `cdp`: `GET /json/version` returns JSON;
 * `bidi`: an upgrade on `/session` returns 101.
 
@@ -281,7 +288,8 @@ forwarded endpoint from a local one, plus the provenance:
 | A16 | `parseControlEndpoint` consumes xq's shape exactly | any of these is accepted: unknown `transport`; unix with a non-null host or port; unix without `host_header`; a relative or 108-byte path; a non-loopback tcp host | **xq's literal schema-1 JSON** (both transports, recorded as fixtures from `wait-ready_json_test.py`) parses unchanged; an unknown EXTRA field is ignored |
 | A17 | sealed-ancestor check | it passes for a socket whose every ancestor is 0755, or whose sealed ancestor is foreign-owned, or which has a foreign-owned component below the seal | an xq-like layout (0700 zone dir above a 0755 control dir, socket 0666) passes; base's 0700 channel dir passes |
 | A18 | unix transport sends `host_header` | the Host on `/json/version` or on the upgrade is anything but `host_header`; a dial to the host or port inside `webSocketDebuggerUrl` | a fake that answers **400 to any other Host** (as Firefox does) succeeds |
-| A19 | the forward contract — **xq-side arms, specified here so the halves match** | the argv lacks any of `ControlMaster=no`, `ControlPath=none`, `ExitOnForwardFailure=yes`, `BatchMode=yes`, `StreamLocalBindMask=0177`, `--`; the `-L` has a TCP form while transport is unix; the local path is > 107 bytes or outside a verified 0700 dir; readiness by bare connect; `host_header` rewritten; stop kills a pid whose cmdline differs | a pre-created foreign `state_dir` ⇒ refused; a fake remote (a unix socket behind a socat "ssh") ⇒ ready only after the adapter probe |
+| A18 (tcp) | a **tcp** endpoint with `host_header` sends it in the Host HEADER, on every request and on the upgrade, dialling `host:port` | any request or upgrade carries the dialled authority, or `host_header` is put in the URL. *Measured before the fix:* `httpReq` used `fetch(URL)` and the built-in `WebSocket(URL)`, so the Host sent was the URL's authority. The built-in WebSocket cannot send any other Host (it is a forbidden header), so the tcp path now goes through `http.request` and the same RFC 6455 client the unix path uses, dialled by `{host, port}` | the same tcp fake (it checks Host against its own port, as an app behind a forward does) refuses an endpoint WITHOUT `host_header`, where the dialled authority is sent |
+| A19 | the forward contract — **xq-side arms, specified here so the halves match** | the argv lacks any of `ControlMaster=no`, `ControlPath=none`, `ExitOnForwardFailure=yes`, `BatchMode=yes`, `StreamLocalBindMask=0177`, `--`; the `-L` has a TCP form while transport is unix; the local path is > 107 bytes or outside a verified 0700 dir; readiness by bare connect; `host_header` rewritten; stop kills a pid whose cmdline differs; ⛔ **health judged by "ssh is alive"**: a forward whose REMOTE socket refuses is reported healthy, or its `open failed` line is not surfaced | a pre-created foreign `state_dir` ⇒ refused; a fake remote (a unix socket behind a socat "ssh") ⇒ ready only after the adapter probe; a remote socket that REFUSES ⇒ unhealthy, with ssh's `open failed` line in the report, while ssh is still running |
 
 **Integration (opt-in, throwaway containers, never `~/.ssh`):**
 
@@ -293,7 +301,7 @@ forwarded endpoint from a local one, plus the provenance:
 
 | # | base | xq | why |
 |---|---|---|---|
-| **D9** | the forward's local `state_dir` is **verified** (owner, mode) | `mkdir(exist_ok=True, mode=0o700)`, with a `/tmp/xq-<uid>` fallback | an existing dir keeps its owner and mode; a pre-created `/tmp/xq-<uid>` would hold the socket. Requested of xq (§6.5, Q11) |
+| **D9** | the forward's local `state_dir` is **verified** (owner, mode) | `mkdir(exist_ok=True, mode=0o700)`, with a `/tmp/xq-<uid>` fallback | an existing dir keeps its owner and mode; a pre-created `/tmp/xq-<uid>` would hold the socket. Requested of xq (§6.5, Q11). ✅ **RESOLVED in xq `3bccc0c`**: `state_dir` is now verified (owner and mode), not merely created |
 
 ## 7. Rulings (2026-10-13, `webctl:mgr` lead)
 
