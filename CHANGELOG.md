@@ -487,6 +487,32 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   * 11 sabotages were all caught (DEV_NOTES D1–D11).
   Building it found a go-handshake race (a hang under load), closed before any release.
 
+### Machine names go in as DATA, on every backend (ib4k §3b, "Machine names")
+
+A lane's no-host-literals check asked `xq machine ls --json` INSIDE `isolated`. That broke when the
+home was hidden, and under docker it cannot run at all (no xq in the image). Now the harness asks the
+HOST's xq **before entering any backend** and passes the names in, read-only, at
+`/run/.webctl-identity/machine-names`. `WEBCTL_MACHINE_NAMES_FILE` is set to that path.
+* ⛔ **Only a trusted xq is run on the host**: the same planted-xq rule as xq's root. An `xq` in the
+  cwd (npm's `node_modules/.bin`), a keep, `/tmp` and the like, or one not named `xq`, is not run.
+  There, running it would be an escape, not a leak.
+* unshare and bwrap carry the names in the plan pipe (never a file on the host) onto the identity
+  files' read-only tmpfs. docker binds a 0600 file from the run's private channel dir, removed with
+  it. Nested calls keep the variable while the outer call's file is there.
+* ⛔ **No name reaches argv, the env, a log or the verdict.** The verdict ends `; machine-names:
+  passed` or `; machine-names: none (<why>)`, and the reason names no machine. A caller's own
+  `WEBCTL_MACHINE_NAMES_FILE` is scrubbed: only `isolated` sets it.
+* **Base owns the check**: `scripts/no-host-literals.mjs` scans the files git tracks, prints each hit
+  as `path:line` plus the name's index (never the name), and exits 0 clean, 1 found, 2 REFUSED. It
+  refuses by name when the variable is unset or the file is empty or unreadable. Lanes switch at the
+  relocation wake.
+* ⚠ **Verdict pins:** a lane that matches the verdict line to its END sees one more clause.
+* Arms: `test/isolation-machine-names.test.js` (a planted xq is never run; the docker command sees
+  exactly the host xq's names, compared by digest, read-only, fresh and nested; red with the mount
+  dropped), `test/no-host-literals.test.js` (a planted name is found by index, every refusal named,
+  red when a name is printed). ⚠ The unshare and bwrap paths are written but **not run here**: the
+  measuring host blocks user namespaces. They run on a host that allows them.
+
 ### v0.34.0 pre-tag review follow-ups
 
 * **Row 12b's TIOCSTI half could not fail where `dev.tty.legacy_tiocsti=0`.** The kernel answers EIO

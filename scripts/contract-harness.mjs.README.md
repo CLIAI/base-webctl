@@ -404,6 +404,11 @@ contract's output when it is used.
   checkout and keep both out of your keeps. Pass `UV_NO_CACHE` with
   `--pass-env` if your check sets it. A lane should still treat "xq did not answer" as a FAIL,
   not a warning, when xq is installed — it falls back to fewer names silently.
+  ⭐ **v0.35.0: the names go in as DATA** (ib4k §3b "Machine names"): `isolated` asks the HOST's xq
+  (trusted by the same rule) before entering any backend, and the command reads them from
+  `$WEBCTL_MACHINE_NAMES_FILE` (`/run/.webctl-identity/machine-names`, read-only, one per line).
+  The verdict says `; machine-names: passed` or `none (<why>)`. Prefer
+  `scripts/no-host-literals.mjs` (base's own check) to running xq inside.
 * ⛔ **BREAKING (v0.33.0): the env is an ALLOWLIST.** Measured by the review: 37 vars matching
   `*_API_KEY`, `*_TOKEN`, `*SECRET` reached the arm on an operator host — and the gate passes its
   full env. Default-passed: `PATH HOME USER LOGNAME SHELL LANG LC_* TERM TZ NODE_OPTIONS

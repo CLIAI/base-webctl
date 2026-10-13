@@ -1239,7 +1239,9 @@ const SCRUBBED_ENV = Object.freeze(['DISPLAY', 'WAYLAND_DISPLAY', 'SSH_AUTH_SOCK
   'DBUS_SESSION_BUS_ADDRESS', 'DOCKER_HOST', 'XDG_RUNTIME_DIR',
   'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_DATA_HOME',
   'TMUX', 'TMUX_PANE', 'XAUTHORITY', 'SSH_AGENT_PID', 'DOCKER_CONTEXT',
-  'SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY']);
+  'SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY',
+  // ib4k §3b "Machine names": only `isolated` sets it, to MACHINE_NAMES_PATH, when it passed names
+  'WEBCTL_MACHINE_NAMES_FILE']);
 /**
  * The env ALLOWLIST (v0.33.0, BREAKING): the ONLY names the command inherits, plus each
  * `--pass-env NAME|PREFIX_*` — and `isolated`'s own (TMPDIR=/tmp; the WEBCTL_* markers).
@@ -2515,7 +2517,7 @@ export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earl
         return Promise.resolve(usageRefusal(`${label} is not visible inside the docker backend's container — keep it in the OUTER call instead`, command));
       }
     }
-    return runInPlace(command, isolatedEnv(process.env, pass));
+    return runInPlace(command, isolatedEnv(process.env, pass, nestedMachineNamesEnv()));
   }
   const ub = unshareBin();
   // ⛔ NESTED CALL: "already inside" is proven from the KERNEL. The marker alone is
@@ -2565,7 +2567,7 @@ export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earl
     // signal dispositions (a bash background job would IGNORE SIGINT)
     // fd 3: the helper's `started`; fd 4: the command's env (the chain itself gets privilegedEnv)
     return runCommand([nt.tools.bash, ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', nt.tools.keyctl, ...pid1HelperArgv(command, 4, true)],
-      priv.prefix, { pastUnshare: true, env: isolatedEnv(process.env, pass) });
+      priv.prefix, { pastUnshare: true, env: isolatedEnv(process.env, pass, nestedMachineNamesEnv()) });
   }
   let hostNs = '';
   let hostMnt = '';
@@ -2611,8 +2613,11 @@ export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earl
     try { const st = fs.statSync(b.p); return st.isDirectory() || st.isFile(); } catch { return false; } // not a /dev/null cover
   });
   // ⛔ xq's checkout (read-only; xq ONLY — xqRoot), and never one found through a WRITABLE place
-  const xq = xqRoot(prot.home, prot.hideRule, [process.cwd(), ...keeps, ...keepsRo, ...maskedScratch, os.tmpdir(), '/var/tmp',
-    '/dev/shm', throwawayHome(ident.home), ...carried.filter((b) => b.rw).map((b) => b.p)]);
+  const xqWritable = [process.cwd(), ...keeps, ...keepsRo, ...maskedScratch, os.tmpdir(), '/var/tmp',
+    '/dev/shm', throwawayHome(ident.home), ...carried.filter((b) => b.rw).map((b) => b.p)];
+  const xq = xqRoot(prot.home, prot.hideRule, xqWritable);
+  // ⭐ the machine names for a no-host-literals check (ib4k §3b): asked HERE, on the host, before any backend
+  const names = hostMachineNames({ home: prot.home, writable: xqWritable, outer: !!outer });
   const plan = planKeeps(keeps, [
     { p: process.cwd(), label: 'the working directory', rw: true, named: true, noHidden: true },
     // ⛔ READ-ONLY: under the release gate ONE base checkout serves every consumer in turn,
@@ -2664,7 +2669,7 @@ export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earl
       process.stderr.write(seen.stderr.endsWith('\n') ? seen.stderr : `${seen.stderr}\n`);
     }
     return runDockerFresh({ command, keeps, keepsRo, pass, plan, prot, ident, sockets, choice, cli: dcli, image: dseen.image,
-      ns: { hostNs, hostMnt, hostIpc, hostCgroup, hostPid } });
+      ns: { hostNs, hostMnt, hostIpc, hostCgroup, hostPid }, names });
   }
   // ⛔ THE RUNNERS BELOW ARE UNSHARE'S AND BWRAP'S (review F7) — they differ only in the namespace CREATOR
   // (ib4k §2a). A backend whose probe lands before its runner would otherwise run here, on another's
@@ -2707,7 +2712,7 @@ export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earl
   if (choice.skipped.some((x) => x.backend === 'unshare') && seen.stderr.trim()) {
     process.stderr.write(seen.stderr.endsWith('\n') ? seen.stderr : `${seen.stderr}\n`);
   }
-  process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', `${inside}; ${backendClause(choice)}${keyringNote}${NSDELEGATE_CLAUSE}`)}\n`);
+  process.stderr.write(`${verdictLine(plan.binds, prot.home, process.env[VERBOSE_ENV] === '1', `${inside}; ${backendClause(choice)}${keyringNote}${NSDELEGATE_CLAUSE}${machineNamesClause(names)}`)}\n`);
   // ⇩ the REAL uid/gid, resolved HERE (inside, getuid() is 0). The command runs as them (privilegeDrop).
   const ids = { uid: ident.uid, gid: ident.gid };
   // the COMMAND's env: the allowlist + our markers. It travels in the plan (fd 4) and is applied
@@ -2717,9 +2722,10 @@ export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earl
     // (fact 6), as ≤ v0.32 did: its hide is mode 0755 (HIDE_MODE), so access(W_OK) answers EROFS.
     // (With 0555 it answered EACCES and the home had been dropped from this list.)
     [RO_ROOTS_ENV]: JSON.stringify([prot.home, ...prot.roots]), [HIDDEN_ENV]: JSON.stringify([prot.home, ...prot.hidden]),
-    [HOST_IDS_ENV]: JSON.stringify(ids) });
+    [HOST_IDS_ENV]: JSON.stringify(ids), ...machineNamesEnv(names) });
+  // ⛔ the names travel in the plan (fd 4, a pipe): never argv, never a file on the host
   const payload = JSON.stringify({ hostMnt, hostIpc, hostCgroup, cwd: process.cwd(), binds: plan.binds, roots: prot.roots, hidden: prot.hidden,
-    home: prot.home, exempt: plan.exempt, sockets, ids, env: cmdEnv, tools, keyring });
+    home: prot.home, exempt: plan.exempt, sockets, ids, env: cmdEnv, tools, keyring, machineNames: names.names });
   return new Promise((resolve) => {
     /** @type {import('node:child_process').ChildProcess} */
     let child;
@@ -3016,7 +3022,7 @@ function dockerLimits() {
  * The `docker create` argv (after `-H <endpoint>`), ib4k §3b. ⛔ What is NOT here is the contract too: no
  * `--privileged`, no unconfined profile, no published port, no host network/pid/ipc/userns, no docker.sock, no `-e`
  * (the command's env travels in the channel's plan.json — never an argv, never `docker inspect`).
- * @param {{name: string, uid: number, gid: number, limits: string[], binds: Bind[], masks: string[], channel: string, image: string, inner: string[]}} o
+ * @param {{name: string, uid: number, gid: number, limits: string[], binds: Bind[], masks: string[], channel: string, image: string, inner: string[], machineNames?: boolean}} o
  * @returns {string[]}
  */
 export function dockerCreateArgv(o) {
@@ -3028,6 +3034,7 @@ export function dockerCreateArgv(o) {
     ...o.masks.flatMap((s) => ['--mount', `type=bind,src=/dev/null,dst=${s},readonly`]),
     '--mount', `type=bind,src=${path.join(o.channel, 'machine-id')},dst=/etc/machine-id,readonly`,
     '--mount', `type=bind,src=${o.channel},dst=${DOCKER_CHANNEL},readonly`,
+    ...(o.machineNames ? ['--mount', `type=bind,src=${path.join(o.channel, 'machine-names')},dst=${MACHINE_NAMES_PATH},readonly`] : []),
     o.image, ...o.inner];
 }
 
@@ -3117,7 +3124,7 @@ export function runDockerReaper(a) {
  * half writes `started` / `fail …`) and `go` (the harness's answer). ⚠ node has no mkfifo: the system tool makes them.
  * @param {object} plan @returns {{dir: string, why: string}}
  */
-function dockerChannel(plan) {
+function dockerChannel(plan, machineNames = null) {
   /** @type {string} */ let dir = '';
   try {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webctl-iso-'));
@@ -3125,6 +3132,8 @@ function dockerChannel(plan) {
     fs.writeFileSync(path.join(dir, 'plan.json'), JSON.stringify(plan), { mode: 0o600 });
     fs.writeFileSync(path.join(dir, 'marker'), DOCKER_MARKER, { mode: 0o444 });
     fs.writeFileSync(path.join(dir, 'machine-id'), `${NEUTRAL_MACHINE_ID}\n`, { mode: 0o444 });
+    // ib4k §3b "Machine names": 0600 (the container runs as the caller's uid), bound read-only at MACHINE_NAMES_PATH
+    if (machineNames) fs.writeFileSync(path.join(dir, 'machine-names'), machineNames.map((n) => `${n}\n`).join(''), { mode: 0o600 });
     const mkfifo = systemTool('mkfifo');
     if (!mkfifo) return { dir, why: noSystemTool('mkfifo', 'install coreutils: the docker backend\'s status channel is a FIFO') };
     const r = spawnSync(mkfifo, ['-m', '600', path.join(dir, 'status'), path.join(dir, 'go')], { stdio: 'ignore', env: privilegedEnv(process.env) });
@@ -3143,7 +3152,7 @@ function dockerChannel(plan) {
  * --signal=<sig> <exact id>` (pid 1, the reaping bash → the inner half → the command's group); before `go` a signal tears the
  * container down (`rm -f` by exact id) and the command never runs. The harness then dies by it (exitOrDieBy).
  * @param {{cli: {bin: string}, image: string, name: string, ids: {uid: number, gid: number}, binds: Bind[],
- *   masks: string[], plan: object, command: string[], choice: BackendChoice, verdict: string}} o
+ *   masks: string[], plan: object, command: string[], choice: BackendChoice, verdict: string, machineNames?: string[] | null}} o
  * @returns {Promise<number>}
  */
 function runDockerBackend(o) {
@@ -3151,7 +3160,7 @@ function runDockerBackend(o) {
     + 'run on the host as a fallback.', { command: o.command, backend: o.choice.backend, skipped: o.choice.skipped });
   const lim = dockerLimits();
   if (lim.why) return Promise.resolve(refuse(lim.why));
-  const ch = dockerChannel(o.plan);
+  const ch = dockerChannel(o.plan, o.machineNames);
   const cleanup = () => { if (ch.dir) { try { fs.rmSync(ch.dir, { recursive: true, force: true }); } catch { /* left: private, 0700 */ } } };
   if (ch.why) { cleanup(); return Promise.resolve(refuse(ch.why)); }
   process.stderr.write(`${o.verdict}\n`);
@@ -3195,7 +3204,7 @@ function runDockerBackend(o) {
     // ⛔ `--disable-sigusr1`: the image's node has it (22.23.3)
     const inner = ['/bin/bash', ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', '', 'node', '--disable-sigusr1', SELF, DOCKER_INNER, '--', ...o.command];
     const argv = ['-H', DOCKER_ENDPOINT, ...dockerCreateArgv({ name: o.name, uid: o.ids.uid, gid: o.ids.gid, limits: lim.args, binds: o.binds,
-      masks: o.masks, channel: ch.dir, image: o.image, inner })];
+      masks: o.masks, channel: ch.dir, image: o.image, inner, machineNames: !!o.machineNames })];
     let out = '';
     let err = '';
     creating = spawn(o.cli.bin, argv, { stdio: ['ignore', 'pipe', 'pipe'], env: dockerEnv() });
@@ -3277,7 +3286,8 @@ function runDockerBackend(o) {
  * ⚠ The home is never bound: what of it is visible inside are only the dirs leading to a bind beneath it.
  * @param {{command: string[], keeps: string[], keepsRo: string[], pass: string[], plan: {exempt: string[], notes: string[]},
  *   prot: Prot, ident: {uid: number, gid: number, home: string}, sockets: string[], choice: BackendChoice,
- *   cli: {bin: string, why: string}, image: string, ns: {hostNs: string, hostMnt: string, hostIpc: string, hostCgroup: string, hostPid: string}}} o
+ *   cli: {bin: string, why: string}, image: string, ns: {hostNs: string, hostMnt: string, hostIpc: string, hostCgroup: string, hostPid: string},
+ *   names: {names: string[] | null, why: string}}} o
  * @returns {Promise<number>}
  */
 function runDockerFresh(o) {
@@ -3301,14 +3311,14 @@ function runDockerFresh(o) {
   for (const n of o.plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
   const cmdEnv = isolatedEnv(process.env, o.pass, { [HOST_NETNS_ENV]: o.ns.hostNs, [HOST_MNTNS_ENV]: o.ns.hostMnt, [HOST_PIDNS_ENV]: o.ns.hostPid,
     [RO_ROOTS_ENV]: JSON.stringify([o.prot.home, ...o.prot.roots]), [HIDDEN_ENV]: JSON.stringify([o.prot.home, ...o.prot.hidden]),
-    [HOST_IDS_ENV]: JSON.stringify({ uid: o.ident.uid, gid: o.ident.gid }) });
+    [HOST_IDS_ENV]: JSON.stringify({ uid: o.ident.uid, gid: o.ident.gid }), ...machineNamesEnv(o.names) });
   const plan = { ...o.ns, cwd: process.cwd(), binds, home: o.prot.home, hidden: [...new Set([...o.prot.hideRule, ...o.prot.hidden])],
     exempt: o.plan.exempt, sockets: inBinds, env: cmdEnv };
   // ⛔ `; cgroup2: nsdelegate` is OMITTED (ruling 2): that check does not run here — the command cannot make a cgroup namespace
   const verdict = verdictLine(binds, o.prot.home, process.env[VERBOSE_ENV] === '1',
-    `; ${backendClause(o.choice)}; keyring: none (docker seccomp); dev: +${DOCKER_DEV_EXTRA}`);
+    `; ${backendClause(o.choice)}; keyring: none (docker seccomp); dev: +${DOCKER_DEV_EXTRA}${machineNamesClause(o.names)}`);
   return runDockerBackend({ cli: o.cli, image: o.image, name: dockerName(o.ident.uid), ids: { uid: o.ident.uid, gid: o.ident.gid },
-    binds, masks, plan, command: o.command, choice: o.choice, verdict });
+    binds, masks, plan, command: o.command, choice: o.choice, verdict, machineNames: o.names.names });
 }
 
 /**
@@ -3704,7 +3714,7 @@ async function runIsolatedInner(a) {
 
   // ⇩ only now, provably off the host network, read the plan. (On the host the
   // proofs above refuse first, so an unrelated fd 4 is never read.)
-  /** @type {{hostMnt: string, hostIpc: string, hostCgroup: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, env: Record<string, string>, tools: Tools, keyring: string}} */
+  /** @type {{hostMnt: string, hostIpc: string, hostCgroup: string, cwd: string, binds: Bind[], roots: string[], hidden: string[], home: string, exempt: string[], sockets: string[], ids: unknown, env: Record<string, string>, tools: Tools, keyring: string, machineNames: string[] | null}} */
   let plan;
   try {
     // node's stdio 'pipe' is a socketpair, not a FIFO; anything else is not ours
@@ -3718,7 +3728,8 @@ async function runIsolatedInner(a) {
     if (typeof plan.hostMnt !== 'string' || typeof plan.hostIpc !== 'string' || typeof plan.hostCgroup !== 'string' || typeof plan.cwd !== 'string' || !binds(plan.binds)
       || typeof plan.home !== 'string' || !path.isAbsolute(plan.home)
       || !strs(plan.roots) || !strs(plan.hidden) || !strs(plan.exempt) || !strs(plan.sockets) || !hostIdsOf(plan.ids)
-      || !isEnvObject(plan.env) || !isTools(plan.tools) || typeof plan.keyring !== 'string') throw new Error('malformed');
+      || !isEnvObject(plan.env) || !isTools(plan.tools) || typeof plan.keyring !== 'string'
+      || !(plan.machineNames === null || strs(plan.machineNames))) throw new Error('malformed');
   } catch (e) {
     return refuse(`internal: no masking plan on fd 4 (${errMsg(e)}) — run via \`isolated\``);
   }
@@ -3779,7 +3790,7 @@ async function runIsolatedInner(a) {
   if (dGaps.length) return refuse(`after building a fresh /dev, ${dGaps.join(', ')} — the host's devices could be reachable`);
   // ⛔ HOST IDENTITY (v0.34.0, ib4k row 10): a neutral hostname, a sysfs of THIS netns (only lo), neutral
   // /etc/machine-id and /etc/hostname — then READ BACK (identityGaps), not trusted
-  const idr = maskIdentity(plan.tools);
+  const idr = maskIdentity(plan.tools, plan.machineNames);
   if (idr.why) return refuse(idr.why);
   // ⛔ THE CALLER'S CGROUPS (v0.34.0, re-review item 2): our own cgroup namespace, and the FRESH cgroup2
   // maskIdentity mounted in it READ-ONLY (third review, F3) — READ BACK, not trusted
@@ -4029,7 +4040,7 @@ const IDENTITY_FILES = Object.freeze([['/etc/machine-id', `${NEUTRAL_MACHINE_ID}
  *      READ-ONLY, so no writable name is left (review F6). A symlink to one already covered is covered by it.
  * @param {Tools} tools @returns {{why: string}}
  */
-function maskIdentity(tools) {
+function maskIdentity(tools, machineNames = null) {
   const h = spawnSync(tools.hostname, [NEUTRAL_HOSTNAME], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'], env: privilegedEnv(process.env) });
   if (h.status !== 0) return { why: `cannot set the neutral hostname: \`hostname\` exited ${h.status ?? h.signal ?? h.error?.message}` };
   const mounts = readMountinfo() || [];
@@ -4074,6 +4085,8 @@ function maskIdentity(tools) {
       if (rb) return { why: rb };
       done.push(real);
     }
+    // ⭐ the machine names (ib4k §3b), on this same tmpfs: read-only with it, below, and gone with the namespace
+    if (machineNames) fs.writeFileSync(MACHINE_NAMES_PATH, machineNames.map((n) => `${n}\n`).join(''), { mode: 0o444 });
     // ⛔ THE COPIES' OWN tmpfs, READ-ONLY (review F6): bound and ro, each copy still had a writable NAME in
     // our /run, owned by the real uid — `chmod u+w` + a write there rewrote what /etc/machine-id read
     // (measured). Unlinking them is NOT the fix: the kernel refuses a mount on top of a bind whose
@@ -4272,6 +4285,141 @@ function pathEntriesUnder(home) {
   return out;
 }
 
+/** The env var that names the machine-names file inside (ib4k §3b "Machine names"); it holds a PATH, never a name. */
+export const MACHINE_NAMES_ENV = 'WEBCTL_MACHINE_NAMES_FILE';
+/** Where the machine names are, inside, on EVERY backend: in the identity files' read-only tmpfs. */
+export const MACHINE_NAMES_PATH = '/run/.webctl-identity/machine-names';
+/** How long `xq machine ls --json` may take on the host (it lists a local file; no `--check`, no network). */
+const XQ_MACHINES_TIMEOUT_MS = 20000;
+
+/**
+ * The verdict's machine-names clause: `passed`, or `none (<why>)` — ⛔ never a name, never a count.
+ * @param {{names: string[] | null, why: string}} n @returns {string}
+ */
+function machineNamesClause(n) { return n.names ? '; machine-names: passed' : `; machine-names: none (${n.why})`; }
+/**
+ * The command's MACHINE_NAMES_ENV: set to MACHINE_NAMES_PATH only when names were passed — else absent, so a consumer's
+ * check refuses by name. @param {{names: string[] | null}} n @returns {Record<string, string>}
+ */
+function machineNamesEnv(n) { return n.names ? { [MACHINE_NAMES_ENV]: MACHINE_NAMES_PATH } : {}; }
+
+/**
+ * A NESTED call (its outer call's mounts are its own): the variable again, when the outer call's file is there — the
+ * scrub removed whatever the env said, so only the file decides. @returns {Record<string, string>}
+ */
+function nestedMachineNamesEnv() { return fs.existsSync(MACHINE_NAMES_PATH) ? { [MACHINE_NAMES_ENV]: MACHINE_NAMES_PATH } : {}; }
+
+/**
+ * The machine names in `xq machine ls --json` output (its documented CONTRACT, schema 1): each `alias`, and the host
+ * part of each `ssh` target (`user@` and `:port` removed), deduplicated. ⛔ The reason names NO machine — it may reach
+ * the verdict. An unknown schema is refused, never guessed (xq's own rule for its consumers).
+ * @param {string} stdout @returns {{names: string[] | null, why: string}}
+ */
+export function machineNamesFromXq(stdout) {
+  /** @type {any} */ let j;
+  try { j = JSON.parse(String(stdout)); } catch { return { names: null, why: '`xq machine ls --json` printed no JSON' }; }
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return { names: null, why: '`xq machine ls --json` printed no object' };
+  if (j.schema !== 1) return { names: null, why: `\`xq machine ls --json\` has schema ${JSON.stringify(j.schema ?? null)}, not 1 — refused, never guessed` };
+  if (!Array.isArray(j.machines)) return { names: null, why: '`xq machine ls --json` has no machines list' };
+  /** @type {string[]} */ const names = [];
+  const add = (/** @type {unknown} */ n) => {
+    if (typeof n !== 'string') return;
+    const t = n.trim();
+    // one name per LINE in the file: a name with a newline (or any control char) would split into two
+    if (t && !/[\u0000-\u001f\u007f]/.test(t) && !names.includes(t)) names.push(t);
+  };
+  for (const m of j.machines) {
+    if (!m || typeof m !== 'object') continue;
+    add(m.alias);
+    if (typeof m.ssh === 'string') {
+      const h = m.ssh.replace(/^[^@]*@/, '');
+      const v6 = h.match(/^\[([^\]]+)\](:\d+)?$/);
+      // `[v6]:port` → v6; `host:port` → host (exactly ONE colon: a bare IPv6 address keeps all of its own)
+      add(v6 ? v6[1] : (h.split(':').length === 2 ? h.replace(/:\d+$/, '') : h));
+    }
+  }
+  return { names, why: '' };
+}
+
+/**
+ * The machine names to pass in (ib4k §3b "Machine names"), asked on the HOST before entering any backend.
+ * ⛔ Only an `xq` judgeXqOnPath TRUSTS is run — a planted one, run here, would be an escape. Inside an outer
+ * `isolated` whose markers were stripped (`outer`), the names the OUTER call passed are read back instead (xq is
+ * not on the host there). `names: null` = nothing passed (`why` says why, naming no machine); `[]` = an xq with
+ * no machines (passed; a consumer's check refuses "no names").
+ * @param {{home: string, writable: string[], outer: boolean, run?: (bin: string) => {status: number|null, stdout: string, error?: Error}}} o
+ * @returns {{names: string[] | null, why: string}}
+ */
+export function hostMachineNames(o) {
+  if (o.outer) {
+    let text = '';
+    try { text = fs.readFileSync(MACHINE_NAMES_PATH, 'utf8'); } catch { return { names: null, why: 'the outer call passed none' }; }
+    return { names: text.split('\n').map((l) => l.trim()).filter(Boolean), why: '' };
+  }
+  const j = judgeXqOnPath(o.home, o.writable);
+  if (!j.found || !j.real) return { names: null, why: 'xq is not installed on the host' };
+  if (j.ignored) return { names: null, why: `xq ignored: ${j.ignored}` };
+  const run = o.run || ((/** @type {string} */ bin) => spawnSync(bin, ['machine', 'ls', '--json'],
+    { encoding: 'utf8', timeout: XQ_MACHINES_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'ignore'], env: process.env }));
+  const r = run(j.found);
+  if (r.error || r.status !== 0) {
+    return { names: null, why: `\`xq machine ls --json\` failed (${r.error ? errCode(r.error) : `exit ${r.status ?? 'by a signal'}`})` };
+  }
+  return machineNamesFromXq(r.stdout);
+}
+
+/**
+ * The FIRST `xq` on the caller's PATH (absolute entries only) and whether it may be TRUSTED: `ignored` (a label, no
+ * path) when the PATH entry, any link of its symlink chain or the real file's dir lies within `writable` or a dir
+ * outside the home the caller can write, or the real file is not named `xq`. Shared by xqRoot (re-bind its checkout)
+ * and hostMachineNames (RUN it on the host — where a planted xq would be an escape, not a leak).
+ * @param {string} home @param {string[]} writable @returns {{found: string, real: string, ignored: string}}
+ */
+function judgeXqOnPath(home, writable) {
+  /** @type {string[]} */ const spots = [];
+  for (const w of writable) {
+    if (!w) continue;
+    // ⛔ a RELATIVE entry (`--keep ../x`, a relative TMPDIR) is writable all the same: planKeeps binds
+    // path.resolve() of it (review F1, round 4 — it used to be skipped)
+    const a = path.resolve(w);
+    spots.push(a);
+    try { spots.push(fs.realpathSync.native(a)); } catch { /* absent: its lexical path is enough */ }
+  }
+  // ⛔ and any dir OUTSIDE the home the caller can write (a user-owned /opt/x): the command runs as
+  // the real uid, with everything outside the home as on the host (review F3, round 4)
+  const writableAt = (/** @type {string} */ d) => {
+    let r = d;
+    try { r = fs.realpathSync.native(d); } catch { /* lexical only */ }
+    if (spots.some((s) => isWithin(d, s) || isWithin(r, s))) return true;
+    try { if (!isWithin(r, home)) { fs.accessSync(r, fs.constants.W_OK); return true; } } catch { /* not writable */ }
+    return false;
+  };
+  // ⛔ paths are joined RAW, never normalised: after a symlink, `..` is resolved by the kernel
+  // (physically), and path.join/resolve would judge a different file than execvp runs (review F4)
+  const join = (/** @type {string} */ d, /** @type {string} */ t) => (path.isAbsolute(t) ? t : `${d.replace(/\/+$/, '')}/${t}`);
+  let found = '';
+  for (const d of String(process.env.PATH || '').split(':')) {
+    if (!path.isAbsolute(d)) continue;
+    const c = join(d, 'xq');
+    try { if (fs.statSync(c).isFile()) { fs.accessSync(c, fs.constants.X_OK); found = c; break; } } catch { /* next */ }
+  }
+  if (!found) return { found: '', real: '', ignored: '' };
+  let real = '';
+  try { real = fs.realpathSync.native(found); } catch { return { found, real: '', ignored: '' }; }
+  let ignored = '';
+  // (a) every hop: the PATH entry, each link's own dir, and the last hop — the real file's dir (realpath'd)
+  for (let cur = found, hop = 0; hop < 64; hop++) {
+    if (writableAt(path.dirname(cur))) { ignored = 'found in a writable location'; break; }
+    let st;
+    try { st = fs.lstatSync(cur); } catch { break; }
+    if (!st.isSymbolicLink()) break;
+    try { cur = join(path.dirname(cur), fs.readlinkSync(cur)); } catch { break; }
+  }
+  // (b)
+  if (!ignored && path.basename(real) !== 'xq') ignored = 'not named xq';
+  return { found, real, ignored };
+}
+
 /**
  * The dir to re-bind READ-ONLY so `xq` (base's runtime layer, rx9q) runs inside — or why not.
  *
@@ -4304,49 +4452,11 @@ function pathEntriesUnder(home) {
  */
 function xqRoot(home, hideRule, writable) {
   const none = { p: '', why: '', ignored: '' };
-  /** @type {string[]} */ const spots = [];
-  for (const w of writable) {
-    if (!w) continue;
-    // ⛔ a RELATIVE entry (`--keep ../x`, a relative TMPDIR) is writable all the same: planKeeps binds
-    // path.resolve() of it (review F1, round 4 — it used to be skipped)
-    const a = path.resolve(w);
-    spots.push(a);
-    try { spots.push(fs.realpathSync.native(a)); } catch { /* absent: its lexical path is enough */ }
-  }
-  // ⛔ and any dir OUTSIDE the home the caller can write (a user-owned /opt/x): the command runs as
-  // the real uid, with everything outside the home as on the host (review F3, round 4)
-  const writableAt = (/** @type {string} */ d) => {
-    let r = d;
-    try { r = fs.realpathSync.native(d); } catch { /* lexical only */ }
-    if (spots.some((s) => isWithin(d, s) || isWithin(r, s))) return true;
-    try { if (!isWithin(r, home)) { fs.accessSync(r, fs.constants.W_OK); return true; } } catch { /* not writable */ }
-    return false;
-  };
-  // ⛔ paths are joined RAW, never normalised: after a symlink, `..` is resolved by the kernel
-  // (physically), and path.join/resolve would judge a different file than execvp runs (review F4)
-  const join = (/** @type {string} */ d, /** @type {string} */ t) => (path.isAbsolute(t) ? t : `${d.replace(/\/+$/, '')}/${t}`);
-  let found = '';
-  for (const d of String(process.env.PATH || '').split(':')) {
-    if (!path.isAbsolute(d)) continue;
-    const c = join(d, 'xq');
-    try { if (fs.statSync(c).isFile()) { fs.accessSync(c, fs.constants.X_OK); found = c; break; } } catch { /* next */ }
-  }
-  if (!found) return none;
-  let real = '';
-  try { real = fs.realpathSync.native(found); } catch { return none; }
-  if (!home || !isWithin(real, home)) return none;
-  let ignored = '';
-  // (a) every hop: the PATH entry, each link's own dir, and the last hop — the real file's dir (realpath'd)
-  for (let cur = found, hop = 0; hop < 64; hop++) {
-    if (writableAt(path.dirname(cur))) { ignored = 'found in a writable location'; break; }
-    let st;
-    try { st = fs.lstatSync(cur); } catch { break; }
-    if (!st.isSymbolicLink()) break;
-    try { cur = join(path.dirname(cur), fs.readlinkSync(cur)); } catch { break; }
-  }
-  // (b)
-  if (!ignored && path.basename(real) !== 'xq') ignored = 'not named xq';
-  if (ignored) return { ...none, ignored };
+  const j = judgeXqOnPath(home, writable);
+  if (!j.found || !j.real) return none;
+  if (!home || !isWithin(j.real, home)) return none;
+  if (j.ignored) return { ...none, ignored: j.ignored };
+  const real = j.real;
   let root = '';
   for (let d = path.dirname(real); isWithin(d, home); d = path.dirname(d)) {
     if (fs.existsSync(path.join(d, '.git'))) { root = d; break; }

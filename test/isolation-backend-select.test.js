@@ -171,7 +171,7 @@ test('⭐ logic: the AppArmor case keeps v0.33\'s HOST-POLICY text (the sysctl a
 test('⭐ the verdict line names the backend used: `backend: unshare` (nothing skipped before it)', needsNs, async () => {
   const r = await run(['isolated', '--', 'true']);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: unshare; cgroup2: nsdelegate(?: —|$)/m);
+  assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: unshare; cgroup2: nsdelegate; machine-names: (?:passed|none \([^\n]*?\))(?: —|$)/m);
   assert.doesNotMatch(r.stderr, /skipped/);
   // CONTROL: a successful run prints NO record of its own on stdout (the command's output is the output)
   assert.equal(r.stdout, '');
@@ -180,7 +180,7 @@ test('⭐ the verdict line names the backend used: `backend: unshare` (nothing s
 test('⭐ WEBCTL_ISOLATION_BACKEND=unshare pins the implemented backend → runs, verdict names it', needsNs, async () => {
   const r = await run(['isolated', '--', 'true'], { WEBCTL_ISOLATION_BACKEND: 'unshare' });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /; backend: unshare; cgroup2: nsdelegate(?: —|$)/m);
+  assert.match(r.stderr, /; backend: unshare; cgroup2: nsdelegate; machine-names: (?:passed|none \([^\n]*?\))(?: —|$)/m);
 });
 
 test('⛔ WEBCTL_ISOLATION_BACKEND=docker where docker cannot be used (a remote endpoint planted) → REFUSED naming why, the command NOT run, no fallback to unshare', async () => {
@@ -317,7 +317,7 @@ test('⭐ WEBCTL_ISOLATION_BACKEND=bwrap → bwrap RUNS the command; the verdict
     const marker = path.join(dir, 'RAN');
     const r = await run(['isolated', '--keep', dir, '--', ...markerCmd(marker)], { WEBCTL_ISOLATION_BACKEND: 'bwrap' });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: bwrap; cgroup2: nsdelegate(?: —|$)/m);
+    assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: bwrap; cgroup2: nsdelegate; machine-names: (?:passed|none \([^\n]*?\))(?: —|$)/m);
     assert.doesNotMatch(r.stderr, /skipped/);
     assert.equal(fs.existsSync(marker), true, 'the command did not run');
     assert.equal(r.stdout, '');
@@ -330,7 +330,7 @@ test('⭐ unshare\'s probe FAILS (EPERM) → bwrap is selected and RUNS the comm
     const marker = path.join(dir, 'RAN');
     const r = await run(['isolated', '--keep', dir, '--', ...markerCmd(marker)], { WEBCTL_UNSHARE_BIN: probeFailingUnshare(dir) });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: bwrap \(skipped unshare: unshare exited 1 before the isolated side reported in — [^\n]*\); cgroup2: nsdelegate(?: —|$)/m);
+    assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: bwrap \(skipped unshare: unshare exited 1 before the isolated side reported in — [^\n]*\); cgroup2: nsdelegate; machine-names: (?:passed|none \([^\n]*?\))(?: —|$)/m);
     // "unshare's own message, if any, is above" stays TRUE on this path too
     const own = r.stderr.indexOf('unshare: unshare failed: Operation not permitted');
     assert.ok(own >= 0 && own < r.stderr.indexOf('isolated: home HIDDEN'), r.stderr);

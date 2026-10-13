@@ -232,7 +232,7 @@ test('⭐ selection: unshare and bwrap unavailable → docker is selected, and t
   const s = scratch();
   try {
     const r = await run(s, ['--', 'true'], { WEBCTL_ISOLATION_BACKEND: '', WEBCTL_UNSHARE_BIN: '/nonexistent/unshare' });
-    assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: docker \(skipped unshare: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path[^\n]*; bwrap: [^\n]*\); keyring: none \(docker seccomp\); dev: \+core( — WEBCTL_ISOLATED_VERBOSE=1 lists every path)?$/m);
+    assert.match(r.stderr, /^isolated: home HIDDEN; .*; backend: docker \(skipped unshare: WEBCTL_UNSHARE_BIN must be an ABSOLUTE path[^\n]*; bwrap: [^\n]*\); keyring: none \(docker seccomp\); dev: \+core; machine-names: (passed|none \([^\n]*\))( — WEBCTL_ISOLATED_VERBOSE=1 lists every path)?$/m);
     assert.doesNotMatch(r.stderr, /cgroup2: nsdelegate/, 'ruling 2: the nsdelegate clause is claimed under docker');
     assert.ok(callOf(s.calls(), 'create'), 'docker was selected but nothing was created');
   } finally { fs.rmSync(s.dir, { recursive: true, force: true }); }
