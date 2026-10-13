@@ -2036,6 +2036,72 @@ unshare is bound over. F8 is a CHANGELOG line for lanes. F9 and F10 are arm-tabl
 | B1 (re-run, F9) | no `--new-session` (detached kept) | the renamed arm, by itself now: `the running bwrap lacks --new-session: …/bwrap --unshare-user … --die-with-parent --dev-bind / / --proc /proc`. The terminal half alone stays green, as before |
 | B11a (re-run, F10) | no `--make-rprivate` (read-back kept) | the new shared-world arm: the run is refused (rc 1, `still receive propagation`). The table's rows themselves run in a private world and stay green |
 
+### v0.35.0 phase 3 — the docker backend (ib4k §3b)
+
+**Shape.** Docker is the WHOLE sandbox, not a namespace creator: inside a container nothing can mount
+or unshare, so the daemon builds the masks from `docker create` flags (`dockerCreateArgv`) and a
+capless inner half (`__isolated-docker`, `runDockerInner`) READS BACK every property (`dockerGaps`)
+before the command runs. Host side: `probeDocker` → `runDockerFresh` (preflight refusals, binds,
+socket masks, the plan) → `runDockerBackend` (reaper, create, start, the go-handshake over FIFOs,
+signals by `docker kill`). Nested and stripped-markers calls under docker run IN PLACE once
+`dockerInsideProof` holds: the read-only channel bind (a process inside can mount nothing), plus
+every read-back again.
+
+**Measured on the way** (Docker Engine 29.1.3, kernel 7.0, AppArmor userns sysctl 1; one throwaway
+container per measurement, removed by exact name):
+
+* Defaults under `--network none --read-only --cap-drop ALL --security-opt no-new-privileges --user`:
+  CapEff/CapBnd 0, NoNewPrivs 1, Seccomp 2; own net, ipc, uts, cgroup and pid namespaces; `/sys`
+  read-only with lo only; cgroup2 read-only and rooted at `/`; `/proc/keys` masked.
+* `/dev` is docker's and cannot be replaced (a tmpfs over it fails container init: `error reopening
+  /dev/null`). It holds the minimal set plus `core` → `/proc/kcore`, which docker masks with a bind of
+  its `/dev`'s `null` (char 1:3). Reading it is EACCES (AppArmor). A create in `/dev` is EACCES.
+* `unshare -rn` → EPERM, and `mount -t tmpfs` is refused, inside. So row 7's control cannot be met.
+* `add_key` and `keyctl` → EPERM (default seccomp, via python ctypes). So row 9's control cannot be met.
+* A unix socket in a bound dir answered CONNECTED inside. A `/dev/null` bind over it gave ECONNREFUSED.
+* `-H unix:///var/run/docker.sock` wins over `DOCKER_HOST=ssh://…` and `DOCKER_CONTEXT`.
+* ⛔ **The CLI dies by HUP, QUIT, USR2, ALRM and USR1, and the container RUNS ON** (`docker run`, no
+  tty: 5 of 5 left running). TERM is proxied. ⇒ The harness forwards by `docker kill --signal`.
+* ⛔ **Go resets an ignored signal it installs a handler for.** `start --attach` under `env
+  --ignore-signal` read back SigIgn 0, and `creatorShieldWhy` refused the run. `docker start` has no
+  `--sig-proxy=false` either. ⇒ The CLI is not the run's authority. If it dies by a signal, the
+  harness follows the container with `docker wait <id>`.
+* ⛔ **`--init` binds the host's docker-init as a slave mount (`master:1`).** The propagation
+  read-back refused the run. ⇒ pid 1 is our `PID1_REAPER` (keyctl ''), as on the namespace backends.
+* ⛔ **node resets every inherited signal disposition at start**, so a node reaper under `env
+  --ignore-signal` read SigIgn 0 (the shield arm, red). ⇒ The reaper catches TERM/INT/HUP/QUIT
+  in-process.
+* A FIFO in a read-only bind is read and written across the boundary. The harness holds each FIFO
+  `O_RDWR`, which never blocks on Linux.
+* ⛔ **A go-handshake race, found as a HANG in a parallel suite (2 runs).** The harness answered
+  `started` by writing `go` and closing its end. When the inner half had not yet opened `go`, the pipe
+  lost its last reference and the answer with it, and the inner half's open then blocked forever. ⇒
+  The inner half opens `go` BEFORE it writes `started`. *After:* 30 runs, two at a time, 0 hangs.
+* The pipe-EOF reaper prototype: harness SIGKILLed mid-run 3/3, no container (0.29 s).
+* The image `webctl-iso/node22:<recipe>` is 332 MB (base 231 MB, plus git and procps).
+
+**Arms.** Units, against a FAKE CLI through the import-only `dockerBin` seam
+(`isolation-docker.test.js`, 17 tests). Real docker (`isolation-docker-table.test.js`, 29 tests):
+rows 1–12 and 12b on the fresh, nested and stripped paths, each with its control, and the deviations
+asserted AS deviations. Plus §3a.2 (inspect of the running container), the four group signals (GOT
+×1, rc 7), 128+n, SIGKILL mid-run and in the create window, an early TERM, the GO arm (harness
+frozen), the reaper's shield, and a forged marker. The arm table's guard now accepts a backend that
+is judged by a table of its own (`JUDGED_ELSEWHERE`), and checks that table covers rows 1–12.
+
+| # | sabotage (on a copy) | caught by |
+|---|---|---|
+| D1 | no reaper (a stand-in that exits at once) | §3a.4 SIGKILL mid-run: `the container outlived its harness`. ⚠ It was GREEN first: the arm awaited `close`, which the detached CLI held until the command ended by itself. ⇒ It awaits `exit` |
+| D2 | the harness forwards nothing (relies on the CLI) | the group-HUP arm |
+| D3 | the `/dev/null` socket masks dropped | row 2: the socket in the cwd answers |
+| D4 | the env passed as `-e` on the create argv | the row-11 argv arm (unit). ⚠ The first mutation did not apply (it read a field that is not there), so it was a no-op and stayed green, not a miss. Re-run as a real mutation |
+| D5 | the nested proof skips its mount check | the forged-marker arm |
+| D6 | the symlink check off | ruling 7's arm (unit) |
+| D7 | the reaper unbounded | ruling 6's arm (unit; it now has a timeout of its own, and hung without one) |
+| D8 | any extra `/dev` name accepted | ruling 1's arm (unit, a fake `/dev` with `uinput` planted) |
+| D9 | `--init` back | every real run: refused by the propagation read-back |
+| D10 | `; cgroup2: nsdelegate` claimed under docker | the selection arm's verdict (unit) |
+| D11 | the go-handshake skipped | the GO arm. ⚠ The early-TERM arm alone stayed GREEN: a TERM at 400 ms lands before the container exists, so it never reached the `started`→`go` window. Hence the frozen-harness arm |
+
 ### The import guard
 
 The dispatch ran at module top level unconditionally, so importing the file would have

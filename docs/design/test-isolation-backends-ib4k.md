@@ -266,9 +266,8 @@ yet is refused (`internal: backend <x> has no runner yet`, review F7) — everyt
 is unshare's runner until each phase adds its own. Only a PROBE failure moves on to the next backend;
 once a backend is chosen, a failure inside it (a mask that fails, a read-back that disagrees) is a
 FAIL, never a reason to try the next. Until v0.35.0, `bwrap` and `docker` answered
-`not implemented yet (v0.35.0)`. Since v0.35.0, bwrap has its probe and runner (§2a); `docker` still
-answers that until phase 3, so a pin to it is refused, and a host where neither namespace backend can
-run is refused naming all three. An unknown pin is refused by rule (its value is not
+`not implemented yet (v0.35.0)`. Since v0.35.0, bwrap has its probe and runner (§2a), and since phase 3
+docker has its own (§3b); a host where no backend can run is refused naming all three. An unknown pin is refused by rule (its value is not
 printed). A **nested** call makes no sandbox of its own (it runs inside its outer call's): the pin
 is validated there, and selects nothing.
 
@@ -934,5 +933,12 @@ A lane blocked by host policy (the Ubuntu host above) resumes on v0.35.0, with b
   blocked in `read`, as a pid-namespace init holding the caller's stdio, and nothing in it can be
   signalled except by SIGKILL. *Measured:* 160 harness SIGKILLs spread over the setup window gave
   0 runs, 0 hangs and 0 leaks.
-* **v0.35.0 phase 3 — docker (§3b): design approved (2026-10-13) with rulings: `/dev/core` accepted with a read-back; `; cgroup2: nsdelegate` omitted under docker; generation stays 9; a tool survey; acceptance per consumer on the policy-blocked host; a bounded reaper; a refusal of symlinked bind sources. Implementation in progress.**
+* **v0.35.0 phase 3 — docker (§3b): design approved (2026-10-13) with rulings: `/dev/core` accepted with a read-back; `; cgroup2: nsdelegate` omitted under docker; generation stays 9; a tool survey; acceptance per consumer on the policy-blocked host; a bounded reaper; a refusal of symlinked bind sources.**
+  **Implemented (unreleased):**
+  * the probe, the runner, the inner half's read-backs, the reaper, nested in place, and the image verb;
+  * rows 1–12 and 12b judged on all three paths by `isolation-docker-table.test.js`, the deviations
+    asserted as deviations, plus 17 unit arms;
+  * 11 sabotages (DEV_NOTES D1–D11), all caught. Three of them first exposed a vacuous or missing arm
+    (D1, D4, D11), each fixed.
+  Measured on one policy-blocked host only. Consumer acceptance there is pending.
 * **Residual (phase 3): `kill -9 -1` as the user.** It kills the docker backend's reaper with everything else, so a container may outlive it. Named; no layer closes it.

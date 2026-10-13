@@ -213,8 +213,10 @@ is the strongest form: it names the ownership in the function that reads it.
 arm table (ib4k §2a).** Pin it with `WEBCTL_ISOLATION_BACKEND=bwrap`, or reach it when unshare's probe
 fails. It runs every row on the fresh, nested and stripped paths, with the same inner half, read-backs
 and drop as unshare. Building it found a hole bwrap opens, mount propagation, now closed for every
-backend. ⚠ **It does NOT unblock a host that forbids user namespaces** (below): on no measured host
-does bwrap run where unshare cannot. Docker is phase 3. Harness and tests only; no `lib/` change.
+backend. ⚠ **bwrap does NOT unblock a host that forbids user namespaces** (below): on no measured host
+does bwrap run where unshare cannot. **Phase 3, the docker backend (ib4k §3b), does:** where both namespace
+backends are refused, `isolated` runs on the local docker daemon, judged by the same rows, with five named
+deviations. Harness, tests and an image recipe; no `lib/` change.
 `HARNESS_GENERATION` is **9** (it was 7; v0.34.1 took 8 — see "For lanes").
 
 ### The bwrap backend (ib4k §2a)
@@ -429,6 +431,62 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   bwrap in a world whose mounts are SHARED. Control: they are. Removing the private step (B11a) turns it
   red.
 
+### The docker backend (ib4k §3b, phase 3)
+
+* **What it is:** the WHOLE sandbox, not a namespace creator. Inside a container nothing can mount or
+  unshare, so the local daemon builds the masks from `docker create` flags. A capless inner half
+  (`__isolated-docker`, the caller's uid) READS BACK every property before the command runs:
+  capabilities, seccomp, namespaces, lo only, `/dev`, identity, cgroups, the read-only root,
+  propagation, the hidden home, and host sockets. Any failed read-back is a refusal.
+* **When it runs:** pinned (`WEBCTL_ISOLATION_BACKEND=docker`), or when both unshare and bwrap fail
+  their probes. Its probe:
+  * the docker CLI from the system dirs;
+  * no remote `DOCKER_HOST`/`DOCKER_CONTEXT` (refused by name, the value never printed); every call
+    carries `-H unix:///var/run/docker.sock`;
+  * a daemon that answers, with seccomp (and AppArmor where the host has it), not rootless;
+  * the image built locally with this recipe's label.
+  A missing image is refused, naming `node <base>/scripts/contract-harness.mjs isolated-image build`. The
+  run never builds and never pulls.
+* **The image:** `docker/isolated/Dockerfile`. It is node 22.23.3 on Debian trixie slim, pinned by
+  digest, plus `git` and `procps`, tagged `webctl-iso/node22:<recipe hash>` (332 MB). It is built only by
+  `isolated-image build`.
+* **The container:**
+  * `--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user <uid>:<gid>
+    --hostname webctl-isolated`;
+  * caps `--cpus 2 --memory 4g --pids-limit 4096` (`WEBCTL_ISOLATION_DOCKER_CPUS/_MEMORY/_PIDS`);
+  * private tmpfs on `/tmp`, `/var/tmp` and `/run`; the neutral machine-id;
+  * the cwd and each `--keep` bound writable; each `--keep-ro` and base's root bound read-only; a host
+    socket inside a bind covered with `/dev/null`;
+  * named `webctl-iso-u<uid>-<lane>-<pid>`. Removal is by exact id or name only, never a prune.
+  The command's env travels in a `0600` plan file in a private channel dir, never on an argv or in
+  `docker inspect`.
+* **Refused after selection:**
+  * a symlink in any bind source (the daemon resolves them as root);
+  * a bind at or beneath `/dev`, `/proc` or `/sys`, or one containing the daemon's socket;
+  * a native addon (`*.node`) in the cwd's `node_modules`.
+* **Signals, as on the other backends:**
+  * a terminal-group INT/TERM/HUP/QUIT reaches the command exactly once (`docker kill` by exact id),
+    and its trap completes;
+  * exit 128+n, and the harness dies by a forwarded signal;
+  * an early signal means the command never runs (the go-handshake, over FIFOs);
+  * SIGUSR1 is swallowed.
+  ⚠ The docker CLI dies by HUP, QUIT, USR2, ALRM and USR1 and cannot be shielded (Go resets the
+  ignore). So it is not the run's authority: the harness follows the container with `docker wait`.
+* **Nothing outlives the harness, SIGKILL included:** a reaper reads a pipe only the harness holds. On
+  EOF it runs `docker rm -f` by exact id and name, bounded at 30 s, then exits.
+* **Nested and stripped-markers calls run IN PLACE.** The proof is the read-only channel bind, which a
+  process inside cannot make, plus every read-back run again. A forged marker is refused (exit 2).
+* **The verdict:** `…; backend: docker (skipped unshare: …; bwrap: …); keyring: none (docker seccomp);
+  dev: +core`. ⚠ It has no `; cgroup2: nsdelegate` (ruling 2: that check does not run under docker).
+  The gate reads the LAST `; backend:`, as before.
+* **Measured on a policy-blocked host** (Docker Engine 29.1.3, kernel 7.0, the AppArmor userns sysctl
+  at 1):
+  * rows 1–12 and 12b pass on the fresh, nested and stripped paths, each with its control (the
+    deviations below asserted AS deviations);
+  * 17 unit arms run against a fake CLI;
+  * 11 sabotages were all caught (DEV_NOTES D1–D11).
+  Building it found a go-handshake race (a hang under load), closed before any release.
+
 ### v0.34.0 pre-tag review follow-ups
 
 * **Row 12b's TIOCSTI half could not fail where `dev.tty.legacy_tiocsti=0`.** The kernel answers EIO
@@ -475,6 +533,11 @@ The changes that can show:
 
 ### For lanes
 
+* **On a host whose policy blocks user namespaces** (the AppArmor sysctl at 1): build the docker
+  backend's image ONCE — `node vendor/base-webctl/scripts/contract-harness.mjs isolated-image build`
+  (a pull of the digest-pinned base, then local) — and `isolated` runs there, on the local daemon.
+  Nothing else changes; a lane whose arms run Chromium inside needs `--no-sandbox` there (row 7's
+  deviation), and a step that needs a host tool the image lacks fails visibly (ENOENT).
 * **Nothing to change** unless you want bwrap. `WEBCTL_ISOLATION_BACKEND=bwrap` on the gate host (or
   around your own suite) pins it. The pin passes through the `WEBCTL_*` allowlist, so your nested
   `isolated` calls validate it and run inside the bwrap outer. A stripped-markers call isolates again
@@ -501,8 +564,23 @@ The changes that can show:
 
 ### ⛔ What this does NOT cover
 
-* **Docker = phase 3** (ib4k §3, §3a). `docker` still answers `not implemented yet (v0.35.0)`; a pin to
-  it is refused.
+* **Docker's deviations from the namespace contract** (ib4k §3b, named, never counted as passes):
+  * **Row 7's control:** the command cannot make namespaces of its own (seccomp and AppArmor), so
+    Chromium's own sandbox fails inside, and a lane runs it with `--no-sandbox`, a weaker browser.
+  * **Row 9's control:** no keyring at all (`add_key` is EPERM).
+  * **Row 12:** `/dev/core` exists, read back as a link to docker's masked `/proc/kcore`. `/dev` is
+    docker's root-owned rw tmpfs (a create there is EACCES, not EROFS).
+  * **A nested call cannot drop or re-isolate.** It runs in place: same uid, same PID namespace as
+    its nested caller.
+  * **The userland is the image's.** Host PATH tools are not there; `xq` is not in the image, so a lane's
+    no-host-literals step takes its documented "xq is not installed" path.
+* **The docker backend: measured on ONE host and daemon** (29.1.3). Not measured: a rootless daemon
+  (refused), Docker Desktop, other engines, and a remote daemon (refused by rule).
+* **`kill -9 -1` as the user** kills the docker backend's reaper with everything else, so a container
+  may outlive it (named residual, ib4k §6).
+* **The unshare/bwrap suites and arm table were NOT run on the docker host** (its AppArmor policy blocks
+  user namespaces). They run on a gating host.
+
 * **A host that forbids unprivileged user namespaces is NOT unblocked by bwrap.**
   * The sysctls (`user.max_user_namespaces=0`, `kernel.unprivileged_userns_clone=0`) refuse bwrap
     by the same kernel check.
