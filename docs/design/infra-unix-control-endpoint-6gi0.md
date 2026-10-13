@@ -125,7 +125,8 @@ it unchanged. Each line below is an arm (A16):
 { name: 'cdp', kind: 'tcp', adapter: 'cdp', transport: 'unix',
   host: null, port: null, path: '<channelDir>/cdp.sock', host_header: '127.0.0.1:9222' }
 // tcp-legacy
-{ name: 'cdp', kind: 'tcp', adapter: 'cdp', transport: 'tcp', host: '127.0.0.1', port: <port> }
+{ name: 'cdp', kind: 'tcp', adapter: 'cdp', transport: 'tcp', host: '127.0.0.1', port: <port>,
+  path: null, host_header: null }
 ```
 
 * **`inspect()` is pure.** It reports the shape this cfg **would** produce.
@@ -294,12 +295,21 @@ forwarded endpoint from a local one, plus the provenance:
 |---|---|---|---|
 | **D9** | the forward's local `state_dir` is **verified** (owner, mode) | `mkdir(exist_ok=True, mode=0o700)`, with a `/tmp/xq-<uid>` fallback | an existing dir keeps its owner and mode; a pre-created `/tmp/xq-<uid>` would hold the socket. Requested of xq (§6.5, Q11) |
 
-## 7. Open — needs a ruling
+## 7. Rulings (2026-10-13, `webctl:mgr` lead)
 
-* **Q11 — xq's forward `state_dir`** (§6 D9): verify owner and mode of an existing dir, and
-  drop or verify the `/tmp/xq-<uid>` fallback. This is xq's call, but base's consumer
-  check (A17) refuses the result if it is not sealed.
-* **Q12 — the forward's local path.** `<state_dir>/<key>/<control>.sock` under
-  `$XDG_RUNTIME_DIR` is short enough for typical keys, but `<key>` grows with machine
-  and zone names. Should xq hash the key when the 107-byte check would fail, or refuse?
-  Refusing is the safe default; hashing loses readability.
+* **Field names — xq's, exactly as built.** In base the endpoint is
+  `inspect().ports.cdp.endpoint = {name, kind, adapter, transport, host, port, path,
+  host_header}`, with `null` where a field does not apply: `path`/`host_header` on tcp,
+  `host`/`port` on unix. `kind` keeps xq's meaning, and base does not redefine it.
+* **Q11 / D9** — xq's call, passed on by the lead.
+* **Q12 — hash the key, deterministically.**
+  * Use a sha256 prefix long enough to be unambiguous, recorded in the forward's claim
+    record, so that a collision is **detected and refused**.
+  * Refuse only if the hashed path **still** exceeds 107 bytes, and name the state dir as
+    the reason.
+* **The sealed-ancestor check on consumers is accepted** as the answer to xq's 0666
+  socket.
+* **Q1 (`gvlx`)** — a third-party `ws://`-only client gets the **per-call `tcp-forward`**,
+  bounded to the call, torn down after it, and reported as exposed while it lives.
+* **In v0.34.2** base ships `parseControlEndpoint`, the sealed-ancestor check and the unix
+  transport in `cdp-client.js`. The owned forward is **xq's half** and is not in base.

@@ -100,7 +100,8 @@ outside base and unmeasured here. It cannot see forwarded container traffic (`6g
 ⇒ **The uid is the boundary.**
 
 * **Below it** (two lanes of one account) is **not a security boundary**, and this
-  design does not pretend otherwise. Same-uid separation is `ow9k`'s job, and it is
+  design does not pretend otherwise: **the same uid can already ptrace every process of
+  the pair**, so same-uid lanes are one trust domain (ruled, §12 Q5). Same-uid separation is `ow9k`'s job, and it is
   about *intent*, not *access*.
 * **Above it** (the docker group) is **root-equivalent by docker's design**, so this
   design is **defence in depth only** there. It raises the bar from *connect to a port*
@@ -336,7 +337,7 @@ never widen the publish address.
 
 ```
 <stateRoot> = <XDG_STATE_HOME or ~/.local/state>/CLIAI/<CACHE_DIRNAME>       (v59v)
-<key>       = first 12 hex of sha256(realpath(profilePath))                 (ow9k §3: key on the TARGET)
+<key>       = first 12 hex of sha256(path.resolve(profilePath))             (ow9k §3: key on the TARGET; §12)
 
 <stateRoot>/run/<key>/            0700   channel dir: xpra.sock, cdp.sock (0600)
 <stateRoot>/auth/<key>/           0700   secret dir — always minted (auth is always on)
@@ -402,7 +403,7 @@ never widen the publish address.
 owner's call, never base's.** Base never stops, restarts or recreates a running pair to
 apply it.
 
-**Phase 0 — see the exposure; change nothing (next release).**
+**Phase 0 — see the exposure; change nothing (v0.34.2).**
 
 * `driver.exposure()`: new, async, read-only.
   * It reads the running pair with `docker inspect` only: `PortBindings`, the xpra env
@@ -421,7 +422,7 @@ apply it.
   exposure  owner-only   cdp: unix 0600 in 0700; xpra: unix peercred + tcp auth=file; html5: off
   ```
 
-**Phase 1 — opt in (the same release).**
+**Phase 1 — opt in (v0.34.2).**
 
 * `cfg.channels = 'owner-only'`. **Stock images work** (§5.2, §6.1): bump base, then
   restart.
@@ -429,7 +430,7 @@ apply it.
   hint for a `userDataDir`.
 * The default stays `'tcp-legacy'`, which warns `local-users` on every bring-up.
 
-**Phase 2 — flip the default (the release after).**
+**Phase 2 — flip the default (a later minor, once the wired lanes' gate passes with owner-only; §12 Q4).**
 
 * `'tcp-legacy'` stays available as an explicit opt-in, and is reported as exposed.
 * ⭐ **The backward-compatible window:** `ensureRunning()` that finds a **running legacy
@@ -511,26 +512,38 @@ own images; they are this document's measurements made executable.
   148.0.7778.178 (Debian 13); socat 1.8.0.3; Docker Engine 29.7.2; Node 22.23.
 * All probes ran in throwaway containers.
 
-## 12. Open — needs a ruling
+## 12. Rulings (2026-10-13, `webctl:mgr` lead) and follow-ups
 
-* **Q1 — third-party CDP clients that only speak `ws://` over TCP.** Either a
-  per-invocation `tcp-forward` (exposed for its lifetime, as `6gi0` §3–§4), or keep
-  `'tcp-legacy'` as the permanent escape hatch.
-* **Q2 — html5 default.** Off is recommended. On means the password flow of §5.3.
-* **Q3 — an `LWC_CONTROL_CDP_SOCKET` entrypoint contract,** ported from xq's
-  `XQ_CONTROL_CDP_SOCKET` (path confined to the dir, fail-closed exit 78). Should one, plus a
-  `CHROMIUM_CONTAINER_ENV_CONTRACT`, eventually replace the sidecar? Dockerfiles stay
-  consumer-owned either way.
-* **Q4 — the phase-2 flip.** Confirm the timing, and confirm "refuse only when
-  owner-only was explicitly requested".
-* **Q5 — same-uid lanes** as one trust domain. Recommended; per-lane uids are out of
-  base's scope.
-* **Q6 — docker-group co-users.** They are root-equivalent. Rootless or per-user
-  daemons are the host admin's call.
-* **Q7 — the host firewall by socket owner.** The admin's option; unmeasured.
-* **Q8 — state root vs runtime dir for sockets.** The logout reasoning is not measured
-  here.
-* ~~**Q9 — the endpoint field name.**~~ ✅ **Resolved by xq's shipped shape:** `kind`
-  stays the image-declared inside, and `transport` is how this host reaches it (`6gi0` §2).
-* **Q10 — D3.** Does xq mount its secret as a file? If so, its rotation is the measured
-  trap.
+| # | ruling |
+|---|---|
+| **Q1** | Third-party `ws://`-only clients get the **named per-call `tcp-forward`** fallback: bounded to the call, torn down after it, reported as exposed while it lives. `'tcp-legacy'` is **not** kept as the answer for them |
+| **Q2** | html5 **defaults OFF**; opt in per target (`cfg.html5: true`) |
+| **Q3** | **Yes, later:** a joint unix-socket entrypoint contract with xq replaces the sidecar. Until then the sidecar ships (follow-up F1) |
+| **Q4** | **Phase 0 + Phase 1 ship as v0.34.2**, a security patch off master: `exposure()` and the status line; the `channels:'owner-only'` opt-in; every dir base creates is 0700; B4 at both layers; the unix CDP transport in `cdp-client.js`. **Phase 2** (the default flip) ships in a later minor, once the wired lanes' gate passes with owner-only. Refuse only on an explicit cfg; a running legacy pair is reused with a WARN, never restarted |
+| **Q5** | **Same-uid lanes are one trust domain**, since the same uid can already ptrace every process of the pair (§2) |
+| **Q6 / Q7** | docker-group co-users and a host firewall by socket owner are **the host admins' calls — out of base's scope** |
+| **Q8** | **The state root, as designed.** The named reason: removal of a runtime dir at logout is **not measured** here, and a persistent root does not depend on it |
+| **Q9** | **xq's field names exactly, as built** (`6gi0` §2). `kind` stays xq's (the protocol family the app speaks inside, `"tcp"` even over a unix transport); base does not redefine it, and `rx9q` documents both fields |
+| **Q10** | Raised with xq by the lead, together with the rotation finding (§8.2) |
+| **D1–D6** | Accepted as named divergences |
+
+**Decisions made while implementing** (named here so they are not mistaken for omissions):
+
+* **The key is `sha256(path.resolve(profilePath))`, not `realpath`.** That is the bring-up
+  mutex's key, and it is computable before the profile dir exists, so a read-only
+  `inspect()` names the same channel dir that a bring-up creates.
+* **A running owner-only pair under a `'tcp-legacy'` cfg is REFUSED, not reused.** Reuse
+  would hand back a TCP URL that answers nothing, and the existing "CDP unreachable"
+  path would recreate the pair — a restart the owner did not choose. The refusal names
+  both remedies: set `channels:'owner-only'`, or stop the pair yourself.
+* **`exposure()` has a fourth level, `not-running`.** No pair, so nothing is exposed and
+  nothing is known; that is distinct from `unknown`, where inspection failed.
+
+**Follow-ups:**
+
+* **F1** — the joint `LWC_CONTROL_CDP_SOCKET` / `XQ_CONTROL_CDP_SOCKET` entrypoint
+  contract (Q3), which retires the sidecar.
+* **F2** — Phase 2: flip the default to `'owner-only'` after the wired lanes' gate passes.
+* **F3** — the image-uid label check before `docker run` applies only to images built by
+  v0.34.2+ (`buildImage` adds the label). Older images fall back to the post-start
+  socket-owner check, which fails closed.
