@@ -822,10 +822,15 @@ backend is not allowed either: a check that skips there is a check that cannot f
     cwd `/`, and an env of identity only (the real home from passwd; no `UV_*`, `PYTHON*`,
     `XDG_*` or display). Not trusted either: an xq whose FILE is writable (outside the home),
     or whose checkout holds a writable path (a `--keep` of its `lib/`).
-  * **The names:** each machine's `alias`, and the host of its `ssh` target, deduplicated.
-    Accepted forms: `[user@]host[:port]`, `[user@][v6][:port]`, or a bare IPv6 address. A dotted
-    name also adds its first label. ⛔ Any other form (`ssh://h`, `h -p 22`, `h:`) refuses the
-    whole list: it would yield a name that never matches, and the check would say clean. An xq with no machines configured gives an EMPTY
+  * **The names:** each machine's `alias`, and the host of its `ssh` destination, deduplicated.
+    *Per xq (2026-10-13):* `ssh` is an OPAQUE ssh destination, exactly as in xq's config, and
+    untrusted text: xq runs `ssh -- <value>`. So base reads it as ssh(1) does,
+    `ssh://[user@]host[:port]` (an IPv6 host in brackets) or `[user@]host` (an IPv6 host bare;
+    an `~/.ssh/config` alias is a host). A dotted name also adds its first label. ⛔ Anything
+    else (`host:port`, which is not ssh syntax, `h -p 22`, a leading `-`) refuses the whole list:
+    it would yield a name that never matches, and the check would say clean. Within schema 1,
+    keys are never removed or redefined, new keys may appear, and unknown ones are ignored
+    (xq's contract). An xq with no machines configured gives an EMPTY
     list. The file is still passed, and the check refuses "no names supplied" (it scans for
     nothing otherwise).
 * **The file:** one name per line, at the fixed path `/run/.webctl-identity/machine-names`

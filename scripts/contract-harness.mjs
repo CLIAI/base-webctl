@@ -4387,17 +4387,34 @@ export function machineNamesFromXq(stdout) {
     if (!m || typeof m !== 'object') continue;
     add(m.alias);
     if (m.ssh === undefined || m.ssh === null || m.ssh === '') continue;
-    // ⛔ STRICT (v0.35.0 review): `[user@]host[:port]`, `[user@][v6][:port]` or a bare IPv6 — anything else
-    // (`ssh://h`, `h -p 22`, `h:`) would yield a name that never matches, and the check would say clean: REFUSED
-    const t = typeof m.ssh === 'string'
-      ? m.ssh.match(/^(?:[^@\s/]+@)?(?:\[([0-9A-Fa-f:.]+)\]|([A-Za-z0-9_.-]+)|([0-9A-Fa-f]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*))(?::(\d+))?$/) : null;
-    if (!t) return { names: null, why: '`xq machine ls --json` has an ssh target that is not [user@]host[:port] — refused, never guessed' };
-    const host = t[1] || t[2] || t[3];
+    // ⛔ `ssh` is an OPAQUE ssh destination (xq's contract: untrusted text, run as `ssh -- <value>`). Read as ssh(1)
+    // reads one — `ssh://[user@]host[:port]` or `[user@]host` — and nothing else: `host:port` is not ssh syntax, and
+    // a form base cannot read would yield a name that never matches, so the check would say clean. REFUSED instead.
+    const host = sshDestinationHost(m.ssh);
+    if (!host) return { names: null, why: '`xq machine ls --json` has an ssh destination base cannot read (not ssh://[user@]host[:port] or [user@]host) — refused, never guessed' };
     add(host);
-    // a dotted NAME (not an IPv4 address): its first label too — code may spell the short name
-    if (t[2] && t[2].includes('.') && !/^[\d.]+$/.test(t[2])) add(t[2].split('.')[0]);
+    // a dotted NAME (not an IP address): its first label too — code may spell the short name
+    if (host.includes('.') && !/^[\d.]+$/.test(host) && !host.includes(':')) add(host.split('.')[0]);
   }
   return { names, why: '' };
+}
+
+/**
+ * The HOST of an ssh destination, as ssh(1) reads one: `ssh://[user@]host[:port]` (an IPv6 host in brackets), or
+ * `[user@]host` (an IPv6 host bare). '' for anything else — `host:port` included (not ssh syntax), and a leading `-`.
+ * @param {unknown} v @returns {string}
+ */
+function sshDestinationHost(v) {
+  if (typeof v !== 'string' || /[\s\u0000-\u001f\u007f]/.test(v) || v.startsWith('-')) return '';
+  const HOST = /^[A-Za-z0-9_.-]+$/;
+  const V6 = /^[0-9A-Fa-f]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*$/;
+  if (v.startsWith('ssh://')) {
+    const m = v.slice(6).match(/^(?:[^@/]+@)?(?:\[([0-9A-Fa-f:.]+)\]|([A-Za-z0-9_.-]+))(?::\d+)?\/?$/);
+    return m ? (m[1] || m[2]) : '';
+  }
+  if (v.includes('/')) return '';
+  const h = v.replace(/^[^@]+@/, '');
+  return HOST.test(h) || V6.test(h) ? h : '';
 }
 
 /**

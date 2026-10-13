@@ -22,25 +22,34 @@ const xqJson = (/** @type {any} */ machines, schema = 1) => JSON.stringify({ sch
 
 test('machineNamesFromXq: alias + the HOST of each ssh target (user@ and :port removed), deduplicated', () => {
   const r = machineNamesFromXq(xqJson([
-    { alias: 'box-a', ssh: 'someone@box-a.example:2222', shadows_local_zone: false },
+    { alias: 'box-a', ssh: 'ssh://someone@box-a.example:2222', shadows_local_zone: false },
     { alias: 'box-b', ssh: 'box-b' },
-    { alias: 'box-c', ssh: '[2001:db8::1]:22' },
+    { alias: 'box-c', ssh: 'ssh://[2001:db8::1]:22' },
     { alias: 'bad\nname', ssh: 'ok-host' },
   ]));
   assert.equal(r.why, '');
+  // (box-a's first label is box-a itself — already in)
   assert.deepEqual(r.names, ['box-a', 'box-a.example', 'box-b', 'box-c', '2001:db8::1', 'ok-host']);
   // a bare IPv6 keeps every colon; an IPv4 address gets no "first label"; no ssh at all is fine
-  assert.deepEqual(machineNamesFromXq(xqJson([{ alias: 'v6', ssh: '2001:db8::2' }, { alias: 'v4', ssh: 'u@192.0.2.7:22' }, { alias: 'none' }])).names,
+  assert.deepEqual(machineNamesFromXq(xqJson([{ alias: 'v6', ssh: '2001:db8::2' }, { alias: 'v4', ssh: 'u@192.0.2.7' }, { alias: 'none' }])).names,
     ['v6', '2001:db8::2', 'v4', '192.0.2.7', 'none']);
 });
 
+test('ssh destinations as ssh(1) reads them: ssh://user@host:port, ssh://[v6], user@host, an ~/.ssh/config alias, a bare IPv6', () => {
+  const r = machineNamesFromXq(xqJson([{ alias: 'a1', ssh: 'ssh://u@h1.example:2200' }, { alias: 'a2', ssh: 'ssh://[2001:db8::3]' },
+    { alias: 'a3', ssh: 'u@h3' }, { alias: 'a4', ssh: 'cfg-alias' }, { alias: 'a5', ssh: 'u@2001:db8::5' }]));
+  assert.deepEqual(r.names, ['a1', 'h1.example', 'h1', 'a2', '2001:db8::3', 'a3', 'h3', 'a4', 'cfg-alias', 'a5', '2001:db8::5']);
+});
+
 test('⛔ review: an ssh target in ANY other form refuses the whole list, by a reason naming no machine — never a name that cannot match', () => {
-  for (const bad of ['ssh://h3', 'h4 -p 22', 'u@h6:', '@', 'u@', 'h/x']) {
+  // (xq's contract: `ssh` is an opaque ssh DESTINATION; `host:port` is not ssh syntax)
+  for (const bad of ['host:22', 'u@h6:', 'h4 -p 22', '@', 'u@', 'h/x', '-oProxyCommand=x', 'ssh://', 'ssh://u@']) {
     const r = machineNamesFromXq(xqJson([{ alias: 'secret-box', ssh: bad }]));
     assert.equal(r.names, null, bad);
-    assert.match(r.why, /ssh target that is not \[user@\]host\[:port\] — refused, never guessed/, bad);
-    // (the input itself is not echoed: checked for the inputs long enough to be told apart from the reason's own text)
-    assert.ok(!r.why.includes('secret-box') && (bad.length < 3 || !r.why.includes(bad)), r.why);
+    assert.match(r.why, /an ssh destination base cannot read .* — refused, never guessed/, bad);
+    // the input itself is never echoed (its distinctive part: the reason's own text names the forms it reads)
+    const own = bad.replace(/^ssh:\/\//, '').replace(/^[^@]*@/, '');
+    assert.ok(!r.why.includes('secret-box') && (own.length < 2 || !r.why.includes(own)), `${bad}: ${r.why}`);
   }
 });
 

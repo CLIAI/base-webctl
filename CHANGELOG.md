@@ -509,8 +509,9 @@ HOST's xq **before entering any backend** and passes the names in, read-only, at
 * ⛔ **Review (before release), BLOCKER fixed:** a planted interpreter. xq is a uv script, and it
   was run with the caller's PATH, so a `uv` planted in npm's writable `node_modules/.bin` ran on
   the host (measured by the reviewer). xq now runs with a JUDGED PATH, cwd `/` and an identity-only
-  env. An xq whose file, or whose checkout, the run could write is not trusted. `ssh` targets are
-  parsed strictly: an unknown form refuses the list. The identity tmpfs is sized for the names.
+  env. An xq whose file, or whose checkout, the run could write is not trusted. `ssh` is read as
+  ssh(1) reads a destination (`ssh://[user@]host[:port]` or `[user@]host`, xq's contract: opaque,
+  untrusted). Any other form refuses the list. The identity tmpfs is sized for the names.
 * ⚠ **Verdict pins:** a lane that matches the verdict line to its END sees one more clause.
 * Arms: `test/isolation-machine-names.test.js` (a planted xq is never run; the docker command sees
   exactly the host xq's names, compared by digest, read-only, fresh and nested; red with the mount
