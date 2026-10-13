@@ -249,3 +249,53 @@ test('⛔ review F5: a relay whose command is not base\'s socat relay, or anothe
     assert.equal(judgeExposure(q).level, 'unknown');
   } finally { s.done(); }
 });
+
+// ── review 2 of v0.34.2: item 5 (three shapes) and N4 ──────────────────────
+
+test('⛔ review item 5: PublishAllPorts on any container is LOCAL-USERS — whatever PortBindings says', () => {
+  const s = scratch();
+  try {
+    for (const role of ['xpra', 'chromium', 'relay']) {
+      const p = /** @type {any} */ (ownerOnlyPair(s.chan, s.prof));
+      p[role].HostConfig.PublishAllPorts = true;
+      assert.equal(judgeExposure(p).level, 'local-users', role);
+    }
+  } finally { s.done(); }
+});
+
+test('⛔ review item 5: a relay mounting a DIFFERENT channel dir than xpra\'s is UNKNOWN', () => {
+  const s = scratch();
+  try {
+    const other = path.join(s.root, 'run', 'other');
+    fs.mkdirSync(other, { recursive: true, mode: 0o700 });
+    const p = ownerOnlyPair(s.chan, s.prof);
+    p.relay.Mounts = [{ Type: 'bind', Source: other, Destination: '/run/webctl' }];
+    assert.equal(judgeExposure(p).level, 'unknown');
+  } finally { s.done(); }
+});
+
+test('⛔ review item 5: ANY XPRA_BIND other than base\'s peercred socket is UNKNOWN — CONTROL: base\'s exact value is owner-only', () => {
+  const s = scratch();
+  try {
+    for (const v of ['/run/webctl/xpra.sock', '/run/webctl/xpra.sock,auth=none', '/tmp/x.sock,auth=peercred', 'tcp://0.0.0.0:1']) {
+      const p = ownerOnlyPair(s.chan, s.prof);
+      p.xpra.Config.Env = p.xpra.Config.Env.map((/** @type {string} */ kv) => (kv.startsWith('XPRA_BIND=') ? `XPRA_BIND=${v}` : kv));
+      assert.equal(judgeExposure(p).level, 'unknown', v);
+    }
+    assert.equal(judgeExposure(ownerOnlyPair(s.chan, s.prof)).level, 'owner-only', 'CONTROL');
+  } finally { s.done(); }
+});
+
+test('⛔ review N4: auth=file with ANY other filename, or none, is UNKNOWN — CONTROL: the mounted secret path is owner-only', () => {
+  const s = scratch();
+  try {
+    for (const tail of ['auth=file', 'auth=file,filename=/etc/hostname', 'auth=file,filename=/run/webctl-secret/other']) {
+      const p = ownerOnlyPair(s.chan, s.prof);
+      p.xpra.Config.Env = [`XPRA_TCP_BIND=0.0.0.0:14500,${tail}`];
+      assert.equal(judgeExposure(p).level, 'unknown', tail);
+    }
+    const ok = ownerOnlyPair(s.chan, s.prof);
+    ok.xpra.Config.Env = ['XPRA_TCP_BIND=0.0.0.0:14500,auth=file,filename=/run/webctl-secret/xpra.pass'];
+    assert.equal(judgeExposure(ok).level, 'owner-only', 'CONTROL');
+  } finally { s.done(); }
+});

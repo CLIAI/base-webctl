@@ -167,8 +167,8 @@ test('xpraChannelEnv: peercred unix socket; TCP always auth=file (comma form); l
 });
 
 test('parseXpraTcpBind: reads host, port and auth from a bind string (exposure() relies on it)', () => {
-  assert.deepEqual(parseXpraTcpBind('0.0.0.0:14327'), { host: '0.0.0.0', port: 14327, auth: null });
-  assert.deepEqual(parseXpraTcpBind('127.0.0.1:1,auth=file,filename=/x'), { host: '127.0.0.1', port: 1, auth: 'file' });
-  assert.deepEqual(parseXpraTcpBind('0.0.0.0:2,auth=file:filename=/x'), { host: '0.0.0.0', port: 2, auth: 'file:filename=/x' });
+  assert.deepEqual(parseXpraTcpBind('0.0.0.0:14327'), { host: '0.0.0.0', port: 14327, auth: null, filename: null });
+  assert.deepEqual(parseXpraTcpBind('127.0.0.1:1,auth=file,filename=/x'), { host: '127.0.0.1', port: 1, auth: 'file', filename: '/x' });
+  assert.deepEqual(parseXpraTcpBind('0.0.0.0:2,auth=file:filename=/x'), { host: '0.0.0.0', port: 2, auth: 'file:filename=/x', filename: null });
   assert.equal(parseXpraTcpBind(undefined), null);
 });
