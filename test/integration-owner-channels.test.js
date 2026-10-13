@@ -124,6 +124,9 @@ async function withPair(slug, cfgExtra, fn) {
   }
 }
 
+/** Prefixed to every probe's shell: an image-level DISPLAY never survives into a client (review 3 F3). */
+const NO_DISPLAY = 'unset DISPLAY WAYLAND_DISPLAY XAUTHORITY; ';
+
 /** Run a throwaway client container as ANOTHER uid. @param {string[]} dockerArgs @param {string} image @param {string} sh */
 function asOther(dockerArgs, image, sh) {
   const name = `${PREFIX}client-${Math.random().toString(16).slice(2, 8)}`;
@@ -132,7 +135,10 @@ function asOther(dockerArgs, image, sh) {
   if (hostNet && dockerArgs.includes('-v')) throw new Error('a host-network probe carries no mount');
   const lock = hostNet ? ['--cap-drop', 'ALL', '--read-only'] : [];
   try {
-    return docker(['run', '--rm', '--name', name, ...CAPS, ...lock, '--user', OTHER, ...dockerArgs, '--entrypoint', 'sh', image, '-c', sh], hostNet ? 60000 : 90000);
+    // ⛔ review 3 F3: an IMAGE may set DISPLAY (the chromium image does: :99), and on the host network that reaches the
+    // host's abstract X socket — no argv check sees it, so every probe's shell drops the display vars first
+    return docker(['run', '--rm', '--name', name, ...CAPS, ...lock, '--user', OTHER, ...dockerArgs, '--entrypoint', 'sh', image, '-c',
+      `${NO_DISPLAY}${sh}`], hostNet ? 60000 : 90000);
   } finally { docker(['rm', '-f', name]); }
 }
 
@@ -156,7 +162,7 @@ function xpraInfoAsUs(root, target, passwordFile) {
     const pf = passwordFile ? ' --password-file=/tmp/p' : '';
     const r = docker(['run', '--rm', '-i', '--name', name, ...CAPS, '--network', 'host', '--user', OTHER, '--cap-drop', 'ALL', '--read-only',
       '--tmpfs', '/tmp:size=1m,mode=1777', '-e', 'HOME=/tmp', '-e', 'XDG_RUNTIME_DIR=/tmp', '--entrypoint', 'sh', XPRA_IMAGE, '-c',
-      `umask 077; cat > /tmp/p; timeout 20 xpra info ${target}${pf} </dev/null ${grep}`], 60000, pw);
+      `${NO_DISPLAY}umask 077; cat > /tmp/p; timeout 20 xpra info ${target}${pf} </dev/null ${grep}`], 60000, pw);
     return r.out + r.err;
   } finally { docker(['rm', '-f', name]); }
 }

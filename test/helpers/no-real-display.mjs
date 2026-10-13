@@ -98,6 +98,8 @@ function hostSrcReachesDisplay(src) {
  * argv), or a mount whose HOST source reaches the display or is a parent of it — `-v`, a cluster ending in v, `--mount`
  * bind, a `--mount` volume with `volume-opt=device=<path>`, and `docker volume create --opt device=<path>`.
  * ⚠ Argv only: a shell that runs docker (`sh -c 'docker run …'`) is not parsed (CHANGELOG v0.34.2, the guard's limits).
+ *   Nor: an image-level DISPLAY under `--network host`, global flags before `volume create`, a relative `-v` source,
+ *   an Xauthority bound from outside the home and /run/user (same CHANGELOG list).
  * @param {string[]} args @returns {string}
  */
 export function displayIntoContainer(args) {

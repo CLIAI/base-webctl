@@ -431,7 +431,9 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   * review 3: the secret dir's host source; adoption's channel-dir labels; a running
     tcp-legacy pair with silent CDP refused, never recreated (red on the code before item 8); a
     failed inspection refused on reuse too (red on `a83403f`); the relay-repair cleanup;
-    `-p=<v>`.
+    `-p=<v>`; a mount BELOW `/run/webctl` or `/run/webctl-secret` (a file bound over the
+    password, a socket, a subdir) reads unknown, never owner-only (red on `6e4898d`); and a
+    relay that already exited is said to be gone, not "removed" (red on `6e4898d`).
 * **Integration (opt-in, `test/integration-owner-channels.test.js`).** I1–I10 run against
   throwaway containers from a consumer's own images, through the real driver. Set
   `WEBCTL_IT_XPRA_IMAGE` and `WEBCTL_IT_CHROMIUM_IMAGE`; without them the arms skip and say
@@ -473,7 +475,17 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   string (`sh -c 'docker run …'`) with a display-free env is not parsed, so a display named
   inside that string is NOT caught. The env scrub only keeps the host's own display vars out.
   The argv check does not try to be docker's whole grammar. The integration arms make their own
-  docker calls through it, never through a shell.
+  docker calls through it, never through a shell. Its other known edges (review 3):
+  * `--network host` plus a `DISPLAY` set in the IMAGE, not the argv, reaches the host's
+    abstract X socket, which no mount check can see. The chromium image sets `DISPLAY=:99`,
+    and the I4 probe runs it on the host network, so every integration probe's shell now
+    unsets the display variables first. A probe written without that prefix is not caught;
+  * global flags before the subcommand (`docker --context x volume create …`) hide the
+    `volume create` form from the device-opt check;
+  * a RELATIVE mount source (`-v ./:/x`) is not resolved against the cwd, so it is never
+    judged as a parent of the display;
+  * an Xauthority file bound from outside the home and `/run/user` (an `XAUTHORITY` path
+    elsewhere) is not recognised.
 
 ## v0.34.1 — 2026-10-12
 
