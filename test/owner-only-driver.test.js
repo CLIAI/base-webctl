@@ -738,3 +738,30 @@ test('⛔ review 3 nit 6b: a relay recreated ALONE whose CDP still does not answ
     assert.deepEqual(h.stops, []);
   } finally { await h.done(); }
 });
+
+test('⛔ review 3 F2: a recreated relay that is ALREADY GONE when CDP stays silent is not reported as "removed" — the message says it was gone', async () => {
+  let silent = false;
+  /** @type {string} */ let relayName = '';
+  /** @type {any} */ let hh = null;
+  // the relay this call starts serves no CDP AND exits at once (socat dying on its own): docker has nothing to remove
+  const h = harness({ relayNoCdp: () => { if (silent) hh.running.delete(relayName); return silent; } });
+  hh = h;
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    const names = d.inspect().names;
+    relayName = names.cdpRelayContainer;
+    h.running.delete(names.cdpRelayContainer);
+    await h.relayFakes[h.relayFakes.length - 1].close();
+    silent = true;
+    await assert.rejects(h.driver(OO).ensureRunning(), (/** @type {any} */ e) => {
+      assert.equal(e.exitCode, 3);
+      assert.doesNotMatch(e.message, /Only the relay this call started was removed/, 'a removal that did not happen is claimed');
+      assert.match(e.message, /had already exited and is gone/);
+      assert.match(e.message, /nothing else was stopped, removed or started/);
+      return true;
+    });
+    assert.deepEqual(h.removed, [], `removed: ${h.removed.join(', ')}`);
+    assert.ok(h.running.get(names.chromiumContainer)?.up, 'the running BROWSER was touched');
+  } finally { await h.done(); }
+});
