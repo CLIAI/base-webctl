@@ -228,6 +228,9 @@ masked default on `0.0.0.0`, which is the bridge exposure again.
     URL in a browser process's argv, which **every local user can read** from
     `/proc/<pid>/cmdline`.
   * ⇒ Base prints the URL and the **path** of the mode-600 secret, never the secret.
+    ⚠ **PHASE 2 — NOT in v0.34.2** (review F11): no verb prints them yet. `inspect()` gives the
+    html5 URL (`xpraHtml5Url`), and the secret's path is derivable from the channel paths;
+    neither is surfaced by a command in this release.
 * **`gx7e` tailnet exposure:** the remote viewer needs the password too. ⭐ It is a
   second factor **that does not depend on peer IP**, the property `gx7e` §4 found
   missing behind a relay.
@@ -380,6 +383,8 @@ never widen the publish address.
   ⇒ **Mount the directory, never the file** (arm A3, with I5's control).
 * Rotation runs on every `gui html5 on`, and on demand with `gui html5 rotate`. Sessions
   already open are not cut. *(Expected from auth-at-connect; not measured.)*
+  ⚠ **PHASE 2 — NOT in v0.34.2** (review of v0.34.2, F11): no `gui html5` verb ships.
+  `rotateSecret()` is a library function, measured by I5, and no verb calls it yet.
 
 ### 8.3 Ownership and naming (`ow9k`)
 

@@ -21,13 +21,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-import { xpraSpawnGuard, displayless } from './helpers/no-real-display.mjs';
+import { guardedSpawnSync } from './helpers/no-real-display.mjs';
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import * as dockerCtl from '../lib/browser-location/docker-ctl.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
@@ -59,9 +58,9 @@ const NEEDS_PUBLISH = 'needs WEBCTL_IT_PUBLISH=1 (a loopback publish) — this h
 
 /** @param {string[]} args @param {number} [timeoutMs] */
 function docker(args, timeoutMs = 60000, input = '') {
-  const env = displayless();
-  xpraSpawnGuard(['docker', ...args], env); // RULE ZERO: never with a display in reach
-  const r = spawnSync('docker', args, { encoding: 'utf8', timeout: timeoutMs, env, input });
+  // RULE ZERO: GUARDED on the env the child really gets (this process's — scrubbed on the helper's import, so a display
+  // that reappears is caught here, not silently passed through: review F12)
+  const r = guardedSpawnSync('docker', args, { encoding: 'utf8', timeout: timeoutMs, input });
   return { code: r.status === null ? -1 : r.status, out: String(r.stdout || ''), err: String(r.stderr || '') };
 }
 
@@ -138,9 +137,8 @@ function asOther(dockerArgs, image, sh) {
 }
 
 /**
- * `xpra info` from a throwaway client container of the xpra image. A socket target: as US (the image's uid, which
- * the driver requires to be the owner's), with no network and this run's temp root mounted at the same path. A
- * TCP/ws target: a host-network probe as uid 65534 (below). Never the host's own xpra client: it may open a GUI prompt on the
+ * `xpra info` from a throwaway client container of the xpra image, against a TCP/ws target: a host-network probe as
+ * uid 65534 (below). A socket target is asked inside the pair instead (xpraInfoInPair). Never the host's own xpra client: it may open a GUI prompt on the
  * desktop, and its behaviour is not this file's to depend on.
  * @param {string} root @param {string} target @param {string} [passwordFile]
  */
@@ -148,13 +146,9 @@ function xpraInfoAsUs(root, target, passwordFile) {
   const name = `${PREFIX}xinfo-${Math.random().toString(16).slice(2, 8)}`;
   const grep = "2>&1 | grep -E '^clients=|authentication failed|denied|refused' | head -3";
   try {
-    if (/^socket:/.test(target)) {
-      // a socket target: as US (peercred), NO network, this run's temp root mounted at its own path
-      const pf = passwordFile ? ` --password-file=${passwordFile}` : '';
-      const r = docker(['run', '--rm', '--name', name, ...CAPS, '--network', 'none', '-v', `${root}:${root}`,
-        '--entrypoint', 'sh', XPRA_IMAGE, '-c', `timeout 20 xpra info ${target}${pf} </dev/null ${grep}`], 90000);
-      return r.out + r.err;
-    }
+    // ⛔ a socket target is asked INSIDE the pair (xpraInfoInPair) — never from a container with this run's whole temp
+    // root mounted: that root holds auth/<key>/xpra.pass too (review F12)
+    if (/^socket:/.test(target)) throw new Error('xpraInfoAsUs: a socket target is asked with xpraInfoInPair');
     // a TCP/ws target: a HOST-NETWORK probe (an allowance), as uid 65534 — TCP auth is the password, not who asks —
     // with no capability, a read-only root, NO mount: the password arrives on STDIN into a tmpfs (never argv), ≤ 60 s
     if (!HOST_NET) throw new Error(`xpraInfoAsUs(${target}): ${NEEDS_HOST_NET}`);

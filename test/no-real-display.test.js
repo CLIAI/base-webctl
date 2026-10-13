@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { xpraSpawnGuard, displayless, DISPLAY_VARS } from './helpers/no-real-display.mjs';
+import { xpraSpawnGuard, guiSpawnGuard, guardedSpawnSync, displayless, DISPLAY_VARS } from './helpers/no-real-display.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HELPER = path.join(ROOT, 'test', 'helpers', 'no-real-display.mjs');
@@ -36,7 +36,7 @@ test('⛔ the guard REFUSES xpra with a display set: the host binary, `docker ru
     ['docker', 'run', '--rm', '--entrypoint', 'xpra', 'img', 'info', 'socket:///s'],
     ['docker', 'run', '--rm', '--entrypoint', 'sh', 'img', '-c', 'timeout 20 xpra info socket:///s </dev/null']]) {
     for (const k of DISPLAY_VARS) {
-      assert.throws(() => xpraSpawnGuard(argv, { [k]: FAKE[/** @type {keyof typeof FAKE} */ (k)] }), /RULE ZERO: refusing to spawn xpra/, `${k}: ${argv.join(' ')}`);
+      assert.throws(() => xpraSpawnGuard(argv, { [k]: FAKE[/** @type {keyof typeof FAKE} */ (k)] }), /RULE ZERO: refusing to spawn/, `${k}: ${argv.join(' ')}`);
     }
     // CONTROL: the same argv with no display is allowed
     assert.doesNotThrow(() => xpraSpawnGuard(argv, displayless({ ...FAKE })));
@@ -87,5 +87,27 @@ test('⛔ product: the `xpra info` presence probe never hands xpra a display —
       assert.equal(got.marker, 'reached', 'CONTROL: the fake xpra did not get the caller\'s env at all');
       assert.deepEqual([got.display, got.wayland, got.xauth], [undefined, undefined, undefined], `${JSON.stringify(target)}: xpra got a display`);
     }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('⛔ review F12: the guard covers EVERY program that can draw — chromium, a browser, xdg-open — not only xpra; CONTROL: without a display they pass', () => {
+  for (const argv of [['chromium', '--headless=new'], ['/usr/bin/google-chrome'], ['xdg-open', 'http://127.0.0.1:1/'], ['firefox'],
+    ['docker', 'run', '--rm', '--entrypoint', 'chromium', 'img'], ['sh', '-c', 'xdg-open http://x/ &']]) {
+    assert.throws(() => guiSpawnGuard(argv, { DISPLAY: FAKE.DISPLAY }), /RULE ZERO/, argv.join(' '));
+    assert.doesNotThrow(() => guiSpawnGuard(argv, {}), `CONTROL: ${argv.join(' ')}`);
+  }
+});
+
+test('⛔ review F12: guardedSpawnSync judges the env the child REALLY gets — a display in it is refused and NOTHING runs (the old helper scrubbed first, so its guard could never fail)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rule-zero-g-'));
+  try {
+    const marker = path.join(dir, 'RAN');
+    const bin = path.join(dir, 'xpra');
+    fs.writeFileSync(bin, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, { mode: 0o755 });
+    assert.throws(() => guardedSpawnSync(bin, ['info'], { env: { PATH: `${dir}:/usr/bin:/bin`, DISPLAY: FAKE.DISPLAY } }), /RULE ZERO/);
+    assert.equal(fs.existsSync(marker), false, 'the program ran with a display in its env');
+    // CONTROL: the same spawn without a display runs
+    guardedSpawnSync(bin, ['info'], { env: { PATH: `${dir}:/usr/bin:/bin` } });
+    assert.equal(fs.existsSync(marker), true, 'CONTROL: the guarded spawn did not run at all');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
