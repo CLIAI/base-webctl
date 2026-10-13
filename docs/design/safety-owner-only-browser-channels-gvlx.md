@@ -17,7 +17,7 @@ tech:
     version: "29.7.2"
   - name: "Node.js"
     version: ">=22.12 (measured 22.23)"
-relates_to: [gx7e, f6rd, v7x3, v59v, ow9k, gu1d, k3wn, rx9q, btg4, t2wf, f868, rb7s]
+relates_to: [gx7e, f6rd, v7x3, v59v, ow9k, gu1d, k3wn, rx9q, btg4, t2wf, f868, rb7s, 6gi0]
 depends_on: [ow9k, v59v]
 expands: []
 similar_to: [gx7e]
@@ -95,7 +95,7 @@ reached from the other direction.
 | **a tailnet viewer** | `gx7e`: xq's exposure with its allowlist | — | — | the password is a factor that does **not** depend on peer IP (§5.3) | — |
 
 A host firewall that matches on socket owner (`meta skuid`) is the host admin's option,
-outside base and unmeasured here. It cannot see forwarded container traffic (§6.4).
+outside base and unmeasured here. It cannot see forwarded container traffic (`6gi0` §3).
 
 ⇒ **The uid is the boundary.**
 
@@ -274,96 +274,26 @@ pair's **network-namespace loopback**. That loopback is shared only by the pair'
 processes; it is unreachable from the host, from the bridge, and from other containers
 (*measured*, bridge address refused). ⇒ The claim base makes is **"no TCP listener
 reachable from outside the pair"**. `--remote-debugging-pipe` would remove even this one,
-but only the process that spawns Chromium can use the pipe (§6.4).
+but only the process that spawns Chromium can use the pipe (`6gi0` §3).
 
-### 6.2 A zero-dep UNIX transport for base's CDP client (`v7x3`)
+### 6.2 The endpoint, the client transport and the forward → `infra-unix-control-endpoint-6gi0`
 
-Today `lib/cdp-client.js` is TCP-only by construction. It uses Node's built-in `fetch`
-(four call sites: `/json/version`, `/json`, `PUT /json/new`, `/json/close/<id>`) and the
-built-in `WebSocket`. *Measured:* the built-in `WebSocket` **refuses a unix socket**
-(`Expected a ws: or wss: protocol, got ws+unix:`), and undici's `Agent` cannot be reached
-without a dependency.
+The CDP socket is consumed and produced in **xq's shipped endpoint shape**: schema 1,
+`transport:"unix"`, `path`, `host_header`. Base's client gains a zero-dep unix transport
+(`http` + its own RFC 6455 framing). Remote targets use an **owned unix → unix forward**,
+whose contract is written there for xq's half to match.
 
-* **An endpoint argument replaces `host`/`port`** at every public entry point.
-  `{kind:'unix', path}` or `{kind:'tcp', host, port}` (§6.3). `host`/`port` remain as
-  shorthand for the TCP form; giving both is refused, per `v7x3`'s refuse-unknown-options
-  rule.
-* **HTTP:** one internal `httpJson(endpoint, path, method)`. TCP keeps `fetch`; unix uses
-  `http.request({socketPath, path, method, headers:{Host:'localhost'}})`. The four call
-  sites go through it.
-* **WebSocket:** a `UnixWebSocket` class, about 150 lines.
-  * It implements exactly the surface `CdpSession` uses: the constructor,
-    `addEventListener('open'|'message'|'error'|'close')`, `send(string)`, `close()`,
-    and `readyState`.
-  * It is injected through the **existing `WebSocketImpl` seam**, so the session code
-    does not change.
-  * The upgrade is `http.request({socketPath, headers:{Upgrade:'websocket', …}})`, and
-    `Sec-WebSocket-Accept` is **verified**.
-  * Framing is base's own, client side:
-    * frames masked;
-    * 7/16/64-bit lengths;
-    * continuation frames reassembled;
-    * ping answered with pong;
-    * close handshake;
-    * text only — no extensions are offered, so none can be negotiated.
-  * `xpra-html5-gateway.js` is the precedent for raw upgrades over `net`/`http`. It pumps
-    bytes and never frames, so the framing is new code and needs its own arms.
-* **The websocket URL:** Chromium's `webSocketDebuggerUrl` names `localhost` with no
-  port. Over a socket only its **path** is used, and `cdp-rewrite` is bypassed rather
-  than taught a fake host.
+Two consequences matter here:
 
-### 6.3 The endpoint shape — `inspect().ports` and `rx9q`
+* **Base's driver reports the same shape** in `inspect().ports.cdp.endpoint`, with
+  `path = <channelDir>/cdp.sock` and `host_header = "127.0.0.1:9222"`. `exposure()`
+  derives the path from the relay's real mount.
+* **Consumers check a sealed ancestor**, not the socket's mode, because xq's socket is
+  0666 (D7).
 
-```js
-inspect().ports = {
-  cdp:        { value: <cfg port>|null, source,
-                endpoint: { kind: 'unix', path: '<channelDir>/cdp.sock' }      // owner-only
-                        | { kind: 'tcp', host: '127.0.0.1', port } },           // named fallback
-  xpra:       { endpoint: { kind: 'unix', path: '<channelDir>/xpra.sock', auth: 'peercred' } },
-  'xpra-tcp': { value, source,
-                endpoint: { kind: 'tcp', host, port, auth: 'file', published: <bool> } },
-  'xpra-html5': { value, source },                                              // unchanged
-}
-inspect().channelDir = '<channelDir>'
-inspect().exposure   = { level: 'owner-only' | 'local-users', reasons: [ … ] }  // from cfg
-```
-
-* **`kind`, not `transport`.** `rx9q` already names this field `kind` in
-  `controlEndpoint → {name, kind:"tcp", adapter, host, port}`. A second word for the
-  same field is the drift `rx9q` warns about.
-  ⇒ The unix form extends `rx9q` as `{name, kind:"unix", adapter:"cdp", path}`. ⚠ This
-  is **provisional until xq's schema arrives** (Q9).
-* ⛔ **In owner-only mode `cdpHttpUrl` and `cdpWsBase` are `null`.** They are not
-  fabricated, because no URL reaches the browser. `ports.cdp.value` still keys the port
-  mutex, but the **endpoint** says how to connect. Per `t2wf`, a field that keeps its
-  old value after its meaning has changed reads as a measurement. ⇒ A consumer building
-  a URL from `cdpHttpUrl` must **fail on `null`**, not connect to nothing.
-* `inspect()` stays pure: it reports what this cfg **would** create. What a **running**
-  pair actually exposes comes from `exposure()` (§9).
-
-### 6.4 Remote targets, and the alternatives refused
-
-* **Remote targets (`btg4`, `rb7s`): forward unix → unix.**
-
-  ```
-  ssh -L <local 0700 dir>/cdp.sock:<remote channelDir>/cdp.sock …
-  ```
-
-  The local socket lands in a caller-owned 0700 directory. OpenSSH creates it under
-  `StreamLocalBindMask` (default 0177 ⇒ 0600) — *documented, not measured here*.
-* ⛔ **A forward to a LOCAL TCP port reopens the hole** on a multi-user caller host:
-  every local user there can reach it. ⇒ TCP `127.0.0.1` exists only as an explicit,
-  **named** fallback (`cdp: 'tcp-forward'`), reported as `exposure: local-users` for its
-  lifetime and owned by the process that opened it.
-* **Host firewall by socket owner** (an `output` rule on `meta skuid`) is outside base:
-  it needs root, drifts port by port, and is **blind to other containers**, because
-  forwarded traffic has no socket owner. It is the admin's defence in depth for
-  `'tcp-legacy'` stacks. *Unmeasured.*
-* **An authenticating TCP relay** (a token in the URL path): the token leaks into URLs,
-  logs and argv, Chromium's JSON would need rewriting, and the listener stays on the
-  bridge.
-* **`--remote-debugging-pipe`:** only the process that spawns Chromium can use it, and
-  that is the in-container entrypoint, not a host client.
+⛔ In owner-only mode `cdpHttpUrl` and `cdpWsBase` are `null`, never fabricated (`t2wf`).
+xpra is not a control endpoint: it is reported beside the endpoint, as
+`inspect().xpra = {socket, auth:'peercred', tcp:{host, port, auth:'file', published}}`.
 
 ## 7. B4 — refuse a non-loopback publish host
 
@@ -526,8 +456,10 @@ A rebuild is needed only for the image-uid label, and that is optional.
 | **D2** | auth via the **bind option string**, `XPRA_TCP_BIND=…,auth=file,filename=…` | `--tcp-auth=/--ws-auth=file:filename=…` flags | base passes it through the **stock entrypoint's env** with no rebuild. Both spellings are measured to work; mixing them is the trap in §5.1 |
 | **D3** | secret mounted as a **directory** | "a per-zone 0600 secret file … mounted read-only" | if that is a single-file mount, **rotation silently does nothing** (measured, §8.2). Raised to xq to check |
 | **D4** | with html5 off, the xpra TCP bind is on the **netns loopback** | auth-on TCP | the listener leaves the bridge entirely, so there is nothing to brute-force |
-| **D5** | CDP relay as a **sidecar** + Chromium args | built into xq's template | base cannot rebuild consumer images; the sidecar gets the same socket on stock images |
-| **D6** | "nothing on TCP" means **nothing reachable outside the pair**; Chromium's netns-loopback 9222 remains | "no TCP listener at all" | the debug port is inherent to `--remote-debugging-port`; to be checked against xq's template |
+| **D5** | CDP relay as a **sidecar** + Chromium args | built into xq's entrypoint (`XQ_CONTROL_CDP_SOCKET`, a path confined to `/run/xq-control/`, fail-closed exit 78) | base cannot rebuild consumer images; the sidecar gets the same socket on stock images. xq's entrypoint is the reference for a later consumer-side contract (Q3) |
+| ~~D6~~ | "nothing on TCP" means **nothing reachable outside the pair**; Chromium's netns-loopback 9222 remains | the same | ✅ **not a divergence.** xq's unix relay also targets `TCP:127.0.0.1:9222` (read from its entrypoint at `0a4fab6`); its "no TCP listener at all" means no relay listener. Same property, same words now |
+| **D7** | socket **0600**, plus a check that `stat(socket).uid` is the owner | socket **0666**; the sealed zone dir is the only boundary | base's container uid is the owner (baked uid, or a future `--user`), so 0600 costs nothing and keeps a second layer if a dir is ever loosened. **Consumers do not rely on either**: they run the sealed-ancestor check (`6gi0` §2), which passes on both |
+| **D8** | in-container dir `/run/webctl` (`cdp.sock`, `xpra.sock`) | `/run/xq-control` (`<control>.sock`) | a base pair is not an xq zone, and nothing reads the in-container path across the boundary. Only the host `path` in the endpoint crosses it, and that is identical in shape |
 
 ## 11. Arms — every one can fail, none touches a real browser
 
@@ -548,7 +480,6 @@ A rebuild is needed only for the image-uid label, and that is optional.
 | A9 | the secret is never disclosed | its bytes appear in any captured spawn argv, opened URL or log line | **self-test:** planting it in a fake log line makes the arm fail |
 | A10 | `exposure()` | a fake legacy pair with **no publish** but `XPRA_TCP_BIND=0.0.0.0:…` without auth reads `owner-only` | a fake owner-only pair reads `owner-only` |
 | A11 | uid gates | `image-uid ≠ getuid` reaches `docker run`; a socket owned by another uid is declared up | matching uid proceeds |
-| A12 | the CDP transport over a socket | against a **fake CDP server on a unix socket the test creates** (`http` + RFC 6455): `Browser.getVersion` fails; a bad `Sec-WebSocket-Accept` is accepted; an unmasked client frame is sent; a 64-bit length or a continuation frame is mis-assembled; ⛔ **any TCP connect or listen happens** (a `net` spy) | the same calls over `{kind:'tcp'}` against a TCP fake succeed |
 | A13 | attach / presence | `tcp://` is emitted in owner-only | `socket://<channelDir>/xpra.sock`; TCP attach carries `--password-file` |
 | A14 | dirs base creates | profile leaf, cache tool root, channel or secret dir created with any group/other bit (asserted with `stat`, under umask 022 **and** 0000) | 0700 under both umasks |
 | A15 | X11 stays off host paths | any mount of `/tmp/.X11-unix` (or of a pulse path) whose source is a **host path** rather than the named volume | the named volume |
@@ -583,10 +514,11 @@ own images; they are this document's measurements made executable.
 ## 12. Open — needs a ruling
 
 * **Q1 — third-party CDP clients that only speak `ws://` over TCP.** Either a
-  per-invocation `tcp-forward` (exposed for its lifetime, as §6.4), or keep
+  per-invocation `tcp-forward` (exposed for its lifetime, as `6gi0` §3–§4), or keep
   `'tcp-legacy'` as the permanent escape hatch.
 * **Q2 — html5 default.** Off is recommended. On means the password flow of §5.3.
-* **Q3 — an `LWC_CDP_UNIX` entrypoint contract.** Should one, plus a
+* **Q3 — an `LWC_CONTROL_CDP_SOCKET` entrypoint contract,** ported from xq's
+  `XQ_CONTROL_CDP_SOCKET` (path confined to the dir, fail-closed exit 78). Should one, plus a
   `CHROMIUM_CONTAINER_ENV_CONTRACT`, eventually replace the sidecar? Dockerfiles stay
   consumer-owned either way.
 * **Q4 — the phase-2 flip.** Confirm the timing, and confirm "refuse only when
@@ -598,7 +530,7 @@ own images; they are this document's measurements made executable.
 * **Q7 — the host firewall by socket owner.** The admin's option; unmeasured.
 * **Q8 — state root vs runtime dir for sockets.** The logout reasoning is not measured
   here.
-* **Q9 — the endpoint field name.** `kind` (as `rx9q`) vs `transport` (as proposed in
-  the queue). Await xq's schema; one name only.
+* ~~**Q9 — the endpoint field name.**~~ ✅ **Resolved by xq's shipped shape:** `kind`
+  stays the image-declared inside, and `transport` is how this host reaches it (`6gi0` §2).
 * **Q10 — D3.** Does xq mount its secret as a file? If so, its rotation is the measured
   trap.

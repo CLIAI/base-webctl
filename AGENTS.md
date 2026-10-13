@@ -132,7 +132,10 @@ live on:
   * **infra** — `infra-directory-structure-f868`, `infra-browser-configuration-v7m2`,
     `infra-cdp-websocket-client-v7x3`, `infra-webdriver-bidi-client-bd1x` (firefox over
     WebDriver BiDi; four constraints measured on Firefox 156: Host header through a tunnel,
-    privileged about:home, one session at a time, readiness is a real upgrade), `infra-client-profile-registry-lf4f`,
+    privileged about:home, one session at a time, readiness is a real upgrade),
+    `infra-unix-control-endpoint-6gi0` (xq's control-endpoint shape consumed exactly —
+    `transport:"unix"`, `path`, `host_header`; a zero-dep unix CDP transport; the owned
+    unix → unix ssh forward, specified for xq's half), `infra-client-profile-registry-lf4f`,
     `infra-config-precedence-2fc5`, `infra-dotenv-configuration-r7m3`,
     `infra-logging-output-sazn`, `infra-storage-path-resolution-v59v`,
     `infra-xpra-remote-access-gateway-f6rd`.
