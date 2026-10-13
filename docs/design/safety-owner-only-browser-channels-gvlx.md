@@ -5,7 +5,7 @@ category: safety
 created: "2026-10-13"
 updated: "2026-10-13"
 status: draft
-tags: [docker-xpra, cdp, xpra, authentication, unix-socket, peercred, multi-user, threat-model, exposure, secrets, migration, fail-closed]
+tags: [docker-xpra, cdp, xpra, authentication, unix-socket, peercred, multi-user, threat-model, exposure, bridge-network, file-modes, x11, pulse, secrets, migration, fail-closed]
 tech:
   - name: "xpra"
     version: "6.4.4 server (xpra-html5 19); 6.5 beta client"
@@ -17,7 +17,7 @@ tech:
     version: "29.7.2"
   - name: "Node.js"
     version: ">=22.12 (measured 22.23)"
-relates_to: [gx7e, f6rd, v7x3, v59v, ow9k, gu1d, k3wn, rx9q, btg4, t2wf, f868]
+relates_to: [gx7e, f6rd, v7x3, v59v, ow9k, gu1d, k3wn, rx9q, btg4, t2wf, f868, rb7s]
 depends_on: [ow9k, v59v]
 expands: []
 similar_to: [gx7e]
@@ -25,267 +25,366 @@ similar_to: [gx7e]
 
 # Owner-only browser channels — xpra and CDP reachable by the owning account alone
 
-> Raised as queue item **B2** (xpra auth) by a consumer lane and by the host admin;
+> Raised as queue item **B2** (xpra auth) by a consumer lane and by the host admin.
 > **B4** (refuse a non-loopback publish host) and **B5** (a per-user CDP channel) are
-> folded in because they are the same property seen from three sides.
-> **Design only — nothing in `lib/` has changed.** Every claim marked *measured* below
-> was measured on throwaway containers built from a consumer's own driver images,
-> never on a running browser (§9 lists each measurement).
+> folded in, because they are the same property seen from three sides.
+> **Design only — nothing in `lib/` has changed.**
+>
+> Every claim marked *measured* was measured on throwaway containers built from a
+> consumer's own driver images. No running browser was connected to, exec'd into or
+> signalled; running pairs were read with `docker ps` / `docker inspect` and `stat`
+> only. The runtime layer (xq) measured the same exposure independently on its own
+> template. Its findings are cited as **xq's** and the divergences are named (§10).
 
 ## 0. The property, in one sentence
 
 ⭐ **Only the account that owns a browser can view it, type into it, or drive it.**
 
-Today nothing enforces that. The docker-xpra driver gives each browser two channels,
-and neither has authentication:
+Today nothing enforces that. The docker-xpra driver gives each browser two network
+channels, and neither has authentication:
 
 | channel | what it grants | today's shape |
 |---|---|---|
 | **CDP** | drive the browser: read cookies, run script, navigate — everything | `socat TCP-LISTEN:<port>,bind=0.0.0.0` in the chromium container, published on host `127.0.0.1:<port>` |
 | **xpra** (native + html5) | see the screen, type, click — a signed-in session | `xpra --bind-tcp=0.0.0.0:<xpraTcpPort>`, no `auth=`, published on host `127.0.0.1:<xpraTcpPort>` |
 
-## 1. ⛔ The finding that changes the design: loopback was never the boundary
+…and file surfaces (X11, pulse, the profile) whose protection is a host directory
+mode (§3).
+
+## 1. ⛔ Loopback was never the boundary — the bridge address
 
 The premise of B2/B4 was *"the ports are published on 127.0.0.1, so only local users
 can reach them"*. **That is half the exposure.**
 
-*Measured:* a container with **no published port at all**, running today's CDP relay
-shape (`socat TCP-LISTEN:<p>,bind=0.0.0.0`), answered `GET /json/version` with the
-browser's websocket URL:
+*Measured (and independently by xq, HTTP 200 from its own throwaway):* a container with
+**no published port at all**, running today's CDP relay shape, answered
+`GET /json/version` with the browser's websocket URL. It answered:
 
-* from **another uid** in the host network namespace, addressed to the container's
-  **bridge address** — no publish involved;
-* from **another container** on docker's default bridge.
+* **another uid** in the host network namespace, addressed to the container's **bridge
+  address** (read from that container's own `docker inspect`);
+* **another container** on docker's default bridge.
 
-The driver's pairs run on the **default bridge** (read-only `docker inspect` of
-running pairs: `HostConfig.NetworkMode = bridge`). ⇒ Every in-container listener bound
-to `0.0.0.0` is reachable by every local user and every default-bridge container,
-**whatever the publish address is.**
+The driver's pairs run on the **default bridge** (read-only `docker inspect` of running
+pairs: `HostConfig.NetworkMode = bridge`).
 
-⇒ Consequences:
+⇒ **Every in-container listener bound to `0.0.0.0` is reachable by every local user and
+every default-bridge container, whatever the publish address.** Only authentication, or
+file permissions, is a boundary.
 
-* **B4 alone closes nothing locally.** It stops a LAN publish (worth doing, §5), but
-  the local exposure survives it.
-* "Remove the publish" is **not** a fix either — the measurement above had none.
-* The fix must remove **every non-loopback TCP listener inside the pair's network
-  namespace**, or put authentication on the ones that remain.
+* **B4 alone closes nothing locally.** It stops a LAN publish (§7), but not the local
+  exposure.
+* **Removing the publish is not a fix** — the measurement above had none.
+* The fix: **no non-loopback TCP listener without authentication**, anywhere in the
+  pair's network namespace.
 
 ⚠ *Also measured:* behind a docker publish, xpra logs the peer of a host-originated
-connection as the **docker bridge gateway**, not the client. ⇒ Any IP-based check
-inside the container is meaningless for local connections (the same trap as `gx7e`
-§4, arrived at from the other direction).
+connection as the **docker bridge gateway**, not the client. ⇒ An IP-based check
+inside the container means nothing for local connections. That is `gx7e` §4's trap,
+reached from the other direction.
 
-## 2. Threat model — who, and what each option does and does NOT stop
+## 2. Threat model — network channels
 
-| actor | today (measured) | B4 only | xpra unix socket + peercred | html5 TCP + `auth=file` | CDP unix socket | host firewall by socket owner (admin) |
-|---|---|---|---|---|---|---|
-| **other local user, no docker** | full control of both channels, via `127.0.0.1` AND the bridge address | no change | ✅ stopped (dir 0700 **and** peercred, two layers measured) | session refused without the password (page and ws upgrade still answer) | ✅ stopped | stopped for host-originated traffic (unmeasured) |
-| **local process of another uid** (daemon, CI runner, sandboxed tool) | same as above | no change | ✅ stopped | as above | ✅ stopped | as above |
-| **another container on the default bridge** | full control via bridge address (measured) | no change | ✅ stopped (no `0.0.0.0` listener left) | session needs the password | ✅ stopped | ❌ forwarded traffic has no socket owner |
-| **process of the SAME uid** (another lane, another tool) | full | full | full | full (can read the secret) | full | n/a |
-| **docker-group co-user** (root-equivalent) | full | full | full via `docker exec`, mount, or `inspect` | full (reads the secret through a mount) | full | full |
-| **another machine on the LAN** | blocked unless the publish host is widened | ✅ refused | — | — | — | — |
-| **a tailnet viewer** | `gx7e`: xq's exposure, allowlist at the socket | — | — | the password becomes a factor that does **not** depend on peer IP (§4.3) | — | — |
+| actor | today (measured) | B4 only | xpra unix socket + peercred | xpra TCP + `auth=file` | CDP unix socket |
+|---|---|---|---|---|---|
+| **other local user, no docker** | full control of both channels, via `127.0.0.1` AND the bridge address | no change | ✅ stopped (dir 0700 **and** peercred — two layers, measured) | no session without the password, published port and bridge address both (measured) | ✅ stopped |
+| **local process of another uid** (daemon, CI runner, sandboxed tool) | same | no change | ✅ | as above | ✅ |
+| **another container on the default bridge** | full control via the bridge address (measured) | no change | ✅ (no listener left) | needs the password | ✅ |
+| **process of the SAME uid** (another lane or tool) | full | full | full | full (can read the secret) | full |
+| **docker-group co-user** (root-equivalent) | full | full | full, via `docker exec` / mount / `inspect` | full (mounts the secret) | full |
+| **another machine on the LAN** | blocked unless the publish host is widened | ✅ refused | — | — | — |
+| **a tailnet viewer** | `gx7e`: xq's exposure with its allowlist | — | — | the password is a factor that does **not** depend on peer IP (§5.3) | — |
 
-⇒ Read the table as **the uid is the boundary**:
+A host firewall that matches on socket owner (`meta skuid`) is the host admin's option,
+outside base and unmeasured here. It cannot see forwarded container traffic (§6.4).
 
-* Below the uid (two lanes of one account): **not a security boundary**, and this
-  design does not pretend otherwise. Same-uid separation is `ow9k`'s job (ownership
-  claims and locks) — it is about *intent*, not *access*.
-* Above the uid (docker group): **root-equivalent by docker's design.** For them this
-  design is **defence in depth only**. It raises the bar from *connect to a port* to
-  *`docker exec` / mount*. That bar is visible in `docker events`, and connecting to a
-  port is not.
-* **For every other local user and process, this design is the whole defence** — and
-  today there is none.
+⇒ **The uid is the boundary.**
 
-## 3. Recommendation, in one table
+* **Below it** (two lanes of one account) is **not a security boundary**, and this
+  design does not pretend otherwise. Same-uid separation is `ow9k`'s job, and it is
+  about *intent*, not *access*.
+* **Above it** (the docker group) is **root-equivalent by docker's design**, so this
+  design is **defence in depth only** there. It raises the bar from *connect to a port*
+  to *`docker exec` or mount*, which `docker events` shows and a port connection does
+  not.
+* **For every other local user and process this is the whole defence**, and today
+  there is none.
 
-| channel | recommended | refused alternatives (why) |
-|---|---|---|
-| **xpra, native attach + presence** | **unix socket** in a host directory mode **0700**, bound with **`auth=peercred`** | password-over-TCP for local use (a secret to manage where none is needed) |
-| **xpra html5** | **off by default** (no TCP published, TCP bound to the netns loopback). When on: TCP with **`auth=file`**, a per-target mode-600 secret in a **directory** mounted read-only | `auth=password,value=…` (the secret lands in argv); a relay onto the unix socket (peercred then sees the relay, and every local user passes) |
-| **CDP** | **unix socket** via the in-container `socat` relay, in the same 0700 directory, socket mode 0600 | host firewall (outside base, root, per-port drift, blind to containers); an authenticating TCP relay (secret in URLs, needs rewriting, still on the bridge); `--remote-debugging-pipe` (only the parent process can use it) |
-| **publish host (B4)** | **refuse** anything but loopback, at the driver **and** at `docker-ctl` | — |
+## 3. Threat model — file surfaces (X11, pulse, xpra socket, profile) — measured for base's driver
 
-## 4. The xpra channel
+xq measured its own template: each zone's X11 and pulse sockets were **mode 0777 in a
+host path every local user can traverse**. With `Xvfb -ac` and anonymous pulse, that
+means anyone can screenshot and type with no network at all. Base's driver was measured
+separately, because its topology differs:
 
-### 4.1 Mechanisms the image's xpra actually supports — measured
+| surface | where it lives in base's driver | mode (measured) | auth (measured) | reachable by a non-docker local user? |
+|---|---|---|---|---|
+| **X11 socket** `X99` | a docker **named volume** (`/tmp/.X11-unix`), shared by the pair — **no host bind** | socket 0777, dir 1777 | Xvfb runs **without `-ac` but also without `-auth`**. A client of **another uid** that reached the socket was admitted (`xdpyinfo` answered). ⇒ effectively no X access control | **No.** The volume sits under docker's data root, which is **0710 root:root**; `stat` of the volume path as the host user → `Permission denied` |
+| **X11 abstract socket** | the pair's network namespace | — | as above | **No.** Abstract sockets are per network namespace |
+| **pulse** `/run/pulse/native` | **inside the xpra container only** — no host bind, and chromium has no pulse mount | 0777 | `auth-anonymous=1` | **No** host path. Reaching it via `/proc/<pid>/root` needs ptrace rights over the container's processes, i.e. the **same uid** |
+| **xpra's own unix socket** (today `/run/xpra/socket`) | inside the container — no host bind | — | default | **No** |
+| **profile dir** (bind into chromium) | `<cacheRoot>/profiles/<slug>/chromium` or a configured `userDataDir` | **0755** on every running pair inspected — `mkdirSync` with no mode under umask 022 | n/a | **Only by accident.** On the measured host an ancestor (`~/.cache`) happened to be 0700. A `userDataDir` under a 0755 home has no such ancestor |
+| **upload staging** (ro into chromium) | per-slug host dir | 0700 (pre-created by the driver) | n/a | No |
 
-The image's xpra is **6.4.4**, and its `auth/` package ships `allow, capability, env,
-exec, fail, file, gss, hosts, http_header, kerberos_*, keycloak, ldap, ldap3,
-multifile, mysql, none, otp, otpscreen, pam, password, peercred, reject, sql, sqlite,
-u2f`.
+⇒ **For base, X11 and pulse are docker-group exposure, not local-user exposure.** The
+named volume is what xq's 0700-parent mitigation gives its zones. It holds only while the
+volume stays a named volume: ⛔ **a change that bind-mounts the X11 directory from a
+host path inherits xq's finding exactly** (arm A15).
+
+⇒ **The profile is base's real file-surface gap.**
+
+* **Rule:** every directory base creates is created **0700** — the profile leaf, the
+  tool's cache root, the channel dir and the secret dir.
+* Base **reports** traversability for paths it did not create (`userDataDir`). It never
+  chmods a lane's own path on its own initiative.
+* *Measured:* tightening the profile dir and the channel dir from 0755 to 0700 **under a
+  running pair** left everything working — the container still wrote to its profile, CDP
+  still opened a tab over the socket, and xpra still answered. This matches xq's
+  measurement on its zones. ⇒ **This mitigation needs no restart.**
+
+## 4. Recommendation, in one table
+
+| channel | recommended | xq (runtime layer) | refused alternatives |
+|---|---|---|---|
+| **xpra, native attach + presence** | **unix socket** in the 0700 channel dir, `auth=peercred` | TCP + `--password-file` | — (D1, §10) |
+| **xpra TCP** (html5) | **auth ON always** — `auth=file`, per-target 0600 secret in a 0700 dir. html5 off ⇒ bound to the **netns loopback**, unpublished; html5 on ⇒ `0.0.0.0` + `127.0.0.1` publish | auth ON always, `--tcp-auth`/`--ws-auth file:filename=…` | `auth=password,value=…` (secret in argv); a relay onto the unix socket (peercred then sees the relay) |
+| **CDP** | **unix socket** relay in the 0700 channel dir; **no TCP listener outside the netns** | the same | host firewall; an authenticating TCP relay; `--remote-debugging-pipe` (§6.4) |
+| **publish host (B4)** | **refuse** non-loopback at the driver **and** at `docker-ctl` | — | — |
+| **dirs base creates** | **0700** at creation; refuse a loosened channel/secret dir | parent data dir 0700 | — |
+
+## 5. The xpra channel
+
+### 5.1 Mechanisms the image's xpra supports — measured
+
+The image's xpra is **6.4.4**. Its `auth/` package ships `allow, capability, env, exec,
+fail, file, gss, hosts, http_header, kerberos_*, keycloak, ldap, ldap3, multifile,
+mysql, none, otp, otpscreen, pam, password, peercred, reject, sql, sqlite, u2f`.
 
 | test | result |
 |---|---|
-| unix socket in a bind-mounted host dir (0700), owner `xpra info socket://…` | ✅ session (`clients=0`) |
-| same, **another uid** (dir 0700) | `Permission denied` at the directory |
-| same, another uid, dir **and** socket opened to the world | `peercred access denied` — **the second layer holds alone** |
-| `--bind-tcp=…,auth=file,filename=…`, right password (6.4.4 and 6.5 clients) | ✅ session |
-| same, wrong password | `authentication failed` |
-| same, no password, stdin closed | **no session** in 25 s — the client blocks on a prompt |
-| same over `ws://` (the html5 transport): no / wrong / right password | no session / `authentication failed` / ✅ session |
-| html5 static page `GET /` with `auth=file` | **200** — the page, and the websocket upgrade (**101**), are served unauthenticated; only the xpra session is gated |
-| baseline: **no `auth=`** (today's shape), another uid via host loopback | ✅ **session** — the exposure, reproduced |
+| unix socket in a bind-mounted host dir (0700): the owner runs `xpra info socket://…` | ✅ session |
+| the same, **another uid** (dir 0700) | `Permission denied` at the directory |
+| the same, another uid, with the dir **and** the socket opened to the world | `peercred access denied` — **layer two holds alone** |
+| `--bind-tcp=…,auth=file,filename=…`: right password (6.4.4 and 6.5 clients) | ✅ session |
+| the same, wrong password / no password | `authentication failed` / **no session** (the client blocks on a prompt, or fails to open one) |
+| the same over `ws://` (the html5 transport) | gated identically — the bind's auth covers both protocols on that socket |
+| the same **via the bridge address**, as another uid: none / wrong / right password | no session / `authentication failed` / ✅ (right password, as the owner) |
+| xq's spelling, `--tcp-auth=file:filename=… --ws-auth=file:filename=…` | ✅ right password admitted, wrong refused, tcp and ws |
+| `GET /` on an `auth=file` socket | **200**, and the websocket upgrade returns **101**. The html5 page is served unauthenticated; only the xpra session is gated |
+| **baseline**: today's shape, no `auth=`, another uid over host loopback | ✅ **session** — the exposure, reproduced |
 
-⛔ **A SYNTAX TRAP THAT FAILS CLOSED BY ACCIDENT.** The form
-`auth=file:filename=/path` (colon — the older `--tcp-auth` spelling) is **accepted at
-startup** and then **refuses every password, including the right one**. xpra 6 wants
-`auth=file,filename=/path` (comma). It fails closed, so it is not a hole — but an arm
-that only tests *"a wrong password is refused"* passes against it. ⇒ **Arm A2 tests
-the right password too.**
+⛔ **A SYNTAX TRAP THAT FAILS CLOSED BY ACCIDENT.** The colon form **inside the bind
+option string**, `--bind-tcp=…,auth=file:filename=/path`, is accepted at startup and
+then **refuses every password, the right one included**.
 
-### 4.2 Recommended shape
+* The two valid spellings are `--bind-tcp=…,auth=file,filename=…` (comma) and
+  `--tcp-auth=file:filename=…` (a separate flag, colon).
+* Mixing them is the trap. Because it fails closed it is not a hole, but an arm that
+  only checks *"a wrong password is refused"* passes against it.
+* ⇒ **Arm A2 checks the right password too.**
+
+### 5.2 Recommended shape — on the stock image, env only
 
 ```
-xpra container
-  XPRA_BIND      = /run/webctl/xpra.sock,auth=peercred        # host: <channelDir>/xpra.sock
-  XPRA_TCP_BIND  = 127.0.0.1:<xpraTcpPort>                     # html5 OFF: netns loopback only
-                 | 0.0.0.0:<xpraTcpPort>,auth=file,filename=/run/webctl-secret/xpra.pass   # html5 ON
-  mounts         = <channelDir>        → /run/webctl          (rw)
-                   <secretDir>         → /run/webctl-secret   (ro, html5 ON only, xpra container ONLY)
-  publish        = none | 127.0.0.1:<xpraTcpPort>  (html5 ON only)
+xpra container (stock entrypoint)
+  XPRA_BIND      = /run/webctl/xpra.sock,auth=peercred
+  XPRA_TCP_BIND  = 127.0.0.1:<xpraTcpPort>,auth=file,filename=/run/webctl-secret/xpra.pass   # html5 OFF
+                 | 0.0.0.0:<xpraTcpPort>,auth=file,filename=/run/webctl-secret/xpra.pass     # html5 ON
+  mounts         = <channelDir> → /run/webctl          (rw)
+                   <secretDir>  → /run/webctl-secret   (ro — a DIRECTORY; xpra container ONLY)
+  publish        = none | 127.0.0.1:<xpraTcpPort>   (html5 ON only)
 ```
 
-✅ **No entrypoint change is needed on the xpra side** — *measured with the stock
-consumer entrypoint*, unmodified. It passes `XPRA_BIND` straight to `--bind=` (its own
-`mkdir -p "$(dirname "$XPRA_BIND")"` copes with the `,auth=` suffix), and
-`XPRA_TCP_BIND` to `--bind-tcp=`. With `XPRA_TCP_BIND=127.0.0.1:<p>` the TCP listener
-is **refused from the host netns at the bridge address** (*measured*). The netns
-loopback is shared only by the pair itself.
+✅ ***Measured:* the stock entrypoint needs no change and no rebuild.**
 
-⚠ **Why `127.0.0.1:<p>` and not "unset" when html5 is off.** The entrypoint declares
-`: "${XPRA_TCP_BIND:=0.0.0.0:14500}"`. `:=` substitutes on **unset OR empty**, so
-base cannot switch TCP off by omission. Omitting it re-arms the masked default the
-driver already warns about, on `0.0.0.0` — the bridge exposure again. ⇒ Base must
-**set** it to the netns loopback.
+* It passes `XPRA_BIND` straight to `--bind=`. Its `mkdir -p "$(dirname "$XPRA_BIND")"`
+  copes with the `,auth=` suffix.
+* It passes `XPRA_TCP_BIND` to `--bind-tcp=`.
+* ⇒ Applying the fix is **a restart, not a rebuild** — as xq found for its images.
 
-### 4.3 How attach keeps working
+*Measured:* the full owner-only shape was run on stock images, and its listener
+inventory read from the pair's own `/proc/net/tcp{,6}`. The only TCP listeners were
+**`127.0.0.1:9222`** (Chromium's own debug port, on the netns loopback) and the xpra
+port. With html5 off, the xpra port is `127.0.0.1` too, and *measured:* it is refused
+from the host at the bridge address.
 
-* **`xpra-attach.js`** — `attachArgs()` gains `socketPath`. In owner-only mode it emits
-  `xpra attach socket://<channelDir>/xpra.sock`, never `tcp://`. *Measured:* the host's
-  6.5 client against the 6.4.4 server over the socket.
-* **`xpra-presence.js`** — `xpra info socket://<path>` instead of `tcp://127.0.0.1:<p>/`.
-  Same `clients=` parse, which is unchanged.
-* **html5 (`gui attach --html5`)** — the URL stays `http://127.0.0.1:<xpraTcpPort>/`.
+⚠ **Why the netns loopback, and not "unset", when html5 is off.** The entrypoint
+declares `: "${XPRA_TCP_BIND:=0.0.0.0:14500}"`, and `:=` substitutes on **unset OR
+empty**. ⇒ Base cannot turn TCP off by omitting the variable: omitting it re-arms a
+masked default on `0.0.0.0`, which is the bridge exposure again.
+
+### 5.3 How attach keeps working
+
+* **`xpra-attach.js`:** `attachArgs()` gains `socketPath`. Owner-only mode emits
+  `xpra attach socket://<channelDir>/xpra.sock`, never `tcp://`. *Measured* with the
+  host's 6.5 client against the 6.4.4 server. TCP attach (remote, or a fallback) passes
+  `--password-file=<secretDir>/xpra.pass`, as xq does.
+* **`xpra-presence.js`:** `xpra info socket://<path>`. The `clients=` parse is unchanged.
+* **html5 (`gui attach --html5`):** the URL stays `http://127.0.0.1:<xpraTcpPort>/`.
   The human types the password into the client's own connect form (`connect.html` has
-  the field; `index.html` reads `password` from the query string **or
-  sessionStorage**).
-  * ⛔ **Base never puts the password in the URL it opens.** `xdg-open <url>` places
-    the URL in a browser process's argv, which **every local user can read** in
-    `/proc/<pid>/cmdline`. That is the disclosure this design exists to stop.
-  * ⇒ Base prints the URL **and the path** of the mode-600 secret, never the secret.
-* **`gx7e` tailnet exposure** — with `auth=file` the remote viewer needs the password
-  too. ⭐ It is a second factor **that does not depend on peer IP**. That is exactly the
-  property `gx7e` §4 found missing behind a relay, so it informs that open question
-  (option (b)).
-* **The gui verbs (`gu1d`)** — `gui status` gains `exposure` (§7.2). `html5Answering`
-  keeps its meaning, a 2xx from `GET html5Url`: the page still answers under
-  `auth=file`, so the field stays honest. It means *the page answers*, **not** *a
-  session is open*.
+  the field; `index.html` also reads `password` from the query string or
+  sessionStorage).
+  * ⛔ **Base never puts the password in a URL it opens.** `xdg-open <url>` places the
+    URL in a browser process's argv, which **every local user can read** from
+    `/proc/<pid>/cmdline`.
+  * ⇒ Base prints the URL and the **path** of the mode-600 secret, never the secret.
+* **`gx7e` tailnet exposure:** the remote viewer needs the password too. ⭐ It is a
+  second factor **that does not depend on peer IP**, the property `gx7e` §4 found
+  missing behind a relay.
+* **The gui verbs (`gu1d`):** `gui status` gains `exposure` (§9). `html5Answering`
+  keeps its meaning, *the page answers* (a 2xx) — still true under `auth=file`. It
+  never meant *a session is open*.
 
-## 5. The CDP channel
+## 6. The CDP channel
 
-### 5.1 Recommended: unix socket via the in-container relay — measured
+### 6.1 Recommended: a unix-socket relay; nothing on TCP outside the netns — measured, stock images
 
 ```
-chromium container (shares the xpra netns)
-  chromium --remote-debugging-port=9222        # netns loopback only (Chromium ≥111 binds 127.0.0.1)
+chromium container (stock entrypoint, shares the xpra netns)
+  LWC_CDP_PORT     NOT set                         # ⇒ the entrypoint starts NO TCP relay
+  cmd              --remote-debugging-port=9222 --remote-allow-origins=*
+                                                   # appended by the entrypoint (argv[1:])
+cdp-relay sidecar (chromium image, --entrypoint socat, --network container:<xpra>)
   socat UNIX-LISTEN:/run/webctl/cdp.sock,fork,mode=0600,unlink-early  TCP:127.0.0.1:9222
-  env   LWC_CDP_UNIX=/run/webctl/cdp.sock      # NEW; LWC_CDP_PORT is NOT set in owner-only mode
-  mount <channelDir> → /run/webctl  (rw)       # the same dir as xpra's socket
+  mount <channelDir> → /run/webctl
 ```
 
-*Measured* (Chromium 148, headless, `--network none`, so the socket was the **only**
-path in):
+*Measured — the whole stack on unmodified images:*
 
-* the owner: `curl --unix-socket … /json/version` → the browser's version JSON;
-* **another uid** with the dir mounted → refused at the 0700 directory;
-* **zero-dep Node 22**:
-  * `http.get({socketPath})` → `/json/version`;
-  * `http.request({socketPath})` + an RFC 6455 upgrade → **101**, then
-    `Browser.getVersion` round-tripped over the socket.
-* ⚠ Node's **built-in `WebSocket` refuses a unix socket** (`Expected a ws: or wss:
-  protocol, got ws+unix:`), and undici's `Agent` is not reachable without a
-  dependency. ⇒ base's client needs its own transport (§5.2). This is not optional.
+* **owner:** `curl --unix-socket <channelDir>/cdp.sock /json/version` → Chromium 148,
+  and `PUT /json/new` opened a tab;
+* **another uid** at the **bridge address**, port 9222 → **connection refused**;
+* **another uid** through the 0700 dir → refused;
+* **zero-dep Node 22:** `http.get({socketPath})` → `/json/version`; then
+  `http.request({socketPath})` + an RFC 6455 upgrade → **101**, and
+  `Browser.getVersion` round-tripped over the socket.
 
-⚠ **The image entrypoint must change on this side**, and it is consumer-owned (base
-ships no dockerfiles):
+Why a **sidecar**, not an entrypoint change: today `LWC_CDP_PORT` both enables
+`--remote-debugging-port` **and** starts `socat TCP-LISTEN:…,bind=0.0.0.0`, which is the
+bridge exposure. Passing the flag as container args, with no `LWC_CDP_PORT`, gets
+Chromium's debug port **without** the TCP relay. `docker-ctl.runDetached` already
+supports `cmd`.
 
-* Today `LWC_CDP_PORT` both enables `--remote-debugging-port` **and** starts
-  `socat TCP-LISTEN:…,bind=0.0.0.0`, which is the bridge exposure.
-* The new contract: `LWC_CDP_UNIX` set ⇒ enable CDP and relay to `UNIX-LISTEN` only.
-* An **old entrypoint ignores the new variable**. Chromium then runs portless, so it
-  **fails closed**: no socket ever appears. The driver must name that cause rather
-  than time out (arm A11).
+* ⇒ **A restart, not a rebuild.**
+* A later `LWC_CDP_UNIX` entrypoint contract can absorb the sidecar (Q3).
+* The sidecar is the pair's third container: owner-labelled and named like its
+  siblings (`ow9k`), started after chromium and stopped with the pair.
 
-### 5.2 How base's CDP client connects (`v7x3`)
+⚠ **"Nothing on TCP" — stated exactly.** Chromium's own `127.0.0.1:9222` stays, on the
+pair's **network-namespace loopback**. That loopback is shared only by the pair's own
+processes; it is unreachable from the host, from the bridge, and from other containers
+(*measured*, bridge address refused). ⇒ The claim base makes is **"no TCP listener
+reachable from outside the pair"**. `--remote-debugging-pipe` would remove even this one,
+but only the process that spawns Chromium can use the pipe (§6.4).
 
-* `getVersion` / `connectBrowser` / `listTargets*` accept **`socketPath`** as an
-  alternative to `host`+`port` (mutually exclusive — both given is refused, per
-  `v7x3`'s refuse-unknown-options rule).
-* HTTP goes through `node:http` with `socketPath`. The websocket goes through a small
-  RFC 6455 client over `http.request({socketPath})`, injected through the
-  **existing `WebSocketImpl` seam** of `CdpSession`. The session code itself does not
-  change.
-* The `webSocketDebuggerUrl` Chromium returns names `localhost` with no port. Over a
-  socket the client uses **its path only** — the host part is meaningless there, so
-  `cdp-rewrite` is bypassed rather than taught a fake host.
+### 6.2 A zero-dep UNIX transport for base's CDP client (`v7x3`)
 
-### 5.3 How `driver.inspect()` reports it
+Today `lib/cdp-client.js` is TCP-only by construction. It uses Node's built-in `fetch`
+(four call sites: `/json/version`, `/json`, `PUT /json/new`, `/json/close/<id>`) and the
+built-in `WebSocket`. *Measured:* the built-in `WebSocket` **refuses a unix socket**
+(`Expected a ws: or wss: protocol, got ws+unix:`), and undici's `Agent` cannot be reached
+without a dependency.
+
+* **An endpoint argument replaces `host`/`port`** at every public entry point.
+  `{kind:'unix', path}` or `{kind:'tcp', host, port}` (§6.3). `host`/`port` remain as
+  shorthand for the TCP form; giving both is refused, per `v7x3`'s refuse-unknown-options
+  rule.
+* **HTTP:** one internal `httpJson(endpoint, path, method)`. TCP keeps `fetch`; unix uses
+  `http.request({socketPath, path, method, headers:{Host:'localhost'}})`. The four call
+  sites go through it.
+* **WebSocket:** a `UnixWebSocket` class, about 150 lines.
+  * It implements exactly the surface `CdpSession` uses: the constructor,
+    `addEventListener('open'|'message'|'error'|'close')`, `send(string)`, `close()`,
+    and `readyState`.
+  * It is injected through the **existing `WebSocketImpl` seam**, so the session code
+    does not change.
+  * The upgrade is `http.request({socketPath, headers:{Upgrade:'websocket', …}})`, and
+    `Sec-WebSocket-Accept` is **verified**.
+  * Framing is base's own, client side:
+    * frames masked;
+    * 7/16/64-bit lengths;
+    * continuation frames reassembled;
+    * ping answered with pong;
+    * close handshake;
+    * text only — no extensions are offered, so none can be negotiated.
+  * `xpra-html5-gateway.js` is the precedent for raw upgrades over `net`/`http`. It pumps
+    bytes and never frames, so the framing is new code and needs its own arms.
+* **The websocket URL:** Chromium's `webSocketDebuggerUrl` names `localhost` with no
+  port. Over a socket only its **path** is used, and `cdp-rewrite` is bypassed rather
+  than taught a fake host.
+
+### 6.3 The endpoint shape — `inspect().ports` and `rx9q`
 
 ```js
-inspect().channels = {
-  dir:   '<channelDir>',                                   // 0700, owner = this uid
-  cdp:   { transport: 'unix', socketPath: '<channelDir>/cdp.sock' }
-       | { transport: 'tcp', host, port },                 // legacy only
-  xpra:  { transport: 'unix', socketPath: '<channelDir>/xpra.sock', auth: 'peercred' },
-  html5: null | { transport: 'tcp', host: '127.0.0.1', port, auth: 'file', secretPath },
+inspect().ports = {
+  cdp:        { value: <cfg port>|null, source,
+                endpoint: { kind: 'unix', path: '<channelDir>/cdp.sock' }      // owner-only
+                        | { kind: 'tcp', host: '127.0.0.1', port } },           // named fallback
+  xpra:       { endpoint: { kind: 'unix', path: '<channelDir>/xpra.sock', auth: 'peercred' } },
+  'xpra-tcp': { value, source,
+                endpoint: { kind: 'tcp', host, port, auth: 'file', published: <bool> } },
+  'xpra-html5': { value, source },                                              // unchanged
 }
-inspect().exposure = { level: 'owner-only' | 'local-users', reasons: [ … ] }   // from cfg
+inspect().channelDir = '<channelDir>'
+inspect().exposure   = { level: 'owner-only' | 'local-users', reasons: [ … ] }  // from cfg
 ```
 
-* ⛔ **In owner-only mode `cdpHttpUrl` and `cdpWsBase` are `null`, not a fabricated
-  URL.** `ports.cdp.value` stays the configured number (it still keys the port mutex),
-  but **`ports.cdp` is no longer a way in**. Per `t2wf`, a field that keeps its old
-  value while its meaning has changed reads as a measurement. ⇒ A consumer that builds
-  a URL from `cdpHttpUrl` must **fail loudly** on `null` rather than connect to
-  nothing.
-* `inspect()` stays pure — it reports what this cfg **would** create. What a **running**
-  pair actually exposes is `exposure()` (§7.2).
+* **`kind`, not `transport`.** `rx9q` already names this field `kind` in
+  `controlEndpoint → {name, kind:"tcp", adapter, host, port}`. A second word for the
+  same field is the drift `rx9q` warns about.
+  ⇒ The unix form extends `rx9q` as `{name, kind:"unix", adapter:"cdp", path}`. ⚠ This
+  is **provisional until xq's schema arrives** (Q9).
+* ⛔ **In owner-only mode `cdpHttpUrl` and `cdpWsBase` are `null`.** They are not
+  fabricated, because no URL reaches the browser. `ports.cdp.value` still keys the port
+  mutex, but the **endpoint** says how to connect. Per `t2wf`, a field that keeps its
+  old value after its meaning has changed reads as a measurement. ⇒ A consumer building
+  a URL from `cdpHttpUrl` must **fail on `null`**, not connect to nothing.
+* `inspect()` stays pure: it reports what this cfg **would** create. What a **running**
+  pair actually exposes comes from `exposure()` (§9).
 
-### 5.4 Alternatives, and why not
+### 6.4 Remote targets, and the alternatives refused
 
-* **Keep loopback TCP, restrict by socket owner with a host firewall** — e.g. an
-  `output` rule rejecting `meta skuid != <owner>` to the CDP port and the bridge
-  subnet. It is **outside base** (root, the host admin's), drifts per port, and is
-  **blind to other containers** (forwarded traffic has no socket owner). ⇒ A valid
-  admin defence in depth, **not measured here**, never base's mechanism.
-* **An authenticating TCP relay** (token in the URL path). The token ends up in URLs,
-  logs and argv. Chromium's JSON would need rewriting to carry it, and the listener is
-  still on the bridge. Strictly weaker than a socket.
-* **`--remote-debugging-pipe`** — only the process that spawned Chromium can use it,
-  which is the in-container entrypoint, not the host client.
+* **Remote targets (`btg4`, `rb7s`): forward unix → unix.**
 
-## 6. B4 — refuse a non-loopback publish host
+  ```
+  ssh -L <local 0700 dir>/cdp.sock:<remote channelDir>/cdp.sock …
+  ```
 
-**Accepted:** `127.0.0.0/8`, `::1`. **Refused:** `0.0.0.0`, `::`, empty, `localhost`
-(docker needs an address, and a name is a location assumed — `nl0c`), and every other
-address, e.g. `192.0.2.10`.
+  The local socket lands in a caller-owned 0700 directory. OpenSSH creates it under
+  `StreamLocalBindMask` (default 0177 ⇒ 0600) — *documented, not measured here*.
+* ⛔ **A forward to a LOCAL TCP port reopens the hole** on a multi-user caller host:
+  every local user there can reach it. ⇒ TCP `127.0.0.1` exists only as an explicit,
+  **named** fallback (`cdp: 'tcp-forward'`), reported as `exposure: local-users` for its
+  lifetime and owned by the process that opened it.
+* **Host firewall by socket owner** (an `output` rule on `meta skuid`) is outside base:
+  it needs root, drifts port by port, and is **blind to other containers**, because
+  forwarded traffic has no socket owner. It is the admin's defence in depth for
+  `'tcp-legacy'` stacks. *Unmeasured.*
+* **An authenticating TCP relay** (a token in the URL path): the token leaks into URLs,
+  logs and argv, Chromium's JSON would need rewriting, and the listener stays on the
+  bridge.
+* **`--remote-debugging-pipe`:** only the process that spawns Chromium can use it, and
+  that is the in-container entrypoint, not a host client.
 
-**Where — refused in both places**, as `gx7e` §2 rules for exposure:
+## 7. B4 — refuse a non-loopback publish host
 
-1. **The driver, in `ensureRunning()` before any docker call** — not in `createDriver()`.
-   A read-only caller (`gui status`) must still be able to construct a driver and
-   **report** the bad host through `exposure.reasons`.
+| | addresses |
+|---|---|
+| **Accepted** | `127.0.0.0/8`, `::1` |
+| **Refused** | `0.0.0.0`, `::`, empty, `localhost`, and every other address (e.g. `192.0.2.10`) |
+
+`localhost` is refused because docker needs an address, and a name is a location assumed
+(`nl0c`).
+
+**Refused in both places**, as `gx7e` §2 rules for exposure:
+
+1. **The driver, in `ensureRunning()`**, before any docker call — not in
+   `createDriver()`, so that a read-only caller (`gui status`) can still construct a
+   driver and **report** the bad host in `exposure.reasons`.
 2. **`docker-ctl.runDetached()`** refuses any `publish` tuple whose host is not
-   loopback. That is the layer every caller passes through, including one that never
-   built a driver.
+   loopback. That covers callers that never built a driver.
 
-`buildDriverCfg()` may refuse earlier, naming the source. It is not the guard, because
-a hand-built cfg skips it (`inspect().portSourcesUnavailable` is the measured
-precedent).
+`buildDriverCfg()` may refuse earlier and name the source. It is not the guard, because a
+hand-built cfg skips it (`portSourcesUnavailable` is the measured precedent).
 
 **Refusal text** (exit 4, CONFIG_ERROR):
 
@@ -301,192 +400,205 @@ another machine use `gui expose` (gx7e), which enforces an allowlist at the sock
 never widen the publish address.
 ```
 
-## 7. Secrets, the channel directory, ownership and naming
+## 8. Secrets, directories, ownership and naming
 
-### 7.1 Where things live
+### 8.1 Where things live
 
 ```
-<stateRoot> = <XDG_STATE_HOME or ~/.local/state>/CLIAI/<CACHE_DIRNAME>      (v59v)
-<key>       = first 12 hex of sha256(realpath(profilePath))                (ow9k §3: key on the TARGET)
+<stateRoot> = <XDG_STATE_HOME or ~/.local/state>/CLIAI/<CACHE_DIRNAME>       (v59v)
+<key>       = first 12 hex of sha256(realpath(profilePath))                 (ow9k §3: key on the TARGET)
 
-<stateRoot>/run/<key>/            0700   channel dir: xpra.sock, cdp.sock (0600, created in-container)
-<stateRoot>/auth/<key>/           0700   secret dir (html5 ON only)
+<stateRoot>/run/<key>/            0700   channel dir: xpra.sock, cdp.sock (0600)
+<stateRoot>/auth/<key>/           0700   secret dir — always minted (auth is always on)
 <stateRoot>/auth/<key>/xpra.pass  0600   ≥32 random bytes, base64url
 ```
 
-* **Why the state root, not `$XDG_RUNTIME_DIR`.** systemd-logind removes the runtime
-  dir at the account's last logout. A container still running then holds a bind mount
-  of a **deleted** directory, its sockets unreachable from the host until a restart.
-  *(Known logind behaviour; not measured here — §10 Q8.)*
+* **Why the state root, not `$XDG_RUNTIME_DIR`.** logind removes the runtime dir at the
+  account's last logout. A pair still running would then hold a bind mount of a
+  **deleted** directory, and its sockets would be unreachable until a restart.
+  *(Known logind behaviour, not measured here — Q8.)*
 * **Why not inside the profile.** The profile is bind-mounted into the **chromium**
-  container, where web content runs, and profiles get copied and exported. The secret
-  must be visible to the **xpra container only** (arm A3).
-* **Never in git, never in an exportable location.** Both roots are outside every
-  repository. `f868`'s `.gitignore` template is the second line, not the first.
-* **sun_path is 108 bytes.** The socket path is checked **before** start and refused
-  with its length. A deep `XDG_STATE_HOME` makes the limit reachable (arm A7).
+  container, where web content runs, and profiles get copied and exported. The secret is
+  mounted into the **xpra container only** (arm A3).
+* **Never in git, and never in an exportable location.** Both roots are outside every
+  repository; `f868`'s `.gitignore` is the second line of defence, not the first.
+* **sun_path is 108 bytes.** The socket path is checked before start and refused with its
+  length (arm A7).
 
-**Creation rules (each is an arm):**
+**Creation rules (each one is an arm):**
 
-* Base **pre-creates** the dirs at 0700. Docker would otherwise create a missing bind
-  source **root-owned**.
-* An existing dir with **group/other bits, or another owner, is REFUSED, not chmodded**.
-  Silently tightening would hide whoever loosened it.
-* The secret is created `O_CREAT|O_EXCL`, mode 0600 **at creation**, never chmodded
-  after a write. A symlink or an existing file at the path is refused, not followed.
+* Every directory base creates gets **0700 at creation**, never a later chmod. Docker
+  would otherwise create a missing bind source **root-owned**.
+* An existing channel or secret dir with group/other bits, or another owner, is
+  **REFUSED, not chmodded**. Silently tightening would hide whoever loosened it.
+* Profile dirs are the exception (§3): base-created ones are made 0700, and a lane's
+  `userDataDir` is reported, never changed.
+* The secret is created `O_CREAT|O_EXCL`, 0600 at creation. A symlink or an existing file
+  at the path is refused, never followed.
 
-### 7.2 Rotation — measured, and the trap it avoids
+### 8.2 Rotation — measured, and the trap it avoids
 
-* **Rotate = write a temp file in the same dir (0600, `O_EXCL`), fsync, `rename()`.**
-  *Measured:* with the **directory** mounted read-only, the new password opened a
-  session and the old one was refused — **no restart**. xpra re-reads the file per
+* **Rotate** = write a temp file in the same dir (0600, `O_EXCL`), `fsync`, then
+  `rename()`. *Measured:* with the **directory** mounted, the new password was admitted
+  and the old one refused, **with no restart** — xpra re-reads the file on every
   connection.
-* ⛔ ***Measured trap:* with the secret mounted as a SINGLE FILE, the same rotation
-  "succeeded" on the host, while the container kept the OLD inode.** The new password
-  was refused; the old one still opened a session. A rotation that reports success
-  and changes nothing is a `k3wn` check that cannot fail. ⇒ **Mount the directory,
-  never the file** (arm A3, proven by I5's control).
-* Rotation happens on every `gui html5 on`, and on demand (`gui html5 rotate`).
-  Sessions already open are not cut. *(Expected from auth-at-connect; not measured.)*
+* ⛔ ***Measured trap:* when the secret is mounted as a SINGLE FILE, the same rotation
+  "succeeds" on the host while the container keeps the OLD inode.** The new password is
+  refused and the old one still opens a session. A rotation that reports success and
+  changes nothing is a `k3wn` check that cannot fail.
+  ⇒ **Mount the directory, never the file** (arm A3, with I5's control).
+* Rotation runs on every `gui html5 on`, and on demand with `gui html5 rotate`. Sessions
+  already open are not cut. *(Expected from auth-at-connect; not measured.)*
 
-### 7.3 Ownership and naming (`ow9k`)
+### 8.3 Ownership and naming (`ow9k`)
 
-* The **owner-only socket is identity by construction for the uid axis** (`ow9k`
-  §4(ii)). Nothing but the owner can reach it, so *"is this browser mine?"* has no
-  stale endpoint to answer wrongly.
-  ⚠ It says nothing about **which lane** of that uid — the claim and the lock remain
-  `ow9k`'s.
-* Before declaring the channel up, the driver checks that **`stat(socket).uid ===
-  process uid`**. This catches an image built for another account. *Measured:* an
-  image whose baked uid differed from the dir owner's could **not create** its socket
-  (`bind(…): Permission denied`) — it fails closed, and the driver must say why (arm
-  A11).
-* The key is the **target** (profile realpath), not the tool. A second tool of the
-  same uid attaching the same profile learns the paths from a label on the xpra
-  container (`<LABEL_NS>.channel-dir`), read with `docker inspect`. The directory
-  is not secret; the label is only a path.
-* The image records its build uid as a label (`<LABEL_NS>.image-uid`, set by
-  `buildImage`, which already passes the `UID` build-arg). The driver checks it
-  **before** `docker run` and refuses a mismatch. Absent ⇒ the post-start socket owner
-  check decides.
+* **The owner-only socket is identity by construction on the uid axis** (`ow9k` §4(ii)):
+  only the owner can reach it. ⚠ It says nothing about **which lane** of that uid; the
+  claim and the lock stay with `ow9k`.
+* **`stat(socket).uid === process uid` is checked before the channel is declared up.**
+  *Measured:* an image whose baked uid differed from the dir owner's could **not create**
+  its socket (`bind(…): Permission denied`). That fails closed, and the driver must name
+  the cause (A11).
+* **The key is the target, not the tool.** A second same-uid tool attaching the same
+  profile reads the paths from a label on the xpra container (`<LABEL_NS>.channel-dir`,
+  via `docker inspect`). The directory path is not secret.
+* **`buildImage` labels the image with its build uid** (`<LABEL_NS>.image-uid`; it
+  already passes `UID` as a build-arg). The driver refuses a mismatch before
+  `docker run`. If the label is absent, the post-start socket-owner check decides.
 
-## 8. Migration — what a lane must do
+## 9. Migration — what a lane must do
 
-⛔ **Taking the fix means restarting the lane's browser container. That is the lane's
-and its owner's call, never base's.** Base never stops, restarts or recreates a running
-pair to apply this.
+⛔ **Taking the fix means restarting the lane's browser pair. That is the lane's and its
+owner's call, never base's.** Base never stops, restarts or recreates a running pair to
+apply it.
 
-**Phase 0 — see the exposure, change nothing (next base release).**
+**Phase 0 — see the exposure; change nothing (next release).**
 
-* `driver.exposure()` — new, async, read-only. It reads the running pair with
-  `docker inspect` only: `HostConfig.PortBindings`, the xpra container's
-  `XPRA_TCP_BIND`/`XPRA_BIND` env, the chromium container's `LWC_CDP_PORT`/
-  `LWC_CDP_UNIX` env, and its mounts. It returns
-  `{level: 'owner-only'|'local-users'|'unknown', reasons[]}`.
-* ⛔ It **must** report `local-users` for an in-container `0.0.0.0` listener **even
-  with no publish** (§1). That is the fallacy this whole design exists to correct.
-  Unknown is reported as unknown, never as safe.
+* `driver.exposure()`: new, async, read-only.
+  * It reads the running pair with `docker inspect` only: `PortBindings`, the xpra env
+    (`XPRA_TCP_BIND`, `XPRA_BIND`), the chromium env (`LWC_CDP_PORT`), whether a relay
+    sidecar exists, the mounts, and `stat` modes of the host bind sources and their
+    parents.
+  * It returns `{level: 'owner-only'|'local-users'|'unknown', reasons[]}`.
+  * ⛔ An in-container `0.0.0.0` listener without auth is `local-users` **even with no
+    publish**. Unknown is never reported as safe.
 * **The doctor / `gui status` line:**
 
   ```
-  exposure  LOCAL-USERS  cdp: tcp 0.0.0.0 in netns, published 127.0.0.1:<p>; xpra: tcp, no auth
-            → any local user can drive this browser. Fix needs a container restart (your call): gvlx §8
-  exposure  owner-only   cdp: unix 0600 in 0700; xpra: unix peercred; html5: off
+  exposure  LOCAL-USERS  cdp: tcp 0.0.0.0 in netns (+ published 127.0.0.1:<p>); xpra: tcp, no auth;
+                         profile dir 0755 (ancestor 0700: yes)
+            → any local user can drive this browser. Fix: restart, your call — gvlx §9
+  exposure  owner-only   cdp: unix 0600 in 0700; xpra: unix peercred + tcp auth=file; html5: off
   ```
 
-**Phase 1 — opt in (same release).** `cfg.channels = 'owner-only'`:
+**Phase 1 — opt in (the same release).**
 
-* consumer images need the chromium entrypoint's `LWC_CDP_UNIX` support, plus the two
-  image labels;
-* the xpra side needs nothing (§4.2);
-* the default stays `'tcp-legacy'`, reported as `local-users` on every bring-up (a
-  WARN, not a refusal).
+* `cfg.channels = 'owner-only'`. **Stock images work** (§5.2, §6.1): bump base, then
+  restart.
+* No-restart mitigations base applies at once: 0700 on dirs it creates, and a doctor
+  hint for a `userDataDir`.
+* The default stays `'tcp-legacy'`, which warns `local-users` on every bring-up.
 
-**Phase 2 — the default flips (the release after).**
+**Phase 2 — flip the default (the release after).**
 
-* `'tcp-legacy'` stays available as an explicit opt-in, still reported as exposed.
+* `'tcp-legacy'` stays available as an explicit opt-in, and is reported as exposed.
 * ⭐ **The backward-compatible window:** `ensureRunning()` that finds a **running legacy
-  pair** reuses it with a loud WARN and `exposure: local-users` — it does **not**
-  refuse, and does not restart it. Bumping base never takes a lane's browser down.
-* It **refuses** only when the cfg **explicitly** says `'owner-only'` and the running
-  pair is not. A lane that asked for the property must not be told it has it.
+  pair** reuses it with a loud WARN and does **not** restart it. Bumping base never takes
+  a lane's browser down.
+* It **refuses** only if the cfg **explicitly** says `'owner-only'` and the running pair
+  is not, because a lane that asked for the property must not be told it has it.
 
-**A lane's checklist.**
+**A lane's checklist:**
 
-1. Bump base. Read `exposure` in `gui status` or the doctor.
-2. Add `LWC_CDP_UNIX` to the chromium entrypoint, plus the labels.
-3. Rebuild the images under the owning uid.
-4. Move CDP callers to base's client with `socketPath`, or to `inspect().channels.cdp`.
-   Third-party CDP clients: §10 Q1.
-5. **The owner restarts the pair** at a time they choose.
-6. Confirm `exposure owner-only`.
+1. Bump base, and read `exposure`.
+2. Move CDP callers to base's client with an endpoint, or to `inspect().ports.cdp.endpoint`.
+   Third-party clients: Q1.
+3. **The owner restarts the pair** at a time they choose.
+4. Confirm `exposure owner-only`.
 
-## 9. Arms — every one can fail, none touches a real browser
+A rebuild is needed only for the image-uid label, and that is optional.
 
-**Unit arms** — fake docker capturing `runDetached` args, as `chromium-docker-xpra.test.js`
-already does. A temp `HOME` with `XDG_*` stripped (`v59v`), and each arm **proves it
-wrote nothing outside its temp root**.
+## 10. Divergences from xq, named
+
+| # | base | xq | why |
+|---|---|---|---|
+| **D1** | native attach and presence over the **unix socket + peercred** | TCP + `--password-file` | no secret on the local hot path; file permissions are the auth, as both chose for CDP. TCP + `--password-file` stays available, and is used for remote attach |
+| **D2** | auth via the **bind option string**, `XPRA_TCP_BIND=…,auth=file,filename=…` | `--tcp-auth=/--ws-auth=file:filename=…` flags | base passes it through the **stock entrypoint's env** with no rebuild. Both spellings are measured to work; mixing them is the trap in §5.1 |
+| **D3** | secret mounted as a **directory** | "a per-zone 0600 secret file … mounted read-only" | if that is a single-file mount, **rotation silently does nothing** (measured, §8.2). Raised to xq to check |
+| **D4** | with html5 off, the xpra TCP bind is on the **netns loopback** | auth-on TCP | the listener leaves the bridge entirely, so there is nothing to brute-force |
+| **D5** | CDP relay as a **sidecar** + Chromium args | built into xq's template | base cannot rebuild consumer images; the sidecar gets the same socket on stock images |
+| **D6** | "nothing on TCP" means **nothing reachable outside the pair**; Chromium's netns-loopback 9222 remains | "no TCP listener at all" | the debug port is inherent to `--remote-debugging-port`; to be checked against xq's template |
+
+## 11. Arms — every one can fail, none touches a real browser
+
+**Unit arms.** These use a fake docker capturing `runDetached` args, as
+`chromium-docker-xpra.test.js` already does, and a temp `HOME` with `XDG_*` stripped
+(`v59v`). Each one **proves it wrote nothing outside its temp root**.
 
 | # | property | fails when | control (must pass) |
 |---|---|---|---|
 | A1 | owner-only publishes nothing | any `publish` tuple captured | html5 on ⇒ exactly one, `127.0.0.1:<xpraTcpPort>` |
-| A2 | xpra binds | `XPRA_TCP_BIND` not `127.0.0.1:` (html5 off); html5 on lacks `,auth=file,filename=`; the colon form appears; `XPRA_BIND` lacks `,auth=peercred` | legacy keeps `0.0.0.0` **and** reports `local-users` |
-| A3 | mounts | channel dir missing on either container; the secret dir on **chromium**; the secret mounted as a **file** | secret dir ro on xpra only |
-| A4 | CDP env | `LWC_CDP_PORT` set, or `LWC_CDP_UNIX` absent, in owner-only | legacy: `LWC_CDP_PORT` set |
-| A5 | B4 | `0.0.0.0`, `::`, `''`, `localhost`, `192.0.2.10` reach any docker call, at the driver **or** at `docker-ctl` | `127.0.0.1`, `127.0.0.2`, `::1` accepted |
-| A6 | dir mode | a pre-existing 0755 or foreign-owner dir is accepted, or silently chmodded | absent ⇒ created 0700; own 0700 ⇒ accepted |
+| A2 | xpra binds | `XPRA_TCP_BIND` lacks `,auth=file,filename=`; html5 off is not `127.0.0.1:`; the colon-in-bind form appears; `XPRA_BIND` lacks `,auth=peercred` | legacy keeps `0.0.0.0` **and** reports `local-users` |
+| A3 | mounts | channel dir missing on xpra or the relay; the secret dir on **chromium**; the secret mounted as a **file** | secret **dir** ro, on xpra only |
+| A4 | CDP shape | `LWC_CDP_PORT` set, no relay sidecar, or chromium `cmd` lacking `--remote-debugging-port` in owner-only | legacy: `LWC_CDP_PORT` set, no sidecar |
+| A5 | B4 | `0.0.0.0`, `::`, `''`, `localhost` or `192.0.2.10` reach any docker call, whether at the driver **or** at `docker-ctl` | `127.0.0.1`, `127.0.0.2`, `::1` accepted |
+| A6 | channel/secret dir mode | a pre-existing 0755 or foreign-owner dir is accepted, or silently chmodded | absent ⇒ created 0700; own 0700 ⇒ accepted |
 | A7 | sun_path | a 108-byte socket path reaches `docker run` | 107 bytes accepted |
-| A8 | secret creation | mode ≠ 0600 at creation; a planted symlink is followed; <32 bytes | fresh path ⇒ 0600, 0700 dir |
-| A9 | secret never disclosed | the secret's bytes appear in any captured spawn argv, opened URL, or log line | **self-test:** planting it in a fake log line makes the arm fail |
-| A10 | `exposure()` | a fake legacy pair with **no publish** but `XPRA_TCP_BIND=0.0.0.0:…` reads `owner-only` | a fake owner-only pair reads `owner-only` |
-| A11 | capability + uid gates | owner-only with an image lacking the cdp-unix label, or with `image-uid ≠ getuid`, reaches `docker run`; a missing socket times out without naming the entrypoint | matching labels proceed |
-| A12 | CDP over a socket | the client accepts a bad `Sec-WebSocket-Accept`; `socketPath`+`port` together accepted | in-process fake (unix-socket HTTP + RFC 6455) answers `Browser.getVersion` |
-| A13 | attach / presence | `tcp://` emitted in owner-only | `socket://<channelDir>/xpra.sock` |
+| A8 | secret creation | mode ≠ 0600 at creation; a planted symlink is followed; fewer than 32 bytes | fresh path ⇒ 0600 in a 0700 dir |
+| A9 | the secret is never disclosed | its bytes appear in any captured spawn argv, opened URL or log line | **self-test:** planting it in a fake log line makes the arm fail |
+| A10 | `exposure()` | a fake legacy pair with **no publish** but `XPRA_TCP_BIND=0.0.0.0:…` without auth reads `owner-only` | a fake owner-only pair reads `owner-only` |
+| A11 | uid gates | `image-uid ≠ getuid` reaches `docker run`; a socket owned by another uid is declared up | matching uid proceeds |
+| A12 | the CDP transport over a socket | against a **fake CDP server on a unix socket the test creates** (`http` + RFC 6455): `Browser.getVersion` fails; a bad `Sec-WebSocket-Accept` is accepted; an unmasked client frame is sent; a 64-bit length or a continuation frame is mis-assembled; ⛔ **any TCP connect or listen happens** (a `net` spy) | the same calls over `{kind:'tcp'}` against a TCP fake succeed |
+| A13 | attach / presence | `tcp://` is emitted in owner-only | `socket://<channelDir>/xpra.sock`; TCP attach carries `--password-file` |
+| A14 | dirs base creates | profile leaf, cache tool root, channel or secret dir created with any group/other bit (asserted with `stat`, under umask 022 **and** 0000) | 0700 under both umasks |
+| A15 | X11 stays off host paths | any mount of `/tmp/.X11-unix` (or of a pulse path) whose source is a **host path** rather than the named volume | the named volume |
 
-**Integration arms** — opt-in, throwaway containers from the consumer's own images.
-These are §4.1/§5.1's measurements made executable. Containers are named
-`<prefix>-design-u<uid>-<pid>-*` and removed by exact name. They publish nothing, or
-only ports verified free on `127.0.0.1`.
+**Integration arms.** These are opt-in and use throwaway containers from the consumer's
+own images; they are this document's measurements made executable.
+
+* Containers are named `<prefix>-design-u<uid>-<pid>-*` and removed by exact name.
+* They publish nothing, or only ports verified free on `127.0.0.1`.
+* The bridge address is read **from the throwaway's own `docker inspect`**, never
+  guessed.
 
 | # | arm | control |
 |---|---|---|
-| I1 | another uid via the mounted dir ⇒ `Permission denied` | owner ⇒ session |
+| I1 | another uid via the mounted channel dir ⇒ `Permission denied` | the owner ⇒ session |
 | I2 | dir **and** socket opened ⇒ still `peercred access denied` | — (proves layer two alone) |
-| I3 | html5 TCP: no password ⇒ no session; wrong ⇒ refused (tcp and ws) | right ⇒ session |
-| I4 | another uid → `<bridge-ip>:<xpraTcpPort>` ⇒ refused (netns-loopback bind) | the legacy shape **answers** — the arm can tell them apart |
-| I5 | rotation via rename, dir mount ⇒ new accepted, old refused | single-file mount ⇒ **old** still accepted (the trap, detected) |
-| I6 | CDP: owner `Browser.getVersion` over the socket | another uid ⇒ refused |
-| I7 | an image with a mismatched baked uid ⇒ socket creation fails, with the driver's named refusal | matching uid ⇒ socket owned by the owner |
+| I3 | xpra TCP: no password ⇒ no session; wrong ⇒ refused — **on the published port AND the bridge address**, tcp and ws | right ⇒ session |
+| I4 | **another uid → `<bridge-ip>`: CDP 9222 refused; xpra port refused (html5 off)** | the legacy shape **answers** at the bridge address, so the arm can tell the two apart |
+| I5 | rotation by rename with a dir mount ⇒ new password admitted, old refused, no restart | a single-file mount ⇒ the **old** password is still admitted (the trap, detected) |
+| I6 | CDP: the owner's `Browser.getVersion` over the socket | another uid ⇒ refused |
+| I7 | an image with a mismatched baked uid ⇒ socket creation fails, and the driver names it | a matching uid ⇒ the socket is owned by the owner |
+| I8 | the listener inventory from the throwaway's `/proc/net/tcp{,6}` contains **no `0.0.0.0`/`::` listener without auth** | the legacy shape lists `0.0.0.0:<cdp>`, so the arm can fail |
+| I9 | `stat` of the X11 volume path as the host user ⇒ denied (0710 data root). An X client of another uid **with** the volume ⇒ admitted — documents the docker-group reach, so nobody mistakes X for an auth layer | — |
+| I10 | tighten the channel and profile dirs 0755 → 0700 under a running throwaway pair ⇒ profile writes, CDP and xpra all keep working | — |
 
-**Measured, 2026-10-13:**
+**Measured 2026-10-13:**
 
-* **Versions.** xpra server 6.4.4-r0 (xpra-html5 19); host xpra client 6.5 beta;
-  Chromium 148.0.7778.178 (Debian 13); socat 1.8.0.3; Docker Engine 29.7.2; Node
-  22.23.
-* **Probes.** All containers were throwaway. No running browser was connected to,
-  inspected beyond `docker ps`/`inspect`, or signalled.
+* **Versions:** xpra server 6.4.4-r0 (xpra-html5 19); host xpra client 6.5 beta; Chromium
+  148.0.7778.178 (Debian 13); socat 1.8.0.3; Docker Engine 29.7.2; Node 22.23.
+* All probes ran in throwaway containers.
 
-## 10. Open — needs a ruling
+## 12. Open — needs a ruling
 
-* **Q1 — third-party CDP clients.** A client that only speaks `ws://` TCP (e.g.
-  `connectOverCDP`-style APIs) cannot use a socket. Options:
-  * a per-invocation loopback forwarder, owned by the calling process and exposed for
-    its lifetime, reported in `exposure`;
-  * or `'tcp-legacy'` kept permanently as the escape hatch.
-* **Q2 — html5 default.** Off is recommended (no TCP at all). On-with-password is the
-  alternative for lanes whose humans live in the html5 client.
-* **Q3 — the chromium entrypoint contract.** Should base ship a
-  `CHROMIUM_CONTAINER_ENV_CONTRACT` (mirroring `XPRA_CONTAINER_ENV_CONTRACT`) and a
-  reference entrypoint snippet for `LWC_CDP_UNIX`? Dockerfiles stay consumer-owned
-  either way.
-* **Q4 — the phase-2 flip and the explicit-cfg refusal (§8).** Confirm the timing, and
-  confirm *"refuse only when owner-only was explicitly requested"*.
-* **Q5 — same-uid lanes.** Accepted as one trust domain (recommended). Per-lane uids
-  are the only real separation and are out of base's scope.
-* **Q6 — docker-group co-users.** Documented as root-equivalent. Rootless or per-user
-  docker daemons are the host admin's call, not base's.
-* **Q7 — the host firewall by socket owner** — the host admin's option for
-  `'tcp-legacy'` stacks. Unmeasured here (root).
-* **Q8 — state root vs runtime dir for sockets.** The logout-removal reasoning in §7.1
-  is known behaviour, not a measurement here. A ruling, or a measurement on a lingering
-  account.
+* **Q1 — third-party CDP clients that only speak `ws://` over TCP.** Either a
+  per-invocation `tcp-forward` (exposed for its lifetime, as §6.4), or keep
+  `'tcp-legacy'` as the permanent escape hatch.
+* **Q2 — html5 default.** Off is recommended. On means the password flow of §5.3.
+* **Q3 — an `LWC_CDP_UNIX` entrypoint contract.** Should one, plus a
+  `CHROMIUM_CONTAINER_ENV_CONTRACT`, eventually replace the sidecar? Dockerfiles stay
+  consumer-owned either way.
+* **Q4 — the phase-2 flip.** Confirm the timing, and confirm "refuse only when
+  owner-only was explicitly requested".
+* **Q5 — same-uid lanes** as one trust domain. Recommended; per-lane uids are out of
+  base's scope.
+* **Q6 — docker-group co-users.** They are root-equivalent. Rootless or per-user
+  daemons are the host admin's call.
+* **Q7 — the host firewall by socket owner.** The admin's option; unmeasured.
+* **Q8 — state root vs runtime dir for sockets.** The logout reasoning is not measured
+  here.
+* **Q9 — the endpoint field name.** `kind` (as `rx9q`) vs `transport` (as proposed in
+  the queue). Await xq's schema; one name only.
+* **Q10 — D3.** Does xq mount its secret as a file? If so, its rotation is the measured
+  trap.
