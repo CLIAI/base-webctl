@@ -452,3 +452,17 @@ test('A15: /tmp/.X11-unix (and any pulse path) is mounted from the NAMED VOLUME,
       'the scan found the X11 mount (not vacuous)');
   } finally { await h.done(); }
 });
+
+// ── the per-target opt-in, through buildDriverCfg ──────────────────────────
+
+test('buildDriverCfg: channels/html5 from JSONC (CLI wins), absent when unset', async () => {
+  const { createClientConfig } = await import('../lib/client-config.js');
+  const c = createClientConfig(/** @type {any} */ (fakeC()));
+  const none = c.buildDriverCfg({ args: {}, dotenv: {}, env: {}, jsonc: {} });
+  assert.ok(!('channels' in none) && !('html5' in none), 'a cfg without them is unchanged');
+  const j = c.buildDriverCfg({ args: {}, dotenv: {}, env: {}, jsonc: { channels: 'owner-only', html5: true } });
+  assert.equal(j.channels, 'owner-only');
+  assert.equal(j.html5, true);
+  const cli = c.buildDriverCfg({ args: { channels: 'tcp-legacy' }, dotenv: {}, env: {}, jsonc: { channels: 'owner-only' } });
+  assert.equal(cli.channels, 'tcp-legacy');
+});
