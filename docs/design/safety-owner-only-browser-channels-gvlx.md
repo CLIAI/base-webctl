@@ -492,6 +492,10 @@ own images; they are this document's measurements made executable.
 * They publish nothing, or only ports verified free on `127.0.0.1`.
 * The bridge address is read **from the throwaway's own `docker inspect`**, never
   guessed.
+* ⛔ **Every xpra client runs in a throwaway container, never on the host.** Without a
+  password file, the host's client opens a GUI password prompt on whatever desktop the
+  shell inherits. It did, on the operator's screen, during this design's measurements
+  (2026-10-13), and the host admin had to stop the runs.
 
 | # | arm | control |
 |---|---|---|
