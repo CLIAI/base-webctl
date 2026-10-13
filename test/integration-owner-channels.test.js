@@ -44,7 +44,7 @@ const CAPS = ['--cpus', '1', '--memory', '1g', '--pids-limit', '512'];
  * …and so is the driver's own pair, through its injectable docker-ctl (TEST-ONLY: the product sets no caps). Each
  * `runDetached` gains them, and nothing else changes.
  */
-const PAIR_CAPS = ['--cpus', '2', '--memory', '4g', '--memory-swap', '4g', '--pids-limit', '512'];
+const PAIR_CAPS = ['--cpus', '1', '--memory', '2g', '--memory-swap', '2g', '--pids-limit', '512'];
 const cappedDocker = { ...dockerCtl, runDetached: (/** @type {any} */ o) => dockerCtl.runDetached({ ...o, extra: [...PAIR_CAPS, ...((o && o.extra) || [])] }) };
 /**
  * What a shared host ALLOWS beyond "no published port, no host network" (its admin's call, named per run):
@@ -167,6 +167,18 @@ function xpraInfoAsUs(root, target, passwordFile) {
   } finally { docker(['rm', '-f', name]); }
 }
 
+/**
+ * `xpra info` AS THE OWNER over the peercred socket, from INSIDE our own pair's xpra container (`docker exec`, the
+ * image's uid = the owner's, its channel dir mounted at /run/webctl): no extra container. A shared host's allowance is
+ * the pair + ONE short-lived uid-65534 probe, so the owner's control check is not a fourth container.
+ * @param {string} xpraContainer our pair's exact name
+ */
+function xpraInfoInPair(xpraContainer) {
+  const r = docker(['exec', xpraContainer, 'sh', '-c',
+    "timeout 20 xpra info socket:///run/webctl/xpra.sock </dev/null 2>&1 | grep -E '^clients=|authentication failed|denied|refused' | head -3"], 60000);
+  return r.out + r.err;
+}
+
 test('the artifact prefix is THIS process\'s and can never name a fleet container (always runs)', () => {
   assert.match(PREFIX, /^webctl-it-p\d+-$/);
   for (const fleet of ['webctl-', 'linkedin-webctl-', 'chatgpt-webctl-']) {
@@ -196,7 +208,7 @@ test('I1 + I2 + I6 + I4 + I8 + I9 + I10 — one owner-only pair (html5 off)', { 
     const c1 = asOther(['--network', 'none', '-v', `${chan}:/run/webctl`], XPRA_IMAGE,
       'timeout 20 xpra info socket:///run/webctl/xpra.sock </dev/null 2>&1 | tail -3');
     assert.match(c1.out, /Permission denied/);
-    assert.match(xpraInfoAsUs(root, `socket://${i.xpra.socket}`), /^clients=/m, 'control: the owner gets a session');
+    assert.match(xpraInfoInPair(N.xpraContainer), /^clients=/m, 'control: the owner gets a session');
 
     // I2: dir AND socket opened to the world ⇒ peercred still refuses (layer two alone).
     fs.chmodSync(chan, 0o755); fs.chmodSync(i.xpra.socket, 0o666);
@@ -236,7 +248,7 @@ test('I1 + I2 + I6 + I4 + I8 + I9 + I10 — one owner-only pair (html5 off)', { 
     fs.chmodSync(udd, 0o755); fs.chmodSync(udd, 0o700);
     fs.chmodSync(chan, 0o755); fs.chmodSync(chan, 0o700);
     assert.match((await getVersion(r.endpoint)).Browser, /Chrome\//);
-    assert.match(xpraInfoAsUs(root, `socket://${i.xpra.socket}`), /^clients=/m);
+    assert.match(xpraInfoInPair(N.xpraContainer), /^clients=/m);
 
     // and the read-only verdict on the live pair
     assert.equal((await drv.exposure()).level, 'owner-only');
