@@ -536,10 +536,22 @@ own images; they are this document's measurements made executable.
 * **The key is `sha256(path.resolve(profilePath))`, not `realpath`.** That is the bring-up
   mutex's key, and it is computable before the profile dir exists, so a read-only
   `inspect()` names the same channel dir that a bring-up creates.
-* **A running owner-only pair under a `'tcp-legacy'` cfg is REFUSED, not reused.** Reuse
-  would hand back a TCP URL that answers nothing, and the existing "CDP unreachable"
-  path would recreate the pair — a restart the owner did not choose. The refusal names
-  both remedies: set `channels:'owner-only'`, or stop the pair yourself.
+* **A pair started owner-only, under a cfg that sets NO `channels`, is ADOPTED** (Q4,
+  re-ruled 2026-10-13: never refuse on an implicit cfg, never downgrade). From then on that driver is
+  owner-only: `inspect()` shows the unix endpoint, `cdpHttpUrl` is `null`, and ONE log line
+  says it adopted. The check runs first in `ensureRunning`, on the xpra container's
+  label whether it is running or stopped. A stopped owner-only pair is therefore brought back
+  owner-only, never recreated as tcp-legacy. A TCP-only caller needs the per-call
+  `tcp-forward` (Q1).
+  * Only an **EXPLICIT** `channels: 'tcp-legacy'` refuses it. Reuse would hand back a TCP URL
+    that answers nothing, and recreating it would restart a browser its owner did not ask to
+    restart.
+  * Adoption is itself refused when this cfg cannot serve owner-only (`containerEnv.LWC_CDP_PORT`
+    is set), or when the pair's channel dir is not the one this cfg derives (another state
+    root). Either would hand back a wrong endpoint.
+  * *Arms (owner-only-driver.test.js):* implicit adopts with nothing new started; a stopped pair
+    comes back owner-only; explicit refuses with nothing touched. The first draft refused the
+    implicit case as well, and these arms are red against it.
 * **`exposure()` has a fourth level, `not-running`.** No pair, so nothing is exposed and
   nothing is known; that is distinct from `unknown`, where inspection failed.
 

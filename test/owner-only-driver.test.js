@@ -381,7 +381,7 @@ test('a RUNNING legacy pair under an explicit owner-only cfg is REFUSED — neve
   } finally { await h.done(); }
 });
 
-test('a RUNNING owner-only pair under a tcp-legacy cfg is REFUSED — never recreated', async () => {
+test('⛔ gvlx Q4: a running owner-only pair under an EXPLICIT channels:\'tcp-legacy\' cfg is REFUSED — never recreated, never downgraded', async () => {
   const pre = harness();
   const names = pre.driver(OO).inspect().names;
   await pre.done();
@@ -391,8 +391,44 @@ test('a RUNNING owner-only pair under a tcp-legacy cfg is REFUSED — never recr
   ] });
   try {
     h.running.get(names.chromiumContainer).args.mounts = [[h.udd, '/x', 'rw']];
-    await assert.rejects(h.driver({}).ensureRunning(), /owner-only/);
+    await assert.rejects(h.driver({ channels: 'tcp-legacy' }).ensureRunning(), /explicitly says\n?\s*'tcp-legacy'/);
     assert.deepEqual(h.calls, []); assert.deepEqual(h.stops, []); assert.deepEqual(h.removed, []);
+  } finally { await h.done(); }
+});
+
+test('⭐ gvlx Q4: an IMPLICIT cfg (no channels) ADOPTS a running owner-only pair — reused, inspect() then shows the unix endpoint, ONE line says so; never refused, never downgraded', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning(); // a real owner-only pair of ours, sockets and all
+    const n = h.calls.length;
+    const d = h.driver({});
+    // CONTROL: before it has seen the pair, the implicit cfg describes tcp-legacy (inspect() is pure)
+    assert.equal(d.inspect().ports.cdp.endpoint.transport, 'tcp');
+    const r = await d.ensureRunning();
+    assert.equal(h.calls.length, n, 'nothing new was started (no recreate, no downgrade)');
+    assert.deepEqual(h.stops, []); assert.deepEqual(h.removed, []);
+    assert.equal(r.endpoint.transport, 'unix');
+    const i = d.inspect();
+    assert.equal(i.channels, 'owner-only');
+    assert.equal(i.ports.cdp.endpoint.transport, 'unix');
+    assert.equal(i.cdpHttpUrl, null, 'no TCP URL is handed out for an adopted owner-only pair');
+    assert.equal(h.logs.filter((l) => /channels: adopted 'owner-only'/.test(l)).length, 1, 'exactly one line says it adopted');
+    assert.ok(!h.logs.some((l) => /^WARN .*LOCAL-USERS/.test(l)), 'an adopted owner-only pair is not reported as legacy');
+  } finally { await h.done(); }
+});
+
+test('⛔ gvlx Q4: a STOPPED owner-only pair under an implicit cfg is brought back owner-only — never recreated as tcp-legacy (a downgrade)', async () => {
+  const h = harness();
+  try {
+    const first = h.driver(OO);
+    await first.ensureRunning();
+    for (const [, c] of h.running) c.up = false; // the pair is there, stopped
+    const d = h.driver({});
+    const r = await d.ensureRunning();
+    assert.equal(r.endpoint.transport, 'unix');
+    assert.equal(d.inspect().channels, 'owner-only');
+    const legacyRuns = h.calls.filter((c) => c.env && (c.env.LWC_CDP_PORT || /0\.0\.0\.0/.test(String(c.env.XPRA_TCP_BIND || ''))));
+    assert.deepEqual(legacyRuns.map((c) => c.name), [], 'a container was (re)created in the tcp-legacy shape');
   } finally { await h.done(); }
 });
 
