@@ -37,6 +37,8 @@ const XPRA_IMAGE = process.env.WEBCTL_IT_XPRA_IMAGE || '';
 const CHROMIUM_IMAGE = process.env.WEBCTL_IT_CHROMIUM_IMAGE || '';
 const PREFIX = `webctl-it-p${process.pid}-`;
 const OTHER = '65534:65534';
+/** Every container THIS file starts itself is capped (a shared host's limits); the driver's own pair is the product's. */
+const CAPS = ['--cpus', '1', '--memory', '1g', '--pids-limit', '512'];
 
 /** @param {string[]} args @param {number} [timeoutMs] */
 function docker(args, timeoutMs = 60000) {
@@ -110,7 +112,7 @@ async function withPair(slug, cfgExtra, fn) {
 function asOther(dockerArgs, image, sh) {
   const name = `${PREFIX}client-${Math.random().toString(16).slice(2, 8)}`;
   try {
-    return docker(['run', '--rm', '--name', name, '--user', OTHER, ...dockerArgs, '--entrypoint', 'sh', image, '-c', sh], 90000);
+    return docker(['run', '--rm', '--name', name, ...CAPS, '--user', OTHER, ...dockerArgs, '--entrypoint', 'sh', image, '-c', sh], 90000);
   } finally { docker(['rm', '-f', name]); }
 }
 
@@ -126,7 +128,7 @@ function xpraInfoAsUs(root, target, passwordFile) {
   const name = `${PREFIX}xinfo-${Math.random().toString(16).slice(2, 8)}`;
   const pf = passwordFile ? ` --password-file=${passwordFile}` : '';
   try {
-    const r = docker(['run', '--rm', '--name', name, '--network', 'host', '-v', `${root}:${root}`,
+    const r = docker(['run', '--rm', '--name', name, ...CAPS, '--network', 'host', '-v', `${root}:${root}`,
       '--entrypoint', 'sh', XPRA_IMAGE, '-c', `timeout 20 xpra info ${target}${pf} </dev/null 2>&1 | grep -E '^clients=|authentication failed|denied|refused' | head -3`], 90000);
     return r.out + r.err;
   } finally { docker(['rm', '-f', name]); }
@@ -237,7 +239,7 @@ test('I5 control + I7 + I4/I8 control — raw throwaways: the traps the driver a
     fs.writeFileSync(path.join(sec, 'p'), 'first-password-0123456789abcdef', { mode: 0o600 });
     const x = `${PREFIX}raw-xpra`; names.push(x);
     const port = await freePort();
-    assert.equal(docker(['run', '-d', '--name', x, '-p', `127.0.0.1:${port}:${port}`, '-v', `${path.join(sec, 'p')}:/s/p:ro`,
+    assert.equal(docker(['run', '-d', '--name', x, ...CAPS, '-p', `127.0.0.1:${port}:${port}`, '-v', `${path.join(sec, 'p')}:/s/p:ro`,
       '--entrypoint', 'xpra', XPRA_IMAGE, 'start', ':95', '--daemon=no', '--xvfb=Xvfb -screen 0 640x480x24 -nolisten tcp -noreset',
       `--bind-tcp=0.0.0.0:${port},auth=file,filename=/s/p`, '--html=on', '--pulseaudio=no', '--mdns=no',
       '--notifications=no', '--bell=no', '--webcam=no', '--printing=no']).code, 0);
@@ -260,7 +262,7 @@ test('I5 control + I7 + I4/I8 control — raw throwaways: the traps the driver a
     // I4/I8 control: today's CDP relay shape (no publish) IS reachable at the bridge address.
     const leg = `${PREFIX}raw-legacy`; names.push(leg);
     const prof = path.join(root, 'prof'); fs.mkdirSync(prof, { mode: 0o700 });
-    assert.equal(docker(['run', '-d', '--name', leg, '--shm-size', '256m', '-v', `${prof}:/home/user/prof`, '--entrypoint', 'sh', CHROMIUM_IMAGE, '-c',
+    assert.equal(docker(['run', '-d', '--name', leg, ...CAPS, '--shm-size', '256m', '-v', `${prof}:/home/user/prof`, '--entrypoint', 'sh', CHROMIUM_IMAGE, '-c',
       'chromium --headless=new --no-sandbox --user-data-dir=/home/user/prof --remote-debugging-port=9222 --remote-allow-origins=* about:blank 2>/dev/null & '
       + 'socat TCP-LISTEN:9333,fork,reuseaddr,bind=0.0.0.0 TCP:127.0.0.1:9222,retry=30,interval=1']).code, 0);
     const lip = docker(['inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', leg]).out.trim();
