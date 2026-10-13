@@ -780,7 +780,7 @@ marker (the env set, plus a plain file) is refused, both on the host and inside 
   | `git` | A, B: the pin check (`ls-tree`, `rev-parse`), the downgrade arms (`checkout`), the PASS line (`describe`) | no | **added** |
   | `ps` (procps) | none of A and B; base's own arms read `/proc` | no | **added**: diagnostics in a shared harness, small |
   | `hostname`, `diff`, `sed`, `awk`, `grep`, `sort`, `mktemp`, `timeout`, `id`, `env` | A, B | yes | (base) |
-  | `xq` | A, B: the no-host-literals step lists machine names with `xq machine ls --json` | no | **REFUSED**: a host-specific tool whose checkout lives under the hidden home, and it needs uv and python. Under docker that step takes the lanes' documented path for an absent xq (NO VERDICT, exit 2, "xq is not installed"). The acceptance runs (below) show what each lane's verdict then is |
+  | `xq` | A, B: the no-host-literals step lists machine names with `xq machine ls --json` | no | **REFUSED**: a host-specific tool whose checkout lives under the hidden home, and it needs uv and python. **(ruling) The DATA goes in instead:** see "Machine names" below, on every backend |
   | `uv`, `python3`, `curl`, `jq` | none of A and B | no | not added until a lane names one |
 * **(ruling) Acceptance on the real target.** Before the merge, each consumer on the policy-blocked
   host that waits on docker passes its OWN `./test-against-base.sh` there, under the docker
@@ -794,6 +794,54 @@ marker (the env set, plus a plain file) is refused, both on the host and inside 
   runs by ID, so a retag mid-run cannot swap it. ⚠ Any user of a shared daemon is root-equivalent
   and could build a same-tagged image. The label check catches an accident, not an attacker.
 * Size: the base is 231 MB. The image adds well under 1 GB.
+
+#### Machine names for a no-host-literals check (every backend) — (ruling, 2026-10-13)
+
+A lane's "no host literal in code" check (nl0c §3, `findHostLiterals`) needs the lane's machine
+names. They used to come from `xq machine ls --json` run INSIDE the sandbox, which broke when the
+home was hidden (DEV_NOTES "xq could not run inside") and cannot work under docker (no xq in the
+image). **Pass the data in, not the tool.** Putting xq in the image would tie the image to xq's
+version, and xq needs its own state, which the sandbox hides anyway. Skipping the check under one
+backend is not allowed either: a check that skips there is a check that cannot fail there (k3wn).
+
+* **Host side, before entering ANY backend** (unshare, bwrap or docker; one mechanism for all):
+  the harness runs `xq machine ls --json` on the HOST, with a bounded timeout and no `--check`, so
+  nothing goes over the network.
+  * ⛔ **Which xq:** only the FIRST `xq` on the caller's PATH, judged by the same planted-xq rule
+    as xq's root (DEV_NOTES "xq could not run inside"): a PATH entry, link or real file in a
+    writable dir, or a real file not named `xq`, is NOT run. Running a planted `xq` on the host,
+    outside the sandbox, would be an escape. An `xq` that is absent or not judged safe, a non-zero
+    exit, a timeout, output that is not JSON, or a `schema` other than 1 → no names are passed,
+    and the verdict says why. A consumer's check then REFUSES by name.
+  * **The names:** each machine's `alias`, and the host part of its `ssh` target (with any
+    `user@` and `:port` removed), deduplicated. An xq with no machines configured gives an EMPTY
+    list. The file is still passed, and the check refuses "no names supplied" (it scans for
+    nothing otherwise).
+* **The file:** one name per line, at the fixed path `/run/.webctl-identity/machine-names`
+  inside, READ-ONLY, and `WEBCTL_MACHINE_NAMES_FILE` is set to that path. ⚠ The path is the same
+  on every backend, so a lane needs one code path.
+  * unshare and bwrap: the names travel in the run's plan over its pipe (never argv, never a file
+    on the host), and the inner half writes them onto the identity files' own tmpfs, which is
+    then made read-only (as `/etc/machine-id`'s neutral copy is). They are gone with the namespace.
+  * docker: a 0600 file in the run's private 0700 channel dir on the host, never in git, bound
+    read-only at that path, and removed with the channel dir on every exit path.
+  * A nested call keeps the variable while the outer call's file is there. A caller's own
+    `WEBCTL_MACHINE_NAMES_FILE` is scrubbed: only `isolated` sets it.
+* ⛔ **The names are private data.** None of them may reach base's repo, a log, argv, an env dump
+  or the verdict. The verdict says only `; machine-names: passed`, or `; machine-names: none
+  (<why>)` with a reason that names no machine. The env var holds a PATH, never a name.
+* **Base owns the check:** `scripts/no-host-literals.mjs`. It reads `WEBCTL_MACHINE_NAMES_FILE`,
+  scans the files git TRACKS in its cwd with `findHostLiterals`, and prints each hit as
+  `path:line` plus the name's index in the file, never the name itself. Exit 0 = clean,
+  1 = found, 2 = REFUSED. It refuses when the variable is unset ("not passed by `isolated`"), the
+  file is unreadable or empty, or no file is tracked. Lanes switch to it at the relocation wake
+  (every lane copies the same script today).
+* **Arms:**
+  * under each backend, a name planted in a fixture is caught through the passed file;
+  * with no file, the check gives the named refusal;
+  * the names never appear in argv, an env dump or the verdict;
+  * a planted `xq` (in a writable PATH dir) is never run on the host;
+  * a schema other than 1 passes nothing, and the reason is named.
 
 #### Selection, verdict, generation
 
