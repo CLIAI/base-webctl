@@ -125,7 +125,10 @@ live on:
     `safety-safe-invocation-file-payloads-r7x2` (argv arrays, file payloads — and
     §1b, the REMOTE shell boundary an argv array does not cross),
     `safety-target-ownership-and-lock-identity-ow9k` (one identity for the X-input
-    lease AND for "is this browser mine"; an unrecognised lock is HELD, never free).
+    lease AND for "is this browser mine"; an unrecognised lock is HELD, never free),
+    `safety-owner-only-browser-channels-gvlx` (xpra and CDP reachable by the owning
+    uid alone: unix sockets in a 0700 dir, peercred, html5 behind a file secret; the
+    container's bridge address means a loopback publish was never the boundary).
   * **ux** — `ux-dual-audience-help-nho9`, `ux-tab-management-lru-1wsg`,
     `ux-ui-state-hygiene-iqrg`, `ux-gui-subcommand-surface-gu1d`.
   * **data** — `data-jsonl-machine-interface-lszd`.
