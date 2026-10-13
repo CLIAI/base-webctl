@@ -29,6 +29,19 @@ test('machineNamesFromXq: alias + the HOST of each ssh target (user@ and :port r
   ]));
   assert.equal(r.why, '');
   assert.deepEqual(r.names, ['box-a', 'box-a.example', 'box-b', 'box-c', '2001:db8::1', 'ok-host']);
+  // a bare IPv6 keeps every colon; an IPv4 address gets no "first label"; no ssh at all is fine
+  assert.deepEqual(machineNamesFromXq(xqJson([{ alias: 'v6', ssh: '2001:db8::2' }, { alias: 'v4', ssh: 'u@192.0.2.7:22' }, { alias: 'none' }])).names,
+    ['v6', '2001:db8::2', 'v4', '192.0.2.7', 'none']);
+});
+
+test('⛔ review: an ssh target in ANY other form refuses the whole list, by a reason naming no machine — never a name that cannot match', () => {
+  for (const bad of ['ssh://h3', 'h4 -p 22', 'u@h6:', '@', 'u@', 'h/x']) {
+    const r = machineNamesFromXq(xqJson([{ alias: 'secret-box', ssh: bad }]));
+    assert.equal(r.names, null, bad);
+    assert.match(r.why, /ssh target that is not \[user@\]host\[:port\] — refused, never guessed/, bad);
+    // (the input itself is not echoed: checked for the inputs long enough to be told apart from the reason's own text)
+    assert.ok(!r.why.includes('secret-box') && (bad.length < 3 || !r.why.includes(bad)), r.why);
+  }
 });
 
 test('⛔ machineNamesFromXq: an unknown schema, no JSON, or no machines list passes NOTHING — and the reason names no machine', () => {
@@ -50,7 +63,7 @@ test('⛔ machineNamesFromXq: an unknown schema, no JSON, or no machines list pa
 /** A fake `xq` in a fresh dir; `mode` its dir's mode. @param {number} mode */
 function fakeXq(mode) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'webctl-fxq-')));
-  fs.writeFileSync(path.join(dir, 'xq'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, 'xq'), '#!/bin/sh\nexit 0\n', { mode: 0o555 }); // read-only: a writable FILE is never trusted
   fs.chmodSync(dir, mode);
   return { dir, done: () => { fs.chmodSync(dir, 0o700); fs.rmSync(dir, { recursive: true, force: true }); } };
 }
@@ -76,6 +89,29 @@ test('⛔ hostMachineNames: an xq in a WRITABLE place is NEVER RUN on the host (
     assert.deepEqual(ran, [path.join(x.dir, 'xq')]);
     assert.deepEqual(ok, { names: ['box-a'], why: '' });
   } finally { x.done(); }
+});
+
+test('⛔ review: xq\'s INTERPRETER is found on a JUDGED PATH — a planted `uv` in a writable PATH entry is never run on the host; nor is a writable xq FILE trusted', () => {
+  // xq is a uv script (`#!/usr/bin/env -S uv run --script`): the kernel resolves `env`, and env resolves `uv`, on the
+  // PATH xq is run with. With the caller's PATH, npm's writable <cwd>/node_modules/.bin came first (review: measured).
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'webctl-fxq2-')));
+  const good = path.join(root, 'good'); const planted = path.join(root, 'planted');
+  const marker = path.join(root, 'PLANTED-RAN');
+  try {
+    fs.mkdirSync(good); fs.mkdirSync(planted);
+    // read-only and in a sealed dir: THIS xq is trusted, so only the PATH judgement can stop the planted interpreter
+    fs.writeFileSync(path.join(good, 'xq'), '#!/usr/bin/env -S fakeuv\n', { mode: 0o555 });
+    fs.writeFileSync(path.join(planted, 'fakeuv'), `#!/bin/sh\necho ran > ${JSON.stringify(marker)}\necho '{"schema":1,"machines":[]}'\n`, { mode: 0o755 });
+    fs.chmodSync(good, 0o555);
+    // the REAL runner (no injected run): PATH = the planted (writable) entry FIRST, then xq's own
+    const r = withPath([planted, good, '/usr/bin', '/bin'], () => hostMachineNames({ home: '/nonexistent-home', writable: [planted], outer: false }));
+    assert.equal(fs.existsSync(marker), false, 'a planted interpreter RAN on the host');
+    assert.equal(r.names, null, JSON.stringify(r));
+    // a WRITABLE xq file (its dir sealed, the file not): never trusted — the sandbox could rewrite it
+    fs.chmodSync(path.join(good, 'xq'), 0o755);
+    const w = withPath([good], () => hostMachineNames({ home: '/nonexistent-home', writable: [], outer: false, run: () => { throw new Error('ran'); } }));
+    assert.match(String(w.why), /^xq ignored: its file is writable/, JSON.stringify(w));
+  } finally { fs.chmodSync(good, 0o755); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('hostMachineNames: no xq, a failing xq, and an outer call that passed none — each NAMED, nothing passed', () => {

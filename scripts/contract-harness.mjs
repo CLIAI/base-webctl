@@ -4117,7 +4117,11 @@ function maskIdentity(tools, machineNames = null) {
     }
     const dir = '/run/.webctl-identity';
     fs.mkdirSync(dir, { mode: 0o755 });
-    const t = mountOrWhy(['-t', 'tmpfs', '-o', 'mode=0755,nosuid,nodev,noexec,size=16k', IDENTITY_SOURCE, dir], 'mount the neutral identity files\' tmpfs');
+    // 16k for the identity copies, plus the machine names' own pages (v0.35.0 review: a large xq inventory hit ENOSPC
+    // on a fixed 16k and was refused as "masking the host's identity failed")
+    const namesText = machineNames ? machineNames.map((n) => `${n}\n`).join('') : '';
+    const size = 16384 + Math.ceil(Buffer.byteLength(namesText) / 4096) * 4096;
+    const t = mountOrWhy(['-t', 'tmpfs', '-o', `mode=0755,nosuid,nodev,noexec,size=${size}`, IDENTITY_SOURCE, dir], 'mount the neutral identity files\' tmpfs');
     if (t) return { why: t };
     /** @type {string[]} */ const done = [];
     for (const [f, text] of IDENTITY_FILES) {
@@ -4133,7 +4137,11 @@ function maskIdentity(tools, machineNames = null) {
       done.push(real);
     }
     // ⭐ the machine names (ib4k §3b), on this same tmpfs: read-only with it, below, and gone with the namespace
-    if (machineNames) fs.writeFileSync(MACHINE_NAMES_PATH, machineNames.map((n) => `${n}\n`).join(''), { mode: 0o444 });
+    if (machineNames) {
+      try { fs.writeFileSync(MACHINE_NAMES_PATH, namesText, { mode: 0o444 }); } catch (e) {
+        return { why: `cannot place the machine names inside (${errCode(e)})` };
+      }
+    }
     // ⛔ THE COPIES' OWN tmpfs, READ-ONLY (review F6): bound and ro, each copy still had a writable NAME in
     // our /run, owned by the real uid — `chmod u+w` + a write there rewrote what /etc/machine-id read
     // (measured). Unlinking them is NOT the fix: the kernel refuses a mount on top of a bind whose
@@ -4378,12 +4386,16 @@ export function machineNamesFromXq(stdout) {
   for (const m of j.machines) {
     if (!m || typeof m !== 'object') continue;
     add(m.alias);
-    if (typeof m.ssh === 'string') {
-      const h = m.ssh.replace(/^[^@]*@/, '');
-      const v6 = h.match(/^\[([^\]]+)\](:\d+)?$/);
-      // `[v6]:port` → v6; `host:port` → host (exactly ONE colon: a bare IPv6 address keeps all of its own)
-      add(v6 ? v6[1] : (h.split(':').length === 2 ? h.replace(/:\d+$/, '') : h));
-    }
+    if (m.ssh === undefined || m.ssh === null || m.ssh === '') continue;
+    // ⛔ STRICT (v0.35.0 review): `[user@]host[:port]`, `[user@][v6][:port]` or a bare IPv6 — anything else
+    // (`ssh://h`, `h -p 22`, `h:`) would yield a name that never matches, and the check would say clean: REFUSED
+    const t = typeof m.ssh === 'string'
+      ? m.ssh.match(/^(?:[^@\s/]+@)?(?:\[([0-9A-Fa-f:.]+)\]|([A-Za-z0-9_.-]+)|([0-9A-Fa-f]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*))(?::(\d+))?$/) : null;
+    if (!t) return { names: null, why: '`xq machine ls --json` has an ssh target that is not [user@]host[:port] — refused, never guessed' };
+    const host = t[1] || t[2] || t[3];
+    add(host);
+    // a dotted NAME (not an IPv4 address): its first label too — code may spell the short name
+    if (t[2] && t[2].includes('.') && !/^[\d.]+$/.test(t[2])) add(t[2].split('.')[0]);
   }
   return { names, why: '' };
 }
@@ -4406,8 +4418,14 @@ export function hostMachineNames(o) {
   const j = judgeXqOnPath(o.home, o.writable);
   if (!j.found || !j.real) return { names: null, why: 'xq is not installed on the host' };
   if (j.ignored) return { names: null, why: `xq ignored: ${j.ignored}` };
+  // ⛔ NOT the caller's env, PATH or cwd (v0.35.0 review, BLOCKER, measured): xq's interpreter is resolved on PATH, and
+  // npm's writable <cwd>/node_modules/.bin came first — a planted `uv` RAN on the host. ⇒ the judged PATH only, cwd /
+  // (no project file of the run's is discovered), and an env of identity only (no UV_*, PYTHON*, XDG_*, display)
+  // HOME is the REAL one (passwd): a caller's $HOME could point uv at a cache the run planted
+  const env = { PATH: j.safePath.join(':'), HOME: o.home, LANG: process.env.LANG || 'C.UTF-8',
+    ...(process.env.USER ? { USER: process.env.USER } : {}), ...(process.env.LOGNAME ? { LOGNAME: process.env.LOGNAME } : {}) };
   const run = o.run || ((/** @type {string} */ bin) => spawnSync(bin, ['machine', 'ls', '--json'],
-    { encoding: 'utf8', timeout: XQ_MACHINES_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'ignore'], env: process.env }));
+    { encoding: 'utf8', timeout: XQ_MACHINES_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'ignore'], env, cwd: '/' }));
   const r = run(j.found);
   if (r.error || r.status !== 0) {
     return { names: null, why: `\`xq machine ls --json\` failed (${r.error ? errCode(r.error) : `exit ${r.status ?? 'by a signal'}`})` };
@@ -4420,7 +4438,12 @@ export function hostMachineNames(o) {
  * path) when the PATH entry, any link of its symlink chain or the real file's dir lies within `writable` or a dir
  * outside the home the caller can write, or the real file is not named `xq`. Shared by xqRoot (re-bind its checkout)
  * and hostMachineNames (RUN it on the host — where a planted xq would be an escape, not a leak).
- * @param {string} home @param {string[]} writable @returns {{found: string, real: string, ignored: string}}
+ * ⛔ v0.35.0 review (hostMachineNames RUNS it): also `ignored` when the real FILE is writable outside the home (a
+ * user-owned file in a root-owned dir: the sandbox sees it as the host does, and could rewrite it), or when a writable
+ * spot lies INSIDE its checkout (a `--keep` of its lib/). `safePath`: the caller's PATH entries a run cannot write —
+ * absolute, not within `writable`, and outside the home only when ROOT-owned and not writable — the PATH xq's own
+ * interpreter (`#!/usr/bin/env -S uv run --script`) is then resolved on.
+ * @param {string} home @param {string[]} writable @returns {{found: string, real: string, ignored: string, safePath: string[]}}
  */
 function judgeXqOnPath(home, writable) {
   /** @type {string[]} */ const spots = [];
@@ -4450,9 +4473,16 @@ function judgeXqOnPath(home, writable) {
     const c = join(d, 'xq');
     try { if (fs.statSync(c).isFile()) { fs.accessSync(c, fs.constants.X_OK); found = c; break; } } catch { /* next */ }
   }
-  if (!found) return { found: '', real: '', ignored: '' };
+  const safePath = String(process.env.PATH || '').split(':').filter((d) => {
+    if (!path.isAbsolute(d) || writableAt(d)) return false;
+    let r = d;
+    try { r = fs.realpathSync.native(d); } catch { return false; }
+    if (isWithin(r, home)) return true; // the home is HIDDEN inside: a run cannot reach it (PATH entries re-bound read-only)
+    try { return fs.statSync(r).uid === 0; } catch { return false; }
+  });
+  if (!found) return { found: '', real: '', ignored: '', safePath };
   let real = '';
-  try { real = fs.realpathSync.native(found); } catch { return { found, real: '', ignored: '' }; }
+  try { real = fs.realpathSync.native(found); } catch { return { found, real: '', ignored: '', safePath }; }
   let ignored = '';
   // (a) every hop: the PATH entry, each link's own dir, and the last hop — the real file's dir (realpath'd)
   for (let cur = found, hop = 0; hop < 64; hop++) {
@@ -4464,7 +4494,20 @@ function judgeXqOnPath(home, writable) {
   }
   // (b)
   if (!ignored && path.basename(real) !== 'xq') ignored = 'not named xq';
-  return { found, real, ignored };
+  // (c) the FILE itself, outside the home: writable by the caller = writable by the sandboxed run
+  if (!ignored && !(home && isWithin(real, home))) {
+    try { fs.accessSync(real, fs.constants.W_OK); ignored = 'its file is writable'; } catch { /* sealed */ }
+  }
+  // (d) its checkout: no writable spot inside it (a --keep of its lib/ would let the run rewrite what xq imports)
+  if (!ignored) {
+    let root = path.dirname(real);
+    for (let d = root; d !== path.dirname(d); d = path.dirname(d)) {
+      if (fs.existsSync(path.join(d, '.git'))) { root = d; break; }
+      if (home && d === home) break;
+    }
+    if (spots.some((sp) => isWithin(sp, root))) ignored = 'its checkout holds a writable path';
+  }
+  return { found, real, ignored, safePath };
 }
 
 /**

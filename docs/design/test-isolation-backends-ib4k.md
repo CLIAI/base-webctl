@@ -815,8 +815,17 @@ backend is not allowed either: a check that skips there is a check that cannot f
     outside the sandbox, would be an escape. An `xq` that is absent or not judged safe, a non-zero
     exit, a timeout, output that is not JSON, or a `schema` other than 1 → no names are passed,
     and the verdict says why. A consumer's check then REFUSES by name.
-  * **The names:** each machine's `alias`, and the host part of its `ssh` target (with any
-    `user@` and `:port` removed), deduplicated. An xq with no machines configured gives an EMPTY
+  * ⛔ **How it is run (review, BLOCKER, measured):** xq is a uv script, and its interpreter is
+    resolved on PATH. With the caller's PATH, npm's writable `<cwd>/node_modules/.bin` came
+    first, and a planted `uv` ran on the host. ⇒ xq runs with a JUDGED PATH: only entries the
+    run cannot write, and an entry outside the home only when it is root-owned. It runs with
+    cwd `/`, and an env of identity only (the real home from passwd; no `UV_*`, `PYTHON*`,
+    `XDG_*` or display). Not trusted either: an xq whose FILE is writable (outside the home),
+    or whose checkout holds a writable path (a `--keep` of its `lib/`).
+  * **The names:** each machine's `alias`, and the host of its `ssh` target, deduplicated.
+    Accepted forms: `[user@]host[:port]`, `[user@][v6][:port]`, or a bare IPv6 address. A dotted
+    name also adds its first label. ⛔ Any other form (`ssh://h`, `h -p 22`, `h:`) refuses the
+    whole list: it would yield a name that never matches, and the check would say clean. An xq with no machines configured gives an EMPTY
     list. The file is still passed, and the check refuses "no names supplied" (it scans for
     nothing otherwise).
 * **The file:** one name per line, at the fixed path `/run/.webctl-identity/machine-names`

@@ -506,6 +506,11 @@ HOST's xq **before entering any backend** and passes the names in, read-only, at
   as `path:line` plus the name's index (never the name), and exits 0 clean, 1 found, 2 REFUSED. It
   refuses by name when the variable is unset or the file is empty or unreadable. Lanes switch at the
   relocation wake.
+* ⛔ **Review (before release), BLOCKER fixed:** a planted interpreter. xq is a uv script, and it
+  was run with the caller's PATH, so a `uv` planted in npm's writable `node_modules/.bin` ran on
+  the host (measured by the reviewer). xq now runs with a JUDGED PATH, cwd `/` and an identity-only
+  env. An xq whose file, or whose checkout, the run could write is not trusted. `ssh` targets are
+  parsed strictly: an unknown form refuses the list. The identity tmpfs is sized for the names.
 * ⚠ **Verdict pins:** a lane that matches the verdict line to its END sees one more clause.
 * Arms: `test/isolation-machine-names.test.js` (a planted xq is never run; the docker command sees
   exactly the host xq's names, compared by digest, read-only, fresh and nested; red with the mount

@@ -375,8 +375,11 @@ test('[docker] §3a.4: the harness SIGKILLed during the CREATE → no container 
   const t = privateTmp();
   try {
     const r = start(['--', 'bash', '-c', 'echo RAN; sleep 300'], { cwd: w.work, env: cleanEnv({ TMPDIR: t.dir }) });
-    // the create is in flight once docker was called: the probe takes several CLI calls first
-    await until(() => false, 900);
+    // the create is in flight once the channel dir AND the reaper exist (the reaper is spawned right before the create)
+    // ⛔ waited for, not slept (review): a SIGKILL before the channel existed made the dir check pass with nothing to test
+    const name = `webctl-iso-u${UID}-work-${r.c.pid}`;
+    assert.ok(await until(() => t.left().length === 1 && pidsWith(['__isolated-reaper', name]).length > 0, 30_000),
+      `CONTROL: no channel dir and reaper before the kill: ${r.err()}`);
     r.c.kill('SIGKILL');
     await r.exited;
     assert.ok(await until(() => containerOf('work', r.c.pid || 0) === '', 45_000), 'a container outlived its harness');
@@ -390,7 +393,8 @@ test('[docker] an EARLY TERM (before the inner half reports in) → the command 
   const t = privateTmp();
   try {
     const r = start(['--', 'sh', '-c', `touch ${marker}`], { cwd: w.work, env: cleanEnv({ TMPDIR: t.dir }) });
-    await until(() => false, 400);
+    // ⛔ the channel dir exists before the TERM (review): else the cleanup arm below would pass with nothing to clean
+    assert.ok(await until(() => t.left().length === 1, 30_000), `CONTROL: no channel dir before the TERM: ${r.err()}`);
     process.kill(-(r.c.pid || 0), 'SIGTERM');
     const end = await r.done;
     assert.equal(end.signal, 'SIGTERM', `${end.code}/${end.signal}\n${r.err()}`);
