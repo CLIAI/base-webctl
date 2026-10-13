@@ -142,3 +142,44 @@ test('B4: buildDriverCfg carries hostSource, so a refusal can say where the host
   assert.equal(c.buildDriverCfg({ args: {}, dotenv: {}, env: {}, jsonc: {} }).hostSource, 'default');
   assert.equal(c.buildDriverCfg({ args: {}, dotenv: {}, env: {}, jsonc: { host: '0.0.0.0' } }).hostSource, 'jsonc:host');
 });
+
+// ── review of v0.34.2, F6: `extra` and the network are not a way around `publish` ──
+
+import { exposureFlagsWhy as reviewExposureFlagsWhy, runDetached as reviewRunDetached } from '../lib/browser-location/docker-ctl.js';
+import { readdirSync as reviewReaddir, readFileSync as reviewRead, statSync as reviewStat } from 'node:fs';
+import { join as reviewJoin, dirname as reviewDirname } from 'node:path';
+import { fileURLToPath as reviewF2p } from 'node:url';
+
+test('⛔ review F6: runDetached refuses a wildcard/LAN publish, -P or the host network smuggled in `extra` or `network` — before docker is touched', async () => {
+  const cases = [['-p', '8080:80'], ['-p', '80'], ['-p8080:80'], ['--publish', '0.0.0.0:8080:80'], ['--publish=192.0.2.5:8080:80'],
+    ['-P'], ['--publish-all'], ['--network', 'host'], ['--net=host'], ['--network=host']];
+  for (const extra of cases) {
+    await assert.rejects(reviewRunDetached({ name: 'webctl-it-never', image: 'never/runs', extra }), /refusing/, extra.join(' '));
+  }
+  await assert.rejects(reviewRunDetached({ name: 'webctl-it-never', image: 'never/runs', network: 'host' }), /refusing/);
+});
+
+test('review F6, logic: loopback publishes and a pair namespace pass — CONTROL for the refusals above', () => {
+  for (const ok of [['-p', '127.0.0.1:8080:80'], ['--publish=127.0.0.1:1:2'], ['-p', '[::1]:8080:80'], ['--network', 'container:webctl-x-xpra'],
+    ['--network', 'none'], ['--shm-size=1g']]) {
+    assert.equal(reviewExposureFlagsWhy(ok), '', ok.join(' '));
+  }
+});
+
+test('⛔ review F6, source: no lib code starts a container with a raw `run([\'run\'|\'create\', …])` — runDetached is the one way (its B4 claim depends on it)', () => {
+  const lib = reviewJoin(reviewDirname(reviewF2p(import.meta.url)), '..', 'lib');
+  /** @type {string[]} */ const hits = [];
+  const walk = (/** @type {string} */ d) => {
+    for (const n of reviewReaddir(d)) {
+      const p = reviewJoin(d, n);
+      if (reviewStat(p).isDirectory()) walk(p);
+      else if (n.endsWith('.js')) {
+        // CODE only: a comment may name the forbidden shape (docker-ctl's own does, to forbid it)
+        const code = reviewRead(p, 'utf8').split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+        if (/\brun\(\s*\[\s*['"](run|create)['"]|['"]container['"]\s*,\s*['"](run|create)['"]/.test(code)) hits.push(p);
+      }
+    }
+  };
+  walk(lib);
+  assert.deepEqual(hits, []);
+});
