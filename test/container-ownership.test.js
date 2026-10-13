@@ -1014,3 +1014,19 @@ test('DECIDED: shutdown() that cannot READ ownership (daemon down) refuses and d
   assert.equal(released, 0, 'our lock is not released without proof the browser is stopped');
   assert.deepEqual(d.verbs.filter((v) => MUTATION.test(v)), []);
 });
+
+test('⛔ review 3 item 4: tcp-legacy too — a RUNNING pair proven ours whose CDP stays SILENT is refused (exit 3): the browser is never removed, stopped or recreated', async () => {
+  const cdp = await cdpEndpoint(() => false); // listening, but CDP never answers
+  try {
+    const r = await up({ [CHROMIUM]: ours({ running: true }), [XPRA]: xpraOf({ running: true }) }, { cdpPort: cdp.port });
+    assert.equal(r.result, undefined, 'a silent pair must not be handed back');
+    assert.ok(r.error, 'must refuse');
+    assert.equal(r.error.exitCode, 3, String(r.error.message));
+    assert.match(String(r.error.message), /is RUNNING, but CDP did not answer at http:\/\/127\.0\.0\.1:\d+\.\n.*never recreated automatically/);
+    assert.deepEqual(r.removed, [], r.verbs.join(', '));
+    assert.deepEqual(r.stopped, [], r.verbs.join(', '));
+    assert.deepEqual(r.started, [], r.verbs.join(', '));
+    assert.equal(r.ctrs.get(CHROMIUM).id, `id-${CHROMIUM}`, 'the same browser container');
+    assert.ok(r.ctrs.get(CHROMIUM).running, 'it still runs');
+  } finally { await cdp.close(); }
+});
