@@ -130,4 +130,7 @@ test('⛔ review 2 (low): a docker argv that hands a container a display is refu
     assert.throws(() => guardedSpawnSync('docker', args, { env: { PATH: '/nonexistent' } }), /RULE ZERO/, args.join(' '));
   }
   assert.equal(displayIntoContainer(['run', '--rm', '-e', 'HOME=/tmp', '-v', '/a:/b', 'img']), '', 'CONTROL');
+  // CONTROL: a named docker VOLUME at /tmp/.X11-unix INSIDE (a pair's own private Xvfb — integration arm I9) is not the host display
+  assert.equal(displayIntoContainer(['run', '-v', 'webctl-it-p1-x11:/tmp/.X11-unix', 'img']), '', 'a private Xvfb volume was refused');
+  assert.equal(displayIntoContainer(['run', '--mount', 'type=volume,src=webctl-x11,dst=/tmp/.X11-unix', 'img']), '');
 });

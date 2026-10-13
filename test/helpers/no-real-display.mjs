@@ -83,8 +83,14 @@ export function displayIntoContainer(args) {
     const next = String(args[i + 1] || '');
     const envVal = a === '-e' || a === '--env' ? next : a.startsWith('--env=') ? a.slice(6) : /^-e[A-Z_]/.test(a) ? a.slice(2) : null;
     if (envVal !== null && /^(DISPLAY|WAYLAND_DISPLAY|XAUTHORITY)(=|$)/.test(envVal)) return `it passes ${envVal.split('=')[0]} into the container`;
+    // the HOST SOURCE of a mount is what is judged — a named docker VOLUME at /tmp/.X11-unix inside (the pair's own
+    // private Xvfb, integration arm I9) is not the host's display
+    const isMount = a === '--mount' || a.startsWith('--mount=');
     const mountVal = a === '-v' || a === '--volume' || a === '--mount' ? next : /^--(volume|mount)=/.test(a) ? a.replace(/^--(volume|mount)=/, '') : /^-v./.test(a) ? a.slice(2) : null;
-    if (mountVal !== null && /\/tmp\/\.X11-unix|\.Xauthority|wayland-\d/.test(mountVal)) return 'it mounts the X11/Wayland socket or an Xauthority into the container';
+    if (mountVal !== null) {
+      const src = isMount ? ((mountVal.match(/(?:^|,)(?:src|source)=([^,]+)/) || [])[1] || '') : mountVal.split(':')[0];
+      if (src.startsWith('/') && /\/tmp\/\.X11-unix|\.Xauthority|wayland-\d|\/run\/user\/\d+/.test(src)) return 'it mounts the host\'s X11/Wayland socket, its runtime dir or an Xauthority into the container';
+    }
   }
   return '';
 }
