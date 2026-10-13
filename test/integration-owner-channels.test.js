@@ -29,6 +29,7 @@ import path from 'node:path';
 
 import { xpraSpawnGuard, displayless } from './helpers/no-real-display.mjs';
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
+import * as dockerCtl from '../lib/browser-location/docker-ctl.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
 import { rotateSecret } from '../lib/browser-location/owner-channels.js';
 import { getVersion } from '../lib/cdp-client.js';
@@ -37,8 +38,24 @@ const XPRA_IMAGE = process.env.WEBCTL_IT_XPRA_IMAGE || '';
 const CHROMIUM_IMAGE = process.env.WEBCTL_IT_CHROMIUM_IMAGE || '';
 const PREFIX = `webctl-it-p${process.pid}-`;
 const OTHER = '65534:65534';
-/** Every container THIS file starts itself is capped (a shared host's limits); the driver's own pair is the product's. */
+/** Every container THIS file starts itself is capped (a shared host's limits). */
 const CAPS = ['--cpus', '1', '--memory', '1g', '--pids-limit', '512'];
+/**
+ * …and so is the driver's own pair, through its injectable docker-ctl (TEST-ONLY: the product sets no caps). Each
+ * `runDetached` gains them, and nothing else changes.
+ */
+const PAIR_CAPS = ['--cpus', '1', '--memory', '2g', '--pids-limit', '1024'];
+const cappedDocker = { ...dockerCtl, runDetached: (/** @type {any} */ o) => dockerCtl.runDetached({ ...o, extra: [...PAIR_CAPS, ...((o && o.extra) || [])] }) };
+/**
+ * What a shared host ALLOWS beyond "no published port, no host network" (its admin's call, named per run):
+ *   WEBCTL_IT_HOST_NETWORK=1  short-lived uid-65534 clients on the host network (I4; xpra info over TCP: I3, I5)
+ *   WEBCTL_IT_PUBLISH=1       loopback publishes on ephemeral ports this run verified free (I3/I5 html5, the raw arm)
+ * Without one, the arms that need it SKIP, saying which — they are never quietly passed.
+ */
+const HOST_NET = process.env.WEBCTL_IT_HOST_NETWORK === '1';
+const PUBLISH = process.env.WEBCTL_IT_PUBLISH === '1';
+const NEEDS_HOST_NET = 'needs WEBCTL_IT_HOST_NETWORK=1 (a short-lived client on the host network) — this host has not allowed it';
+const NEEDS_PUBLISH = 'needs WEBCTL_IT_PUBLISH=1 (a loopback publish) — this host has not allowed it';
 
 /** @param {string[]} args @param {number} [timeoutMs] */
 function docker(args, timeoutMs = 60000) {
@@ -94,7 +111,7 @@ async function withPair(slug, cfgExtra, fn) {
   const xpraTcpPort = await freePort(); // explicit and verified free — never a derived guess
   const logs = /** @type {string[]} */ ([]);
   const logger = { info: (/** @type {string} */ s) => logs.push(s), warn: (/** @type {string} */ s) => logs.push(s), debug: () => {} };
-  const drv = createChromiumDockerXpra(C, { mounts, stateRoot })
+  const drv = createChromiumDockerXpra(C, { mounts, stateRoot, docker: cappedDocker })
     .createDriver({ port, xpraTcpPort, host: '127.0.0.1', slug, base: /** @type {any} */ (m)[2], userDataDir: udd, logger, ...cfgExtra });
   const N = drv.inspect().names;
   try {
@@ -127,8 +144,11 @@ function asOther(dockerArgs, image, sh) {
 function xpraInfoAsUs(root, target, passwordFile) {
   const name = `${PREFIX}xinfo-${Math.random().toString(16).slice(2, 8)}`;
   const pf = passwordFile ? ` --password-file=${passwordFile}` : '';
+  // a socket target needs no network at all; only a TCP/ws target needs the host's (an allowance: HOST_NET)
+  const net = /^socket:/.test(target) ? 'none' : 'host';
+  if (net === 'host' && !HOST_NET) throw new Error(`xpraInfoAsUs(${target}): ${NEEDS_HOST_NET}`);
   try {
-    const r = docker(['run', '--rm', '--name', name, ...CAPS, '--network', 'host', '-v', `${root}:${root}`,
+    const r = docker(['run', '--rm', '--name', name, ...CAPS, '--network', net, '-v', `${root}:${root}`,
       '--entrypoint', 'sh', XPRA_IMAGE, '-c', `timeout 20 xpra info ${target}${pf} </dev/null 2>&1 | grep -E '^clients=|authentication failed|denied|refused' | head -3`], 90000);
     return r.out + r.err;
   } finally { docker(['rm', '-f', name]); }
@@ -146,7 +166,7 @@ test('integration arms run here, or say exactly why not', { skip: SKIP || false 
   assert.ok(XPRA_IMAGE && CHROMIUM_IMAGE);
 });
 
-test('I1 + I2 + I6 + I4 + I8 + I9 + I10 — one owner-only pair (html5 off)', { skip: SKIP || false, timeout: 300000 }, async () => {
+test('I1 + I2 + I6 + I4 + I8 + I9 + I10 — one owner-only pair (html5 off)', { skip: SKIP || false, timeout: 300000 }, async (t) => {
   await withPair('oo', { channels: 'owner-only' }, async ({ drv, r, N, ip, udd, root }) => {
     const i = drv.inspect();
     const chan = /** @type {string} */ (i.channelDir);
@@ -175,12 +195,14 @@ test('I1 + I2 + I6 + I4 + I8 + I9 + I10 — one owner-only pair (html5 off)', { 
 
     // I4: another uid from the HOST netns, at the bridge address read from docker inspect.
     assert.ok(ip, 'the throwaway has a bridge address');
+    if (!HOST_NET) { t.diagnostic(`I4 NOT RUN: ${NEEDS_HOST_NET}`); } else {
     const c4 = asOther(['--network', 'host'], CHROMIUM_IMAGE,
       `curl -sS -m 5 http://${ip}:9222/json/version 2>&1 | head -1; `
       + `curl -sS -m 5 http://${ip}:${i.xpraTcpPort}/ 2>&1 | head -1`);
     assert.doesNotMatch(c4.out, /webSocketDebuggerUrl|websockets client/, c4.out);
     // ⛔ and the client RAN: both connects were refused, not silently skipped
     assert.equal((c4.out.match(/^curl: \(7\)/gm) || []).length, 2, c4.out);
+    }
 
     // I8: the pair's own listener inventory — nothing non-loopback.
     const tcp = docker(['exec', N.xpraContainer, 'sh', '-c', 'cat /proc/net/tcp /proc/net/tcp6']).out;
@@ -208,7 +230,7 @@ test('I1 + I2 + I6 + I4 + I8 + I9 + I10 — one owner-only pair (html5 off)', { 
   });
 });
 
-test('I3 + I5 — html5 on: password on the published port AND the bridge address; rotation', { skip: SKIP || false, timeout: 300000 }, async () => {
+test('I3 + I5 — html5 on: password on the published port AND the bridge address; rotation', { skip: SKIP || (!PUBLISH && NEEDS_PUBLISH) || (!HOST_NET && NEEDS_HOST_NET) || false, timeout: 300000 }, async () => {
   await withPair('h5', { channels: 'owner-only', html5: true }, async ({ drv, ip, root }) => {
     const i = drv.inspect();
     const secretDir = path.join(path.dirname(path.dirname(/** @type {string} */ (i.channelDir))), 'auth', path.basename(/** @type {string} */ (i.channelDir)));
@@ -230,7 +252,7 @@ test('I3 + I5 — html5 on: password on the published port AND the bridge addres
   });
 });
 
-test('I5 control + I7 + I4/I8 control — raw throwaways: the traps the driver avoids', { skip: SKIP || false, timeout: 300000 }, async () => {
+test('I5 control + I7 + I4/I8 control — raw throwaways: the traps the driver avoids', { skip: SKIP || (!PUBLISH && NEEDS_PUBLISH) || (!HOST_NET && NEEDS_HOST_NET) || false, timeout: 300000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'webctl-it-raw-'));
   const names = /** @type {string[]} */ ([]);
   try {
