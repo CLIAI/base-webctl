@@ -1030,3 +1030,23 @@ test('⛔ review 3 item 4: tcp-legacy too — a RUNNING pair proven ours whose C
     assert.ok(r.ctrs.get(CHROMIUM).running, 'it still runs');
   } finally { await cdp.close(); }
 });
+
+const RELAY = 'demo-webctl-u4242-cdprelay-test';
+
+test('⛔ review 3 item 5: an inspection that FAILED is never read as absent — a running, CDP-answering pair whose RELAY cannot be inspected is refused, nothing touched; the refusal names the operation (reuse), not "remove" (nit 6c)', async () => {
+  const cdp = await cdpEndpoint();
+  try {
+    for (const shape of /** @type {Array<Record<string, any>>} */ ([
+      { [CHROMIUM]: ours({ running: true }), [XPRA]: xpraOf({ running: true }), [RELAY]: 'fail' },
+      { [CHROMIUM]: ours({ running: true }), [XPRA]: xpraOf({ running: true }), [RELAY]: 'garbage' },
+    ])) {
+      const r = await up(shape, { cdpPort: cdp.port });
+      assert.equal(r.result, undefined, 'a pair with an uninspectable container must not be handed back');
+      assert.ok(r.error, 'must refuse');
+      assert.equal(r.error.exitCode, 4, String(r.error.message));
+      assert.match(String(r.error.message), new RegExp(`REFUSING to reuse container ${RELAY} — its ownership could not be read`));
+      assert.doesNotMatch(String(r.error.message), /REFUSING to remove/, 'nothing was going to be removed');
+      assert.deepEqual([...r.removed, ...r.stopped, ...r.started], [], r.verbs.join(', '));
+    }
+  } finally { await cdp.close(); }
+});
