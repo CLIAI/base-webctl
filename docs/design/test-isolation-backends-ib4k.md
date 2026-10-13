@@ -566,7 +566,7 @@ the harness). Lanes find v0.34-vendored harnesses with "who is below 9".
    set). A nested `isolated` that PROVES it is inside runs the command in place. *Arm:* a nested
    call under the docker backend passes the §1 arm set and never escapes; a forged marker
    (no such mount) is refused.
-4. **Reaping, signals, no leftovers.** `--init` for pid 1 (orphans reaped, as v0.33.0 does
+4. **Reaping, signals, no leftovers.** `--init` for pid 1 (*as built:* our own reaping bash, §3b) (orphans reaped, as v0.33.0 does
    for the namespace backend); SIGTERM forwarded to the container; `--rm` plus a parent-death
    cleanup. *Arm:* kill the outer harness mid-run → no container is left.
 5. **A shared daemon (one host's daemon serves five accounts): recognisable, owned, bounded,
@@ -627,9 +627,10 @@ backends.
    check and the daemon's resolve would bind whatever it then points at, with root's reach. The
    check makes the daemon bind exactly what the caller named. *Arm:* a `--keep` and a cwd through a
    symlinked component → refused before any `create` (fake CLI).
-3. **The reaper first** (§3a.4, hard point (a)). A host-side process, spawned `detached`
-   through `env --ignore-signal=TERM,INT,HUP,QUIT`, reads a pipe whose only write end the
-   harness holds. On EOF it runs `docker rm -f <exact name>` and, once the harness has written
+3. **The reaper first** (§3a.4, hard point (a)). A host-side process (node), spawned `detached`,
+   reads a pipe whose only write end the harness holds. It CATCHES and drops TERM, INT, HUP and
+   QUIT in-process. *Measured:* `env --ignore-signal` does not hold for it, because node resets
+   every inherited disposition at start (SigIgn 0). The arm reads its SigCgt and sends it a TERM. On EOF it runs `docker rm -f <exact name>` and, once the harness has written
    it, `<exact id>`. EOF is how the reaper learns the harness died, by ANY signal, SIGKILL
    included. It needs no parent-death signal and no polling. The container name is fixed BEFORE
    the create, so the reaper can remove a container whose create was still in flight; it retries
@@ -646,7 +647,7 @@ backends.
    and the reaper holds it. The flags:
 
        --name webctl-iso-u<uid>-<lane>-<pid>   --label org.cliai.webctl-iso.owner=u<uid>
-       --init --rm  --network none  --read-only  --cap-drop ALL
+       --rm  --network none  --read-only  --cap-drop ALL
        --security-opt no-new-privileges  --user <uid>:<gid>  --hostname webctl-isolated
        --cpus <c> --memory <m> --pids-limit <p>
        --tmpfs /tmp:mode=1777 --tmpfs /var/tmp:mode=1777 --tmpfs /run:mode=1777
@@ -654,29 +655,47 @@ backends.
        --mount type=bind,src=/dev/null,dst=<host socket under a bind>,readonly   (each one)
        -v <channel>/machine-id:/etc/machine-id:ro   (and /var/lib/dbus/machine-id)
        -v <channel dir>:/run/webctl-isolated:ro
-       <image id> node … __isolated-docker
+       --interactive <image id> /bin/bash … PID1_REAPER … node … __isolated-docker -- <cmd…>
+
+   *As built:* pid 1 is the harness's own reaping bash (`PID1_REAPER`, the same as on the namespace
+   backends, with no keyctl), NOT `--init`. *Measured:* `--init` binds the host's `docker-init`
+   into the container as a SLAVE mount (`master:1`), so a later host mount there would appear
+   inside. The propagation read-back refused it, correctly. A bind whose propagation we do not
+   control is not used.
 
    ⛔ Never `--privileged`, `seccomp=unconfined`, `apparmor=unconfined`, a published port, the host
    network, `--pid host`, `--ipc host`, `--userns host`, or a docker.sock mount (§3a.2,
    §3a.5). `<lane>` is `[a-z0-9-]{1,24}` from `WEBCTL_LANE`, else from the cwd's basename. The
    defaults are `--cpus 2 --memory 4g --pids-limit 4096`, overridable via `WEBCTL_ISOLATION_DOCKER_CPUS`,
    `_MEMORY` and `_PIDS`. ⛔ Never prune. Removal is only by exact id or exact name (§3a.5).
-5. **The channel** is a private `0700` dir (`mkdtemp`) holding three FIFOs: `plan` (in), `status`
-   (out) and `go` (in). It is bound read-only at `/run/webctl-isolated`. *Measured:* a FIFO in a
-   read-only bind is read and written across the container boundary. The plan is the same JSON
-   the namespace backends send on fd 4: the command's env, the binds, the host socket list and
-   the ids. ⇒ The command's env is never on any argv, never in the CLI's env, never in `docker
-   inspect` (row 11). The dir is removed when the run ends.
+5. **The channel** is a private `0700` dir (`mkdtemp`), bound read-only at `/run/webctl-isolated`.
+   It holds `plan.json` (`0600`), `marker`, the neutral `machine-id`, and two FIFOs: `status` (out)
+   and `go` (in). *Measured:* a FIFO in a read-only bind is read and written across the container
+   boundary. The harness holds each FIFO `O_RDWR`, so the inner half's open never blocks, and
+   closing `go` unanswered is EOF for it. The plan is a FILE, not a FIFO: the host side would block
+   opening a FIFO for write before the container exists. It is the same JSON the namespace
+   backends send on fd 4: the command's env, the binds, the host socket list and the ids. It is
+   readable only by the caller's uid, which is the same exposure as `/proc/<pid>/environ`. ⇒ The
+   command's env is never on any argv, never in the CLI's env, never in `docker inspect` (row 11).
+   The dir is removed when the run ends.
 6. **Signals.** *Measured:* the 29.1.3 CLI proxies TERM, but it DIES by HUP, QUIT, USR2, ALRM
    and USR1, and the container RUNS ON (5 of 5 left running). After a SIGKILL of the CLI the
-   container runs on. ⇒ The CLI's sig-proxy is not used (`--sig-proxy=false`). The CLI is spawned
-   `detached` and shielded like a creator (§2a difference 7), and its SigIgn is read back before
-   `go`. The harness forwards each signal in `FORWARDED_SIGNALS` ONCE as `docker kill
-   --signal=<sig> <exact id>`. It reaches docker-init (pid 1, `--init`), which forwards it to the
-   inner half, which forwards it to the command's group (as the pid-1 helper does). That gives
-   **exactly once** for a terminal-group signal. **128+n**: docker-init exits 128+n when its
-   child dies by n (*measured:* self-TERM → 143); the harness then dies by n as it does on the
-   other backends (`exitOrDieBy`). **Nothing outlives the harness, SIGKILL included:** the
+   container runs on. ⇒ The harness never relies on the CLI to deliver a signal. It forwards each
+   signal in `FORWARDED_SIGNALS` ONCE as `docker kill --signal=<sig> <exact id>`. That reaches pid 1
+   (the reaping bash), which forwards it to the inner half, which forwards it to the command's
+   group (as the pid-1 helper does). That gives **exactly once** for a terminal-group signal.
+   *Measured:* group TERM, INT, HUP and QUIT each gave GOT ×1 and the trap completed.
+   *As built, against the draft:* `docker start` has no `--sig-proxy=false` (its `--attach` always
+   proxies), and the CLI **cannot be shielded**. Go resets a signal the process started with
+   ignored once it installs a handler for it. *Measured:* `start --attach` under
+   `env --ignore-signal` read back SigIgn 0, and the shield read-back refused the run. ⇒ The CLI is
+   spawned `detached`, so only a signal aimed at the CLI itself reaches it, and it is NOT the
+   run's authority. If it dies by a signal while the container runs on, the harness follows the
+   container to its end with `docker wait <exact id>` and reports that status. A signal aimed at
+   the CLI is proxied by it as well: an extra delivery, like an every-pid signal on the other
+   backends (§2a item 9: counted, not asserted). **128+n**: pid 1 exits 128+n when its child dies
+   by n (*measured:* self-TERM → 143). The harness then dies by n as it does on the other backends
+   (`exitOrDieBy`). **Nothing outlives the harness, SIGKILL included:** the
    reaper, item 3. **An early signal means the command never runs:** the go-handshake over the
    FIFOs (§2a difference 6 (B)), and an early signal also means no `docker start`. **SIGUSR1:** every node
    half swallows it, the inner half included; it is not forwarded.
@@ -790,9 +809,10 @@ marker (the env set, plus a plain file) is refused, both on the host and inside 
 
 * **Unit**, against a FAKE `docker` on a throwaway system-dir path that records every argv:
   * the name matches `^webctl-iso-u\d+-[a-z0-9-]{1,24}-\d+$`;
-  * `--cpus`, `--memory`, `--pids-limit`, `--init`, `--rm`, `--read-only` and `--network none`
+  * `--cpus`, `--memory`, `--pids-limit`, `--rm`, `--read-only` and `--network none`
     are present;
-  * none of the forbidden flags appears, and no `prune` verb appears anywhere;
+  * none of the forbidden flags appears (nor `--init`: its host bind is a slave mount), and no `prune`
+    verb appears anywhere;
   * `-H unix:///var/run/docker.sock` is on every call;
   * a planted `DOCKER_HOST=ssh://192.0.2.1` is refused before any `create`;
   * the command's env appears in no argv;
@@ -809,7 +829,7 @@ marker (the env set, plus a plain file) is refused, both on the host and inside 
 * **The v0.35 signal arms:** group HUP/QUIT/INT/TERM → `GOT` ×1, rc 7; an early TERM → never RAN.
 * **Sabotages** on a copy, logged in DEV_NOTES:
   * no reaper → the §3a.4 arm is red;
-  * the sig-proxy back → the HUP arm is red;
+  * the harness forwarding nothing (relying on the CLI) → the HUP arm is red;
   * the `/dev/null` socket mask dropped → row 2 is red;
   * the env passed as `-e` → the argv arm is red;
   * the proof skips its mount check → the forged-marker arm is red;
