@@ -751,7 +751,9 @@ process inside can mount nothing (*measured:* mount refused, `unshare` EPERM). S
 * CapBnd 0, NoNewPrivs 1, Seccomp 2;
 * hostname `webctl-isolated`;
 * lo only, no listener;
-* AND every read-back of the table above, run again in place.
+* AND every read-back of the table above, run again in place: the properties, the loopback, and
+  row 2's masked host sockets (`dockerReadBacks`, the one function the inner half runs too). Until
+  2026-10-13 the nested path re-ran the properties only.
 
 A forged marker means the env is set and/or a marker file exists, but there is no such mount, or
 any property fails. That is REFUSED (exit 2, as `kernelInsideProof`). The nested call cannot

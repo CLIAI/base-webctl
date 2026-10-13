@@ -2517,7 +2517,11 @@ export function runIsolated(a, { readHostMounts = readMountinfo, teardown = earl
         return Promise.resolve(usageRefusal(`${label} is not visible inside the docker backend's container — keep it in the OUTER call instead`, command));
       }
     }
-    return runInPlace(command, isolatedEnv(process.env, pass, nestedMachineNamesEnv()));
+    // ⛔ PARITY (ib4k §3b "Nested under docker"): every read-back of the table, run AGAIN in place — the loopback and
+    // the masked host sockets too, not the properties alone
+    return dockerReadBacks(dockerPlan()).then((why) => (why
+      ? report('isolated', EXIT.noVerdict, `REFUSED, nothing run: this nested call is inside the docker backend's container, but ${why}.`, { command })
+      : runInPlace(command, isolatedEnv(process.env, pass, nestedMachineNamesEnv()))));
   }
   const ub = unshareBin();
   // ⛔ NESTED CALL: "already inside" is proven from the KERNEL. The marker alone is
@@ -3491,6 +3495,23 @@ function dockerInsideProof() {
 }
 
 /**
+ * EVERY read-back of the docker backend's table (ib4k §3b), as one: the properties (dockerGaps), the loopback, and
+ * row 2 — every host socket in a bind was covered with /dev/null by the daemon, and any that still answers is a gap.
+ * ⛔ Run by the inner half AND, again in place, by a nested or stripped-markers call ("Nested under docker": parity —
+ * the nested path used to re-run the properties only). '' = all hold; else the refusal. Its io is injectable (arms).
+ * @param {any} plan @param {{gaps?: (plan: any) => string[], loopback?: () => Promise<unknown>, connect?: (ps: string[]) => Promise<string[]>}} [io]
+ * @returns {Promise<string>}
+ */
+export async function dockerReadBacks(plan, io = {}) {
+  const gaps = (io.gaps || dockerGaps)(plan);
+  if (gaps.length) return `inside the container, ${gaps.join('; ')}`;
+  try { await (io.loopback || loopbackSelfTest)(); } catch (e) { return `the container's loopback does not work (${errMsg(e)})`; }
+  const sockets = (Array.isArray(plan.sockets) ? plan.sockets : []).filter((/** @type {string} */ x) => !(plan.exempt || []).some((/** @type {string} */ k) => isWithin(x, k)));
+  const live = (await (io.connect || connectAll)(sockets)).filter((x) => !SOCKET_UNREACHABLE.has(x)).length;
+  return live ? `${live} host path socket(s) still ANSWER inside the container` : '';
+}
+
+/**
  * Run `command` IN PLACE (the nested and stripped-markers paths under docker): nothing can unshare in here, so no
  * drop and no new namespace — the env allowlist again, a session and group of its own, signals forwarded to it.
  * @param {string[]} command @param {NodeJS.ProcessEnv} env @returns {Promise<number>}
@@ -3532,12 +3553,8 @@ async function runDockerInner() {
   if (dockerMarker() !== 'mount') return refuse('internal: not inside the docker backend\'s container (no channel bind)');
   const plan = dockerPlan();
   if (!plan) return refuse('internal: the docker backend\'s plan is missing or malformed');
-  const gaps = dockerGaps(plan);
-  if (gaps.length) return refuse(`inside the container, ${gaps.join('; ')}`);
-  try { await loopbackSelfTest(); } catch (e) { return refuse(`the container's loopback does not work (${errMsg(e)})`); }
-  // row 2: every host socket in a bind was covered with /dev/null by the daemon; any that still answers → refused
-  const live = (await connectAll(plan.sockets.filter((s) => !plan.exempt.some((k) => isWithin(s, k))))).filter((x) => !SOCKET_UNREACHABLE.has(x)).length;
-  if (live) return refuse(`${live} host path socket(s) still ANSWER inside the container`);
+  const why = await dockerReadBacks(plan);
+  if (why) return refuse(why);
   try { process.chdir(plan.cwd); } catch (e) { return refuse(`cannot enter the working directory (${/** @type {NodeJS.ErrnoException} */ (e).code || errMsg(e)})`); }
   // ⛔ OPEN `go` BEFORE saying `started` (measured: a hang, 2 runs of a parallel suite). The harness answers `started`
   // by writing `go` and CLOSING its end: if no reader had the FIFO open by then, the pipe lost its last reference and

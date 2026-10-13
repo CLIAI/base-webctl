@@ -338,3 +338,17 @@ test('⭐ the reaper: `done` → ONE rm by the exact id and exit at once; EOF wi
     assert.deepEqual(s.calls().map((c) => c.slice(2)), [['rm', '-f', id], ['rm', '-f', 'webctl-iso-u1-arm-1']]);
   } finally { fs.rmSync(s.dir, { recursive: true, force: true }); }
 });
+
+// ── ib4k §3b "Nested under docker": PARITY — every read-back, run again in place ──────────────
+test('⛔ dockerReadBacks: a planted host socket that still ANSWERS is a refusal — the same one for the inner half and a NESTED call; exempt sockets are not asked', async () => {
+  const plan = { sockets: ['/w/live.sock', '/w/keep/ok.sock'], exempt: ['/w/keep'] };
+  /** @type {string[][]} */ const asked = [];
+  const io = (/** @type {string[]} */ outcomes) => ({ gaps: () => [], loopback: async () => {},
+    connect: async (/** @type {string[]} */ ps) => { asked.push(ps); return outcomes; } });
+  assert.equal(await harness.dockerReadBacks(plan, io(['CONNECTED'])), '1 host path socket(s) still ANSWER inside the container');
+  assert.deepEqual(asked[0], ['/w/live.sock'], 'an exempt (kept) socket was asked, or a planned one was not');
+  // CONTROLS: every socket unreachable → ''; a property gap and a dead loopback refuse first, by name
+  assert.equal(await harness.dockerReadBacks(plan, io(['ENOENT'])), '');
+  assert.equal(await harness.dockerReadBacks(plan, { ...io([]), gaps: () => ['CapEff is not 0'] }), 'inside the container, CapEff is not 0');
+  assert.match(await harness.dockerReadBacks(plan, { ...io([]), loopback: async () => { throw new Error('no lo'); } }), /loopback does not work \(no lo\)/);
+});
