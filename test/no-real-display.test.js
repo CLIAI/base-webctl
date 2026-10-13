@@ -76,7 +76,8 @@ test('⛔ product: the `xpra info` presence probe never hands xpra a display —
     fs.writeFileSync(path.join(dir, 'xpra'), `#!/bin/sh\n${JSON.stringify(process.execPath)} -e 'require("fs").writeFileSync(${JSON.stringify(seen)}, `
       + `JSON.stringify({display: process.env.DISPLAY, wayland: process.env.WAYLAND_DISPLAY, xauth: process.env.XAUTHORITY, marker: process.env.ARM_MARKER}))'\n`
       + 'echo clients=0\n', { mode: 0o755 });
-    for (const target of [12345, { port: 12345 }, { socketPath: '/nonexistent/arm.sock' }]) {
+    // the socket target sits in this arm's own 0700 dir: an unsafe path is refused before xpra runs at all (review F4)
+    for (const target of [12345, { port: 12345 }, { socketPath: path.join(dir, 'arm.sock') }]) {
       fs.rmSync(seen, { force: true });
       const r = spawnSync(process.execPath, ['--input-type=module', '-e',
         `const m = await import(${JSON.stringify(pathToFileURL(PRESENCE).href)}); process.stdout.write(String(m.isXpraClientAttached(${JSON.stringify(target)}, { timeoutMs: 5000 })))`],
