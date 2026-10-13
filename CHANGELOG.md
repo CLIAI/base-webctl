@@ -207,6 +207,159 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## v0.34.2 — 2026-10-13
+
+**Headline: a SECURITY patch to the docker-xpra driver. It adds `channels: 'owner-only'`,
+which puts CDP and xpra on unix sockets in a 0700 directory and puts xpra's TCP behind a
+per-target secret. It also refuses a non-loopback publish host (B4), creates every directory
+base makes 0700, and gives the CDP client a zero-dep unix transport.** Design:
+`safety-owner-only-browser-channels-gvlx`; wire contract: `infra-unix-control-endpoint-6gi0`.
+**`HARNESS_GENERATION` is unchanged (8):** the harness is untouched.
+
+⛔ **Read the limit first: this release does NOT change what a lane exposes by default.**
+`channels` defaults to `'tcp-legacy'`, the shape every earlier release had. A lane is
+protected only once it opts in **and its owner restarts the pair**. The default flips in a
+later minor (Phase 2), after the wired lanes' gate passes with owner-only.
+
+### ⛔ SECURITY
+
+* **A loopback publish was never the boundary.** Listeners inside a container that are bound
+  to the wildcard address are reachable from **every local user and every container on
+  docker's default bridge**, through the container's bridge address, whether the port is
+  published or not. The driver's CDP relay and xpra listener were both bound that way.
+  Refusing a non-loopback publish host (B4) is necessary but closes nothing locally on its
+  own.
+* **Neither channel had authentication.** CDP can drive the browser completely; xpra shows
+  and types into a signed-in session. For every local user without docker this was the
+  whole defence, and there was none.
+* **Profile directories were created 0755.** Their contents were protected only when some
+  ancestor directory happened to be 0700.
+* **Affected:** every release of the docker-xpra driver, in its default mode, including this
+  one until a lane opts in. Docker-group users are root-equivalent by docker's design; for
+  them this is defence in depth only. Processes of the same uid are one trust domain (they
+  can already ptrace the pair).
+
+### Added
+
+* **`cfg.channels: 'owner-only'`** (opt in per target: CLI `channels` > JSONC `channels`, via
+  `buildDriverCfg`):
+  * xpra on a **peercred unix socket** in `<XDG_STATE_HOME>/CLIAI/<tool>/run/<key>/` (0700);
+  * xpra's TCP **always behind `auth=file`**, bound to the container's network-namespace
+    loopback (unpublished) unless **`html5: true`** (off by default; then published on
+    127.0.0.1);
+  * the per-target secret is minted 0600 in `auth/<key>/`, and its **directory** is mounted
+    read-only into the xpra container only;
+  * CDP served on `<channelDir>/cdp.sock` by a **socat relay sidecar** — no `LWC_CDP_PORT`,
+    so the image's 0.0.0.0 relay never starts.
+
+  All of this works on **existing images**; no rebuild is needed (measured). Before any
+  container starts, the sun_path length, the dir modes and the image's uid label are
+  checked; after start, each socket must be owned by this uid. A loosened, foreign or
+  symlinked channel/secret dir is refused, never chmodded.
+* **`driver.exposure()`** — read-only (`docker inspect` + `stat`): `owner-only |
+  local-users | not-running | unknown`, with reasons. It reports **local-users for an
+  unauthenticated wildcard listener even with no publish**, and for a profile dir with no
+  sealed ancestor. **`formatExposureLine()`** gives the doctor / `gui status` line.
+* **`inspect()`** gains:
+  * `channels`, `html5`, `channelDir` and `xpra` (socket, auth, tcp);
+  * `exposure` (what this cfg would expose);
+  * `ports.cdp.endpoint` in **xq's control-endpoint shape** (`{name, kind, adapter,
+    transport, host, port, path, host_header}`).
+
+  Under owner-only, `cdpHttpUrl`, `cdpWsBase` and (with html5 off) `xpraHtml5Url` are
+  `null`. `ensureRunning()` returns `endpoint` too.
+* **`lib/cdp-client.js` speaks CDP over a unix socket.** Every entry point accepts a control
+  endpoint as well as a URL. HTTP goes over `http.request({socketPath})` with `Host:
+  host_header`, and the websocket over **`lib/unix-websocket.js`**, a zero-dep RFC 6455
+  client. Before any byte is sent, the socket's path must have a **sealed ancestor**.
+* **`lib/control-endpoint.js`**:
+  * `parseControlEndpoint` consumes xq's `wait-ready --json` shape exactly;
+  * `isLoopbackHost`;
+  * `findSealedAncestor` / `assertSealedPath`.
+* **`lib/browser-location/owner-channels.js`** — channel paths, private dirs, secret
+  mint/rotate, bind strings, `judgeExposure`.
+* `xpra-attach`: `attachArgs({socketPath})` → `socket://…`; `passwordFile` for TCP.
+  `xpra-presence`: `xpraInfoArgs` / `isXpraClientAttached({socketPath})`.
+* `docker-ctl.build` takes `labels`, and `buildImage` labels images with the uid they are
+  built for (`<PROJECT>.image-uid`).
+
+### What lanes do
+
+1. **Bump the pin to v0.34.2** and read **`exposure()`** for each target first; print
+   `formatExposureLine()` in your status surface.
+2. **Opt in per target:** `"channels": "owner-only"` in the target's JSONC (and `"html5":
+   true` only where a human uses the html5 client).
+3. **Move CDP callers** to base's client with `inspect().ports.cdp.endpoint` (or the
+   endpoint `ensureRunning()` returns). A caller that builds a URL from `cdpHttpUrl` gets
+   `null` under owner-only and must fail on it.
+4. **Restart the pair when its owner decides.** Base never restarts it. Under an
+   owner-only cfg, a running legacy pair is **refused**, not reused. Then confirm
+   `exposure  owner-only`.
+
+### What lanes lose
+
+* **B4 refusals.** A publish host of `0.0.0.0`, `::`, `localhost`, an explicit empty
+  string, or any non-loopback address is refused:
+  * by the driver's `ensureRunning()` before any docker call (exit 4, naming where the host
+    came from);
+  * by `docker-ctl.runDetached()` for any caller.
+
+  An explicit `host: ''` no longer falls back to 127.0.0.1.
+* **Every directory base creates is 0700** — profile dirs, lock and mutex dirs, the
+  Preferences dir, the access-store dir, the systemd unit dir, the banner marker dir. A
+  workflow that relied on group or other access to them loses it. Existing directories are
+  untouched.
+* **A tcp-legacy bring-up or reuse now WARNs** (`exposure LOCAL-USERS …`) every time.
+* **A running pair whose channel mode differs from the cfg is refused**, in both
+  directions, instead of being reused or recreated.
+* **New refusals at construction (exit 4):**
+  * an unknown `channels` value;
+  * `containerEnv.LWC_CDP_PORT` with owner-only;
+  * `html5: false` with tcp-legacy (it cannot be honoured).
+* **Data shapes grew:**
+  * `TEARDOWN_CONTRACT.stops` gains `'cdp relay container (owner-only)'`;
+  * `mounts.names()` gains `cdpRelayContainer`;
+  * `buildDriverCfg()` gains `hostSource`, plus `channels` / `html5` when set;
+  * `inspect()` gains the fields above.
+
+  A consumer that deep-equals any of these must update its expectation.
+* **cdp-client:** passing a control endpoint **and** `host`/`port` is refused (two ways to
+  say where).
+
+### Arms
+
+* **Unit:**
+  * A1–A4 — publishes, bind strings including the right-password case, mounts, CDP shape;
+  * A5 — B4 at both layers;
+  * A6–A8 — dirs, sun_path, secret;
+  * A9 — the secret never in argv, URLs, logs or inspect, with a self-test;
+  * A10 — `exposure()`;
+  * A11 — the uid gates;
+  * A12/A18 — CDP over a unix socket against a fake on a test-made socket, with a `net`
+    spy that fails on any TCP (self-tested);
+  * A13 — attach/presence;
+  * A14 — 0700 under umask 022 and 0000, plus a source arm over every `mkdirSync`;
+  * A15 — X11 stays on the named volume;
+  * A16/A17 — endpoint parsing and the sealed-ancestor check.
+* **Integration (opt-in, `test/integration-owner-channels.test.js`).** I1–I10 run against
+  throwaway containers from a consumer's own images, through the real driver. Set
+  `WEBCTL_IT_XPRA_IMAGE` and `WEBCTL_IT_CHROMIUM_IMAGE`; without them the arms skip and say
+  why.
+
+### ⛔ What this does NOT cover
+
+* **The default.** Until Phase 2, a lane that does nothing stays exposed exactly as before;
+  `exposure()` says so.
+* **docker-group co-users** (root-equivalent) and **same-uid processes** (one trust domain).
+* **Third-party `ws://`-only CDP clients.** The ruled per-call `tcp-forward` fallback is not
+  in this release. Such a client keeps working only under `'tcp-legacy'`.
+* **The `gui html5 on/rotate` verbs.** `rotateSecret()` is a library function; no verb ships.
+* **The owned unix → unix ssh forward** for remote targets is xq's half (`6gi0` §4), and is
+  not in base.
+* **The image-uid check before `docker run`** applies only to images built by v0.34.2 or
+  later; older images rely on the post-start socket-owner check, which fails closed.
+* **The sidecar** is replaced later by a joint entrypoint contract with xq (gvlx F1).
+
 ## v0.34.1 — 2026-10-12
 
 **Headline: a SECURITY patch to `isolated` — no node half of it honours SIGUSR1 any more.**
