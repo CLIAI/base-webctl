@@ -192,3 +192,12 @@ test('⛔ review 2 (low): SHORT-flag clusters and case variants do not slip past
     assert.equal(reviewExposureFlagsWhy(ok), '', ok.join(' '));
   }
 });
+
+test('review 3 nit 6d: `-p=<v>` is pflag\'s shorthand-with-equals — a LOOPBACK host passes (it was refused for the leading "="); a non-loopback or hostless one is still refused', () => {
+  for (const ok of [['-p=127.0.0.1:8080:80'], ['-dp=127.0.0.1:1:2'], ['-p=[::1]:8080:80']]) {
+    assert.equal(reviewExposureFlagsWhy(ok), '', ok.join(' '));
+  }
+  for (const bad of [['-p=0.0.0.0:8080:80'], ['-p=8080:80'], ['-dp=192.0.2.5:1:2'], ['-p=80']]) {
+    assert.notEqual(reviewExposureFlagsWhy(bad), '', bad.join(' '));
+  }
+});

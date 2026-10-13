@@ -156,3 +156,10 @@ test('⛔ review 3 item 3: the docker-argv guard reads short-flag CLUSTERS, refu
     assert.equal(displayIntoContainer(args), '', `CONTROL: ${args.join(' ')}`);
   }
 });
+
+test('⛔ review 3 nit 6d (the guard\'s half): `-e=DISPLAY=:0` and `-v=/tmp/.X11-unix:/x` are pflag\'s shorthand-with-equals — refused; CONTROL: `-e=HOME=/tmp` passes', () => {
+  for (const args of [['run', '-e=DISPLAY=:0', 'img'], ['run', '-ite=XAUTHORITY=/x', 'img'], ['run', '-v=/tmp/.X11-unix:/x', 'img'], ['run', '-itv=/tmp:/t', 'img'], ['volume', 'create', '-o=device=/tmp', 'v1']]) {
+    assert.notEqual(displayIntoContainer(args), '', args.join(' '));
+  }
+  assert.equal(displayIntoContainer(['run', '-e=HOME=/tmp', '-v=webctl-x11:/tmp/.X11-unix', 'img']), '', 'CONTROL');
+});

@@ -108,7 +108,7 @@ export function displayIntoContainer(args) {
     const next = String(args[i + 1] || '');
     if (a === '--env-file' || a.startsWith('--env-file=')) return 'it passes an --env-file, whose contents the guard cannot judge (refused in tests)';
     if (isVolumeCreate) {
-      const opt = a === '--opt' || a === '-o' ? next : a.startsWith('--opt=') ? a.slice(6) : /^-o./.test(a) ? a.slice(2) : null;
+      const opt = a === '--opt' || a === '-o' ? next : a.startsWith('--opt=') ? a.slice(6) : /^-o./.test(a) ? a.slice(a[2] === '=' ? 3 : 2) : null;
       if (opt !== null && opt.startsWith('device=') && hostSrcReachesDisplay(opt.slice(7))) return MOUNT_WHY;
       continue;
     }
@@ -120,7 +120,8 @@ export function displayIntoContainer(args) {
       for (let j = 1; j < a.length; j++) {
         const f = a[j];
         if (DOCKER_SHORT_BOOLS.has(f)) continue;
-        const val = j + 1 < a.length ? a.slice(j + 1) : next;
+        // pflag's shorthand-with-equals: `-e=DISPLAY=:0` — ONE '=' after the letter is not part of the value
+        const val = j + 1 < a.length ? a.slice(a[j + 1] === '=' ? j + 2 : j + 1) : next;
         if (f === 'e') envVal = val;
         if (f === 'v') mountVal = val;
         break;
