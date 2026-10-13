@@ -329,3 +329,35 @@ test('⛔ review 3 item 1: html5 auth=file whose secret dir host source is NOT s
     assert.equal(judgeExposure(ownerOnlyPair(s.chan, s.prof)).level, 'owner-only', 'CONTROL: loopback, no secret mount');
   } finally { s.done(); }
 });
+
+test('⛔ review 3 F1: a MORE SPECIFIC mount under a judged dir shadows what was judged — UNKNOWN, never owner-only; CONTROL: base\'s shape is owner-only', () => {
+  const s = scratch();
+  try {
+    const html5 = (/** @type {any} */ p) => { p.xpra.Config.Env = ['XPRA_TCP_BIND=0.0.0.0:14500,auth=file,filename=/run/webctl-secret/xpra.pass']; return p; };
+    // an unsealed host file bound OVER the password file: the sealed secret dir is judged, the file xpra reads is not
+    const loose = path.join(s.root, 'loose');
+    fs.mkdirSync(loose, { mode: 0o755 });
+    fs.chmodSync(loose, 0o755);
+    /** @type {Array<[string, string, string]>} */
+    const shadows = [
+      ['xpra', path.join(loose, 'xpra.pass'), '/run/webctl-secret/xpra.pass'],
+      ['xpra', path.join(loose, 'xpra.sock'), '/run/webctl/xpra.sock'],
+      ['relay', path.join(loose, 'cdp.sock'), '/run/webctl/cdp.sock'],
+      ['relay', path.join(loose, 'sub'), '/run/webctl/sub'],
+    ];
+    for (const [role, src, dst] of shadows) {
+      for (const type of ['bind', 'volume']) {
+        const p = html5(ownerOnlyPair(s.chan, s.prof, s.secret));
+        p[role].Mounts.push({ Type: type, Source: src, Destination: dst });
+        const e = judgeExposure(p);
+        assert.equal(e.level, 'unknown', `${role} ${type} at ${dst}: ${e.reasons.join('; ')}`);
+        assert.ok(e.reasons.some((r) => r.includes(dst) && /shadows/.test(r)), e.reasons.join('; '));
+      }
+    }
+    // CONTROL: base's own shape, and a lookalike prefix that is NOT under a judged dir
+    assert.equal(judgeExposure(html5(ownerOnlyPair(s.chan, s.prof, s.secret))).level, 'owner-only', 'CONTROL');
+    const near = html5(ownerOnlyPair(s.chan, s.prof, s.secret));
+    near.xpra.Mounts.push({ Type: 'bind', Source: loose, Destination: '/run/webctl-secretx' });
+    assert.equal(judgeExposure(near).level, 'owner-only', 'CONTROL: /run/webctl-secretx is not under /run/webctl-secret');
+  } finally { s.done(); }
+});
