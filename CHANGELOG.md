@@ -525,6 +525,7 @@ The changes that can show:
 * Everything under v0.34.0's "does NOT cover" still applies, on both backends: key descriptions,
   user-writable sysfs attributes, empty child cgroups, stdio that is the terminal, the identity not
   hidden.
+
 ## v0.34.1 — 2026-10-12
 
 **Headline: a SECURITY patch to `isolated` — no node half of it honours SIGUSR1 any more.**
