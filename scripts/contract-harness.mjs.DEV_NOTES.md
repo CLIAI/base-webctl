@@ -2079,6 +2079,11 @@ container per measurement, removed by exact name):
   The inner half opens `go` BEFORE it writes `started`. *After:* 30 runs, two at a time, 0 hangs.
 * The pipe-EOF reaper prototype: harness SIGKILLed mid-run 3/3, no container (0.29 s).
 * The image `webctl-iso/node22:<recipe>` is 332 MB (base 231 MB, plus git and procps).
+* ⛔ **`--interactive` ate the gate's registry** (the first consumer acceptance run, `--against-head
+  --scratch` on the policy-blocked host). The CLI reads the caller's stdin EAGERLY and forwards it. The
+  gate runs each consumer inside `while read … done < <(read-consumers)`, so the first run swallowed the
+  second consumer's line, and that consumer was never run (the summary counted 1 of 2, and still said
+  OK). ⇒ No `--interactive` on create or start; the command's stdin is EOF, a named deviation.
 
 **Arms.** Units, against a FAKE CLI through the import-only `dockerBin` seam
 (`isolation-docker.test.js`, 17 tests). Real docker (`isolation-docker-table.test.js`, 29 tests):
@@ -2100,6 +2105,7 @@ is judged by a table of its own (`JUDGED_ELSEWHERE`), and checks that table cove
 | D8 | any extra `/dev` name accepted | ruling 1's arm (unit, a fake `/dev` with `uinput` planted) |
 | D9 | `--init` back | every real run: refused by the propagation read-back |
 | D10 | `; cgroup2: nsdelegate` claimed under docker | the selection arm's verdict (unit) |
+| D12 | `--interactive` back, on create AND start | the stdin arm: `LOOP:two` and `LOOP:three` lost, as in the gate. ⚠ On `start` alone it stayed green: the CLI forwards stdin only to a container created with it |
 | D11 | the go-handshake skipped | the GO arm. ⚠ The early-TERM arm alone stayed GREEN: a TERM at 400 ms lands before the container exists, so it never reached the `started`→`go` window. Hence the frozen-harness arm |
 
 ### The import guard

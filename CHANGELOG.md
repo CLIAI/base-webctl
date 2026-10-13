@@ -215,7 +215,7 @@ fails. It runs every row on the fresh, nested and stripped paths, with the same 
 and drop as unshare. Building it found a hole bwrap opens, mount propagation, now closed for every
 backend. ⚠ **bwrap does NOT unblock a host that forbids user namespaces** (below): on no measured host
 does bwrap run where unshare cannot. **Phase 3, the docker backend (ib4k §3b), does:** where both namespace
-backends are refused, `isolated` runs on the local docker daemon, judged by the same rows, with five named
+backends are refused, `isolated` runs on the local docker daemon, judged by the same rows, with six named
 deviations. Harness, tests and an image recipe; no `lib/` change.
 `HARNESS_GENERATION` is **9** (it was 7; v0.34.1 took 8 — see "For lanes").
 
@@ -574,6 +574,9 @@ The changes that can show:
     its nested caller.
   * **The userland is the image's.** Host PATH tools are not there; `xq` is not in the image, so a lane's
     no-host-literals step takes its documented "xq is not installed" path.
+  * **The command's stdin is EOF.** `docker start --interactive` READS the caller's stdin eagerly
+    whether or not the command does. *Measured:* the gate's registry loop lost a consumer that way, so
+    it is not forwarded.
 * **The docker backend: measured on ONE host and daemon** (29.1.3). Not measured: a rootless daemon
   (refused), Docker Desktop, other engines, and a remote daemon (refused by rule).
 * **`kill -9 -1` as the user** kills the docker backend's reaper with everything else, so a container

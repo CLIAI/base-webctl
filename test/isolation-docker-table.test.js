@@ -303,6 +303,14 @@ test('[docker] row 12b — no controlling terminal: /dev/tty → ENXIO on every 
 
 // ── §3a.2, §3a.4 and the v0.35 signal contract ─────────────────────────────
 
+test('[docker] the CALLER\'s stdin is never consumed: a `while read` loop around `isolated` keeps every line (the gate\'s registry loop lost one) — the command reads EOF', needsDocker, async () => {
+  const w = await world();
+  const r = spawnSync('sh', ['-c', 'printf "one\\ntwo\\nthree\\n" | while read l; do "$0" "$1" isolated -- sh -c \'read x && echo "CMD-READ:$x" || echo CMD-EOF\' 2>/dev/null; echo "LOOP:$l"; done',
+    process.execPath, TOOL], { cwd: w.work, env: cleanEnv(), encoding: 'utf8', timeout: 110_000 });
+  assert.deepEqual(r.stdout.split('\n').filter((l) => l.startsWith('LOOP:')), ['LOOP:one', 'LOOP:two', 'LOOP:three'], r.stdout + r.stderr);
+  assert.equal((r.stdout.match(/^CMD-EOF$/gm) || []).length, 3, `the command read the caller's stdin (a named deviation: it reads EOF):\n${r.stdout}`);
+});
+
 const TRAP = 'for s in INT TERM HUP QUIT; do trap "echo GOT-$s; sleep 0.3; echo CLEANED; exit 7" $s; done; echo READY; while :; do sleep 0.1; done';
 
 test('[docker] §3a.2: the RUNNING container — not privileged, exactly `no-new-privileges`, docker\'s AppArmor profile where the host has AppArmor', needsDocker, async () => {
@@ -390,7 +398,7 @@ test('[docker] the GO-HANDSHAKE: the harness FROZEN before it reads `started` �
   let stopped = false;
   try {
     // freeze the harness the moment its `docker start` exists: it can then never read `started` nor answer `go`
-    assert.ok(await until(() => pidsWith(['start', '--attach', '--interactive']).some((p) => {
+    assert.ok(await until(() => pidsWith(['start', '--attach']).some((p) => {
       try { return Number(fs.readFileSync(`/proc/${p}/stat`, 'utf8').split(') ')[1].split(' ')[1]) === r.c.pid; } catch { return false; }
     }), 30_000), `no docker start appeared: ${r.err()}`);
     process.kill(r.c.pid || 0, 'SIGSTOP');

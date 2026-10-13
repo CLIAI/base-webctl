@@ -698,8 +698,12 @@ backends.
    reaper, item 3. **An early signal means the command never runs:** the go-handshake over the
    FIFOs (§2a difference 6 (B)), and an early signal also means no `docker start`. **SIGUSR1:** every node
    half swallows it, the inner half included; it is not forwarded.
-7. **Stdio:** the command's stdio are the CLI's pipes (`-a -i`, never `-t`). The command
-   therefore never holds the caller's terminal. Row 12b holds (`/dev/tty` → ENXIO, TIOCSTI has no
+7. **Stdio:** the command's stdout and stderr are the CLI's pipes (`--attach`, never `-t`), and its
+   stdin is EOF. *As built:* never `--interactive`. *Measured* by the acceptance run on the
+   policy-blocked host: with it, the CLI READS the caller's stdin eagerly and forwards it, whether or
+   not the command reads. The gate's own `while read` loop over its registry lost the next
+   consumer's line, so that consumer never ran. The command therefore never holds the caller's
+   terminal. Row 12b holds (`/dev/tty` → ENXIO, TIOCSTI has no
    terminal to reach), and §6's "stdio that IS the terminal" residual does not exist on this
    backend.
 
@@ -730,6 +734,8 @@ backends.
    caller's PID namespace and uid.
 4. **The userland is the IMAGE's.** The host's PATH tools are not re-bound (another libc). A lane
    calling a host tool inside finds the image's, or ENOENT.
+5. **The command's stdin is EOF** (item 7). The namespace backends pass the caller's stdin. Here it
+   is not forwarded, because forwarding means the CLI reads it whether or not the command does.
 
 ⇒ The verdict names this backend's deviations. The table marks each unmet control as a named
 DEVIATION for docker, never a pass. A lane that needs one of them is refused nothing: it fails

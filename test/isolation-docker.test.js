@@ -72,7 +72,9 @@ test('⭐ §3a.5: the create argv carries the owned NAME, the caps, and every fl
     assert.equal(at('--name'), `webctl-iso-u${process.getuid?.()}-work-${at('--name').split('-').pop()}`);
     for (const f of ['--cpus', '--memory', '--pids-limit']) assert.ok(c.includes(f), `${f} is missing`);
     assert.deepEqual([at('--cpus'), at('--memory'), at('--pids-limit')], ['2', '4g', '4096'], 'the default caps');
-    for (const f of ['--rm', '--read-only', '--interactive']) assert.ok(c.includes(f), `${f} is missing`);
+    for (const f of ['--rm', '--read-only']) assert.ok(c.includes(f), `${f} is missing`);
+    // ⛔ no `--interactive` on create or start: the CLI would read the caller's stdin eagerly (the gate's loop lost a line)
+    for (const x of s.calls()) assert.ok(!x.includes('--interactive') && !x.includes('-i'), `--interactive on: ${x.slice(0, 4).join(' ')}`);
     assert.equal(at('--network'), 'none');
     assert.equal(at('--cap-drop'), 'ALL');
     assert.equal(at('--security-opt'), 'no-new-privileges');
@@ -93,7 +95,7 @@ test('⛔ §3a.2/§3a.5: NO forbidden flag on any call, no `prune` anywhere, and
     for (const c of calls) {
       assert.deepEqual(c.slice(0, 2), ['-H', ENDPOINT], `a call without the local endpoint first: ${JSON.stringify(c)}`);
       // docker's own options only: after the image comes the command line run INSIDE (pid 1's script has a `-p`)
-      const img = c[2] === 'create' ? c.indexOf('--interactive') + 1 : c.length;
+      const img = c[2] === 'create' ? c.findIndex((a) => /^sha256:[0-9a-f]{64}$/.test(a)) : c.length;
       const flat = c.slice(2, img).join(' ');
       assert.doesNotMatch(flat, /\bprune\b/, 'a prune');
       assert.doesNotMatch(flat, /--privileged|seccomp[=:]unconfined|apparmor[=:]unconfined|--publish|(^| )-p |--network host|--net host|--pid[= ]|--ipc[= ]|--userns[= ]|--init( |$)|docker\.sock/,

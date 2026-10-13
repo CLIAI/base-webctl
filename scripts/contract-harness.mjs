@@ -3028,7 +3028,7 @@ export function dockerCreateArgv(o) {
     ...o.masks.flatMap((s) => ['--mount', `type=bind,src=/dev/null,dst=${s},readonly`]),
     '--mount', `type=bind,src=${path.join(o.channel, 'machine-id')},dst=/etc/machine-id,readonly`,
     '--mount', `type=bind,src=${o.channel},dst=${DOCKER_CHANNEL},readonly`,
-    '--interactive', o.image, ...o.inner];
+    o.image, ...o.inner];
 }
 
 /**
@@ -3137,8 +3137,8 @@ function dockerChannel(plan) {
 
 /**
  * Run `command` under the DOCKER backend (ib4k §3b) — called by runIsolated once docker is selected.
- * The order is the contract: reaper → create (the id known before anything runs) → start (CLI shielded, detached,
- * `--sig-proxy=false`) → the inner half reports `started` on the status FIFO → `go` only if no early signal came and
+ * The order is the contract: reaper → create (the id known before anything runs) → start (`--attach`, detached; no
+ * `--interactive`: the command's stdin is EOF) → the inner half reports `started` on the status FIFO → `go` only if no early signal came and
  * the CLI is READ BACK as shielded → the command runs. Signals: each FORWARDED_SIGNALS entry ONCE, by `docker kill
  * --signal=<sig> <exact id>` (pid 1, the reaping bash → the inner half → the command's group); before `go` a signal tears the
  * container down (`rm -f` by exact id) and the command never runs. The harness then dies by it (exitOrDieBy).
@@ -3241,7 +3241,10 @@ function runDockerBackend(o) {
       // ⚠ `start --attach` has no `--sig-proxy=false`: the CLI proxies what reaches IT. Detached, only a signal aimed at the
       // CLI itself reaches it (a supervisor signalling every process — as an every-pid signal reaches every half); the
       // harness's own forwarding is `docker kill`, once per signal
-      cli = spawn(o.cli.bin, ['-H', DOCKER_ENDPOINT, 'start', '--attach', '--interactive', id], { stdio: 'inherit', env: dockerEnv(), detached: true });
+      // ⛔ NO `--interactive` (measured, acceptance on the policy-blocked host): the CLI then READS the caller's stdin
+      // eagerly and forwards it, whether or not the command reads — the gate's own `while read` loop over its registry
+      // lost the next consumer's line, and that consumer never ran. The command's stdin is EOF here (a named deviation).
+      cli = spawn(o.cli.bin, ['-H', DOCKER_ENDPOINT, 'start', '--attach', id], { stdio: ['ignore', 'inherit', 'inherit'], env: dockerEnv(), detached: true });
       cli.on('error', (e) => { err = errCode(e); });
       cli.on('close', (code, signal) => {
         closeGo();
