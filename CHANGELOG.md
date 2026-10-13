@@ -261,8 +261,10 @@ does bwrap run where unshare cannot. Docker is phase 3. Harness and tests only; 
   controlling terminal either. Since the sixth review (B1) the unshare creator is spawned detached, so its
   halves hold none either (the arm now reads 0 on both creators). `--die-with-parent` takes the namespace
   down with a SIGKILLed harness; unshare got the same, below.
-* **Refusal text:** an unpinned refusal still LEADS with v0.33's unshare text. The perplexity regex
-  `/NOT RUN: unshare exited 1/` keeps matching. bwrap's part of the appended summary is now a real
+* **Refusal text:** every v0.33 shape of an unpinned refusal still LEADS with v0.33's unshare text. The
+  perplexity regex `/NOT RUN: unshare exited 1/` keeps matching. One shape is new, and leads with its own
+  reason: a host whose `env` lacks `--ignore-signal` / `--default-signal` (v0.33 ran there) reads
+  `NOT RUN: its \`env\` cannot reset signal dispositions …`. bwrap's part of the appended summary is now a real
   reason instead of `not implemented yet (v0.35.0)`.
 
 ### ⛔ Mount propagation, closed for every backend (found building bwrap)
@@ -488,9 +490,11 @@ The changes that can show:
   SIGUSR1 fix; `require-generation 7` still gates `; backend:`.
 * **Refusal text where bwrap runs (fifth review, F8).** On a host where unshare's probe fails but bwrap
   runs, a run that then fails reads `NOT RUN: bwrap exited <n> before the isolated side reported in — …`
-  or the inner half's own refusal, not v0.33's unshare text. Every shape where NO backend runs still
-  LEADS with v0.33's unshare reason. So the regex `NOT RUN: unshare exited 1 before the isolated side
-  reported in — ` matches wherever it matched on v0.33.
+  or the inner half's own refusal, not v0.33's unshare text. Every v0.33 shape where NO backend runs
+  still LEADS with v0.33's unshare reason. So the regex `NOT RUN: unshare exited 1 before the isolated
+  side reported in — ` matches wherever it matched on v0.33. The one new shape — an `env` without
+  `--ignore-signal` / `--default-signal`, which v0.33 did not need — leads with
+  `NOT RUN: its \`env\` cannot reset signal dispositions …` instead.
 
 ### ⛔ What this does NOT cover
 
