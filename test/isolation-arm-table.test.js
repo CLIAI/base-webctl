@@ -581,14 +581,16 @@ const KEYRING_UNVERIFIED = 'SKIP (host): `keyctl show @s` fails here — the key
 /** Row 9 without keyctl: a named SKIP — untested, never a pass. */
 const NO_KEYCTL = 'SKIP (host): keyctl not installed — the keyring row is UNTESTED here (isolated says "keyring: shared")';
 
-// ⭐ bwrap only (ib4k §2a): NO ancestor of the command holds the caller's terminal — the privileged halves (pid 1,
-// the inner half) included. Not a contract row: under unshare those keep it (they hold capabilities the command
-// cannot trace), and the shared chain's setsid carries 12b on both creators. ⚠ TWO layers give it under bwrap:
+// ⭐ NO ancestor of the command holds the caller's terminal — the privileged halves (pid 1, the inner half) included.
+// Not a contract row: the shared chain's setsid carries 12b on both creators. Under unshare the halves used to keep it
+// (they hold capabilities the command cannot trace) and that was this arm's control; since the sixth review (B1) the
+// unshare creator is spawned `detached` too, so it reads 0 there as well. The non-vacuity control is the OUTSIDE
+// reading (the same probe without `isolated`: > 0), in each world. ⚠ TWO layers give it under bwrap:
 // bwrap is spawned `detached` (a session of its own) AND runs `--new-session` — either alone keeps the terminal
 // half green (fifth review, F9: the arm was named for the flag it could not see alone). ⇒ The name says what the
 // tty half tests, and the flags are asserted where they live: the RUNNING creator's argv (/proc/<pid>/cmdline),
 // so dropping `--new-session` (B1) — or `--die-with-parent`, `--as-pid-1` — turns this arm red by itself.
-test('[bwrap] detached OR --new-session: no ancestor of the command holds a terminal, privileged halves included — and the running bwrap carries --new-session, --die-with-parent, --as-pid-1 — CONTROL: under unshare they do', async (t) => {
+test('[bwrap] detached OR --new-session: no ancestor of the command holds a terminal, privileged halves included — under unshare too (detached, B1) — and the running bwrap carries --new-session, --die-with-parent, --as-pid-1 — CONTROL: outside, an ancestor does', async (t) => {
   if (!IMPLEMENTED.includes('bwrap')) { t.skip('bwrap is not implemented'); return; }
   const w = await world('bwrap');
   if (w.skip) { t.skip(w.skip); return; }
@@ -596,7 +598,11 @@ test('[bwrap] detached OR --new-session: no ancestor of the command holds a term
   assert.equal(w.tty.fresh?.ttyAncestors, 0, `fresh: ${w.tty.fresh?.ttyAncestors} ancestor(s) of the command hold the caller's terminal under bwrap`);
   assert.ok(w.tty.outside?.ttyAncestors > 0, 'control: no ancestor holds the pty even outside');
   const u = await world('unshare');
-  if (!u.skip && !u.tty.unavailable) assert.ok(u.tty.fresh?.ttyAncestors > 0, 'control: under unshare the privileged halves hold no terminal either — the arm cannot tell bwrap\'s flag from the chain\'s setsid');
+  // B1: the unshare creator is detached too — its pid 1 and inner half hold no terminal (they used to: 2)
+  if (!u.skip && !u.tty.unavailable) {
+    assert.equal(u.tty.fresh?.ttyAncestors, 0, `unshare: ${u.tty.fresh?.ttyAncestors} ancestor(s) of the command hold the caller's terminal — the creator is not detached`);
+    assert.ok(u.tty.outside?.ttyAncestors > 0, 'control (unshare world): no ancestor holds the pty even outside');
+  }
   // the creator's argv, read from the RUNNING process — not from BWRAP_FLAGS (a constant can say anything)
   const tag = `webctl-f9-${process.pid}-${Date.now()}`;
   const c = spawn(process.execPath, [TOOL, 'isolated', '--', 'sh', '-c', 'echo READY; exec sleep 30', tag], { stdio: ['ignore', 'pipe', 'pipe'],

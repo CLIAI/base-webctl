@@ -1627,7 +1627,7 @@ const NOT_IMPLEMENTED = Object.freeze({ docker: 'not implemented yet (v0.35.0)' 
  *     are the `-try` variants (a namespace bwrap cannot make would be silently skipped);
  *   `--as-pid-1`: pid 1 is OUR reaping bash (PID1_REAPER), as under `unshare --fork` — not bwrap's own reaper;
  *   `--die-with-parent`: the namespace dies with bwrap, and with bwrap's parent (us) (`--kill-child`);
- *   `--new-session`: the privileged halves hold no controlling terminal either (unshare's keep it);
+ *   `--new-session`: the privileged halves hold no controlling terminal either (unshare's too, since it is detached: B1);
  *   `--dev-bind / /`: the caller's tree, as `unshare -m` gives it — ⚠ `--bind` makes it nodev: /dev/null
  *     answered EACCES (measured); `--proc /proc`: a procfs of the new PID namespace (`--mount-proc`).
  * ⛔ NOT bwrap's own masks (--ro-bind, --dev, --tmpfs, --hostname, --setenv, --cap-drop): a second, weaker

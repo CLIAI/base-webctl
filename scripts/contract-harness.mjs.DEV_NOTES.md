@@ -1764,8 +1764,9 @@ kernel has `dev.tty.legacy_tiocsti=0` — on < 6.2 or with it 1, it types into t
   privilege-drop chain `detached` (setsid). The `__isolated-pid1` helper runs capless as the command's
   uid in its user namespace, and so does the nested path's pid 1: commoncap lets a capless process
   ptrace them, and with yama's `ptrace_scope` 0 nothing else stops it — a helper still holding the
-  terminal would be TIOCSTI by proxy. The fresh path's pid 1 and inner half keep the terminal; they
-  hold capabilities in the outer user namespace the command cannot trace.
+  terminal would be TIOCSTI by proxy. The fresh path's pid 1 and inner half kept the terminal (they
+  hold capabilities in the outer user namespace the command cannot trace) — until the sixth review (B1)
+  spawned the unshare creator detached: now they hold none, as under bwrap.
 * **Measured: setsid alone broke Ctrl-C for a shell loop.** INT to the group: ae496b7 rc 130, nothing
   left. With the chain detached and the helper forwarding to the command alone, `sh -c 'while :; do
   …; sleep 0.1; done'` HUNG — sh got the INT, its `sleep` (no longer in the terminal's foreground

@@ -257,9 +257,10 @@ does bwrap run where unshare cannot. Docker is phase 3. Harness and tests only; 
   * the command's `kill(0)` does not reach its caller's process group (row 3).
   One difference: bwrap sets no_new_privs for the whole sandbox, so a broken `setpriv` cannot remove
   it there.
-* **Stronger than unshare in one place.** `--new-session` means pid 1 and the inner half hold no
-  controlling terminal either. (`--die-with-parent` takes the namespace down with a SIGKILLed harness.
-  It was the second place until unshare got the same, below.)
+* **Once stronger than unshare in one place:** `--new-session` means pid 1 and the inner half hold no
+  controlling terminal either. Since the sixth review (B1) the unshare creator is spawned detached, so its
+  halves hold none either (the arm now reads 0 on both creators). `--die-with-parent` takes the namespace
+  down with a SIGKILLed harness; unshare got the same, below.
 * **Refusal text:** an unpinned refusal still LEADS with v0.33's unshare text. The perplexity regex
   `/NOT RUN: unshare exited 1/` keeps matching. bwrap's part of the appended summary is now a real
   reason instead of `not implemented yet (v0.35.0)`.
