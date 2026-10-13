@@ -27,6 +27,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
+import { xpraSpawnGuard, displayless } from './helpers/no-real-display.mjs';
 import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
 import { createMounts } from '../lib/browser-location/mounts.js';
 import { rotateSecret } from '../lib/browser-location/owner-channels.js';
@@ -39,7 +40,9 @@ const OTHER = '65534:65534';
 
 /** @param {string[]} args @param {number} [timeoutMs] */
 function docker(args, timeoutMs = 60000) {
-  const r = spawnSync('docker', args, { encoding: 'utf8', timeout: timeoutMs });
+  const env = displayless();
+  xpraSpawnGuard(['docker', ...args], env); // RULE ZERO: never with a display in reach
+  const r = spawnSync('docker', args, { encoding: 'utf8', timeout: timeoutMs, env });
   return { code: r.status === null ? -1 : r.status, out: String(r.stdout || ''), err: String(r.stderr || '') };
 }
 

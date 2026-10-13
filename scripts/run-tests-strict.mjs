@@ -17,6 +17,10 @@ import path from 'node:path';
 const reporter = path.join(import.meta.dirname, 'strict-reporter.mjs');
 const env = { ...process.env };
 delete env.NODE_TEST_CONTEXT;
+// ⛔ RULE ZERO (AGENTS.md): no test may reach a REAL display. Agent shells inherit the desktop's DISPLAY/XAUTHORITY,
+// and a test once opened xpra's password dialog on a person's live desktop, over and over. Scrubbed here for every
+// test file and everything it spawns; test/helpers/no-real-display.mjs does the same for a file run on its own.
+for (const k of ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY']) delete env[k];
 
 // Our own flags; everything else passes through to `node --test`.
 //   --serial               = --test-concurrency=1. node runs test FILES concurrently by
