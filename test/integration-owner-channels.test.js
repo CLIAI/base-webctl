@@ -44,7 +44,7 @@ const CAPS = ['--cpus', '1', '--memory', '1g', '--pids-limit', '512'];
  * …and so is the driver's own pair, through its injectable docker-ctl (TEST-ONLY: the product sets no caps). Each
  * `runDetached` gains them, and nothing else changes.
  */
-const PAIR_CAPS = ['--cpus', '1', '--memory', '2g', '--pids-limit', '1024'];
+const PAIR_CAPS = ['--cpus', '2', '--memory', '4g', '--memory-swap', '4g', '--pids-limit', '512'];
 const cappedDocker = { ...dockerCtl, runDetached: (/** @type {any} */ o) => dockerCtl.runDetached({ ...o, extra: [...PAIR_CAPS, ...((o && o.extra) || [])] }) };
 /**
  * What a shared host ALLOWS beyond "no published port, no host network" (its admin's call, named per run):
@@ -58,10 +58,10 @@ const NEEDS_HOST_NET = 'needs WEBCTL_IT_HOST_NETWORK=1 (a short-lived client on 
 const NEEDS_PUBLISH = 'needs WEBCTL_IT_PUBLISH=1 (a loopback publish) — this host has not allowed it';
 
 /** @param {string[]} args @param {number} [timeoutMs] */
-function docker(args, timeoutMs = 60000) {
+function docker(args, timeoutMs = 60000, input = '') {
   const env = displayless();
   xpraSpawnGuard(['docker', ...args], env); // RULE ZERO: never with a display in reach
-  const r = spawnSync('docker', args, { encoding: 'utf8', timeout: timeoutMs, env });
+  const r = spawnSync('docker', args, { encoding: 'utf8', timeout: timeoutMs, env, input });
   return { code: r.status === null ? -1 : r.status, out: String(r.stdout || ''), err: String(r.stderr || '') };
 }
 
@@ -128,28 +128,41 @@ async function withPair(slug, cfgExtra, fn) {
 /** Run a throwaway client container as ANOTHER uid. @param {string[]} dockerArgs @param {string} image @param {string} sh */
 function asOther(dockerArgs, image, sh) {
   const name = `${PREFIX}client-${Math.random().toString(16).slice(2, 8)}`;
+  // ⛔ a probe on the HOST network (a shared host's allowance): no capability, a read-only root, no mount, ≤ 60 s
+  const hostNet = dockerArgs.join(' ').includes('--network host');
+  if (hostNet && dockerArgs.includes('-v')) throw new Error('a host-network probe carries no mount');
+  const lock = hostNet ? ['--cap-drop', 'ALL', '--read-only'] : [];
   try {
-    return docker(['run', '--rm', '--name', name, ...CAPS, '--user', OTHER, ...dockerArgs, '--entrypoint', 'sh', image, '-c', sh], 90000);
+    return docker(['run', '--rm', '--name', name, ...CAPS, ...lock, '--user', OTHER, ...dockerArgs, '--entrypoint', 'sh', image, '-c', sh], hostNet ? 60000 : 90000);
   } finally { docker(['rm', '-f', name]); }
 }
 
 /**
- * `xpra info` AS US — from a throwaway client container of the xpra image (it runs as
- * the image's uid, which the driver requires to be the owner's), on the host network,
- * with this run's temp root mounted at the same path so socket and password paths are
- * identical. Never the host's own xpra client: it may open a GUI prompt on the
+ * `xpra info` from a throwaway client container of the xpra image. A socket target: as US (the image's uid, which
+ * the driver requires to be the owner's), with no network and this run's temp root mounted at the same path. A
+ * TCP/ws target: a host-network probe as uid 65534 (below). Never the host's own xpra client: it may open a GUI prompt on the
  * desktop, and its behaviour is not this file's to depend on.
  * @param {string} root @param {string} target @param {string} [passwordFile]
  */
 function xpraInfoAsUs(root, target, passwordFile) {
   const name = `${PREFIX}xinfo-${Math.random().toString(16).slice(2, 8)}`;
-  const pf = passwordFile ? ` --password-file=${passwordFile}` : '';
-  // a socket target needs no network at all; only a TCP/ws target needs the host's (an allowance: HOST_NET)
-  const net = /^socket:/.test(target) ? 'none' : 'host';
-  if (net === 'host' && !HOST_NET) throw new Error(`xpraInfoAsUs(${target}): ${NEEDS_HOST_NET}`);
+  const grep = "2>&1 | grep -E '^clients=|authentication failed|denied|refused' | head -3";
   try {
-    const r = docker(['run', '--rm', '--name', name, ...CAPS, '--network', net, '-v', `${root}:${root}`,
-      '--entrypoint', 'sh', XPRA_IMAGE, '-c', `timeout 20 xpra info ${target}${pf} </dev/null 2>&1 | grep -E '^clients=|authentication failed|denied|refused' | head -3`], 90000);
+    if (/^socket:/.test(target)) {
+      // a socket target: as US (peercred), NO network, this run's temp root mounted at its own path
+      const pf = passwordFile ? ` --password-file=${passwordFile}` : '';
+      const r = docker(['run', '--rm', '--name', name, ...CAPS, '--network', 'none', '-v', `${root}:${root}`,
+        '--entrypoint', 'sh', XPRA_IMAGE, '-c', `timeout 20 xpra info ${target}${pf} </dev/null ${grep}`], 90000);
+      return r.out + r.err;
+    }
+    // a TCP/ws target: a HOST-NETWORK probe (an allowance), as uid 65534 — TCP auth is the password, not who asks —
+    // with no capability, a read-only root, NO mount: the password arrives on STDIN into a tmpfs (never argv), ≤ 60 s
+    if (!HOST_NET) throw new Error(`xpraInfoAsUs(${target}): ${NEEDS_HOST_NET}`);
+    const pw = passwordFile ? fs.readFileSync(passwordFile, 'utf8') : '';
+    const pf = passwordFile ? ' --password-file=/tmp/p' : '';
+    const r = docker(['run', '--rm', '-i', '--name', name, ...CAPS, '--network', 'host', '--user', OTHER, '--cap-drop', 'ALL', '--read-only',
+      '--tmpfs', '/tmp:size=1m,mode=1777', '-e', 'HOME=/tmp', '-e', 'XDG_RUNTIME_DIR=/tmp', '--entrypoint', 'sh', XPRA_IMAGE, '-c',
+      `umask 077; cat > /tmp/p; timeout 20 xpra info ${target}${pf} </dev/null ${grep}`], 60000, pw);
     return r.out + r.err;
   } finally { docker(['rm', '-f', name]); }
 }
