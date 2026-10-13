@@ -109,6 +109,39 @@ test('A18 control: a client that sent another Host would be refused by this fake
   } finally { await u.done(); }
 });
 
+test('A18 (tcp): a tcp endpoint WITH host_header sends it as the Host header — every request and upgrade — dialling host:port, never the URL authority', async () => {
+  // An app behind a forward: it listens on an ephemeral loopback port THIS test opened, and checks Host against its
+  // OWN port (127.0.0.1:9222). fetch and the built-in WebSocket would send the dialled authority and get 400.
+  const tcpFake = await startFakeCdp({ tcp: true, hostHeader: HOST_HEADER });
+  try {
+    const ep = { name: 'cdp', kind: 'tcp', adapter: 'cdp', transport: 'tcp', host: '127.0.0.1',
+      port: /** @type {number} */ (tcpFake.port), path: null, host_header: HOST_HEADER };
+    assert.equal((await getVersion(ep)).Browser, 'Fake/1.0');
+    const s = await connectBrowser(ep);
+    try { assert.equal((await s.cdp('Browser.getVersion')).product, 'Fake/1.0'); } finally { s.close(); }
+    const p = await openPage(ep);
+    assert.deepEqual(await p.close(), { closed: true });
+    assert.ok(tcpFake.hosts.length >= 4, 'not every request reached the fake');
+    assert.deepEqual([...new Set(tcpFake.hosts)], [HOST_HEADER], 'a request carried a Host other than host_header');
+  } finally { await tcpFake.close(); }
+});
+
+test('A18 (tcp) control: WITHOUT host_header the same fake refuses (the dialled authority is sent, as fetch does) — the arm can fail', async () => {
+  const tcpFake = await startFakeCdp({ tcp: true, hostHeader: HOST_HEADER });
+  try {
+    const ep = { name: 'cdp', kind: 'tcp', adapter: 'cdp', transport: 'tcp', host: '127.0.0.1',
+      port: /** @type {number} */ (tcpFake.port), path: null, host_header: null };
+    await assert.rejects(getVersion(ep), /400|Bad Host|Unexpected token|JSON/);
+    assert.deepEqual([...new Set(tcpFake.hosts)], [`127.0.0.1:${tcpFake.port}`]);
+  } finally { await tcpFake.close(); }
+});
+
+test('UnixWebSocket: exactly ONE way to dial — a socketPath AND a host/port together are refused, and neither is', () => {
+  for (const o of [{ socketPath: '/x.sock', host: '127.0.0.1', port: 1, hostHeader: HOST_HEADER }, { hostHeader: HOST_HEADER }]) {
+    assert.throws(() => new UnixWebSocket('ws://127.0.0.1:9222/devtools/browser/B', /** @type {any} */ (o)), /exactly one of/);
+  }
+});
+
 test('A12: replies split into continuation frames are reassembled', async () => {
   const u = await unixFake({ fragmentReplies: true });
   try {

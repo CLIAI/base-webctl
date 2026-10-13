@@ -28,7 +28,7 @@ export function serverFrame(op, payload, fin = true) {
 
 /**
  * @param {{
- *   hostHeader?: string,               // unix: the Host to require; tcp: learned after listen
+ *   hostHeader?: string,               // the Host to require; tcp without it: learned after listen
  *   socketPath?: string,               // unix (default) …
  *   tcp?: boolean,                     // … or TCP on 127.0.0.1:<ephemeral> (the control)
  *   badAccept?: boolean,
@@ -131,7 +131,9 @@ export async function startFakeCdp(o) {
     else server.listen(o.socketPath, () => resolve(undefined));
   });
   const addr = /** @type {any} */ (server.address());
-  if (o.tcp) expectHost = `127.0.0.1:${addr.port}`;
+  // tcp: the dialled authority — unless `hostHeader` is given: then the fake is an app BEHIND A FORWARD that checks
+  // Host against its OWN port (6gi0 §2), and a client sending the dialled authority gets 400
+  if (o.tcp && !o.hostHeader) expectHost = `127.0.0.1:${addr.port}`;
   return {
     port: o.tcp ? addr.port : null,
     violations, hosts, methods,
