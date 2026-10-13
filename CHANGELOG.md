@@ -323,8 +323,11 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   workflow that relied on group or other access to them loses it. Existing directories are
   untouched.
 * **A tcp-legacy bring-up or reuse now WARNs** (`exposure LOCAL-USERS …`) every time.
-* **A running pair whose channel mode differs from the cfg is refused**, in both
-  directions, instead of being reused or recreated.
+* **A running pair whose channel mode differs from an EXPLICIT cfg is refused**, in both
+  directions, instead of being reused or recreated. A cfg that sets no `channels` facing a pair
+  started owner-only **adopts** it: `inspect()` then shows the unix endpoint, `cdpHttpUrl` is
+  `null`, and one line says so. It is never refused and never downgraded (gvlx Q4). A TCP-only
+  caller of such a target needs the per-call `tcp-forward`, which is NOT in this release.
 * **New refusals at construction (exit 4):**
   * an unknown `channels` value;
   * `containerEnv.LWC_CDP_PORT` with owner-only;
