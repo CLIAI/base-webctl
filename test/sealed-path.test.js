@@ -93,7 +93,13 @@ test('⛔ review F3, real fs: a sealed dir under a group/other-WRITABLE parent i
 test('⛔ review F3: ensurePrivateDir refuses a 0700 dir whose PARENT is loosened — CONTROL: a sealed parent passes', () => {
   const l = openLayout();
   try {
-    assert.throws(() => ensurePrivateDir(l.sealed), /its path is not safe: .*writable by group or others/);
+    assert.throws(() => ensurePrivateDir(l.sealed), (/** @type {any} */ e) => {
+      // ruled: the refusal names the DIR, the BIT and BOTH remedies
+      assert.match(e.message, /its path is not safe: .*writable by group or others \(mode 0777: g\+w and o\+w\)/);
+      assert.ok(e.message.includes(`chmod go-w ${l.open}`), e.message);
+      assert.match(e.message, /set XDG_STATE_HOME to a private directory/);
+      return true;
+    });
     fs.chmodSync(l.open, 0o700);
     assert.doesNotThrow(() => ensurePrivateDir(l.sealed));
   } finally { l.done(); }
