@@ -108,12 +108,14 @@ ownedForward(...)     -> a tunnel with a handle: started, reported, torn down by
 appVersion(...)       -> the existing schema-1 contract
 ```
 
-⚠ **`controlEndpoint` gains a unix form (`gvlx` §6.3, 2026-10-13).** Both xq and base now
-put the CDP relay on a unix socket in a 0700 directory, with nothing on TCP reachable from
-outside the zone. ⇒ The endpoint becomes `{name, kind: "unix", adapter: "cdp", path}`
-beside today's `kind: "tcp"`, and a forward of it stays unix → unix (`ssh -L <0700 dir>/cdp.sock:<path>`).
-A local TCP forward is a named fallback, never the default. **Provisional until xq's
-schema lands**: one field name (`kind`), not a second one.
+⚠ **`controlEndpoint` gained a unix transport — shipped by xq at `0a4fab6` (2026-10-13), additive
+to schema 1.** `kind` stays the IMAGE's declared control (what the app listens on inside),
+and the new `transport` says how THIS host reaches it:
+`{name, kind:"tcp", adapter, transport:"unix", host:null, port:null, path, host_header}`,
+where TCP endpoints only gain `transport:"tcp"`. `host_header` is the Host a client must
+send through the socket (Firefox BiDi answers 400 to any other). Base consumes this shape
+exactly and its own driver produces it; the owned unix → unix forward that carries it
+across machines is specified in `gvlx` §6.3–§6.5.
 
 ⛔ **Three seam rules from xq's landed work (2026-10-03):**
 
