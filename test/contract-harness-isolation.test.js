@@ -4606,6 +4606,44 @@ test('⛔ B5: an `env` that ACCEPTS --ignore-signal and does nothing → the run
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+// ⛔ Seventh review, item 1: on the NESTED path neither shield was read back — privilegeDrop only asked whether `env`
+// ACCEPTS the options. An `env` that took --default-signal and dropped it left nested pid 1 with SigIgn 0x4007, and a
+// forwarded TERM never reached the command (rc 5, not the trap's 7). ⇒ Before `go`, the nested unshare's SigIgn and its
+// pid 1's SigCgt are read back from /proc. Each fake drops ONE option, and only where WEBCTL_TEST_DROP_SHIELD=1 — set by
+// the outer command for the nested call alone, so the OUTER creator stays shielded and the outer run goes ahead.
+test('⛔ nested: an `env` that ACCEPTS --ignore-signal or --default-signal and drops it → the NESTED call is REFUSED by the read-back, nothing run — CONTROL: the real env runs', needsIsolation, async (t) => {
+  const dir = tmpdir();
+  try {
+    const realEnv = TOOL_DIRS.map((d) => path.join(d, 'env')).find((p) => fs.existsSync(p)) || '/usr/bin/env';
+    const real = realCopyAt(dir, 'env');
+    const marker = path.join(dir, 'RAN');
+    const argv = [process.execPath, TOOL, 'isolated', '--keep', dir, '--', 'sh', '-c',
+      'WEBCTL_TEST_DROP_SHIELD=1 exec "$0" "$1" isolated -- sh -c \'echo x > "$0"\' "$2"', process.execPath, TOOL, marker];
+    const env = cleanEnv({ WEBCTL_ISOLATION_BACKEND: 'unshare' });
+    delete env.WEBCTL_TEST_DROP_SHIELD;
+    /** @type {[string, RegExp][]} */
+    const cases = [
+      ['ignore-signal', /NOT RUN: the nested unshare is running WITHOUT its shield \(read back: SigIgn [0-9a-f]+ lacks TERM, INT, HUP or QUIT\)/],
+      ['default-signal', /NOT RUN: the nested call's pid 1 cannot trap TERM, INT, HUP or QUIT \(read back: SigCgt [0-9a-f]+ lacks one\)/],
+    ];
+    for (const [opt, why] of cases) {
+      const fake = path.join(dir, `fake-env-${opt}`);
+      fs.writeFileSync(fake, '#!/bin/sh\nn=$#; while [ "$n" -gt 0 ]; do a=$1; shift; n=$((n-1)); '
+        + `case "\${WEBCTL_TEST_DROP_SHIELD:-}$a" in 1--${opt}=*) ;; *) set -- "$@" "$a";; esac; done\nexec ${JSON.stringify(real)} "$@"\n`, { mode: 0o755 });
+      const r = await withBinds([[realEnv, real], ...overTool(fake, 'env')], argv, { env });
+      if (!r) { t.skip('SKIP (host): cannot bind a fake env in a throwaway `unshare -rm` here'); return; }
+      assert.match(r.stderr, /; backend: unshare; /, `--${opt}: the OUTER call did not run (its creator must stay shielded):\n${r.stderr}`);
+      assert.equal(r.status, 1, `--${opt}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, why, `--${opt}: ${r.stderr}`);
+      assert.equal(fs.existsSync(marker), false, `--${opt}: the NESTED command RAN with its shield dropped`);
+    }
+    // CONTROL: the same binds minus the fake — the real env — and the nested command runs
+    const c = await withBinds([[realEnv, real]], argv, { env });
+    assert.equal(c?.status, 0, `control: ${c?.stdout}${c?.stderr}`);
+    assert.equal(fs.existsSync(marker), true, 'control: the nested command did not run — the arm cannot fail');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('⛔ F4: TERM to the CREATOR alone → the command is unaffected (it runs to its own end, rc 5) — unshare AND bwrap', needsIsolation, async () => {
   const script = 'trap \'echo GOT-TERM; exit 7\' TERM; echo READY; sleep 1; echo DONE; exit 5';
   for (const backend of bwrapUsable() ? ['unshare', 'bwrap'] : ['unshare']) {

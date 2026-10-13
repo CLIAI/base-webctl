@@ -435,6 +435,13 @@ Chromium's sandbox, the nested path's drop).
    bwrap (`unshareCreator`); the nested path's `unshare --fork` gets the shield too (`privilegeDrop`).
    `probeUnshare` refuses an `env` without the options and reads back that pid 1 can trap all four through a
    shielded unshare; the running creator's SigIgn is read back before `go` (item 7).
+   ⛔ *The nested path reads back BOTH shields too (seventh review, item 1):* `privilegeDrop` only sees `env`
+   ACCEPT the options. *Measured:* an `env` that took `--default-signal` and dropped it left the nested pid 1
+   at SigIgn 0x4007, and a forwarded TERM never reached the command (rc 5, not the trap's 7). So before `go`
+   the nested call reads its unshare's SigIgn (`creatorShieldWhy`) and its pid 1's SigCgt (`nestedPid1Why`:
+   the unshare child that is pid 1 by NSpid) from the host side; either one short, or unreadable, tears the
+   chain down and refuses, named. *Arm:* a fake `env` that accepts and drops each option, for the nested
+   call alone → `NOT RUN`, nothing run; control: the real `env` runs it.
    * **A terminal-group signal reaches the command EXACTLY ONCE** on both creators: only the harness is in
      the caller's group, and each half forwards it once. *Arm:* group HUP/QUIT/INT/TERM → `GOT` ×1, the trap
      completes, rc 7.

@@ -398,6 +398,19 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   * the reaped check off: B3 logic arm;
   * pid 1's swallow trap removed: the B9 arm and the inside SIGUSR1 arm.
 
+### Seventh review
+
+* **The nested path reads back both shields (item 1).** On the nested path neither shield was read back:
+  `privilegeDrop` only checked that `env` ACCEPTS `--ignore-signal` / `--default-signal`. *Measured:* an
+  `env` that took `--default-signal` and dropped it left the nested pid 1 at SigIgn 0x4007, and a forwarded
+  TERM never reached the command (rc 5 instead of the trap's 7). Now, before `go`, the nested call reads back
+  its unshare's SigIgn, as the fresh path reads its creator's, and its pid 1's SigCgt, as the fresh probe
+  does. Either one short is refused and nothing runs: `NOT RUN: the nested unshare is running WITHOUT its
+  shield (read back: SigIgn …)` or `NOT RUN: the nested call's pid 1 cannot trap TERM, INT, HUP or QUIT
+  (read back: SigCgt … lacks one)`. *Arm:* a fake `env` that accepts and drops each option, for the nested
+  call alone → refused, nothing run (red before the fix: the nested command ran, rc 0); control: the real
+  `env` runs it.
+
 ### Fifth review, smaller items
 
 * **F5:** the claim "`isolated` never executes a setuid binary in its chain" was false. `/usr/bin/mount`
@@ -452,7 +465,8 @@ The changes that can show:
     now for unshare AND bwrap, the nested path included. Before this release only bwrap needed it. A
     busybox-only or older-coreutils host that ran v0.34 under unshare is REFUSED, named
     (`its \`env\` cannot reset signal dispositions …`);
-  * a running creator whose SigIgn shows the shield applied.
+  * a running creator whose SigIgn shows the shield applied — and, on the nested path, a pid 1 whose SigCgt
+    shows it can trap TERM, INT, HUP and QUIT.
 
 ### For lanes
 

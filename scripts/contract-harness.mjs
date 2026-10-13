@@ -1707,6 +1707,34 @@ function creatorShieldWhy(pid, creator) {
 }
 
 /**
+ * '' when the nested call's pid 1 — the child of its unshare (`pid`) that is pid 1 in its own namespace (NSpid) —
+ * CATCHES every CREATOR_SHIELDED signal, read back from the host side (/proc/<pid 1>/status SigCgt); else the named
+ * reason (seventh review, item 1). Asked with creatorShieldWhy, before `go`, when PID1_REAPER's traps are in place
+ * (its helper reported `started`). ⚠ SigCgt, not SigIgn, as the fresh probe (probeUnshare): bash ignores QUIT for
+ * itself and still traps it; a signal ignored at ENTRY is the one its trap silently cannot catch — measured, an `env`
+ * that dropped `--default-signal` left pid 1 at SigIgn 0x4007 and a forwarded TERM never reached the command.
+ * Unreadable, or no such child, is a refusal too.
+ * @param {number | undefined} pid the nested unshare @returns {string}
+ */
+function nestedPid1Why(pid) {
+  let cgt = '';
+  for (const k of pid ? childrenOf(pid) : []) {
+    let s = '';
+    try { s = fs.readFileSync(`/proc/${k}/status`, 'utf8'); } catch { continue; /* gone */ }
+    if ((s.match(/^NSpid:\s*(.*)$/m) || [])[1]?.trim().split(/\s+/).pop() !== '1') continue;
+    cgt = (s.match(/^SigCgt:\s*([0-9a-fA-F]+)$/m) || [])[1] || '';
+    break;
+  }
+  if (!cgt) {
+    return 'cannot read the nested call\'s pid 1 signal handlers (SigCgt in /proc) — whether it can trap TERM, INT, HUP and QUIT is unverified';
+  }
+  const want = BigInt(`0x${CREATOR_SHIELDED_MASK}`);
+  if ((BigInt(`0x${cgt}`) & want) === want) return '';
+  return `the nested call's pid 1 cannot trap TERM, INT, HUP or QUIT (read back: SigCgt ${cgt} lacks one) — its \`env\` accepted `
+    + '`--default-signal` and did not apply it; a forwarded stop signal would never reach the command';
+}
+
+/**
  * '' when `env` (from the system dirs) can SHIELD a namespace creator — `--ignore-signal` and `--default-signal`
  * for CREATOR_SHIELDED, accepted — else the named reason. ⚠ "accepted" is all this can see: an `env` that takes
  * the options and does nothing is caught by the read-back of the creator's SigIgn once it runs (creatorShieldWhy).
@@ -4514,7 +4542,19 @@ export function runCommand(command, prefix = [], { pastUnshare = false, env = /*
     const envPipe = /** @type {import('node:stream').Writable | null | undefined} */ (child.stdio[pastUnshare ? 4 : 3]);
     envPipe?.on('error', () => { /* the helper refused or never started; it reports */ });
     envPipe?.end(JSON.stringify(env));
-    if (pastUnshare) st = statusChannel(child, () => !fwd.early?.());
+    // ⛔ `go` only once BOTH shields are READ BACK (seventh review, item 1): the nested unshare's SigIgn
+    // (creatorShieldWhy, as the fresh path's creator) and its pid 1's SigCgt (nestedPid1Why). privilegeDrop
+    // only saw `env` ACCEPT the options — else torn down like an early signal, nothing run
+    let shieldWhy = '';
+    if (pastUnshare) {
+      st = statusChannel(child, () => {
+        if (fwd.early?.()) return false;
+        shieldWhy = creatorShieldWhy(child.pid, 'the nested unshare') || nestedPid1Why(child.pid);
+        if (!shieldWhy) return true;
+        earlyTeardown(child);
+        return false;
+      });
+    }
     fwd.attach(child);
     child.on('error', (e) => {
       fwd.remove();
@@ -4523,6 +4563,7 @@ export function runCommand(command, prefix = [], { pastUnshare = false, env = /*
     });
     child.on('close', (code, signal) => {
       if (fwd.early?.()) dieByForwarded(fwd); // killed before pid 1 could hear it: die by the signal
+      if (shieldWhy) { fwd.remove(); resolve(report('isolated', EXIT.fail, `NOT RUN: ${shieldWhy}. The command was NOT started.`)); return; }
       // ⛔ pid 1 refused before starting anything (its keyring join, R3): report it, as the fresh path does
       const fail = st && !st.started() ? st.text().match(/^fail (.*)$/m) : null;
       if (fail) { fwd.remove(); resolve(report('isolated', EXIT.fail, `NOT RUN: ${fail[1]}. The command was NOT started.`)); return; }
