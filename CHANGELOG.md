@@ -234,6 +234,13 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   whole defence, and there was none.
 * **Profile directories were created 0755.** Their contents were protected only when some
   ancestor directory happened to be 0700.
+* **The xpra presence probe could open a password DIALOG on the caller's desktop.**
+  `isXpraClientAttached()` ran the host's `xpra info` with the caller's full env. Against an
+  auth-protected server it held no password for, xpra's GTK client prompted on whatever
+  DISPLAY the shell inherited. That can happen on every LRU tick. *Measured:* a test did
+  exactly this on a person's live desktop, over and over. ⇒ The probe now runs xpra with
+  DISPLAY, WAYLAND_DISPLAY and XAUTHORITY removed; it fails instead of prompting, and the
+  caller errs toward collapse, as before.
 * **Affected:** every release of the docker-xpra driver, in its default mode, including this
   one until a lane opts in. Docker-group users are root-equivalent by docker's design; for
   them this is defence in depth only. Processes of the same uid are one trust domain (they
@@ -272,6 +279,12 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   endpoint as well as a URL. HTTP goes over `http.request({socketPath})` with `Host:
   host_header`, and the websocket over **`lib/unix-websocket.js`**, a zero-dep RFC 6455
   client. Before any byte is sent, the socket's path must have a **sealed ancestor**.
+* **A tcp control endpoint's `host_header` is sent as the Host header** (6gi0 A18 tcp). Before,
+  `fetch` and the built-in WebSocket sent the URL's authority, so an app behind a forward that
+  checks Host (Chromium, BiDi) answered 400. Such an endpoint now goes through `http.request`
+  and the same RFC 6455 client as the unix path, which dials `{host, port}`. Its
+  `tcpWebSocketImpl` is exported beside `unixWebSocketImpl`. Without `host_header`, tcp is
+  unchanged.
 * **`lib/control-endpoint.js`**:
   * `parseControlEndpoint` consumes xq's `wait-ready --json` shape exactly;
   * `isLoopbackHost`;
@@ -340,7 +353,11 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
   * A13 — attach/presence;
   * A14 — 0700 under umask 022 and 0000, plus a source arm over every `mkdirSync`;
   * A15 — X11 stays on the named volume;
-  * A16/A17 — endpoint parsing and the sealed-ancestor check.
+  * A16/A17 — endpoint parsing and the sealed-ancestor check;
+  * A18 (tcp) — every request and the upgrade carry `host_header`, red on the old code;
+  * rule zero — the test runner and test helper scrub the display vars, the helper refuses
+    any xpra spawn while one is set, and the presence probe hands xpra none. Each layer is
+    sabotaged and caught.
 * **Integration (opt-in, `test/integration-owner-channels.test.js`).** I1–I10 run against
   throwaway containers from a consumer's own images, through the real driver. Set
   `WEBCTL_IT_XPRA_IMAGE` and `WEBCTL_IT_CHROMIUM_IMAGE`; without them the arms skip and say
@@ -359,6 +376,8 @@ later minor (Phase 2), after the wired lanes' gate passes with owner-only.
 * **The image-uid check before `docker run`** applies only to images built by v0.34.2 or
   later; older images rely on the post-start socket-owner check, which fails closed.
 * **The sidecar** is replaced later by a joint entrypoint contract with xq (gvlx F1).
+* **`xpra attach` still opens a client window** — that is its job, run by a human. Rule zero
+  covers tests and probes, not an attach a person asked for.
 
 ## v0.34.1 — 2026-10-12
 
