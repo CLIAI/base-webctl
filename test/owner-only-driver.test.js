@@ -652,6 +652,7 @@ test('⛔ review 2 (low): an IMPLICIT cfg facing ONLY a stopped owner-only chrom
   const h = harness({ preRunning: [{ name: names.chromiumContainer, labels: L('chromium', 'owner-only'), binds: [], up: false }] });
   try {
     h.running.get(names.chromiumContainer).args.mounts = [[h.udd, '/x', 'rw']];
+    h.running.get(names.chromiumContainer).args.labels['demo-webctl.channel-dir'] = h.CH.channelDir; // as base labels it
     const d = h.driver({});
     const r = await d.ensureRunning();
     assert.equal(r.endpoint.transport, 'unix');
@@ -668,8 +669,45 @@ test('⛔ review 2 (low): an IMPLICIT cfg facing ONLY a leftover owner-only RELA
   try {
     // a real leftover relay mounts THIS driver's channel dir — what proves it ours
     h.running.get(names.cdpRelayContainer).args.mounts = [[h.CH.channelDir, '/run/webctl', 'rw']];
+    h.running.get(names.cdpRelayContainer).args.labels['demo-webctl.channel-dir'] = h.CH.channelDir; // as base labels it
     const d = h.driver({});
     await d.ensureRunning();
     assert.equal(d.inspect().channels, 'owner-only');
   } finally { await h.done(); }
+});
+
+// ── review 3 of v0.34.2: item 2 (adoption judges EVERY container's channel-dir label) and item 4 ──
+
+test('⛔ review 3 item 2: an IMPLICIT cfg facing an owner-only-labelled pair with NO channel-dir label, or labels that DISAGREE, is REFUSED — never adopted', async () => {
+  const pre = harness();
+  const names = pre.driver(OO).inspect().names;
+  await pre.done();
+  const DIR = 'demo-webctl.channel-dir';
+  /** @type {Array<[string, (h: any) => void]>} */
+  const shapes = [
+    ['xpra labelled owner-only, no channel-dir label', (h) => { delete h.running.get(names.xpraContainer).args.labels[DIR]; delete h.running.get(names.chromiumContainer).args.labels[DIR]; }],
+    ['chromium names ours, xpra names none', (h) => { delete h.running.get(names.xpraContainer).args.labels[DIR]; }],
+    ['xpra names ours, chromium names another', (h) => { h.running.get(names.chromiumContainer).args.labels[DIR] = path.join(h.stateRoot, 'run', 'other'); }],
+    ['xpra names another, chromium names ours', (h) => { h.running.get(names.xpraContainer).args.labels[DIR] = path.join(h.stateRoot, 'run', 'other'); }],
+  ];
+  for (const [what, shape] of shapes) {
+    const h = harness({ preRunning: [
+      { name: names.xpraContainer, labels: L('xpra', 'owner-only'), binds: [] },
+      { name: names.chromiumContainer, labels: L('chromium', 'owner-only'), binds: [] },
+    ] });
+    try {
+      h.running.get(names.chromiumContainer).args.mounts = [[h.udd, '/x', 'rw']];
+      h.running.get(names.xpraContainer).args.labels[DIR] = h.CH.channelDir;
+      h.running.get(names.chromiumContainer).args.labels[DIR] = h.CH.channelDir;
+      shape(h);
+      await assert.rejects(h.driver({}).ensureRunning(), (/** @type {any} */ e) => {
+        assert.equal(e.exitCode, 4, what);
+        assert.match(e.message, /channel.dir label/, what);
+        assert.match(e.message, /Nothing was stopped, removed or started/, what);
+        return true;
+      }, what);
+      assert.deepEqual(h.calls, [], what); assert.deepEqual(h.stops, [], what); assert.deepEqual(h.removed, [], what);
+      assert.ok(!h.logs.some((l) => /channels: adopted/.test(l)), `${what}: adopted`);
+    } finally { await h.done(); }
+  }
 });
