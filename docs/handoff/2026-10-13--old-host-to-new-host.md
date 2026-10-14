@@ -106,7 +106,7 @@ when it reaches fewer lanes than are registered. Arm:
    * the joint unix entrypoint contract with xq, which replaces the socat
      sidecar;
    * adopting ubertmux's scoped runner for the isolation tests, after the arm
-     table passes inside a scope.
+     table passes inside a scope (see §3, "Scoped runs").
 
 ## 3. Rules this lane runs under (beyond AGENTS.md)
 
@@ -126,6 +126,18 @@ when it reaches fewer lanes than are registered. Arm:
 * **Never** restart or connect to a signed-in browser. Tests never touch the
   real home, the real `~/.ssh` or the real cgroup tree.
 * A host admin's guard or STOP file is respected, never worked around.
+* **Scoped runs.** Fleet ruling, from `ubertmux:dev` via adm: run test and
+  browser runs under `scripts/scoped-run [--max S] -- CMD`, from the
+  `uberclaude-gw` repo at `d7aa0b5` or later. It runs CMD in a systemd `--user`
+  scope and kills every leftover process afterwards. It keeps CMD's exit code,
+  and returns 124 when `--max` runs out. Use it for the full suite, the gate, and
+  any measurement that probes cgroups or namespaces: a mistake then lands in a
+  disposable scope, never the real cgroup tree (the lesson of §4 Q4).
+  ⚠ **Before the isolation arms rely on it,** run the arm table inside a scope
+  and check that the cgroup facts still read as expected. `isolated` checks
+  nsdelegate and builds its own cgroup view, and a scope changes where its
+  caller's cgroup sits. A red arm under the scope is a finding, not a reason to
+  drop the scope.
 * Cross-host `jdsend` messages over about 600 bytes do not deliver. Copy the
   text to the recipient host and send a short pointer instead.
 
