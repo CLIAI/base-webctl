@@ -3,7 +3,7 @@ id: eg7p
 title: "Egress profiles — declare which network a browser's traffic uses; never assume direct"
 category: arch
 created: "2026-10-10"
-updated: "2026-10-10"
+updated: "2026-10-14"
 status: draft
 tags: [egress, network, proxy, socks5, ssh-tunnel, wireguard, vpn, tor, xq, netvm, fail-closed, leaks]
 tech:
@@ -51,6 +51,39 @@ REFUSED rather than silently given NAT. An egress here IS an xq net zone; a brow
 * An egress record names its **`kind`** (`direct`, `ssh-dynamic`, `socks5`, `http-proxy`,
   `wireguard`, `vpn`, `tor`; the list is closed, an unknown kind refused) and the
   kind-specific, NON-secret parameters. Secrets live in files the record points to (§6).
+
+### 2a. Base's half, step 2 (§13): what `lib/egress.js` declares, resolves and refuses — (2026-10-14)
+
+No network and no xq contact. Everything here is decided from config and flags alone.
+
+* **The target record** gains `egress = "<name>"` (a ruled key in its closed schema). The name
+  is lower-case, like a target name. `direct` is RESERVED: it means "no egress, deliberately",
+  needs no record, and a record file named `direct.toml` is refused.
+* **An egress record** (`~/.config/webctl/egress/<name>.toml`, mode 600, the shared loader's
+  TOML subset; base never writes it):
+  * `kind` is required and drawn from the CLOSED list. Any other kind is refused by name;
+  * ⛔ no inline secret. A key that names one (`password`, `passphrase`, `secret`, `token`,
+    `private_key`, `psk`, `credential`, …) is refused with "secrets live in a file the record
+    points to". A secret is a `*_file` key holding an ABSOLUTE path (or `~/…`), never a value;
+  * every other key is the kind's own parameter. It is passed through unrenamed, because xq
+    owns what runs and validates its own parameters (§1). Base does not guess their names.
+* **Resolution:** `--egress` > `<TOOL>_EGRESS` > the lane's config > the shared TARGET record's
+  `egress` key. The source is reported, as for a target (`nl0c` §1a). Two values in one layer
+  are refused as ambiguous.
+* **Refusals**, each a machine `code` with a reason and instructions, and never an exit code
+  (the lane maps it, as for `resolveTarget`):
+  * `no-egress`: nothing declared, and direct is never assumed;
+  * `invalid-egress`: a name that is not an egress name;
+  * `unknown-egress`: no record of that name, or an invalid one;
+  * `unknown-kind`;
+  * `privileged-kind`: `wireguard`/`vpn` (§8) are refused UNLESS xq's capability reading
+    (`egress_kinds`, §11.3) is passed in and says the kind is enabled. Without that reading,
+    they are refused, and the reason names the human's decision;
+  * `kind-unavailable`: xq's reading is passed in and lacks the kind.
+  * ⛔ A refusal echoes a NAME only when it is a valid egress name. It never echoes a record
+    value, because a value may be an endpoint.
+* **`where`:** `egressWhere(resolved)` returns exactly `{egress, egress_kind, egress_source}`.
+  No other field can reach it.
 
 ## 3. ⛔ Fail closed — by topology, not by a check
 
