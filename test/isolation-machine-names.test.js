@@ -220,9 +220,23 @@ test('⛔ final review (LOW): under docker, a names file the COMMAND planted in 
     });
     // no xq on the host's PATH → no names passed → /run is the container's writable tmpfs
     const p = /** @type {any} */ (await go(plant, { PATH: '/usr/local/bin:/usr/bin:/bin' }));
-    assert.match(p.out, /machine-names: none \(xq is not installed on the host\)/, p.out);
-    assert.match(p.out, /^PLANTED$/m, `CONTROL: the plant itself failed:\n${p.out}`);
-    assert.match(p.out, /^NESTED=UNSET$/m, `a nested call trusted a file the command planted:\n${p.out}`);
+    if (/machine-names: none \(/.test(p.out)) {
+      // nothing passed: /run is the container's writable tmpfs, so the plant succeeds — and must not be trusted
+      assert.match(p.out, /^PLANTED$/m, `CONTROL: the plant itself failed:\n${p.out}`);
+      assert.match(p.out, /^NESTED=UNSET$/m, `a nested call trusted a file the command planted:\n${p.out}`);
+    } else {
+      // names passed (this host declares some): the real file is a read-only bind, so the plant cannot even land
+      assert.match(p.out, /machine-names: passed/, p.out);
+      assert.doesNotMatch(p.out, /^PLANTED$/m, `the command overwrote the passed names file:\n${p.out}`);
+      assert.match(p.out, new RegExp(`^NESTED=${MACHINE_NAMES_PATH.replace(/\./g, '\\.')}$`, 'm'), p.out);
+    }
+    // the property itself, pure: a file there but NOT on a read-only mount is never trusted — CONTROL: a read-only one is
+    const row = (/** @type {string} */ id, /** @type {string} */ parent, /** @type {string} */ at, /** @type {string[]} */ opts) => ({ id, parent, root: '/', at, opts, propagation: [], fstype: 'tmpfs', source: 'x', superOpts: '' });
+    // a root mount, then the identity dir's mount with `opts` (resolveMount walks down from the root)
+    const mnt = (/** @type {string[]} */ opts) => () => [row('1', '0', '/', ['rw']), row('2', '1', path.dirname(MACHINE_NAMES_PATH), opts)];
+    assert.deepEqual(harness.nestedMachineNamesEnv({ exists: () => true, mounts: mnt(['rw']) }), {});
+    assert.deepEqual(harness.nestedMachineNamesEnv({ exists: () => true, mounts: mnt(['ro']) }), { [MACHINE_NAMES_ENV]: MACHINE_NAMES_PATH });
+    assert.deepEqual(harness.nestedMachineNamesEnv({ exists: () => false, mounts: mnt(['ro']) }), {});
   } finally { fs.rmSync(work, { recursive: true, force: true }); }
 });
 

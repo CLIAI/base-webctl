@@ -4472,13 +4472,14 @@ function machineNamesEnv(n) { return n.names ? { [MACHINE_NAMES_ENV]: MACHINE_NA
 /**
  * A NESTED call (its outer call's mounts are its own): the variable again, when the outer call's file is there — the
  * scrub removed whatever the env said, so only the file decides. @returns {Record<string, string>}
+ * @param {{exists?: (p: string) => boolean, mounts?: () => any[]}} [io] injectable (arms)
  */
-function nestedMachineNamesEnv() {
-  if (!fs.existsSync(MACHINE_NAMES_PATH)) return {};
+export function nestedMachineNamesEnv(io = {}) {
+  if (!(io.exists || fs.existsSync)(MACHINE_NAMES_PATH)) return {};
   // ⛔ on a READ-ONLY mount only (final review, LOW, measured): under docker /run is a writable tmpfs when no names were
   // passed, so the command could PLANT this file for a nested call to trust. Where `isolated` put it, it is read-only
   // (the identity tmpfs; docker's read-only bind).
-  const m = resolveMount(readMountinfo() || [], MACHINE_NAMES_PATH);
+  const m = resolveMount((io.mounts ? io.mounts() : readMountinfo()) || [], MACHINE_NAMES_PATH);
   return m && m.opts.includes('ro') ? { [MACHINE_NAMES_ENV]: MACHINE_NAMES_PATH } : {};
 }
 
