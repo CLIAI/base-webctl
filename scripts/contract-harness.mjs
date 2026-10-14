@@ -3041,7 +3041,10 @@ export function dockerCreateArgv(o) {
   return ['create', '--name', o.name, '--label', `${DOCKER_LABEL}.owner=u${o.uid}`,
     '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
     '--user', `${o.uid}:${o.gid}`, '--hostname', NEUTRAL_HOSTNAME, ...o.limits,
-    '--tmpfs', '/tmp:mode=1777', '--tmpfs', '/var/tmp:mode=1777', '--tmpfs', '/run:mode=1777',
+    // `exec` (pre-v0.35 lane run): docker's tmpfs default is noexec, so a test's PATH stub in /tmp could not run. The
+    // namespace backends' private tmpfs is nosuid,nodev and exec; docker adds nosuid,nodev itself
+    '--tmpfs', '/tmp:mode=1777,exec', '--tmpfs', '/var/tmp:mode=1777,exec', '--tmpfs', '/run:mode=1777,exec',
+    '--tmpfs', '/dev/shm:mode=1777,exec',
     ...o.binds.flatMap((b) => ['--mount', `type=bind,src=${b.p},dst=${b.p}${b.rw ? '' : ',readonly'}`]),
     ...o.masks.flatMap((s) => ['--mount', `type=bind,src=/dev/null,dst=${s},readonly`]),
     '--mount', `type=bind,src=${path.join(o.channel, 'machine-id')},dst=/etc/machine-id,readonly`,

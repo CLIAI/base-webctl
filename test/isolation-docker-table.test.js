@@ -497,3 +497,15 @@ test('[docker] the caller\'s uid RESOLVES inside (getent passwd, id -un), as on 
   assert.match(r.out(), new RegExp(`^NAME=${me.username}$`, 'm'), r.out());
   assert.doesNotMatch(r.out(), /^GROUP=$/m, r.out());
 });
+
+test('[docker] a script written to /tmp, /var/tmp, /run or /dev/shm RUNS (exec), as on the namespace backends — docker\'s tmpfs default is noexec (pre-v0.35 lane run: a PATH-stub test red)', needsDocker, async () => {
+  const w = await world();
+  const s = 'for d in /tmp /var/tmp /run /dev/shm; do printf "#!/bin/sh\\necho RAN-$d\\n" > $d/s.sh && chmod +x $d/s.sh && $d/s.sh; done; '
+    + 'grep -E " (/tmp|/var/tmp|/run|/dev/shm) " /proc/self/mounts | cut -d" " -f2,4';
+  const r = start(['--', 'sh', '-c', s], { cwd: w.work });
+  const end = await r.done;
+  assert.equal(end.code, 0, `${r.out()}${r.err()}`);
+  for (const d of ['/tmp', '/var/tmp', '/run', '/dev/shm']) assert.match(r.out(), new RegExp(`^RAN-${d}$`, 'm'), `${d}: ${r.out()}`);
+  // still nosuid and nodev, as there
+  for (const l of r.out().split('\n').filter((x) => /^\/(tmp|var\/tmp|run|dev\/shm) /.test(x))) assert.match(l, /nosuid.*nodev|nodev.*nosuid/, l);
+});
