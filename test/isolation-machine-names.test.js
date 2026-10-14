@@ -202,3 +202,23 @@ test('[docker] the command sees EXACTLY the host xq\'s names, read-only, at the 
     assert.ok(!out.includes('VAR=/etc/passwd'), 'the caller\'s own WEBCTL_MACHINE_NAMES_FILE reached the command');
   } finally { fs.rmSync(work, { recursive: true, force: true }); }
 });
+
+test('⛔ final review (LOW): under docker, a names file the COMMAND planted in /run is not trusted by a nested call — CONTROL: the outer call\'s read-only one is', SKIP ? { skip: SKIP } : { timeout: 120_000 }, async () => {
+  const work = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'webctl-mnp-')));
+  try {
+    const nested = `node "$1" isolated -- sh -c 'echo NESTED=\${${MACHINE_NAMES_ENV}-UNSET}'`;
+    const plant = `mkdir -p ${path.dirname(MACHINE_NAMES_PATH)} && echo planted-box > ${MACHINE_NAMES_PATH} && echo PLANTED; ${nested}`;
+    const go = (/** @type {string} */ script, /** @type {NodeJS.ProcessEnv} */ extra) => new Promise((resolve) => {
+      const env = { ...process.env, WEBCTL_ISOLATION_BACKEND: 'docker', ...extra };
+      for (const k of ['NODE_TEST_CONTEXT', 'NODE_OPTIONS', 'WEBCTL_HOST_NETNS', 'WEBCTL_HOST_MNTNS', 'WEBCTL_HOST_PIDNS']) delete env[k];
+      const c = spawn(process.execPath, [TOOL, 'isolated', '--', 'sh', '-c', script, 'arm', TOOL], { cwd: work, env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = ''; c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { out += d; });
+      c.on('close', (code) => resolve({ code, out }));
+    });
+    // no xq on the host's PATH → no names passed → /run is the container's writable tmpfs
+    const p = /** @type {any} */ (await go(plant, { PATH: '/usr/local/bin:/usr/bin:/bin' }));
+    assert.match(p.out, /machine-names: none \(xq is not installed on the host\)/, p.out);
+    assert.match(p.out, /^PLANTED$/m, `CONTROL: the plant itself failed:\n${p.out}`);
+    assert.match(p.out, /^NESTED=UNSET$/m, `a nested call trusted a file the command planted:\n${p.out}`);
+  } finally { fs.rmSync(work, { recursive: true, force: true }); }
+});

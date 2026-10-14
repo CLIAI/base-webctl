@@ -352,3 +352,49 @@ test('⛔ dockerReadBacks: a planted host socket that still ANSWERS is a refusal
   assert.equal(await harness.dockerReadBacks(plan, { ...io([]), gaps: () => ['CapEff is not 0'] }), 'inside the container, CapEff is not 0');
   assert.match(await harness.dockerReadBacks(plan, { ...io([]), loopback: async () => { throw new Error('no lo'); } }), /loopback does not work \(no lo\)/);
 });
+
+// ── final review (v0.35.0): BLOCKER 1, hidden dirs under a bind; MUST 2, a comma in a mount path ──────────────────
+test('⛔ final review 1: a hidden dir INSIDE a bind gets an empty read-only cover — only a --keep AT it unhides it; one beneath it stays on top', () => {
+  const hidden = ['/h/.ssh', '/h/.config/webctl', '/h/.cache/CLIAI'];
+  assert.deepEqual(harness.dockerHiddenCovers(hidden, [{ p: '/h/.config' }], []), ['/h/.config/webctl']);
+  assert.deepEqual(harness.dockerHiddenCovers(hidden, [{ p: '/h/.config' }, { p: '/h/.config/webctl' }], ['/h/.config/webctl']), [],
+    'CONTROL: an explicit --keep AT the hidden dir re-exposes it');
+  assert.deepEqual(harness.dockerHiddenCovers(hidden, [{ p: '/h/.config' }, { p: '/h/.config/webctl/x' }], ['/h/.config/webctl/x']), ['/h/.config/webctl']);
+  assert.deepEqual(harness.dockerHiddenCovers(hidden, [{ p: '/work' }], []), [], 'CONTROL: no bind contains a hidden dir');
+  const argv = harness.dockerCreateArgv({ name: 'n', uid: 1, gid: 1, limits: [], binds: [], masks: [], covers: ['/h/.config/webctl'], channel: '/c', image: 'i', inner: [] });
+  assert.ok(argv.includes('type=bind,src=/c/empty,dst=/h/.config/webctl,readonly'), argv.join(' '));
+});
+
+test('⛔ final review 1: the read-back no longer exempts a hidden dir INSIDE a keep — shown unless empty and read-only (a keep beneath may lead through it)', () => {
+  const io = (/** @type {Record<string, {entries: string[], w: boolean}>} */ fsm) => ({
+    exists: (/** @type {string} */ p) => p in fsm, list: (/** @type {string} */ p) => fsm[p].entries, writable: (/** @type {string} */ p) => fsm[p].w });
+  const plan = { hidden: ['/h/.config/webctl'], exempt: ['/h/.config'] };
+  // the measured hole: --keep ~/.config showed ~/.config/webctl with its entries, writable — the old check exempted it
+  assert.equal(harness.dockerHiddenShown(plan, io({ '/h/.config/webctl': { entries: ['a', 'b', 'c'], w: true } })), 1);
+  assert.equal(harness.dockerHiddenShown(plan, io({ '/h/.config/webctl': { entries: [], w: true } })), 1, 'an empty but WRITABLE dir is not a cover');
+  assert.equal(harness.dockerHiddenShown(plan, io({ '/h/.config/webctl': { entries: [], w: false } })), 0, 'CONTROL: the cover');
+  assert.equal(harness.dockerHiddenShown(plan, io({})), 0, 'CONTROL: absent');
+  // a keep BENEATH the hidden dir: only its leading entry may show
+  const beneath = { hidden: ['/h/.config/webctl'], exempt: ['/h/.config/webctl/x'] };
+  assert.equal(harness.dockerHiddenShown(beneath, io({ '/h/.config/webctl': { entries: ['x'], w: false } })), 0);
+  assert.equal(harness.dockerHiddenShown(beneath, io({ '/h/.config/webctl': { entries: ['x', 'secret'], w: false } })), 1);
+  // a --keep AT it: re-exposed by the caller's own choice
+  assert.equal(harness.dockerHiddenShown({ hidden: ['/h/.ssh'], exempt: ['/h/.ssh'] }, io({ '/h/.ssh': { entries: ['k'], w: true } })), 0);
+});
+
+test('⛔ final review 2: a comma (or quote, control char) in a mount path is REFUSED before any create — named by label, never the path', async () => {
+  const s = scratch();
+  try {
+    const target = path.join(s.dir, 'target');
+    fs.mkdirSync(target);
+    const odd = path.join(s.dir, `y,src=${target}`);
+    fs.mkdirSync(odd, { recursive: true }); // (the spec has slashes: a dir chain)
+    const r = await run(s, ['--keep-ro', odd, '--', 'true']);
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /--keep-ro #1 has a comma, a quote or a control character in its path .* refused/);
+    assert.ok(!r.stderr.includes(odd) && !r.stderr.includes('src='), 'the path was echoed');
+    assert.equal(callOf(s.calls(), 'create'), undefined, 'a container was CREATED with the split mount spec');
+    for (const p of ['/a"b', '/a\nb', "/a'b"]) assert.match(harness.dockerMountPathsUnsafe([{ p, label: 'x' }]), /^x has/, JSON.stringify(p));
+    assert.equal(harness.dockerMountPathsUnsafe([{ p: '/a b/c-d_e.f', label: 'x' }]), '', 'CONTROL: spaces and the usual characters pass');
+  } finally { fs.rmSync(s.dir, { recursive: true, force: true }); }
+});

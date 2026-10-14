@@ -3034,7 +3034,7 @@ function dockerLimits() {
  * The `docker create` argv (after `-H <endpoint>`), ib4k §3b. ⛔ What is NOT here is the contract too: no
  * `--privileged`, no unconfined profile, no published port, no host network/pid/ipc/userns, no docker.sock, no `-e`
  * (the command's env travels in the channel's plan.json — never an argv, never `docker inspect`).
- * @param {{name: string, uid: number, gid: number, limits: string[], binds: Bind[], masks: string[], channel: string, image: string, inner: string[], machineNames?: boolean}} o
+ * @param {{name: string, uid: number, gid: number, limits: string[], binds: Bind[], masks: string[], covers?: string[], channel: string, image: string, inner: string[], machineNames?: boolean}} o
  * @returns {string[]}
  */
 export function dockerCreateArgv(o) {
@@ -3047,6 +3047,8 @@ export function dockerCreateArgv(o) {
     '--tmpfs', '/dev/shm:mode=1777,exec',
     ...o.binds.flatMap((b) => ['--mount', `type=bind,src=${b.p},dst=${b.p}${b.rw ? '' : ',readonly'}`]),
     ...o.masks.flatMap((s) => ['--mount', `type=bind,src=/dev/null,dst=${s},readonly`]),
+    // a hidden dir a bind would show: an EMPTY read-only dir over it (docker mounts parents first, so a keep beneath lands on top)
+    ...(o.covers || []).flatMap((h) => ['--mount', `type=bind,src=${path.join(o.channel, 'empty')},dst=${h},readonly`]),
     '--mount', `type=bind,src=${path.join(o.channel, 'machine-id')},dst=/etc/machine-id,readonly`,
     '--mount', `type=bind,src=${o.channel},dst=${DOCKER_CHANNEL},readonly`,
     ...(o.machineNames ? ['--mount', `type=bind,src=${path.join(o.channel, 'machine-names')},dst=${MACHINE_NAMES_PATH},readonly`] : []),
@@ -3155,6 +3157,50 @@ export function runDockerReaper(a) {
 }
 
 /**
+ * A path that cannot go into a `--mount` spec, by its label (final review, MUST, measured): docker reads `--mount` as
+ * comma-separated fields, the LAST value winning, so `--keep-ro '<x>,src=<y>'` bound <y> at <x> — the whole home was
+ * reachable that way, and every read-back passed. ⛔ A comma, a quote or a control character in ANY mount path is
+ * REFUSED, named by its label, never by the path. '' = all safe. Pure.
+ * @param {{p: string, label: string}[]} items @returns {string}
+ */
+export function dockerMountPathsUnsafe(items) {
+  const bad = items.find((x) => /[,"'\u0000-\u001f\u007f]/.test(x.p));
+  return bad ? `${bad.label} has a comma, a quote or a control character in its path — docker's --mount would read it as more `
+    + 'fields (a path of its own choosing) — refused; rename or move it' : '';
+}
+
+/**
+ * The hidden dirs (~/.ssh, a state root …) a docker bind would SHOW, so each gets an empty read-only cover (final
+ * review, BLOCKER, measured: `--keep ~/.config` showed ~/.config/webctl WRITABLE, and the read-back exempted it). As on
+ * the namespace backends, a keep never unhides a hidden dir inside it; only an explicit --keep AT the hidden dir does
+ * (one BENEATH it is bound deeper, on top of the cover, so that path alone shows). Pure.
+ * @param {string[]} hidden @param {{p: string}[]} binds @param {string[]} keeps the explicit --keep paths, real
+ * @returns {string[]}
+ */
+export function dockerHiddenCovers(hidden, binds, keeps) {
+  return [...new Set(hidden)].filter((h) => binds.some((b) => b.p !== h && isWithin(h, b.p)) && !keeps.includes(h));
+}
+
+/**
+ * The docker read-back of the hidden dirs (row 4): each one not re-exposed by a keep AT it is absent, or an EMPTY,
+ * non-writable dir whose only entries lead to a keep beneath it. ⛔ No exemption for a hidden dir INSIDE a keep (the
+ * final review: `isWithin(h, k)` made this check unable to fail exactly where the cover was missing). Its fs is
+ * injectable (arms). @param {{hidden: string[], exempt: string[]}} plan
+ * @param {{exists?: (p: string) => boolean, list?: (p: string) => string[], writable?: (p: string) => boolean}} [io]
+ * @returns {number} how many are shown
+ */
+export function dockerHiddenShown(plan, io = {}) {
+  const exists = io.exists || ((/** @type {string} */ p) => fs.existsSync(p));
+  const list = io.list || ((/** @type {string} */ p) => { try { return fs.readdirSync(p); } catch { return []; } });
+  const writable = io.writable || ((/** @type {string} */ p) => { try { fs.accessSync(p, fs.constants.W_OK); return true; } catch { return false; } });
+  return [...new Set(plan.hidden)].filter((h) => {
+    if (plan.exempt.includes(h) || !exists(h)) return false;
+    const leading = new Set(plan.exempt.filter((k) => k !== h && isWithin(k, h)).map((k) => path.relative(h, k).split(path.sep)[0]));
+    return writable(h) || list(h).some((n) => !leading.has(n));
+  }).length;
+}
+
+/**
  * The container's /etc/passwd and /etc/group (ib4k §3b, row 10 parity): root, nobody, and the CALLER — its real name,
  * uid, gid and passwd home, as the namespace backends show them (there the host's own files are visible). Nothing of
  * any other account on the host. The group's name is the host's, when /etc/group has one; else the user's.
@@ -3189,6 +3235,7 @@ function dockerChannel(plan, machineNames = null, identity = null) {
     fs.writeFileSync(path.join(dir, 'plan.json'), JSON.stringify(plan), { mode: 0o600 });
     fs.writeFileSync(path.join(dir, 'marker'), DOCKER_MARKER, { mode: 0o444 });
     fs.writeFileSync(path.join(dir, 'machine-id'), `${NEUTRAL_MACHINE_ID}\n`, { mode: 0o444 });
+    fs.mkdirSync(path.join(dir, 'empty'), { mode: 0o555 }); // the hidden dirs' cover (dockerHiddenCovers)
     // ib4k §3b "Machine names": 0600 (the container runs as the caller's uid), bound read-only at MACHINE_NAMES_PATH
     if (machineNames) fs.writeFileSync(path.join(dir, 'machine-names'), machineNames.map((n) => `${n}\n`).join(''), { mode: 0o600 });
     if (identity) {
@@ -3213,7 +3260,7 @@ function dockerChannel(plan, machineNames = null, identity = null) {
  * --signal=<sig> <exact id>` (pid 1, the reaping bash → the inner half → the command's group); before `go` a signal tears the
  * container down (`rm -f` by exact id) and the command never runs. The harness then dies by it (exitOrDieBy).
  * @param {{cli: {bin: string}, image: string, name: string, ids: {uid: number, gid: number}, binds: Bind[],
- *   masks: string[], plan: object, command: string[], choice: BackendChoice, verdict: string, machineNames?: string[] | null, home?: string}} o
+ *   masks: string[], covers?: string[], plan: object, command: string[], choice: BackendChoice, verdict: string, machineNames?: string[] | null, home?: string}} o
  * @returns {Promise<number>}
  */
 function runDockerBackend(o) {
@@ -3224,6 +3271,10 @@ function runDockerBackend(o) {
   const ch = dockerChannel(o.plan, o.machineNames, dockerIdentityFiles(o.ids, o.home));
   const cleanup = () => { if (ch.dir) { try { fs.rmSync(ch.dir, { recursive: true, force: true }); } catch { /* left: private, 0700 */ } } };
   if (ch.why) { cleanup(); return Promise.resolve(refuse(ch.why)); }
+  const unsafe = dockerMountPathsUnsafe([...o.binds.map((b) => ({ p: b.p, label: b.label || 'a bind' })),
+    ...o.masks.map((p) => ({ p, label: 'a masked socket' })), ...(o.covers || []).map((p) => ({ p, label: 'a hidden dir' })),
+    { p: ch.dir, label: 'the channel dir (TMPDIR)' }]);
+  if (unsafe) { cleanup(); return Promise.resolve(refuse(unsafe)); }
   process.stderr.write(`${o.verdict}\n`);
   return new Promise((resolve) => {
     let id = '';
@@ -3270,7 +3321,7 @@ function runDockerBackend(o) {
     // ⛔ `--disable-sigusr1`: the image's node has it (22.23.3)
     const inner = ['/bin/bash', ...PID1_BASH_FLAGS, PID1_REAPER, 'webctl-isolated-pid1', '', 'node', '--disable-sigusr1', SELF, DOCKER_INNER, '--', ...o.command];
     const argv = ['-H', DOCKER_ENDPOINT, ...dockerCreateArgv({ name: o.name, uid: o.ids.uid, gid: o.ids.gid, limits: lim.args, binds: o.binds,
-      masks: o.masks, channel: ch.dir, image: o.image, inner, machineNames: !!o.machineNames })];
+      masks: o.masks, covers: o.covers || [], channel: ch.dir, image: o.image, inner, machineNames: !!o.machineNames })];
     let out = '';
     let err = '';
     creating = spawn(o.cli.bin, argv, { stdio: ['ignore', 'pipe', 'pipe'], env: dockerEnv() });
@@ -3374,6 +3425,9 @@ function runDockerFresh(o) {
   ]);
   const inBinds = o.sockets.filter((s) => binds.some((b) => isWithin(s, b.p)));
   const masks = inBinds.filter((s) => !o.plan.exempt.some((k) => isWithin(s, k)));
+  const hiddenAll = [...new Set([...o.prot.hideRule, ...o.prot.hidden])];
+  const keepsReal = o.keeps.map((k) => { try { return fs.realpathSync.native(path.resolve(k)); } catch { return path.resolve(k); } });
+  const covers = dockerHiddenCovers(hiddenAll.filter((h) => fs.existsSync(h)), binds, keepsReal);
   for (const n of o.plan.notes) process.stderr.write(`isolated: note: ${n}\n`);
   const cmdEnv = isolatedEnv(process.env, o.pass, { [HOST_NETNS_ENV]: o.ns.hostNs, [HOST_MNTNS_ENV]: o.ns.hostMnt, [HOST_PIDNS_ENV]: o.ns.hostPid,
     [RO_ROOTS_ENV]: JSON.stringify([o.prot.home, ...o.prot.roots]), [HIDDEN_ENV]: JSON.stringify([o.prot.home, ...o.prot.hidden]),
@@ -3384,7 +3438,7 @@ function runDockerFresh(o) {
   const verdict = verdictLine(binds, o.prot.home, process.env[VERBOSE_ENV] === '1',
     `; ${backendClause(o.choice)}; keyring: none (docker seccomp); dev: +${DOCKER_DEV_EXTRA}${machineNamesClause(o.names)}`);
   return runDockerBackend({ cli: o.cli, image: o.image, name: dockerName(o.ident.uid), ids: { uid: o.ident.uid, gid: o.ident.gid },
-    binds, masks, plan, command: o.command, choice: o.choice, verdict, machineNames: o.names.names, home: o.ident.home });
+    binds, masks, covers, plan, command: o.command, choice: o.choice, verdict, machineNames: o.names.names, home: o.ident.home });
 }
 
 /**
@@ -3520,7 +3574,7 @@ function dockerGaps(plan) {
     if (shown) gaps.push(`${shown} entr${shown === 1 ? 'y' : 'ies'} of the home are visible`);
     if (plan.binds.some((b) => b.p === plan.home || isWithin(plan.home, b.p))) gaps.push('the home itself is bound');
   }
-  const hiddenShown = plan.hidden.filter((h) => !plan.exempt.some((k) => isWithin(k, h) || isWithin(h, k)) && fs.existsSync(h)).length;
+  const hiddenShown = dockerHiddenShown(plan);
   if (hiddenShown) gaps.push(`${hiddenShown} hidden dir(s) (~/.ssh, a state root) are visible`);
   return gaps;
 }
@@ -4394,7 +4448,14 @@ function machineNamesEnv(n) { return n.names ? { [MACHINE_NAMES_ENV]: MACHINE_NA
  * A NESTED call (its outer call's mounts are its own): the variable again, when the outer call's file is there — the
  * scrub removed whatever the env said, so only the file decides. @returns {Record<string, string>}
  */
-function nestedMachineNamesEnv() { return fs.existsSync(MACHINE_NAMES_PATH) ? { [MACHINE_NAMES_ENV]: MACHINE_NAMES_PATH } : {}; }
+function nestedMachineNamesEnv() {
+  if (!fs.existsSync(MACHINE_NAMES_PATH)) return {};
+  // ⛔ on a READ-ONLY mount only (final review, LOW, measured): under docker /run is a writable tmpfs when no names were
+  // passed, so the command could PLANT this file for a nested call to trust. Where `isolated` put it, it is read-only
+  // (the identity tmpfs; docker's read-only bind).
+  const m = resolveMount(readMountinfo() || [], MACHINE_NAMES_PATH);
+  return m && m.opts.includes('ro') ? { [MACHINE_NAMES_ENV]: MACHINE_NAMES_PATH } : {};
+}
 
 /**
  * The machine names in `xq machine ls --json` output (its documented CONTRACT, schema 1): each `alias`, and the host

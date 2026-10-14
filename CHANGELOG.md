@@ -613,6 +613,35 @@ The changes that can show:
   `--ignore-signal` / `--default-signal`, which v0.33 did not need — leads with
   `NOT RUN: its \`env\` cannot reset signal dispositions …` instead.
 
+### ⛔ Final review of the docker backend (before release): two defects fixed, four named
+
+* **BLOCKER, fixed: a `--keep` of a dir that holds a hidden dir showed that hidden dir, WRITABLE.**
+  *Measured by the reviewer:* `--keep ~/.config` showed `~/.config/webctl` with its entries,
+  writable, and the read-back passed, because it exempted any hidden dir inside a keep. A
+  `--keep ~/.cache` would have shown `~/.cache/CLIAI` (browser profiles). Now each hidden dir inside
+  a bind gets an EMPTY read-only cover (an empty dir from the channel). As on the namespace backends,
+  only a `--keep` AT it unhides it; a keep beneath it is mounted on top. The read-back judges the
+  cover itself: empty, not writable, its only entries leading to a keep beneath. *Measured after:*
+  `--keep ~/.config` → `~/.config/webctl` has 0 entries and is read-only.
+* **MUST, fixed: a comma in a path rewrote the docker mount spec.** docker reads `--mount` as
+  comma-separated fields, the last value winning. So `--keep-ro '<x>,src=<y>'` bound `<y>`, and with
+  `src=$HOME` the whole home, at a path no check looked at. Any mount path (a bind, a mask, a cover,
+  the channel dir) with a comma, a quote or a control character is now refused before the create,
+  named by its label.
+* **LOW, fixed:** under docker, `/run` is writable when no names were passed, so the command could
+  plant the machine-names file for a nested call. A nested call now trusts it only on a read-only mount.
+* **LOW, named, not fixed:**
+  * a reaper that dies before or during the run is not noticed, so a SIGKILL of the harness then
+    could leave the container;
+  * the docker "inside" proof compares some facts against `plan.json`, which a forger able to make a
+    read-only bind would choose (no escape from inside our container: it can mount nothing);
+  * the absolute command path and the throwaway HOME skip `dockerPreflight`. A socket there is still
+    masked;
+  * on every backend, a `--keep-ro` under the writable cwd is writable.
+* Arms: `test/isolation-docker.test.js` (the covers, the read-back judgement, the comma refusal;
+  red on `73c1eff`) and `test/isolation-machine-names.test.js` (a planted names file is not trusted;
+  red with the read-only check removed).
+
 ### ⛔ What this does NOT cover
 
 * **Docker's deviations from the namespace contract** (ib4k §3b, named, never counted as passes):

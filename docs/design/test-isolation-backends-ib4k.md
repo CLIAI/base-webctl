@@ -602,6 +602,17 @@ the HIDE tmpfs), it gets a docker branch that checks the same PROPERTY (e.g. a h
 ENOENT, not "under our hide"). Every read-back that fails is a REFUSAL, as on the namespace
 backends.
 
+#### Two rules from the final review (2026-10-14)
+
+* **Hidden dirs inside a bind are covered.** A docker bind shows everything beneath it, so each
+  hidden dir (§1 row 4) inside a bind gets an empty read-only cover. As on the namespace backends,
+  only a `--keep` AT a hidden dir unhides it; a keep beneath it is mounted on top of the cover. The
+  read-back judges the cover: empty, not writable, its only entries leading to a keep beneath.
+  There is no exemption for a hidden dir INSIDE a keep: that exemption made the check unable to fail.
+* **No mount path may carry a comma, a quote or a control character.** docker's `--mount` is
+  comma-separated with the last field winning, so such a path is a mount spec of the caller's
+  choosing. Refused before the create, by label.
+
 #### The run, host side
 
 1. **Probe** (side-effect free; each failure a NAMED reason, §2):
