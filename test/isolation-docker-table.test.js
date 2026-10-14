@@ -484,3 +484,16 @@ test('[docker] §3a.3: a FORGED marker (a plain /run/webctl-isolated dir, in a c
   assert.match(r.stderr, /REFUSED, nothing run: .*not the docker backend's read-only bind \(a forged marker\)/);
   assert.ok(each(w).length === 3, 'CONTROL: the nested path did not run');
 });
+
+test('[docker] the caller\'s uid RESOLVES inside (getent passwd, id -un), as on the namespace backends — a lane\'s home guard reads it (pre-v0.35 lane run: rc 2, silent)', needsDocker, async () => {
+  const w = await world();
+  const me = os.userInfo();
+  const r = start(['--', 'sh', '-c', 'getent passwd "$(id -u)" | cut -d: -f1,3,4,6; echo "GETENT=$?"; echo "NAME=$(id -un)"; echo "GROUP=$(id -gn)"'], { cwd: w.work });
+  const end = await r.done;
+  assert.equal(end.code, 0, r.err());
+  // name, uid, gid and the REAL home (from passwd, as `isolated` resolves it), never the throwaway HOME
+  assert.match(r.out(), new RegExp(`^${me.username}:${me.uid}:${me.gid}:${me.homedir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'), r.out());
+  assert.match(r.out(), /^GETENT=0$/m);
+  assert.match(r.out(), new RegExp(`^NAME=${me.username}$`, 'm'), r.out());
+  assert.doesNotMatch(r.out(), /^GROUP=$/m, r.out());
+});

@@ -3047,6 +3047,10 @@ export function dockerCreateArgv(o) {
     '--mount', `type=bind,src=${path.join(o.channel, 'machine-id')},dst=/etc/machine-id,readonly`,
     '--mount', `type=bind,src=${o.channel},dst=${DOCKER_CHANNEL},readonly`,
     ...(o.machineNames ? ['--mount', `type=bind,src=${path.join(o.channel, 'machine-names')},dst=${MACHINE_NAMES_PATH},readonly`] : []),
+    // the caller's uid RESOLVES inside (getent passwd, id -un), as on the namespace backends (pre-v0.35 lane run: a lane's
+    // home guard got getent's exit 2, and the contract died silently under `set -e`)
+    '--mount', `type=bind,src=${path.join(o.channel, 'passwd')},dst=/etc/passwd,readonly`,
+    '--mount', `type=bind,src=${path.join(o.channel, 'group')},dst=/etc/group,readonly`,
     o.image, ...o.inner];
 }
 
@@ -3148,12 +3152,33 @@ export function runDockerReaper(a) {
 }
 
 /**
+ * The container's /etc/passwd and /etc/group (ib4k §3b, row 10 parity): root, nobody, and the CALLER — its real name,
+ * uid, gid and passwd home, as the namespace backends show them (there the host's own files are visible). Nothing of
+ * any other account on the host. The group's name is the host's, when /etc/group has one; else the user's.
+ * @param {{uid: number, gid: number}} ids @param {string} [home] @returns {{passwd: string, group: string}}
+ */
+export function dockerIdentityFiles(ids, home) {
+  let name = `u${ids.uid}`;
+  try { const u = os.userInfo(); if (u.uid === ids.uid && /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/.test(u.username)) name = u.username; } catch { /* the uid form */ }
+  let gname = name;
+  try {
+    const row = fs.readFileSync('/etc/group', 'utf8').split('\n').map((l) => l.split(':')).find((f) => f.length >= 3 && f[2] === String(ids.gid));
+    if (row && /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/.test(row[0])) gname = row[0];
+  } catch { /* the user's name */ }
+  const h = home && path.isAbsolute(home) && !/[:\n]/.test(home) ? home : '/nonexistent';
+  const passwd = ['root:x:0:0:root:/root:/bin/sh', ...(ids.uid === 0 ? [] : [`${name}:x:${ids.uid}:${ids.gid}::${h}:/bin/sh`]),
+    'nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin'].join('\n') + '\n';
+  const group = ['root:x:0:', ...(ids.gid === 0 || ids.gid === 65534 ? [] : [`${gname}:x:${ids.gid}:`]), 'nogroup:x:65534:'].join('\n') + '\n';
+  return { passwd, group };
+}
+
+/**
  * Make the channel dir (ib4k §3b item 5): private (`mkdtemp`, 0700) on the host, bound read-only at DOCKER_CHANNEL.
  * `plan.json` (0600: the command's env), `marker`, `machine-id` (the neutral one), and two FIFOs: `status` (the inner
  * half writes `started` / `fail …`) and `go` (the harness's answer). ⚠ node has no mkfifo: the system tool makes them.
  * @param {object} plan @returns {{dir: string, why: string}}
  */
-function dockerChannel(plan, machineNames = null) {
+function dockerChannel(plan, machineNames = null, identity = null) {
   /** @type {string} */ let dir = '';
   try {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webctl-iso-'));
@@ -3163,6 +3188,10 @@ function dockerChannel(plan, machineNames = null) {
     fs.writeFileSync(path.join(dir, 'machine-id'), `${NEUTRAL_MACHINE_ID}\n`, { mode: 0o444 });
     // ib4k §3b "Machine names": 0600 (the container runs as the caller's uid), bound read-only at MACHINE_NAMES_PATH
     if (machineNames) fs.writeFileSync(path.join(dir, 'machine-names'), machineNames.map((n) => `${n}\n`).join(''), { mode: 0o600 });
+    if (identity) {
+      fs.writeFileSync(path.join(dir, 'passwd'), identity.passwd, { mode: 0o444 });
+      fs.writeFileSync(path.join(dir, 'group'), identity.group, { mode: 0o444 });
+    }
     const mkfifo = systemTool('mkfifo');
     if (!mkfifo) return { dir, why: noSystemTool('mkfifo', 'install coreutils: the docker backend\'s status channel is a FIFO') };
     const r = spawnSync(mkfifo, ['-m', '600', path.join(dir, 'status'), path.join(dir, 'go')], { stdio: 'ignore', env: privilegedEnv(process.env) });
@@ -3181,7 +3210,7 @@ function dockerChannel(plan, machineNames = null) {
  * --signal=<sig> <exact id>` (pid 1, the reaping bash → the inner half → the command's group); before `go` a signal tears the
  * container down (`rm -f` by exact id) and the command never runs. The harness then dies by it (exitOrDieBy).
  * @param {{cli: {bin: string}, image: string, name: string, ids: {uid: number, gid: number}, binds: Bind[],
- *   masks: string[], plan: object, command: string[], choice: BackendChoice, verdict: string, machineNames?: string[] | null}} o
+ *   masks: string[], plan: object, command: string[], choice: BackendChoice, verdict: string, machineNames?: string[] | null, home?: string}} o
  * @returns {Promise<number>}
  */
 function runDockerBackend(o) {
@@ -3189,7 +3218,7 @@ function runDockerBackend(o) {
     + 'run on the host as a fallback.', { command: o.command, backend: o.choice.backend, skipped: o.choice.skipped });
   const lim = dockerLimits();
   if (lim.why) return Promise.resolve(refuse(lim.why));
-  const ch = dockerChannel(o.plan, o.machineNames);
+  const ch = dockerChannel(o.plan, o.machineNames, dockerIdentityFiles(o.ids, o.home));
   const cleanup = () => { if (ch.dir) { try { fs.rmSync(ch.dir, { recursive: true, force: true }); } catch { /* left: private, 0700 */ } } };
   if (ch.why) { cleanup(); return Promise.resolve(refuse(ch.why)); }
   process.stderr.write(`${o.verdict}\n`);
@@ -3352,7 +3381,7 @@ function runDockerFresh(o) {
   const verdict = verdictLine(binds, o.prot.home, process.env[VERBOSE_ENV] === '1',
     `; ${backendClause(o.choice)}; keyring: none (docker seccomp); dev: +${DOCKER_DEV_EXTRA}${machineNamesClause(o.names)}`);
   return runDockerBackend({ cli: o.cli, image: o.image, name: dockerName(o.ident.uid), ids: { uid: o.ident.uid, gid: o.ident.gid },
-    binds, masks, plan, command: o.command, choice: o.choice, verdict, machineNames: o.names.names });
+    binds, masks, plan, command: o.command, choice: o.choice, verdict, machineNames: o.names.names, home: o.ident.home });
 }
 
 /**
