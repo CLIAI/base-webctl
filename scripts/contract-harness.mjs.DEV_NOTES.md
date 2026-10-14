@@ -2223,3 +2223,15 @@ common in copy-pasted code, so this needed no exotic input. Identifiers now use
 `\p{ID_Start}` / `\p{ID_Continue}` (plus `$`, `_`, `#`, ZWNJ, ZWJ). Six arms pin it
 (break/return/typeof/else/prefix-`++`/`-->` with NBSP, BOM or U+2028); restoring the old range
 turns them red. Unicode identifiers (`café`, `π`) still lex as identifiers.
+
+### Under a systemd `--user` scope (the fleet's scoped runner), measured 2026-10-14
+
+The handoff asks for the arm table to be run inside a scope once before the isolation arms rely
+on one. A scope moves the caller's cgroup, and `isolated` reads its caller's cgroup facts.
+* **Measured on the host that blocks user namespaces**, the docker backend at `5a11561`: the full
+  suite under `scoped-run --max 2400`, niced. 971 tests, 0 fail, 237 skipped, exit 0. The docker
+  table's row 3 ran and passed, so the caller's cgroup files (now the scope's) are not writable
+  inside. `cgroupDelegationRefusal` passed too.
+* **Not measured:** the unshare and bwrap rows (`isolation-arm-table`). They skip there for host
+  policy. They need the same run on a host with user namespaces (or a VM) before those backends
+  rely on a scope. A red arm there is a finding, not a reason to drop the scope.
