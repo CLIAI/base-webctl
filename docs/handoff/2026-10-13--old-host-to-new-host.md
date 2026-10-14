@@ -53,6 +53,15 @@ when it reaches fewer lanes than are registered. Arm:
   load is the likely cause. **But it is unconfirmed: a red arm is red until a
   re-run proves otherwise.** It needs user namespaces, so it can only be re-run
   on the old host or in a VM (open question 1).
+* ⚠ **That run then HUNG.** After the arm "TERM ×3 (60 ms apart) → the
+  command's trap code 7 … fresh AND nested" (363 s), `test/contract-harness-
+  isolation.test.js` went 14 hours with no output and no child process, so it
+  was waiting on something that never came. The run was stopped by pid the next
+  morning. The run was never finished, and the arm that hung is unidentified.
+  ⇒ Run the suite under `scoped-run --max` (§3), so a hang ends with exit 124
+  and is reported, and treat this as a finding to reproduce on a host with user
+  namespaces: a hang in an isolation arm is a defect, whether in the arm or in
+  `isolated`.
 * Review round 3 (`17fe728..6e4898d`): 137/137 of the touched unit files pass,
   and `tsc` 5.9.3 is clean. The implementer ran 193/193 across ten unit files.
 * Not yet run on `6e4898d`: the full suite, and the gate.
