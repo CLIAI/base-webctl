@@ -221,7 +221,7 @@ meaning.
 
 1. This document. §11 answered by xq's lane (2026-10-10); it measures the internal-network
    topology in its own code path first.
-2. Base: declaration + resolution + refusals + `where` (no network needed; testable now).
+2. Base: declaration + resolution + refusals + `where` (no network needed; testable now). ✅ Built per §2a (`lib/egress.js`, 2026-10-14).
 3. xq: egress zones for the unprivileged kinds (`ssh-dynamic`, `socks5`, `http-proxy`, `tor`).
 4. Base: the verdict and proof against xq's egress; then the privileged kinds once the human
    rules on §8.

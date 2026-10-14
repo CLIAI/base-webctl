@@ -207,6 +207,31 @@ is the strongest form: it names the ownership in the function that reads it.
     frequently its only page, so closing it tears down the session the caller is
     standing on. `close()` encodes this.
 
+## Unreleased — egress declaration (eg7p §2a, step 2)
+
+**`lib/egress.js`: a profile's network egress is DECLARED and resolved, never assumed direct.**
+No network contact: xq runs the egress (step 3), and base judges the declaration.
+* `resolveEgress({flag, env, laneConfig, targetRecord, kinds?})`: `--egress` > `<TOOL>_EGRESS` >
+  the lane's config > the target record's `egress` key. It returns a reason object (`resolved`
+  with name, kind, source and shadowed, or `refused` with a code). Codes: `no-egress`,
+  `ambiguous`, `invalid-egress`, `unknown-egress`, `unknown-kind`, `privileged-kind`,
+  `kind-unavailable`.
+* `egress = "direct"` states no egress. ⛔ Nothing declared is REFUSED.
+* Records: `~/.config/webctl/egress/<name>.toml`, mode 600. `kind` is from a CLOSED list. ⛔ An
+  inline secret key is refused: a secret is a `*_file` path. Other keys pass through as xq's,
+  unrenamed. `direct.toml` is reserved.
+* ⛔ `wireguard` and `vpn` are refused unless xq's `egress_kinds` reading (passed in) says the
+  human enabled them.
+* `egressWhere(r)` returns exactly `{egress, egress_kind, egress_source}`.
+* Target records accept `egress = "<name>"` (their schema is still closed).
+* Arms: `test/egress.test.js` (8). Red with direct assumed, and with a value echoed in a refusal.
+
+### ⛔ What this does NOT cover
+
+* Running an egress, the topology, the proof and the leak arms (eg7p §3–§5): xq's step 3,
+  then base's step 4.
+* The kind-specific parameter names are xq's and are not validated by base yet (asked).
+
 ## v0.34.1 — 2026-10-12
 
 **Headline: a SECURITY patch to `isolated` — no node half of it honours SIGUSR1 any more.**
