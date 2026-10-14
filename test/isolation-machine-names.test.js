@@ -169,7 +169,10 @@ test('[docker] the command sees EXACTLY the host xq\'s names, read-only, at the 
   try {
     // what the HOST's xq says right now (the harness asks the same one); a digest, never the names
     const xq = spawnSync('xq', ['machine', 'ls', '--json'], { encoding: 'utf8', timeout: 20_000 });
-    const want = xq.status === 0 ? machineNamesFromXq(xq.stdout) : { names: null, why: '' };
+    const viaXq = xq.status === 0 ? machineNamesFromXq(xq.stdout) : { names: null, why: '' };
+    // …and the operator's declared file, read the way the harness reads it (the same function; read-only)
+    const decl = harness.hostDeclaredNames(os.userInfo().homedir);
+    const want = decl.why ? { names: null, why: decl.why } : decl.names ? { names: [...new Set([...(viaXq.names || []), ...decl.names])], why: '' } : viaXq;
     const probe = 'f="${WEBCTL_MACHINE_NAMES_FILE-}"; echo "VAR=${f:-UNSET}"; '
       + 'if [ -n "$f" ]; then echo "SHA=$(sha256sum < "$f" | cut -d" " -f1)"; '
       + '(echo x >> "$f") 2>/dev/null && echo WRITABLE || echo READONLY; fi';
@@ -221,4 +224,37 @@ test('⛔ final review (LOW): under docker, a names file the COMMAND planted in 
     assert.match(p.out, /^PLANTED$/m, `CONTROL: the plant itself failed:\n${p.out}`);
     assert.match(p.out, /^NESTED=UNSET$/m, `a nested call trusted a file the command planted:\n${p.out}`);
   } finally { fs.rmSync(work, { recursive: true, force: true }); }
+});
+
+test('⛔ the declared names file (~/.config/webctl/machine-names): a regular file of ours, mode 600, host-name lines — anything else REFUSES the lot, echoing no line', () => {
+  const st = (/** @type {any} */ o) => ({ isFile: () => o.file !== false, isSymbolicLink: () => !!o.link, uid: o.uid ?? 1000, mode: o.mode ?? 0o100600, size: o.size ?? 10 });
+  const io = (/** @type {any} */ o, text = 'box-a\n# a comment\n\nbox-b.example\nbox-a\n') => ({ uid: 1000, lstat: () => st(o), read: () => text });
+  assert.deepEqual(harness.hostDeclaredNames('/h', { ...io({}), lstat: () => { throw Object.assign(new Error('x'), { code: 'ENOENT' }); } }), { names: null, why: '' }, 'absent: nothing, no refusal');
+  assert.deepEqual(harness.hostDeclaredNames('/h', io({})), { names: ['box-a', 'box-b.example'], why: '' });
+  for (const [o, re] of /** @type {Array<[any, RegExp]>} */ ([[{ link: true }, /not a regular file/], [{ file: false }, /not a regular file/],
+    [{ uid: 1001 }, /not owned by this user/], [{ mode: 0o100644 }, /mode 644 .* chmod 600/], [{ size: 70000 }, /larger than 64 KiB/]])) {
+    const r = harness.hostDeclaredNames('/h', io(o));
+    assert.equal(r.names, null, JSON.stringify(o));
+    assert.match(r.why, re);
+    assert.match(r.why, /^~\/\.config\/webctl\/machine-names refused: /, 'the reason names the home path');
+  }
+  const k = harness.hostDeclaredNames('/h', io({}, 'box-a\n-----BEGIN OPENSSH PRIVATE KEY-----\n'));
+  assert.equal(k.names, null);
+  assert.match(k.why, /line 2 \(of the names\) is not a host name/);
+  assert.ok(!k.why.includes('BEGIN'), 'a line was echoed');
+});
+
+test('hostMachineNames: the declared names are UNIONED with xq\'s; a refused file passes NOTHING; with no xq the file alone is passed', () => {
+  const x = fakeXq(0o555);
+  try {
+    const run = () => ({ status: 0, stdout: xqJson([{ alias: 'box-a' }, { alias: 'box-c' }]) });
+    const o = { home: '/nonexistent-home', writable: [], outer: false, run };
+    assert.deepEqual(withPath([x.dir], () => hostMachineNames({ ...o, readDeclared: () => ({ names: ['box-a', 'box-d'], why: '' }) })),
+      { names: ['box-a', 'box-c', 'box-d'], why: '' });
+    assert.deepEqual(withPath([x.dir], () => hostMachineNames({ ...o, readDeclared: () => ({ names: null, why: 'F refused: x' }) })), { names: null, why: 'F refused: x' });
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'webctl-noxq2-'));
+    try {
+      assert.deepEqual(withPath([empty], () => hostMachineNames({ ...o, readDeclared: () => ({ names: ['box-d'], why: '' }) })), { names: ['box-d'], why: '' });
+    } finally { fs.rmSync(empty, { recursive: true, force: true }); }
+  } finally { x.done(); }
 });

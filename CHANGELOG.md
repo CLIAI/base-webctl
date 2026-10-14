@@ -516,6 +516,13 @@ HOST's xq **before entering any backend** and passes the names in, read-only, at
   env. An xq whose file, or whose checkout, the run could write is not trusted. `ssh` is read as
   ssh(1) reads a destination (`ssh://[user@]host[:port]` or `[user@]host`, xq's contract: opaque,
   untrusted). Any other form refuses the list. The identity tmpfs is sized for the names.
+* **A second source: `~/.config/webctl/machine-names`** (the host admin's ruling). On a host whose
+  xq lists no machines, the operator declares them there: one per line, mode 600, never committed.
+  Its names are UNIONED with xq's. ⛔ It is a fixed path, never one from the env: a chosen path
+  could name `~/.ssh/id_rsa`. A file that is present but not a regular file of ours, mode 600, at
+  most 64 KiB, with every line a host-name token, refuses the lot (`none (<why>)`), and no line is
+  ever echoed. *Measured end to end under docker:* a name planted in a tracked file is FOUND by base's
+  check, printed as its index only.
 * ⚠ **Verdict pins:** a lane that matches the verdict line to its END sees one more clause.
 * Arms: `test/isolation-machine-names.test.js` (a planted xq is never run; the docker command sees
   exactly the host xq's names, compared by digest, read-only, fresh and nested; red with the mount

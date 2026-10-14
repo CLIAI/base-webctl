@@ -4541,7 +4541,8 @@ function sshDestinationHost(v) {
  * `isolated` whose markers were stripped (`outer`), the names the OUTER call passed are read back instead (xq is
  * not on the host there). `names: null` = nothing passed (`why` says why, naming no machine); `[]` = an xq with
  * no machines (passed; a consumer's check refuses "no names").
- * @param {{home: string, writable: string[], outer: boolean, run?: (bin: string) => {status: number|null, stdout: string, error?: Error}}} o
+ * @param {{home: string, writable: string[], outer: boolean, run?: (bin: string) => {status: number|null, stdout: string, error?: Error},
+ *   readDeclared?: () => {names: string[] | null, why: string}}} o
  * @returns {{names: string[] | null, why: string}}
  */
 export function hostMachineNames(o) {
@@ -4550,6 +4551,48 @@ export function hostMachineNames(o) {
     try { text = fs.readFileSync(MACHINE_NAMES_PATH, 'utf8'); } catch { return { names: null, why: 'the outer call passed none' }; }
     return { names: text.split('\n').map((l) => l.trim()).filter(Boolean), why: '' };
   }
+  // the operator's own declaration (adm's ruling): UNIONED with xq's; a file that is there but wrong refuses the lot
+  const declared = o.readDeclared ? o.readDeclared() : hostDeclaredNames(o.home);
+  if (declared.why) return { names: null, why: declared.why };
+  const viaXq = hostXqNames(o);
+  if (!declared.names) return viaXq;
+  return { names: [...new Set([...(viaXq.names || []), ...declared.names])], why: '' };
+}
+
+/** `~/.config/webctl/machine-names`, as shown in a reason: never the absolute path (it names the home). */
+export const DECLARED_NAMES_DISPLAY = '~/.config/webctl/machine-names';
+
+/**
+ * The operator's declared machine names (ib4k §3b "Machine names", the second source): a FIXED path under the real
+ * home, never one from the env (a caller-chosen path could name ~/.ssh/id_rsa — mode 600 and owned too). Absent →
+ * `{names: null, why: ''}`. ⛔ Present but not a regular file of ours, mode 600 or stricter, ≤ 64 KiB, every
+ * non-comment line a host-name-like token → `why`, and the caller passes NOTHING. No line is ever echoed.
+ * @param {string} home @param {{lstat?: (p: string) => fs.Stats, read?: (p: string) => string, uid?: number}} [io]
+ * @returns {{names: string[] | null, why: string}}
+ */
+export function hostDeclaredNames(home, io = {}) {
+  if (!home) return { names: null, why: '' };
+  const p = path.join(home, '.config', 'webctl', 'machine-names');
+  const bad = (/** @type {string} */ w) => ({ names: null, why: `${DECLARED_NAMES_DISPLAY} refused: ${w}` });
+  /** @type {fs.Stats} */ let st;
+  try { st = (io.lstat || fs.lstatSync)(p); } catch { return { names: null, why: '' }; }
+  if (!st.isFile() || st.isSymbolicLink()) return bad('not a regular file');
+  if (st.uid !== (io.uid ?? process.getuid?.())) return bad('not owned by this user');
+  if (st.mode & 0o077) return bad(`mode ${(st.mode & 0o777).toString(8)} is readable or writable beyond its owner; chmod 600`);
+  if (st.size > 65536) return bad('larger than 64 KiB');
+  let text = '';
+  try { text = (io.read || ((/** @type {string} */ f) => fs.readFileSync(f, 'utf8')))(p); } catch { return bad('cannot be read'); }
+  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  const n = lines.findIndex((l) => !/^[A-Za-z0-9._:-]{1,253}$/.test(l));
+  if (n >= 0) return bad(`line ${n + 1} (of the names) is not a host name (letters, digits, ".", "_", ":", "-")`);
+  return { names: [...new Set(lines)], why: '' };
+}
+
+/**
+ * xq's machine names, asked on the host (the first source). @param {Parameters<typeof hostMachineNames>[0]} o
+ * @returns {{names: string[] | null, why: string}}
+ */
+function hostXqNames(o) {
   const j = judgeXqOnPath(o.home, o.writable);
   if (!j.found || !j.real) return { names: null, why: 'xq is not installed on the host' };
   if (j.ignored) return { names: null, why: `xq ignored: ${j.ignored}` };

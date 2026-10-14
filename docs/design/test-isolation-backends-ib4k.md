@@ -844,6 +844,14 @@ backend is not allowed either: a check that skips there is a check that cannot f
     (xq's contract). An xq with no machines configured gives an EMPTY
     list. The file is still passed, and the check refuses "no names supplied" (it scans for
     nothing otherwise).
+* **A second host-side source (adm's ruling, 2026-10-14): `~/.config/webctl/machine-names`.** On a
+  host whose xq lists no machines, the operator declares the names in the family's shared config dir,
+  one per line, mode 600, never committed. `isolated` reads it on the HOST, and its names are UNIONED
+  with xq's. ⛔ It is a FIXED path, never one taken from the env: a caller-chosen path could name
+  `~/.ssh/id_rsa` (also mode 600 and owned) and carry a key into the sandbox. The file is refused
+  (`none (<why>)`, and nothing is passed from it) unless it is a regular file (not a symlink), owned by
+  the caller, mode 600 or stricter, at most 64 KiB, and every non-blank line is a host-name-like token
+  (`[A-Za-z0-9._:-]`, at most 253 characters). `#` starts a comment line.
 * **The file:** one name per line, at the fixed path `/run/.webctl-identity/machine-names`
   inside, READ-ONLY, and `WEBCTL_MACHINE_NAMES_FILE` is set to that path. ⚠ The path is the same
   on every backend, so a lane needs one code path.
