@@ -36,7 +36,8 @@ test('⛔ nothing declared → REFUSED (no-egress), never assumed direct — CON
 });
 
 test('resolution: --egress > env > the lane config > the target record — each source honoured and reported, the rest shadowed', () => {
-  const records = { a: { kind: 'socks5' }, b: { kind: 'tor' }, c: { kind: 'ssh-dynamic' }, d: { kind: 'http-proxy' } };
+  const records = { a: { kind: 'socks5', host: 'h', port: 1 }, b: { kind: 'tor' }, c: { kind: 'ssh-dynamic', ssh: 's', known_hosts_file: '/k' },
+    d: { kind: 'http-proxy', host: 'h', port: 1 } };
   const all = { flag: 'a', env: 'b', laneConfig: 'c', targetRecord: { egress: 'd' }, records };
   const r = /** @type {any} */ (resolveEgress(all));
   assert.deepEqual([r.name, r.source, r.shadowed], ['a', 'flag', ['env', 'config', 'shared']]);
@@ -49,7 +50,7 @@ test('resolution: --egress > env > the lane config > the target record — each 
 });
 
 test('⛔ every refusal is NAMED, and none echoes a record value or a non-name: invalid, unknown, unknown kind', () => {
-  const h = home({ prox: [`kind = "socks5"\nhost = "${ENDPOINT}"\n`, 0o600] });
+  const h = home({ prox: [`kind = "socks5"\nhost = "${ENDPOINT}"\nport = 1080\n`, 0o600] });
   try {
     const bad = resolveEgress({ flag: `socks5://${ENDPOINT}:1080`, home: h.h });
     assert.equal(/** @type {any} */ (bad).code, 'invalid-egress');
@@ -86,12 +87,12 @@ test('⛔ a record: kind required and from the CLOSED list; an INLINE secret ref
   assert.deepEqual(errs({ kind: 'shadowsocks' }), ['kind']);
   assert.deepEqual(errs({ kind: 'direct' }), ['kind']);
   for (const k of ['password', 'proxy_password', 'wg-private-key', 'psk', 'token', 'api_key', 'credentials', 'passphrase']) {
-    assert.deepEqual(errs({ kind: 'socks5', [k]: 'x' }), [k], k);
+    assert.deepEqual(errs({ kind: 'socks5', host: 'h', port: 1, [k]: 'x' }), [k], k);
     assert.ok(!JSON.stringify(validateEgressRecord({ kind: 'socks5', [k]: 'sekrit-x' })).includes('sekrit-x'), `${k}: the secret was echoed`);
   }
-  assert.deepEqual(errs({ kind: 'socks5', password_file: 'relative/p' }), ['password_file']);
-  // CONTROLS: a secret BY PATH, and ordinary parameters (keepalive, port, auth_method) are fine
-  assert.deepEqual(errs({ kind: 'socks5', password_file: '~/.config/webctl/egress/p.secret', keepalive: 25, port: 1080, auth_method: 'userpass' }), []);
+  assert.deepEqual(errs({ kind: 'socks5', host: 'h', port: 1, password_file: 'relative/p' }), ['password_file']);
+  // CONTROL: a secret BY PATH, with xq's keys
+  assert.deepEqual(errs({ kind: 'socks5', host: 'h', port: 1080, username: 'u', password_file: '~/.config/webctl/egress/p.secret' }), []);
   assert.deepEqual(errs({ kind: 'tor' }, { name: 'direct' }), ['name']);
 });
 
@@ -120,4 +121,22 @@ test('target records accept a ruled `egress` key (a name only) — the closed sc
 test('the surface: lib/index.js exports egress — construct-and-inspect, not grep', () => {
   assert.equal(typeof index.egress.resolveEgress, 'function');
   assert.deepEqual([...index.egress.EGRESS_KINDS], ['direct', 'ssh-dynamic', 'socks5', 'http-proxy', 'wireguard', 'vpn', 'tor']);
+});
+
+test('⛔ each kind\'s keys are CLOSED, as xq\'s loader is (spec 08): required ones missing, unknown ones, and wrong types are refused by name', () => {
+  const errs = (/** @type {any} */ r) => validateEgressRecord(r).errors.map((e) => e.field).sort();
+  // CONTROLS: a minimal valid record of every kind
+  for (const r of [{ kind: 'socks5', host: 'h', port: 1080 }, { kind: 'http-proxy', host: 'h', port: 3128, tls: true },
+    { kind: 'ssh-dynamic', ssh: 'ssh://u@h:22', known_hosts_file: '~/.ssh/known_hosts' }, { kind: 'tor' },
+    { kind: 'tor', torrc_file: '/x/torrc', check_url: 'https://check.example/ip' }, { kind: 'wireguard', config_file: '/x/wg.conf' },
+    { kind: 'vpn', config_file: '/x/v.ovpn', auth_file: '/x/a' }]) assert.deepEqual(errs(r), [], JSON.stringify(r));
+  assert.deepEqual(errs({ kind: 'socks5' }), ['host', 'port']);
+  // ⛔ ssh-dynamic without known_hosts_file: no trust on first use (xq REQUIRES it)
+  assert.deepEqual(errs({ kind: 'ssh-dynamic', ssh: 'h' }), ['known_hosts_file']);
+  assert.deepEqual(errs({ kind: 'tor', host: 'h' }), ['host']);
+  assert.deepEqual(errs({ kind: 'socks5', host: 'h', port: '1080' }), ['port']);
+  assert.deepEqual(errs({ kind: 'http-proxy', host: 'h', port: 1, tls: 'yes' }), ['tls']);
+  assert.deepEqual(errs({ kind: 'ssh-dynamic', ssh: '-oProxyCommand=x', known_hosts_file: '/k' }), ['ssh']);
+  assert.deepEqual(errs({ kind: 'tor', check_url: 'ftp://x' }), ['check_url']);
+  assert.ok(!JSON.stringify(validateEgressRecord({ kind: 'ssh-dynamic', ssh: `-o${ENDPOINT}`, known_hosts_file: '/k' })).includes(ENDPOINT));
 });

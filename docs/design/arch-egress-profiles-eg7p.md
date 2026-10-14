@@ -65,8 +65,21 @@ No network and no xq contact. Everything here is decided from config and flags a
   * ⛔ no inline secret. A key that names one (`password`, `passphrase`, `secret`, `token`,
     `private_key`, `psk`, `credential`, …) is refused with "secrets live in a file the record
     points to". A secret is a `*_file` key holding an ABSOLUTE path (or `~/…`), never a value;
-  * every other key is the kind's own parameter. It is passed through unrenamed, because xq
-    owns what runs and validates its own parameters (§1). Base does not guess their names.
+  * every other key is the kind's own parameter, passed through unrenamed: xq owns what runs (§1).
+    *Per xq's spec 08 (`specs/08-egress-records.md`, 2026-10-14)*, the keys are CLOSED per kind,
+    and xq's loader refuses an unknown one, so base refuses it first, by name:
+
+    | kind | required | optional |
+    |---|---|---|
+    | `socks5` | `host`, `port` | `username`, `password_file`, `check_url` |
+    | `http-proxy` | `host`, `port` | `username`, `password_file`, `tls` (bool), `check_url` |
+    | `ssh-dynamic` | `ssh` (an ssh(1) destination, passed unparsed), `known_hosts_file` (no trust on first use) | `identity_file`, `check_url` |
+    | `tor` | — | `torrc_file`, `check_url` |
+    | `wireguard` | `config_file` | `check_url` |
+    | `vpn` | `config_file` | `auth_file`, `check_url` |
+
+    `port` is an integer. `check_url` is the operator's own endpoint for the proof (§5). Every
+    `*_file` is a path. xq has no `egress_kinds` reading yet, so a privileged kind fails closed.
 * **Resolution:** `--egress` > `<TOOL>_EGRESS` > the lane's config > the shared TARGET record's
   `egress` key. The source is reported, as for a target (`nl0c` §1a). Two values in one layer
   are refused as ambiguous.

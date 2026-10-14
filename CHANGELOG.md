@@ -218,8 +218,8 @@ No network contact: xq runs the egress (step 3), and base judges the declaration
   `kind-unavailable`.
 * `egress = "direct"` states no egress. ⛔ Nothing declared is REFUSED.
 * Records: `~/.config/webctl/egress/<name>.toml`, mode 600. `kind` is from a CLOSED list. ⛔ An
-  inline secret key is refused: a secret is a `*_file` path. Other keys pass through as xq's,
-  unrenamed. `direct.toml` is reserved.
+  inline secret key is refused: a secret is a `*_file` path. Each kind's keys are CLOSED, as in xq's
+  spec 08 (required and optional, with types). `direct.toml` is reserved.
 * ⛔ `wireguard` and `vpn` are refused unless xq's `egress_kinds` reading (passed in) says the
   human enabled them.
 * `egressWhere(r)` returns exactly `{egress, egress_kind, egress_source}`.
@@ -230,7 +230,7 @@ No network contact: xq runs the egress (step 3), and base judges the declaration
 
 * Running an egress, the topology, the proof and the leak arms (eg7p §3–§5): xq's step 3,
   then base's step 4.
-* The kind-specific parameter names are xq's and are not validated by base yet (asked).
+* xq's `egress_kinds` reading does not exist yet (xq has no egress code), so a privileged kind fails closed.
 
 ## v0.34.1 — 2026-10-12
 
