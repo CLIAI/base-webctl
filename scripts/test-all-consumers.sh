@@ -226,7 +226,9 @@ scratch_from_archive() {
     SCRATCH_ERR="git archive of the live HEAD ${head:0:7} failed: $(tail -n 2 "$log" | tr '\n' ' ')"; return
   fi
   rm -rf "${dst:?}/${sub:?}"
-  if ! { git -C "$dst" init -q && git -C "$dst" "${id[@]}" add -A -- . ":!$sub" \
+  # ⛔ add -f: the archive holds exactly the TRACKED files, and a tracked file a .gitignore matches (base has one,
+  # measured on the first private gate run) is skipped by a plain `add -A` — the tree check then failed
+  if ! { git -C "$dst" init -q && git -C "$dst" "${id[@]}" add -A -f -- . ":!$sub" \
          && { [ -z "$declared" ] || git -C "$dst" update-index --add --cacheinfo "160000,$declared,$sub"; } \
          && git -C "$dst" "${id[@]}" commit -q --allow-empty -m "scratch: archive of ${head:0:7}"; } >"$log" 2>&1; then
     SCRATCH_ERR="building the archive copy of ${head:0:7} failed: $(tail -n 2 "$log" | tr '\n' ' ')"; return
@@ -234,7 +236,7 @@ scratch_from_archive() {
   git -C "$dst" remote add origin "no-push://scratch-archive-of-a-live-tree" 2>/dev/null || true
   mkdir -p "$dst/$sub"
   if ! { git -C "$BASE_ROOT" archive "$BASE_HEAD" | tar -x -C "$dst/$sub" && git -C "$dst/$sub" init -q \
-         && git -C "$dst/$sub" "${id[@]}" add -A && git -C "$dst/$sub" "${id[@]}" commit -q -m "scratch: archive of base ${BASE_HEAD:0:7}"; } >"$log" 2>&1; then
+         && git -C "$dst/$sub" "${id[@]}" add -A -f && git -C "$dst/$sub" "${id[@]}" commit -q -m "scratch: archive of base ${BASE_HEAD:0:7}"; } >"$log" 2>&1; then
     SCRATCH_ERR="building the archive copy of base ${BASE_HEAD:0:7} into '$sub' failed: $(tail -n 2 "$log" | tr '\n' ' ')"; return
   fi
   git -C "$dst/$sub" remote add origin "no-push://scratch-archive-of-base" 2>/dev/null || true

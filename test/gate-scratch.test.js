@@ -719,10 +719,16 @@ function archiveWorld() {
   const w = world();
   fs.mkdirSync(path.join(w.base, 'docker', 'isolated'), { recursive: true });
   fs.copyFileSync(path.join(ROOT, 'docker', 'isolated', 'Dockerfile'), path.join(w.base, 'docker', 'isolated', 'Dockerfile'));
-  git(['add', '.'], w.base); git([...GIT_ID, 'commit', '-qm', 'recipe'], w.base);
+  // a TRACKED file its own .gitignore matches, in base AND in the consumer (base has one: the first private gate run
+  // failed its tree check on it, because a plain `add -A` skips it)
+  fs.writeFileSync(path.join(w.base, '.gitignore'), 'tmp/\nignored-but-tracked.txt\n');
+  fs.writeFileSync(path.join(w.base, 'ignored-but-tracked.txt'), 'x\n');
+  git(['add', '-f', '.'], w.base); git([...GIT_ID, 'commit', '-qm', 'recipe'], w.base);
   // a SECOND commit in the consumer, so a clone (2 commits) and an archive copy (1) differ
   fs.writeFileSync(path.join(w.repo, 'local-override.sh'), 'echo "COUNT=$(git rev-list --count HEAD)"\necho "DECLARED_TREE=$(git ls-tree HEAD vendor/base-webctl | cut -c1-6)"\n');
-  git(['add', 'local-override.sh'], w.repo); git([...GIT_ID, 'commit', '-qm', 'second'], w.repo);
+  fs.writeFileSync(path.join(w.repo, '.gitignore'), 'gate-was-here.txt\nnode_modules/\nignored-but-tracked.txt\n');
+  fs.writeFileSync(path.join(w.repo, 'ignored-but-tracked.txt'), 'y\n');
+  git(['add', '-f', 'local-override.sh', '.gitignore', 'ignored-but-tracked.txt'], w.repo); git([...GIT_ID, 'commit', '-qm', 'second'], w.repo);
   const extra = USERNS ? {} : { WEBCTL_ISOLATION_BACKEND: 'docker' };
   return { ...w, baseHead: git(['rev-parse', 'HEAD'], w.base), consumerHead: git(['rev-parse', 'HEAD'], w.repo), extra };
 }
