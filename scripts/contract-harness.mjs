@@ -3111,6 +3111,9 @@ export function runDockerReaper(a) {
   const [bin, name, chan] = a;
   if (!bin || !path.isAbsolute(bin) || !/^webctl-iso-u\d+-[a-z0-9-]{1,24}-\d+$/.test(name || '')) return Promise.resolve(EXIT.usage);
   if (chan !== undefined && !ownChannelDir(chan)) return Promise.resolve(EXIT.usage);
+  // ⛔ READY only now, its checks passed (final review, LOW): the harness creates nothing until it reads this — a reaper
+  // that refused its argv used to exit unseen, and a later SIGKILL of the harness left the container running
+  try { fs.writeSync(1, 'ready\n'); } catch { /* no reader: the harness will not create */ }
   let id = '';
   let done = false;
   let buf = '';
@@ -3297,10 +3300,18 @@ function runDockerBackend(o) {
     });
     // detached: a terminal's group signals never reach it; shielded IN-PROCESS (runDockerReaper) from the rest
     const reaper = spawn(process.execPath, [...NO_USR1_FLAG, SELF, DOCKER_REAPER, o.cli.bin, o.name, ch.dir],
-      { stdio: ['pipe', 'ignore', 'inherit'], env: dockerEnv(), detached: true });
+      { stdio: ['pipe', 'pipe', 'inherit'], env: dockerEnv(), detached: true });
     reaper.on('error', () => { /* below: no reaper, no run */ });
     reaper.stdin?.on('error', () => { /* it exited */ });
     reaper.unref();
+    // ⛔ A REAPER THAT ENDS BEFORE THE RUN DOES (final review, LOW): without it a SIGKILL of the harness would leave the
+    // container. The run is failed and the container removed (by exact id, else name) — never continued unguarded.
+    reaper.on('exit', () => {
+      if (ended) return;
+      call(['rm', '-f', id || o.name]);
+      for (const c of [creating, cli]) { try { c?.kill('SIGKILL'); } catch { /* gone */ } }
+      fail('the docker backend\'s reaper ended before the run did — the run was stopped, never continued without it');
+    });
     // ⛔ CLEAN UP BEFORE DYING BY A SIGNAL: dieByForwarded / exitOrDieBy may kill this process with the forwarded signal
     // before end() runs — the host channel dir (plan.json: the command's env; machine-names) was left in TMPDIR on every
     // early signal and every command that died by one (measured: ~6 per suite run). SIGKILL: the reaper (below) does it.
@@ -3324,6 +3335,19 @@ function runDockerBackend(o) {
       masks: o.masks, covers: o.covers || [], channel: ch.dir, image: o.image, inner, machineNames: !!o.machineNames })];
     let out = '';
     let err = '';
+    let ready = false;
+    const notReady = setTimeout(() => { if (!ready) fail('the docker backend\'s reaper did not report ready within 15 s'); }, 15000);
+    notReady.unref();
+    reaper.stdout?.setEncoding('utf8');
+    reaper.stdout?.on('data', (/** @type {string} */ d) => {
+      if (ready || ended || !/^ready$/m.test(d)) return;
+      ready = true;
+      clearTimeout(notReady);
+      reaper.stdout?.destroy(); // nothing more is read from it; the loop must not wait on it
+      if (early) { dieBy(); end(EXIT.fail); return; }
+      createIt();
+    });
+    const createIt = () => {
     creating = spawn(o.cli.bin, argv, { stdio: ['ignore', 'pipe', 'pipe'], env: dockerEnv() });
     creating.stdout?.on('data', (d) => { out += d; });
     creating.stderr?.on('data', (d) => { err += d; });
@@ -3341,6 +3365,7 @@ function runDockerBackend(o) {
       if (early) { call(['rm', '-f', id]); dieBy(); end(EXIT.fail); return; }
       startIt();
     });
+    };
     const startIt = () => {
       /** @type {number} */ let st = -1;
       /** @type {number} */ let go = -1;

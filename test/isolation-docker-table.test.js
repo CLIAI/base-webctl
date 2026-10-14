@@ -509,3 +509,17 @@ test('[docker] a script written to /tmp, /var/tmp, /run or /dev/shm RUNS (exec),
   // still nosuid and nodev, as there
   for (const l of r.out().split('\n').filter((x) => /^\/(tmp|var\/tmp|run|dev\/shm) /.test(x))) assert.match(l, /nosuid.*nodev|nodev.*nosuid/, l);
 });
+
+test('⛔ final review (LOW): the REAPER killed mid-run → the run is STOPPED and its container removed, never continued unguarded', needsDocker, async () => {
+  const w = await world();
+  const r = start(['--', 'bash', '-c', 'echo READY; sleep 300'], { cwd: w.work });
+  assert.ok(await until(() => r.out().includes('READY'), 30_000), r.err());
+  const name = `webctl-iso-u${UID}-work-${r.c.pid}`;
+  const reapers = pidsWith(['__isolated-reaper', name]);
+  assert.equal(reapers.length, 1, `CONTROL: no reaper of this run: ${reapers}`);
+  process.kill(reapers[0], 'SIGKILL');
+  const end = await r.done;
+  assert.notEqual(end.code, 0, 'the run went on without its reaper');
+  assert.match(r.err(), /reaper ended before the run did — the run was stopped/, r.err());
+  assert.ok(await until(() => containerOf('work', r.c.pid || 0) === '', 15_000), 'the container outlived its reaper');
+});

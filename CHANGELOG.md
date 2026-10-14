@@ -639,9 +639,12 @@ named error. Each is red with the mode sabotaged (a clone instead; the tree chec
   named by its label.
 * **LOW, fixed:** under docker, `/run` is writable when no names were passed, so the command could
   plant the machine-names file for a nested call. A nested call now trusts it only on a read-only mount.
+* **LOW, fixed:** a reaper that refused its argv or died mid-run went unnoticed. A SIGKILL of the
+  harness then would have left the container. Now the reaper reports `ready` after its checks, nothing
+  is created before that (15 s bound), and a reaper that ends before the run does stops the run and
+  removes its container. *Arm:* the reaper SIGKILLed mid-run means the run is stopped and the
+  container gone. On the old harness the run went on, and the arm timed out.
 * **LOW, named, not fixed:**
-  * a reaper that dies before or during the run is not noticed, so a SIGKILL of the harness then
-    could leave the container;
   * the docker "inside" proof compares some facts against `plan.json`, which a forger able to make a
     read-only bind would choose (no escape from inside our container: it can mount nothing);
   * the absolute command path and the throwaway HOME skip `dockerPreflight`. A socket there is still
