@@ -1,5 +1,9 @@
 # base-webctl — Agent Instructions
 
+> **Newest handoff: `docs/handoff/2026-10-13--old-host-to-new-host.md`** — read it
+> first. Update this line with every later handoff. (Hosts are named by role
+> there, never by name: this repo is public.)
+
 `base-webctl` is the **shared foundation** of the `*-webctl` web-control tool
 family (linkedin / chatgpt / telegram / fetlife / future per-site tools). It is
 two things at once:
