@@ -41,6 +41,14 @@
 #                  in-place swap let a timer firing inside the gate window run an
 #                  untested candidate.
 #
+# --against-head --scratch-from-archive   the same, but each scratch copy is built
+#                  with `git archive <commit>` + `git init` instead of `git clone`
+#                  (lane and base alike): one commit, its TREE asserted equal to
+#                  the live HEAD's (an export-ignore'd file is a named error), and
+#                  the declared gitlink kept. For a host whose disk rule forbids
+#                  clones. History is not there: a contract that needs `git log`
+#                  beyond HEAD sees one commit.
+#
 # Exit: 0 if no consumer FAILs (skips allowed); 1 if any consumer FAILs, or (scratch)
 # a live tree changed, or a GATE-ENVIRONMENT fault left a consumer unrun.
 set -euo pipefail
@@ -53,10 +61,14 @@ CONSUMERS_DIR="${WEBCTL_CONSUMERS_DIR:-$HOME/github/CLIAI}"
 
 AGAINST_HEAD=0
 SCRATCH=0
+# --scratch-from-archive: the scratch copies are built with `git archive` + `git init`, never `git clone` (a host
+# whose disk rule forbids clones; webctl:mgr's ruling, 2026-10-14). Same promises: the live tree is never written.
+FROM_ARCHIVE=0
 for arg in "$@"; do
   case "$arg" in
     --against-head) AGAINST_HEAD=1 ;;
     --scratch) SCRATCH=1 ;;
+    --scratch-from-archive) SCRATCH=1; FROM_ARCHIVE=1 ;;
     -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
@@ -79,7 +91,8 @@ BASE_HEAD="$(git -C "$BASE_ROOT" rev-parse HEAD)"
 BASE_DESC="$(git -C "$BASE_ROOT" describe --tags --always 2>/dev/null || echo unknown)"
 if [ "$AGAINST_HEAD" = "1" ]; then
   VALIDATED_AGAINST="base HEAD $BASE_DESC ($BASE_HEAD)"
-  [ "$SCRATCH" = "1" ] && VALIDATED_AGAINST="$VALIDATED_AGAINST, in SCRATCH clones of each consumer's committed HEAD"
+  [ "$SCRATCH" = "1" ] && [ "$FROM_ARCHIVE" != "1" ] && VALIDATED_AGAINST="$VALIDATED_AGAINST, in SCRATCH clones of each consumer's committed HEAD"
+  [ "$FROM_ARCHIVE" = "1" ] && VALIDATED_AGAINST="$VALIDATED_AGAINST, in SCRATCH copies built by git archive of each consumer's committed HEAD (trees asserted equal; no clone)"
   if [ -n "$(git -C "$BASE_ROOT" status --porcelain)" ]; then
     echo "REFUSING --against-head: base working tree is dirty." >&2
     echo "  Consumers would be tested against a commit that does not exist," >&2
@@ -200,6 +213,33 @@ scratch_end() {
   SCRATCH_TMP=""
   return 0
 }
+# --scratch-from-archive: build <dst> from `git archive` of the live HEAD (git OBJECTS only — the live work tree,
+# index and locks are untouched), with the DECLARED gitlink kept at <sub>, and <dst>/<sub> from `git archive` of
+# BASE_HEAD — each a one-commit repo with an unusable push url. Sets SCRATCH_ERR on failure.
+# $1 live, $2 head, $3 sub, $4 dst, $5 log
+scratch_from_archive() {
+  local live="$1" head="$2" sub="$3" dst="$4" log="$5" declared
+  local id=(-c user.email=gate@invalid -c user.name=gate -c commit.gpgsign=false)
+  declared="$(GIT_OPTIONAL_LOCKS=0 git -C "$live" ls-tree "$head" -- "$sub" | awk '$1 == "160000" {print $3}')"
+  mkdir -p "$dst"
+  if ! GIT_OPTIONAL_LOCKS=0 git -C "$live" archive "$head" 2>"$log" | tar -x -C "$dst" 2>>"$log"; then
+    SCRATCH_ERR="git archive of the live HEAD ${head:0:7} failed: $(tail -n 2 "$log" | tr '\n' ' ')"; return
+  fi
+  rm -rf "${dst:?}/${sub:?}"
+  if ! { git -C "$dst" init -q && git -C "$dst" "${id[@]}" add -A -- . ":!$sub" \
+         && { [ -z "$declared" ] || git -C "$dst" update-index --add --cacheinfo "160000,$declared,$sub"; } \
+         && git -C "$dst" "${id[@]}" commit -q --allow-empty -m "scratch: archive of ${head:0:7}"; } >"$log" 2>&1; then
+    SCRATCH_ERR="building the archive copy of ${head:0:7} failed: $(tail -n 2 "$log" | tr '\n' ' ')"; return
+  fi
+  git -C "$dst" remote add origin "no-push://scratch-archive-of-a-live-tree" 2>/dev/null || true
+  mkdir -p "$dst/$sub"
+  if ! { git -C "$BASE_ROOT" archive "$BASE_HEAD" | tar -x -C "$dst/$sub" && git -C "$dst/$sub" init -q \
+         && git -C "$dst/$sub" "${id[@]}" add -A && git -C "$dst/$sub" "${id[@]}" commit -q -m "scratch: archive of base ${BASE_HEAD:0:7}"; } >"$log" 2>&1; then
+    SCRATCH_ERR="building the archive copy of base ${BASE_HEAD:0:7} into '$sub' failed: $(tail -n 2 "$log" | tr '\n' ' ')"; return
+  fi
+  git -C "$dst/$sub" remote add origin "no-push://scratch-archive-of-base" 2>/dev/null || true
+}
+
 # $1 live repo dir, $2 the live HEAD commit, $3 submodule path.
 # On success: sets SCRATCH_TMP and returns 0 (scratch_end MUST follow).
 # On failure: sets SCRATCH_ERR to the step and git's own words; returns 1 with
@@ -241,7 +281,9 @@ scratch_begin() {
   dst="$SCRATCH_TMP/repo"
   log="$SCRATCH_TMP/setup.log"
   mkdir -p "$SCRATCH_TMP/repo-home"
-  if ! git clone -q --no-hardlinks --no-checkout -- "$live" "$dst" >"$log" 2>&1; then
+  if [ "$FROM_ARCHIVE" = "1" ]; then
+    scratch_from_archive "$live" "$head" "$sub" "$dst" "$log"
+  elif ! git clone -q --no-hardlinks --no-checkout -- "$live" "$dst" >"$log" 2>&1; then
     SCRATCH_ERR="git clone of the live repo failed: $(tail -n 2 "$log" | tr '\n' ' ')"
   elif ! git -C "$dst" cat-file -e "$head^{commit}" 2>/dev/null \
        && ! git -C "$dst" fetch -q --no-tags -- "$live" "$head" >"$log" 2>&1; then
@@ -281,7 +323,17 @@ scratch_begin() {
       SCRATCH_ERR="could not copy the live tree's node_modules into the clone"
     fi
   fi
-  if [ -z "$SCRATCH_ERR" ]; then
+  if [ -z "$SCRATCH_ERR" ] && [ "$FROM_ARCHIVE" = "1" ]; then
+    # ⛔ Assert the VALUES: an archive copy has commits of its own, so its TREES must equal the live HEAD's and
+    # BASE_HEAD's — anything `git archive` dropped or changed (export-ignore, export-subst) is a named error
+    got="$(git -C "$dst" rev-parse 'HEAD^{tree}' 2>/dev/null || echo none)"
+    want="$(GIT_OPTIONAL_LOCKS=0 git -C "$live" rev-parse "$head^{tree}" 2>/dev/null || echo none)"
+    [ "$got" = "$want" ] || SCRATCH_ERR="the archive copy's tree is not the live HEAD ${head:0:7}'s (export-ignore or export-subst in .gitattributes?)"
+    got="$(git -C "$dst/$sub" rev-parse 'HEAD^{tree}' 2>/dev/null || echo none)"
+    want="$(git -C "$BASE_ROOT" rev-parse "$BASE_HEAD^{tree}" 2>/dev/null || echo none)"
+    [ -z "$SCRATCH_ERR" ] && [ "$got" != "$want" ] \
+      && SCRATCH_ERR="'$sub' in the archive copy is not base HEAD ${BASE_HEAD:0:7}'s tree"
+  elif [ -z "$SCRATCH_ERR" ]; then
     # ⛔ Assert the VALUES, not that the commands exited 0.
     got="$(git -C "$dst" rev-parse HEAD 2>/dev/null || echo none)"
     [ "$got" = "$head" ] || SCRATCH_ERR="the clone is at $got, not the live HEAD $head"

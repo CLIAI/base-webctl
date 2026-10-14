@@ -706,3 +706,52 @@ test('⛔ the per-consumer backend is the verdict\'s OWN `; backend:` clause (re
     assert.equal(parse([start]), '');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ── --scratch-from-archive (webctl:mgr's ruling, 2026-10-14): the copies by `git archive`, never `git clone` ─────
+// Run under the DOCKER backend where this host has it (the namespace one is what NEEDS_NS skips): the fake base then
+// carries the image recipe too, so the recipe hash names the image already built here.
+const DOCKER_CLI = ['/usr/sbin', '/usr/bin', '/sbin', '/bin'].map((d) => path.join(d, 'docker')).find((p) => fs.existsSync(p)) || '';
+const DOCKER_OK = !!DOCKER_CLI && !process.env.DOCKER_HOST && !process.env.DOCKER_CONTEXT
+  && spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'contract-harness.mjs'), 'isolated-image'], { encoding: 'utf8' }).status === 0;
+const NEEDS_ISOLATION = USERNS ? false : DOCKER_OK ? false : 'no isolation backend here (no user namespaces, and no docker image built)';
+/** A world whose fake base carries the docker recipe, run pinned to docker when user namespaces are refused. */
+function archiveWorld() {
+  const w = world();
+  fs.mkdirSync(path.join(w.base, 'docker', 'isolated'), { recursive: true });
+  fs.copyFileSync(path.join(ROOT, 'docker', 'isolated', 'Dockerfile'), path.join(w.base, 'docker', 'isolated', 'Dockerfile'));
+  git(['add', '.'], w.base); git([...GIT_ID, 'commit', '-qm', 'recipe'], w.base);
+  // a SECOND commit in the consumer, so a clone (2 commits) and an archive copy (1) differ
+  fs.writeFileSync(path.join(w.repo, 'local-override.sh'), 'echo "COUNT=$(git rev-list --count HEAD)"\necho "DECLARED_TREE=$(git ls-tree HEAD vendor/base-webctl | cut -c1-6)"\n');
+  git(['add', 'local-override.sh'], w.repo); git([...GIT_ID, 'commit', '-qm', 'second'], w.repo);
+  const extra = USERNS ? {} : { WEBCTL_ISOLATION_BACKEND: 'docker' };
+  return { ...w, baseHead: git(['rev-parse', 'HEAD'], w.base), consumerHead: git(['rev-parse', 'HEAD'], w.repo), extra };
+}
+
+test('⛔ --scratch-from-archive: the copy is ONE commit (no clone), its tree is the live HEAD\'s, the gitlink stays declared, base is the candidate — live tree unchanged', { skip: NEEDS_ISOLATION, timeout: 180_000 }, () => {
+  const w = archiveWorld();
+  try {
+    const before = git(['status', '--porcelain'], w.repo);
+    const r = w.gate(['--against-head', '--scratch-from-archive'], w.extra);
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /SCRATCH copies built by git archive .* \(trees asserted equal; no clone\)/);
+    assert.match(r.out, /^COUNT=1$/m, `the copy is not a one-commit archive repo:\n${r.out}`);
+    assert.match(r.out, /^DECLARED_TREE=160000$/m, 'the declared gitlink is gone from the copy');
+    assert.match(r.out, /^SWAPPED=1$/m);
+    assert.match(r.out, /PASS {2}fake-webctl/);
+    assert.equal(git(['status', '--porcelain'], w.repo), before, 'the live tree changed');
+    assert.deepEqual(w.scratchDirs(), [], 'a scratch copy was left behind');
+  } finally { w.cleanup(); }
+});
+
+test('⛔ --scratch-from-archive: a file `git archive` would DROP (export-ignore) is a NAMED setup error — never a quietly different tree', { skip: NEEDS_ISOLATION, timeout: 180_000 }, () => {
+  const w = archiveWorld();
+  try {
+    fs.writeFileSync(path.join(w.repo, '.gitattributes'), 'out.txt export-ignore\n');
+    git(['add', '.gitattributes'], w.repo); git([...GIT_ID, 'commit', '-qm', 'export-ignore'], w.repo);
+    const r = w.gate(['--against-head', '--scratch-from-archive'], w.extra);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.out, /the archive copy's tree is not the live HEAD .*export-ignore or export-subst/);
+    assert.doesNotMatch(r.out, /PASS {2}fake-webctl/);
+    assert.deepEqual(w.scratchDirs(), [], 'a scratch copy was left behind');
+  } finally { w.cleanup(); }
+});
