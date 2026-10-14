@@ -632,10 +632,18 @@ test('⛔ M1: a pair migrated EARLIER whose xpra later died is NOT repaired by r
   assert.ok(r.ctrs.get(CHROMIUM).running, 'the browser still runs');
 });
 
-test('M1 CONTROL: a NON-migrated partial pair (owner-named volume) is still recreated, as before', async () => {
+test('⛔ review item 8 (v0.34.2): a NON-migrated partial pair whose BROWSER RUNS is refused — a running browser is never recreated automatically (it was, before)', async () => {
   const r = await up({ [CHROMIUM]: ours({ running: true, volumes: [VOLUME] }), [XPRA]: xpraOf({ running: false, volumes: [VOLUME] }) });
+  assert.ok(r.error, 'must refuse');
+  assert.match(String(r.error.message), /is RUNNING but its xpra partner .* is not/);
+  assert.deepEqual(r.verbs.filter((v) => MUTATION.test(v)), [], 'nothing stopped, removed or started');
+  assert.ok(r.ctrs.get(CHROMIUM).running, 'the browser still runs');
+});
+
+test('review item 8 CONTROL: a partial pair whose browser is STOPPED (its xpra up) is still recreated — no running browser is touched', async () => {
+  const r = await up({ [CHROMIUM]: ours({ running: false, volumes: [VOLUME] }), [XPRA]: xpraOf({ running: true, volumes: [VOLUME] }) });
   assert.equal(r.error, undefined, r.error && r.error.message);
-  assert.ok(r.removed.length > 0, 'pre-existing behaviour for a non-migrated pair: torn down and recreated');
+  assert.ok(r.removed.length > 0, 'a pair with no running browser is torn down and recreated, as before');
 });
 
 test('⭐ MIGRATION: a pre-owner pair NOT provably ours is ABSENT to us — untouched, not blocking', async () => {
@@ -1005,4 +1013,40 @@ test('DECIDED: shutdown() that cannot READ ownership (daemon down) refuses and d
   assert.match(String(error.message), /REFUSING to stop container demo-webctl-u4242-chromium-test/);
   assert.equal(released, 0, 'our lock is not released without proof the browser is stopped');
   assert.deepEqual(d.verbs.filter((v) => MUTATION.test(v)), []);
+});
+
+test('⛔ review 3 item 4: tcp-legacy too — a RUNNING pair proven ours whose CDP stays SILENT is refused (exit 3): the browser is never removed, stopped or recreated', async () => {
+  const cdp = await cdpEndpoint(() => false); // listening, but CDP never answers
+  try {
+    const r = await up({ [CHROMIUM]: ours({ running: true }), [XPRA]: xpraOf({ running: true }) }, { cdpPort: cdp.port });
+    assert.equal(r.result, undefined, 'a silent pair must not be handed back');
+    assert.ok(r.error, 'must refuse');
+    assert.equal(r.error.exitCode, 3, String(r.error.message));
+    assert.match(String(r.error.message), /is RUNNING, but CDP did not answer at http:\/\/127\.0\.0\.1:\d+\.\n.*never recreated automatically/);
+    assert.deepEqual(r.removed, [], r.verbs.join(', '));
+    assert.deepEqual(r.stopped, [], r.verbs.join(', '));
+    assert.deepEqual(r.started, [], r.verbs.join(', '));
+    assert.equal(r.ctrs.get(CHROMIUM).id, `id-${CHROMIUM}`, 'the same browser container');
+    assert.ok(r.ctrs.get(CHROMIUM).running, 'it still runs');
+  } finally { await cdp.close(); }
+});
+
+const RELAY = 'demo-webctl-u4242-cdprelay-test';
+
+test('⛔ review 3 item 5: an inspection that FAILED is never read as absent — a running, CDP-answering pair whose RELAY cannot be inspected is refused, nothing touched; the refusal names the operation (reuse), not "remove" (nit 6c)', async () => {
+  const cdp = await cdpEndpoint();
+  try {
+    for (const shape of /** @type {Array<Record<string, any>>} */ ([
+      { [CHROMIUM]: ours({ running: true }), [XPRA]: xpraOf({ running: true }), [RELAY]: 'fail' },
+      { [CHROMIUM]: ours({ running: true }), [XPRA]: xpraOf({ running: true }), [RELAY]: 'garbage' },
+    ])) {
+      const r = await up(shape, { cdpPort: cdp.port });
+      assert.equal(r.result, undefined, 'a pair with an uninspectable container must not be handed back');
+      assert.ok(r.error, 'must refuse');
+      assert.equal(r.error.exitCode, 4, String(r.error.message));
+      assert.match(String(r.error.message), new RegExp(`REFUSING to reuse container ${RELAY} — its ownership could not be read`));
+      assert.doesNotMatch(String(r.error.message), /REFUSING to remove/, 'nothing was going to be removed');
+      assert.deepEqual([...r.removed, ...r.stopped, ...r.started], [], r.verbs.join(', '));
+    }
+  } finally { await cdp.close(); }
 });

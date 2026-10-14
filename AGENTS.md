@@ -45,6 +45,23 @@ two things at once:
 * **Service-agnostic.** Specs and lib never name a specific platform.
 * Bash `set -euo pipefail`; markdown blank-line-before-list + `*` bullets; small
   focused commits; non-trivial scripts ship `.README.md` + `.DEV_NOTES.md`.
+* ⛔ **No test, measurement or agent ever puts a window or prompt on a REAL
+  display.** Any GUI step (an xpra client, a password prompt, a headful
+  browser, anything that can draw) runs inside a **private Xvfb**, driven
+  there with `xdotool`, or inside a throwaway container or VM with no display.
+  Concretely:
+  * unset `DISPLAY`, `WAYLAND_DISPLAY` and `XAUTHORITY` in every test spawn;
+  * always pass non-interactive credentials (e.g. `--password-file`), so
+    nothing can prompt;
+  * make test helpers REFUSE to start a GUI-capable client while `DISPLAY` is
+    set.
+
+  Agent shells inherit the desktop session of whoever is logged in. ⚠ Measured
+  2026-10-13: a test ran the host's `xpra info` against an auth-protected
+  server with no password file, and xpra's password dialog kept reopening on a
+  person's live desktop during their calls. The host admin had to deploy a guard
+  that killed those runs. A shared host's other users have desktops too. If a
+  host admin's guard or STOP file appears, respect it; never work around it.
 
 ## ⛔ Roughly HALF of base's callable surface is not a module export
 
@@ -115,7 +132,10 @@ live on:
   * **infra** — `infra-directory-structure-f868`, `infra-browser-configuration-v7m2`,
     `infra-cdp-websocket-client-v7x3`, `infra-webdriver-bidi-client-bd1x` (firefox over
     WebDriver BiDi; four constraints measured on Firefox 156: Host header through a tunnel,
-    privileged about:home, one session at a time, readiness is a real upgrade), `infra-client-profile-registry-lf4f`,
+    privileged about:home, one session at a time, readiness is a real upgrade),
+    `infra-unix-control-endpoint-6gi0` (xq's control-endpoint shape consumed exactly —
+    `transport:"unix"`, `path`, `host_header`; a zero-dep unix CDP transport; the owned
+    unix → unix ssh forward, specified for xq's half), `infra-client-profile-registry-lf4f`,
     `infra-config-precedence-2fc5`, `infra-dotenv-configuration-r7m3`,
     `infra-logging-output-sazn`, `infra-storage-path-resolution-v59v`,
     `infra-xpra-remote-access-gateway-f6rd`.
@@ -125,7 +145,10 @@ live on:
     `safety-safe-invocation-file-payloads-r7x2` (argv arrays, file payloads — and
     §1b, the REMOTE shell boundary an argv array does not cross),
     `safety-target-ownership-and-lock-identity-ow9k` (one identity for the X-input
-    lease AND for "is this browser mine"; an unrecognised lock is HELD, never free).
+    lease AND for "is this browser mine"; an unrecognised lock is HELD, never free),
+    `safety-owner-only-browser-channels-gvlx` (xpra and CDP reachable by the owning
+    uid alone: unix sockets in a 0700 dir, peercred, html5 behind a file secret; the
+    container's bridge address means a loopback publish was never the boundary).
   * **ux** — `ux-dual-audience-help-nho9`, `ux-tab-management-lru-1wsg`,
     `ux-ui-state-hygiene-iqrg`, `ux-gui-subcommand-surface-gu1d`.
   * **data** — `data-jsonl-machine-interface-lszd`.

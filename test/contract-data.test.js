@@ -152,8 +152,9 @@ test('⛔ TEARDOWN_CONTRACT matches what shutdown() ACTUALLY calls', async () =>
   }, { run: {
     // shutdown() proves the pair ours before stopping it: both carry our label.
     // Proof is the profile bind mount (the label alone is not proof). Only the
-    // owner-named pair exists; the pre-owner names are absent.
-    inspect: (a) => (/-u4242-/.test(a[a.length - 1])
+    // owner-named pair exists; the pre-owner names are absent. (v0.34.2: and the
+    // owner-only relay sidecar, a third owner-named container, is absent too.)
+    inspect: (a) => (/-u4242-(xpra|chromium)-/.test(a[a.length - 1])
       ? inspectPresent(a[a.length - 1], {
         labels: { 'demo-webctl.owner.uid': '4242' }, binds: ['/tmp/no-mkdir/test'] })
       : INSPECT_ABSENT),

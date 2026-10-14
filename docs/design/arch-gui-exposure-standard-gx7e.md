@@ -3,7 +3,7 @@ id: gx7e
 title: "GUI exposure over the tailnet — one verb family, enforced by xq"
 category: arch
 created: "2026-10-03"
-updated: "2026-10-03"
+updated: "2026-10-13"
 status: draft
 tags: [gui, xpra, html5, tailnet, allowlist, exposure, xq, safety]
 tech:
@@ -11,7 +11,7 @@ tech:
     version: "tailnet node identity"
   - name: "xpra"
     version: "html5 client"
-relates_to: [rx9q, gu1d, f6rd, nl0c, ow9k, lg1n]
+relates_to: [rx9q, gu1d, f6rd, nl0c, ow9k, lg1n, gvlx]
 depends_on: [rx9q]
 expands: [gu1d]
 similar_to: [f6rd]
@@ -75,6 +75,12 @@ grants) and xpra keeps only the code check; (b) xpra keeps the bind and its auth
 gains the allowlist, with unexpose through xpra's control channel *if* that needs no
 restart. ⛔ **Whichever ships, a test must prove the second factor distinguishes two
 clients** — a check that passes for everyone is the failure this family keeps meeting.
+
+⚠ **Input from `gvlx` (2026-10-13, measured on throwaway containers):** behind a docker
+publish, xpra already logs a host-originated client as the **docker bridge gateway** — so
+the peer IP is lost before any relay is added. And xpra's `auth=file` (a per-target mode-600
+secret, re-read per connection) is a second factor that **does not depend on peer IP**, which
+is the property both shapes above are missing. See `gvlx` §4.3.
 
 ## 5. ⛔ base's `xpra-html5-gateway` and access store — DEPRECATED
 

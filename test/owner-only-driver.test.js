@@ -1,0 +1,767 @@
+// owner-only-driver.test.js — `channels: 'owner-only'` in the docker-xpra driver
+// (gvlx §5.2, §6.1, §8, §9): arms A1–A4, A9, A11, A15, the reuse rules, shutdown, and
+// inspect()'s endpoint (6gi0 §2).
+//
+// The fake docker is STATEFUL and HERMETIC (guardedDocker). Its runDetached creates the
+// sockets a real pair would — an xpra socket and, behind the "relay", a fake CDP — in
+// this test's own temp state root. Nothing here touches a real container or a port the
+// test did not open itself.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+
+import { createChromiumDockerXpra } from '../lib/browser-location/chromium-docker-xpra.js';
+import { createMounts } from '../lib/browser-location/mounts.js';
+import { channelPaths } from '../lib/browser-location/owner-channels.js';
+import { getVersion } from '../lib/cdp-client.js';
+import { guardedDocker, assertHermetic, INSPECT_ABSENT, inspectPresent } from './helpers/fake-docker-inspect.mjs';
+import { startFakeCdp } from './helpers/fake-unix-cdp.mjs';
+import { TEST_CACHE_ROOT } from './helpers/test-cache-root.mjs';
+
+const ME = String(process.getuid ? process.getuid() : 1000);
+const TEST_CDP_PORT = Number(process.env.WEBCTL_TEST_CDP_PORT || 45327);
+
+function fakeC() {
+  return {
+    PROJECT: 'demo-webctl', ARTIFACT_PREFIX: 'demo-webctl-',
+    IMAGE_CHROMIUM_REPO: 'demo/chromium', IMAGE_XPRA: 'demo/xpra:latest',
+    DEFAULT_CDP_PORT: 4999, CACHE_DIRNAME: 'demo-webctl',
+    ZOOM_DEFAULT_HOST: 'demo.example', CONFIG_FILE_PROJECT: 'demo.config.jsonc',
+    DOTENV_FILENAME: '.env.demo', DOTENV_TEMPLATE: '.env.demo.example',
+    ENV_PREFIX: 'DEMO_', ENV_PREFIX_LEGACY: null, ENV_LEGACY_SUFFIXES: [],
+  };
+}
+/** @param {any} C */
+function hermeticMounts(C) {
+  const m = createMounts(C, { dockerfilesDir: '/df' });
+  const fake = (/** @type {string} */ s, /** @type {string} */ u) => u || `/tmp/no-mkdir/${s}`;
+  return { ...m, resolveChromiumProfile: (/** @type {string} */ s, /** @type {string} */ u) => {
+    const p = fake(s, u); fs.mkdirSync(p, { recursive: true, mode: 0o700 }); return p;
+  }, profilePathFor: fake, cacheRoot: () => TEST_CACHE_ROOT };
+}
+
+/**
+ * @param {{
+ *   imageLabels?: Record<string,string>,
+ *   preRunning?: Array<{name: string, labels: Record<string,string>, binds: string[], cdpTcpPort?: number}>,
+ *   noXpraSocket?: boolean,
+ *   relayNoCdp?: () => boolean,
+ * }} [o]
+ *   `relayNoCdp`: while it returns true, a relay this harness starts serves NO CDP (it runs, CDP stays silent).
+ */
+function harness(o = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'webctl-oo-'));
+  const stateRoot = path.join(root, 'state');
+  const udd = path.join(root, 'prof', 'chromium');
+  /** @type {Map<string, {args: any, up: boolean}>} */
+  const running = new Map();
+  /** @type {any[]} */ const calls = [];
+  /** @type {string[]} */ const stops = [];
+  /** @type {string[]} */ const removed = [];
+  /** @type {Array<() => Promise<any>>} */ const closers = [];
+  /** the fake CDP servers the relay "runs" — a test silences one to model CDP going quiet @type {any[]} */
+  const relayFakes = [];
+  for (const p of o.preRunning || []) {
+    running.set(p.name, { up: p.up !== false, args: { name: p.name, labels: p.labels,
+      mounts: p.binds.map((b) => [b, '/x', 'rw']) } });
+  }
+  const C = fakeC();
+  const CH = channelPaths({ stateRoot, profilePath: udd });
+
+  const { docker, violations } = guardedDocker({
+    dockerAvailable: async () => true,
+    imageExists: async () => true,
+    containerExists: async (/** @type {string} */ n) => running.has(n),
+    containerRunning: async (/** @type {string} */ n) => !!(running.get(n) && running.get(n)?.up),
+    rm: async (/** @type {string} */ n) => { if (running.delete(n)) removed.push(n); return { code: 0 }; },
+    stop: async (/** @type {string} */ n) => { stops.push(n); const r = running.get(n); if (r) r.up = false; return { code: 0 }; },
+    volumeRm: async () => ({ code: 0 }),
+    volumeCreate: async () => ({ code: 0 }),
+    exec: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
+    runDetached: async (/** @type {any} */ a) => {
+      calls.push(a);
+      running.set(a.name, { args: a, up: true });
+      if (/-xpra-/.test(a.name) && a.env && a.env.XPRA_BIND && !o.noXpraSocket) {
+        const srv = net.createServer((s) => s.end());
+        await new Promise((r) => srv.listen(CH.xpraSock, () => r(undefined)));
+        closers.push(() => new Promise((r) => srv.close(() => r(undefined))));
+      }
+      if (/-cdprelay-/.test(a.name) && !(o.relayNoCdp && o.relayNoCdp())) {
+        // as the real relay's socat does (`unlink-early`): a stale cdp.sock from a relay that is gone is replaced
+        try { fs.unlinkSync(CH.cdpSock); } catch { /* none */ }
+        const f = await startFakeCdp({ hostHeader: '127.0.0.1:9222', socketPath: CH.cdpSock });
+        relayFakes.push(f);
+        closers.push(() => f.close());
+      }
+      return { code: 0, stderr: '' };
+    },
+  }, { run: {
+    inspect: (/** @type {string[]} */ args) => {
+      const name = args[args.length - 1];
+      const r = running.get(name);
+      if (!r) return INSPECT_ABSENT;
+      const binds = (r.args.mounts || []).map((/** @type {any[]} */ m) => m[0]).filter((/** @type {string} */ s) => s.startsWith('/'));
+      return inspectPresent(name, { labels: r.args.labels || {}, binds });
+    },
+    logs: () => ({ code: 0, stdout: 'logs', stderr: '' }),
+    image: () => ({ code: 0, stdout: JSON.stringify(o.imageLabels || {}) + '\n', stderr: '' }),
+  } });
+
+  /** @type {string[]} */
+  const logs = [];
+  const logger = { info: (/** @type {string} */ m) => logs.push(m), warn: (/** @type {string} */ m) => logs.push(`WARN ${m}`), debug: (/** @type {string} */ m) => logs.push(m) };
+  /** @param {any} [cfg] @param {any} [dopts] */
+  const driver = (cfg = {}, dopts = {}) => createChromiumDockerXpra(C, {
+    mounts: hermeticMounts(C), docker, stateRoot, uid: ME, ...dopts,
+  }).createDriver({ port: TEST_CDP_PORT, host: '127.0.0.1', slug: 'oo', userDataDir: udd, logger, ...cfg });
+  return {
+    root, stateRoot, udd, CH, calls, stops, removed, running, logs, violations, driver, relayFakes,
+    byRole: (/** @type {string} */ re) => calls.find((c) => new RegExp(re).test(c.name)),
+    done: async () => {
+      for (const c of closers) await c();
+      assertHermetic(violations);
+      fs.rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+const OO = { channels: 'owner-only' };
+
+// ── A1 / A2 / A3 / A4 — what a bring-up passes to docker ────────────────────
+
+test('A1: owner-only publishes NOTHING (html5 off by default)', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning();
+    for (const c of h.calls) assert.deepEqual(c.publish || [], [], `${c.name} must publish nothing`);
+  } finally { await h.done(); }
+});
+
+test('A1 control: html5 on ⇒ exactly ONE publish, 127.0.0.1:<xpraTcpPort>', async () => {
+  const h = harness();
+  try {
+    const d = h.driver({ ...OO, html5: true });
+    await d.ensureRunning();
+    const pubs = h.calls.flatMap((c) => c.publish || []);
+    assert.deepEqual(pubs, [['127.0.0.1', String(d.inspect().xpraTcpPort), d.inspect().xpraTcpPort]]);
+  } finally { await h.done(); }
+});
+
+test('A2: xpra binds — peercred socket; TCP auth=file (comma form) on the netns loopback', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning();
+    const env = h.byRole('-xpra-').env;
+    assert.equal(env.XPRA_BIND, '/run/webctl/xpra.sock,auth=peercred');
+    assert.match(env.XPRA_TCP_BIND, /^127\.0\.0\.1:\d+,auth=file,filename=\/run\/webctl-secret\/xpra\.pass$/);
+    assert.doesNotMatch(env.XPRA_TCP_BIND, /auth=file:/);
+  } finally { await h.done(); }
+});
+
+test('A2: html5 on ⇒ the TCP bind is the wildcard docker can publish — still auth=file', async () => {
+  const h = harness();
+  try {
+    await h.driver({ ...OO, html5: true }).ensureRunning();
+    assert.match(h.byRole('-xpra-').env.XPRA_TCP_BIND, /^0\.0\.0\.0:\d+,auth=file,filename=/);
+  } finally { await h.done(); }
+});
+
+test('A2 control: tcp-legacy keeps 0.0.0.0 without auth — and inspect() SAYS local-users', async () => {
+  const fake = await startFakeCdp({ tcp: true }); // a CDP that answers, on a port THIS test opened
+  const h = harness();
+  try {
+    const d = h.driver({ port: fake.port, force: true });
+    await d.ensureRunning();
+    assert.equal(h.byRole('-xpra-').env.XPRA_TCP_BIND, `0.0.0.0:${d.inspect().xpraTcpPort}`);
+    assert.equal(d.inspect().exposure.level, 'local-users');
+    assert.ok(h.logs.some((l) => /^WARN .*LOCAL-USERS/.test(l)), 'a legacy bring-up WARNS that it is exposed');
+  } finally { await h.done(); await fake.close(); }
+});
+
+test('A3: channel dir on xpra AND relay; the secret DIRECTORY on xpra only, read-only; chromium gets neither', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning();
+    const mountsOf = (/** @type {string} */ re) => h.byRole(re).mounts.map((/** @type {any[]} */ m) => m.join(':'));
+    assert.ok(mountsOf('-xpra-').includes(`${h.CH.channelDir}:/run/webctl:rw`));
+    assert.ok(mountsOf('-cdprelay-').includes(`${h.CH.channelDir}:/run/webctl:rw`));
+    assert.ok(mountsOf('-xpra-').includes(`${h.CH.secretDir}:/run/webctl-secret:ro`));
+    assert.ok(fs.statSync(h.CH.secretDir).isDirectory(), 'the mounted secret source is a DIRECTORY (gvlx §8.2)');
+    for (const m of mountsOf('-chromium-')) {
+      assert.ok(!m.startsWith(h.CH.channelDir) && !m.startsWith(h.CH.secretDir), `chromium must not mount ${m}`);
+    }
+    assert.equal(mountsOf('-cdprelay-').length, 1, 'the relay mounts the channel dir and nothing else');
+  } finally { await h.done(); }
+});
+
+test('A4: no LWC_CDP_PORT; chromium gets the debug flag as args; a socat relay sidecar serves the socket', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning();
+    const ch = h.byRole('-chromium-');
+    assert.ok(!('LWC_CDP_PORT' in ch.env), 'LWC_CDP_PORT starts the 0.0.0.0 TCP relay — it must be ABSENT');
+    assert.deepEqual(ch.cmd, ['--remote-debugging-port=9222']); // no --remote-allow-origins (review F9)
+    const relay = h.byRole('-cdprelay-');
+    assert.ok(relay, 'a relay sidecar is started');
+    assert.deepEqual(relay.extra.slice(-2), ['--entrypoint', 'socat']);
+    assert.match(relay.cmd[0], /^UNIX-LISTEN:\/run\/webctl\/cdp\.sock,fork,mode=0600,unlink-early$/);
+    assert.equal(relay.cmd[1], 'TCP:127.0.0.1:9222,retry=30,interval=1');
+    assert.ok(relay.extra.includes(`container:${h.byRole('-xpra-').name}`), 'it shares the pair\'s netns');
+    const order = h.calls.map((c) => c.name.replace(/.*-(xpra|chromium|cdprelay)-.*/, '$1'));
+    assert.deepEqual(order, ['xpra', 'chromium', 'cdprelay']);
+  } finally { await h.done(); }
+});
+
+test('A4 control: tcp-legacy sets LWC_CDP_PORT and starts NO relay', async () => {
+  const fake = await startFakeCdp({ tcp: true });
+  const h = harness();
+  try {
+    await h.driver({ port: fake.port, force: true }).ensureRunning();
+    assert.equal(h.byRole('-chromium-').env.LWC_CDP_PORT, String(fake.port));
+    assert.equal(h.byRole('-cdprelay-'), undefined);
+  } finally { await h.done(); await fake.close(); }
+});
+
+test('portless owner-only: no relay, no debug flag — and still a peercred xpra', async () => {
+  const h = harness();
+  try {
+    const r = await h.driver({ ...OO, containerEnv: { LWC_CDP_PORT: null } }).ensureRunning();
+    assert.equal(h.byRole('-cdprelay-'), undefined);
+    assert.deepEqual(h.byRole('-chromium-').cmd || [], []);
+    assert.equal(r.endpoint, null);
+  } finally { await h.done(); }
+});
+
+// ── the endpoint (6gi0 §2) ─────────────────────────────────────────────────
+
+test('owner-only: ensureRunning and inspect() report xq\'s unix endpoint shape; URLs are null', async () => {
+  const h = harness();
+  try {
+    const d = h.driver(OO);
+    const r = await d.ensureRunning();
+    const want = { name: 'cdp', kind: 'tcp', adapter: 'cdp', transport: 'unix', host: null, port: null,
+      path: h.CH.cdpSock, host_header: '127.0.0.1:9222' };
+    assert.deepEqual(r.endpoint, want);
+    const i = d.inspect();
+    assert.deepEqual(i.ports.cdp.endpoint, want);
+    assert.equal(i.cdpHttpUrl, null, 'never a URL that answers nothing (t2wf)');
+    assert.equal(i.cdpWsBase, null);
+    assert.equal(i.channels, 'owner-only');
+    assert.equal(i.exposure.level, 'owner-only');
+    assert.deepEqual(i.xpra.socket, h.CH.xpraSock);
+    // and base's own client speaks to it end to end
+    assert.equal((await getVersion(r.endpoint)).Browser, 'Fake/1.0');
+  } finally { await h.done(); }
+});
+
+test('tcp-legacy inspect(): the tcp endpoint, with nulls where it does not apply', () => {
+  const h = harness();
+  try {
+    const i = h.driver({}).inspect();
+    assert.deepEqual(i.ports.cdp.endpoint, { name: 'cdp', kind: 'tcp', adapter: 'cdp', transport: 'tcp',
+      host: '127.0.0.1', port: TEST_CDP_PORT, path: null, host_header: null });
+    assert.equal(i.channels, 'tcp-legacy');
+  } finally { void h.done(); }
+});
+
+// ── A9: the secret is never disclosed ──────────────────────────────────────
+
+/** @param {string} secret @param {unknown[]} haystacks */
+function leaks(secret, haystacks) {
+  return haystacks.filter((x) => JSON.stringify(x).includes(secret));
+}
+
+test('A9: the secret\'s bytes appear in NO docker arg, log line, inspect() or result', async () => {
+  const h = harness();
+  try {
+    const d = h.driver({ ...OO, html5: true });
+    const r = await d.ensureRunning();
+    const secret = fs.readFileSync(h.CH.secretFile, 'utf8');
+    assert.ok(secret.length >= 40);
+    assert.deepEqual(leaks(secret, [h.calls, h.logs, d.inspect(), r]), []);
+  } finally { await h.done(); }
+});
+
+test('A9 self-test: the leak check DOES fire on a planted secret', () => {
+  assert.equal(leaks('S3CR3T', [['a line with S3CR3T in it']]).length, 1);
+});
+
+// ── A11: the uid gates ─────────────────────────────────────────────────────
+
+test('A11: an image built for ANOTHER uid is refused before any container starts', async () => {
+  const h = harness({ imageLabels: { 'demo-webctl.image-uid': String(Number(ME) + 1) } });
+  try {
+    await assert.rejects(h.driver(OO).ensureRunning(), (/** @type {any} */ e) => {
+      assert.equal(e.exitCode, 4);
+      assert.match(e.message, /built for uid/);
+      return true;
+    });
+    assert.deepEqual(h.calls, []);
+  } finally { await h.done(); }
+});
+
+test('A11 control: an image labelled with OUR uid proceeds', async () => {
+  const h = harness({ imageLabels: { 'demo-webctl.image-uid': ME } });
+  try { await h.driver(OO).ensureRunning(); assert.ok(h.calls.length >= 3); } finally { await h.done(); }
+});
+
+test('A11: a socket owned by another uid is not declared up — the pair is removed, refused', async () => {
+  const h = harness();
+  try {
+    const realLstat = fs.lstatSync;
+    const lstat = (/** @type {string} */ p) => {
+      const st = realLstat(p);
+      return p === h.CH.cdpSock ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: Number(ME) + 1 }) : st;
+    };
+    await assert.rejects(h.driver(OO, { lstat }).ensureRunning(), /owned by uid/);
+    for (const n of h.calls.map((c) => c.name)) assert.ok(h.removed.includes(n), `${n} must be removed`);
+  } finally { await h.done(); }
+});
+
+test('A11: an xpra socket that never appears names the cause instead of timing out silently', async () => {
+  const h = harness({ noXpraSocket: true });
+  try {
+    await assert.rejects(h.driver(OO, { socketWaitMs: 300 }).ensureRunning(), /xpra\.sock|entrypoint|XPRA_BIND/);
+  } finally { await h.done(); }
+});
+
+// ── construction refusals ──────────────────────────────────────────────────
+
+test('refused at construction: an unknown channels value; LWC_CDP_PORT with owner-only; html5:false on legacy', () => {
+  const h = harness();
+  try {
+    assert.throws(() => h.driver({ channels: 'tcp' }), (/** @type {any} */ e) => e.exitCode === 4 && /channels/.test(e.message));
+    assert.throws(() => h.driver({ ...OO, containerEnv: { LWC_CDP_PORT: '4327' } }),
+      (/** @type {any} */ e) => e.exitCode === 4 && /LWC_CDP_PORT/.test(e.message));
+    assert.throws(() => h.driver({ html5: false }), (/** @type {any} */ e) => e.exitCode === 4 && /html5/.test(e.message));
+  } finally { void h.done(); }
+});
+
+test('A7 (driver): a socket path too long for sun_path is refused BEFORE any docker run', async () => {
+  const h = harness();
+  try {
+    const deep = path.join(h.root, 'd'.repeat(120));
+    await assert.rejects(h.driver(OO, { stateRoot: deep }).ensureRunning(), /108 bytes/);
+    assert.deepEqual(h.calls, []);
+  } finally { await h.done(); }
+});
+
+test('A6 (driver): a loosened channel dir is refused before any container starts — and left as found', async () => {
+  const h = harness();
+  try {
+    fs.mkdirSync(h.CH.channelDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(h.CH.channelDir, 0o755);
+    await assert.rejects(h.driver(OO).ensureRunning(), /0755/);
+    assert.deepEqual(h.calls, []);
+    assert.equal(fs.statSync(h.CH.channelDir).mode & 0o777, 0o755);
+  } finally { await h.done(); }
+});
+
+// ── reuse rules (gvlx §9, §12) ─────────────────────────────────────────────
+
+/** labels a pair started by this driver carries @param {string} role @param {string} [channels] */
+const L = (role, channels) => ({ 'demo-webctl.role': role, 'demo-webctl.slug': 'oo', 'demo-webctl.owner.uid': ME,
+  ...(channels ? { 'demo-webctl.channels': channels } : {}) });
+
+test('a RUNNING legacy pair under an explicit owner-only cfg is REFUSED — never restarted', async () => {
+  const pre = harness();
+  const names = pre.driver(OO).inspect().names;
+  await pre.done();
+  const h = harness({ preRunning: [
+    { name: names.xpraContainer, labels: L('xpra'), binds: [] },
+    { name: names.chromiumContainer, labels: L('chromium'), binds: [] },
+  ] });
+  try {
+    // the chromium must mount OUR profile to be ours: rebuild its binds with this harness's udd
+    h.running.get(names.chromiumContainer).args.mounts = [[h.udd, '/x', 'rw']];
+    await assert.rejects(h.driver(OO).ensureRunning(), (/** @type {any} */ e) => {
+      assert.equal(e.exitCode, 4);
+      assert.match(e.message, /tcp-legacy/);
+      assert.match(e.message, /restart/i);
+      return true;
+    });
+    assert.deepEqual(h.calls, []); assert.deepEqual(h.stops, []); assert.deepEqual(h.removed, []);
+  } finally { await h.done(); }
+});
+
+test('⛔ gvlx Q4: a running owner-only pair under an EXPLICIT channels:\'tcp-legacy\' cfg is REFUSED — never recreated, never downgraded', async () => {
+  const pre = harness();
+  const names = pre.driver(OO).inspect().names;
+  await pre.done();
+  const h = harness({ preRunning: [
+    { name: names.xpraContainer, labels: L('xpra', 'owner-only'), binds: [] },
+    { name: names.chromiumContainer, labels: L('chromium', 'owner-only'), binds: [] },
+  ] });
+  try {
+    h.running.get(names.chromiumContainer).args.mounts = [[h.udd, '/x', 'rw']];
+    await assert.rejects(h.driver({ channels: 'tcp-legacy' }).ensureRunning(), /explicitly says\n?\s*'tcp-legacy'/);
+    assert.deepEqual(h.calls, []); assert.deepEqual(h.stops, []); assert.deepEqual(h.removed, []);
+  } finally { await h.done(); }
+});
+
+test('⭐ gvlx Q4: an IMPLICIT cfg (no channels) ADOPTS a running owner-only pair — reused, inspect() then shows the unix endpoint, ONE line says so; never refused, never downgraded', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning(); // a real owner-only pair of ours, sockets and all
+    const n = h.calls.length;
+    const d = h.driver({});
+    // CONTROL: before it has seen the pair, the implicit cfg describes tcp-legacy (inspect() is pure)
+    assert.equal(d.inspect().ports.cdp.endpoint.transport, 'tcp');
+    const r = await d.ensureRunning();
+    assert.equal(h.calls.length, n, 'nothing new was started (no recreate, no downgrade)');
+    assert.deepEqual(h.stops, []); assert.deepEqual(h.removed, []);
+    assert.equal(r.endpoint.transport, 'unix');
+    const i = d.inspect();
+    assert.equal(i.channels, 'owner-only');
+    assert.equal(i.ports.cdp.endpoint.transport, 'unix');
+    assert.equal(i.cdpHttpUrl, null, 'no TCP URL is handed out for an adopted owner-only pair');
+    assert.equal(h.logs.filter((l) => /channels: adopted 'owner-only'/.test(l)).length, 1, 'exactly one line says it adopted');
+    assert.ok(!h.logs.some((l) => /^WARN .*LOCAL-USERS/.test(l)), 'an adopted owner-only pair is not reported as legacy');
+  } finally { await h.done(); }
+});
+
+test('⛔ gvlx Q4: a STOPPED owner-only pair under an implicit cfg is brought back owner-only — never recreated as tcp-legacy (a downgrade)', async () => {
+  const h = harness();
+  try {
+    const first = h.driver(OO);
+    await first.ensureRunning();
+    for (const [, c] of h.running) c.up = false; // the pair is there, stopped
+    const d = h.driver({});
+    const r = await d.ensureRunning();
+    assert.equal(r.endpoint.transport, 'unix');
+    assert.equal(d.inspect().channels, 'owner-only');
+    const legacyRuns = h.calls.filter((c) => c.env && (c.env.LWC_CDP_PORT || /0\.0\.0\.0/.test(String(c.env.XPRA_TCP_BIND || ''))));
+    assert.deepEqual(legacyRuns.map((c) => c.name), [], 'a container was (re)created in the tcp-legacy shape');
+  } finally { await h.done(); }
+});
+
+test('a running owner-only pair under owner-only cfg is REUSED when its socket answers', async () => {
+  const h = harness();
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    const n = h.calls.length;
+    const r = await h.driver(OO).ensureRunning();
+    assert.equal(h.calls.length, n, 'nothing new started');
+    assert.equal(r.endpoint.transport, 'unix');
+  } finally { await h.done(); }
+});
+
+// ── shutdown ───────────────────────────────────────────────────────────────
+
+test('shutdown (owner-only): stops relay, chromium, xpra — in that order', async () => {
+  const h = harness();
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    await d.shutdown();
+    assert.deepEqual(h.stops.map((s) => s.replace(/.*-(xpra|chromium|cdprelay)-.*/, '$1')),
+      ['cdprelay', 'chromium', 'xpra']);
+  } finally { await h.done(); }
+});
+
+test('shutdown: a relay-named container NOT mounting our channel dir is not ours — refused', async () => {
+  const h = harness();
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    const relay = d.inspect().names.cdpRelayContainer;
+    h.running.get(relay).args.mounts = [['/somewhere/else', '/run/webctl', 'rw']];
+    await assert.rejects(d.shutdown(), /REFUSING to stop/);
+    assert.deepEqual(h.stops, []);
+  } finally { await h.done(); }
+});
+
+// ── A15: X11 stays on the named volume ─────────────────────────────────────
+
+test('A15: /tmp/.X11-unix (and any pulse path) is mounted from the NAMED VOLUME, never a host path', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning();
+    for (const c of h.calls) {
+      for (const m of c.mounts || []) {
+        if (m[1] === '/tmp/.X11-unix' || /pulse/.test(m[1])) {
+          assert.ok(!String(m[0]).startsWith('/'),
+            `${c.name}: ${m[1]} from host path ${m[0]} — the X socket is 0777 with no X auth (gvlx §3); `
+            + 'only the named volume under docker\'s 0710 data root keeps it from other users');
+        }
+      }
+    }
+    assert.ok(h.calls.some((c) => (c.mounts || []).some((/** @type {any[]} */ m) => m[1] === '/tmp/.X11-unix')),
+      'the scan found the X11 mount (not vacuous)');
+  } finally { await h.done(); }
+});
+
+// ── the per-target opt-in, through buildDriverCfg ──────────────────────────
+
+test('buildDriverCfg: channels/html5 from JSONC (CLI wins), absent when unset', async () => {
+  const { createClientConfig } = await import('../lib/client-config.js');
+  const c = createClientConfig(/** @type {any} */ (fakeC()));
+  const none = c.buildDriverCfg({ args: {}, dotenv: {}, env: {}, jsonc: {} });
+  assert.ok(!('channels' in none) && !('html5' in none), 'a cfg without them is unchanged');
+  const j = c.buildDriverCfg({ args: {}, dotenv: {}, env: {}, jsonc: { channels: 'owner-only', html5: true } });
+  assert.equal(j.channels, 'owner-only');
+  assert.equal(j.html5, true);
+  const cli = c.buildDriverCfg({ args: { channels: 'tcp-legacy' }, dotenv: {}, env: {}, jsonc: { channels: 'owner-only' } });
+  assert.equal(cli.channels, 'tcp-legacy');
+});
+
+// ── review of v0.34.2, F7 and F8: every PARTIAL state, and a relay that is gone ──
+
+test('⛔ review F7 (a): an explicit tcp-legacy cfg facing a STOPPED owner-only pair is REFUSED — never recreated as legacy (a downgrade)', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning();
+    for (const [, c] of h.running) c.up = false;
+    const n = h.calls.length;
+    await assert.rejects(h.driver({ channels: 'tcp-legacy' }).ensureRunning(), /DOWNGRADE/);
+    assert.equal(h.calls.length, n, 'a container was started');
+    assert.deepEqual(h.removed, [], 'a container of the owner-only pair was removed');
+  } finally { await h.done(); }
+});
+
+test('⛔ review F7 (a): the same for a HALF-running owner-only pair (its browser up, its relay and xpra stopped)', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning();
+    for (const [name, c] of h.running) c.up = /-chromium-/.test(name);
+    const n = h.calls.length;
+    await assert.rejects(h.driver({ channels: 'tcp-legacy' }).ensureRunning(), /DOWNGRADE/);
+    assert.equal(h.calls.length, n);
+    assert.deepEqual(h.removed, []); assert.deepEqual(h.stops, []);
+  } finally { await h.done(); }
+});
+
+test('⛔ review F7 (b): an explicit owner-only cfg facing a HALF-running legacy pair whose BROWSER runs is REFUSED — the browser is never torn down', async () => {
+  const pre = harness();
+  const names = pre.driver(OO).inspect().names;
+  await pre.done();
+  const h = harness({ preRunning: [
+    { name: names.xpraContainer, labels: L('xpra'), binds: [] },
+    { name: names.chromiumContainer, labels: L('chromium'), binds: [] },
+  ] });
+  try {
+    h.running.get(names.chromiumContainer).args.mounts = [[h.udd, '/x', 'rw']];
+    h.running.get(names.xpraContainer).up = false; // xpra died; the browser runs on
+    await assert.rejects(h.driver(OO).ensureRunning(), /RESTARTING/);
+    assert.deepEqual(h.calls, []); assert.deepEqual(h.stops, []); assert.deepEqual(h.removed, []);
+  } finally { await h.done(); }
+});
+
+test('review F7 CONTROL: a FULLY STOPPED legacy pair under an explicit owner-only cfg IS recreated owner-only — an upgrade restarts nothing', async () => {
+  const pre = harness();
+  const names = pre.driver(OO).inspect().names;
+  await pre.done();
+  const h = harness({ preRunning: [
+    { name: names.xpraContainer, labels: L('xpra'), binds: [] },
+    { name: names.chromiumContainer, labels: L('chromium'), binds: [] },
+  ] });
+  try {
+    h.running.get(names.chromiumContainer).args.mounts = [[h.udd, '/x', 'rw']];
+    for (const [, c] of h.running) c.up = false;
+    const r = await h.driver(OO).ensureRunning();
+    assert.equal(r.endpoint.transport, 'unix');
+    assert.ok(h.calls.some((c) => /-cdprelay-/.test(c.name)), 'it was not brought up owner-only');
+  } finally { await h.done(); }
+});
+
+test('⛔ review F8: a MISSING relay is recreated ALONE — the running browser and xpra are never stopped, removed or restarted', async () => {
+  const h = harness();
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    const relay = d.inspect().names.cdpRelayContainer;
+    h.running.delete(relay); // the relay is gone; the pair runs on
+    const before = h.calls.length;
+    const r = await h.driver(OO).ensureRunning();
+    assert.equal(r.endpoint.transport, 'unix');
+    assert.deepEqual(h.calls.slice(before).map((c) => c.name), [relay], 'anything but the relay was (re)started');
+    assert.deepEqual(h.stops, []);
+    assert.ok(!h.removed.some((n) => !/-cdprelay-/.test(n)), `removed: ${h.removed.join(', ')}`);
+    assert.ok(h.logs.some((l) => /recreating it ALONE/.test(l)));
+  } finally { await h.done(); }
+});
+
+test('⛔ review F8: a STOPPED relay is recreated ALONE as well (removed by its exact name first)', async () => {
+  const h = harness();
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    const relay = d.inspect().names.cdpRelayContainer;
+    /** @type {any} */ (h.running.get(relay)).up = false;
+    const before = h.calls.length;
+    await h.driver(OO).ensureRunning();
+    assert.deepEqual(h.calls.slice(before).map((c) => c.name), [relay]);
+    assert.deepEqual(h.removed, [relay]);
+    assert.deepEqual(h.stops, []);
+  } finally { await h.done(); }
+});
+
+test('⛔ review F9: owner-only starts Chromium WITHOUT --remote-allow-origins=* — base\'s clients send no Origin, and the flag only widened the port to web content', async () => {
+  const h = harness();
+  try {
+    await h.driver(OO).ensureRunning();
+    const chromium = h.calls.find((c) => /-chromium-/.test(c.name));
+    assert.ok(chromium && Array.isArray(chromium.cmd), 'no chromium run recorded');
+    assert.ok(chromium.cmd.includes('--remote-debugging-port=9222'));
+    assert.ok(!chromium.cmd.some((/** @type {string} */ a) => a.startsWith('--remote-allow-origins')), chromium.cmd.join(' '));
+  } finally { await h.done(); }
+});
+
+// ── review 2 of v0.34.2: N1 and item 8 ─────────────────────────────────────
+
+test('⛔ review N1: the relay-only repair whose socket check FAILS removes ONLY the relay — the running browser and xpra survive, and the run is refused', async () => {
+  const h = harness();
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    const names = d.inspect().names;
+    h.running.delete(names.cdpRelayContainer); // the relay is gone …
+    fs.rmSync(h.CH.xpraSock, { force: true }); // … and xpra's socket vanished: the check after the relay repair fails
+    await assert.rejects(h.driver(OO, { socketWaitMs: 300 }).ensureRunning(), /Only the relay this call started was removed/);
+    assert.ok(h.running.has(names.chromiumContainer), 'the running BROWSER was removed');
+    assert.ok(h.running.has(names.xpraContainer), 'the running xpra was removed');
+    assert.ok(!h.removed.some((n) => n === names.chromiumContainer || n === names.xpraContainer), `removed: ${h.removed.join(', ')}`);
+    assert.deepEqual(h.stops, []);
+  } finally { await h.done(); }
+});
+
+test('⛔ review item 8: a RUNNING pair whose relay RUNS while CDP stays silent is REFUSED — the browser is never recreated automatically', async () => {
+  const h = harness();
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    // the relay RUNS but CDP goes silent: its server closes every connection — ⚠ NOT an unlinked socket path: a
+    // keep-alive connection pooled during the bring-up would still answer through it (the first draft of this arm did that)
+    await h.relayFakes[h.relayFakes.length - 1].close();
+    const before = h.calls.length;
+    await assert.rejects(h.driver(OO).ensureRunning(), /is RUNNING, but CDP did not answer.*\n.*never recreated automatically/);
+    assert.equal(h.calls.length, before, 'something was (re)started');
+    assert.deepEqual(h.stops, []); assert.deepEqual(h.removed, []);
+  } finally { await h.done(); }
+});
+
+// ── review 2 of v0.34.2: lows (the implicit cfg's wrong refusal text) ──────
+
+test('⛔ review 2 (low): an IMPLICIT cfg facing ONLY a stopped owner-only chromium (no xpra) ADOPTS — never refused as if it "explicitly says tcp-legacy"', async () => {
+  const pre = harness();
+  const names = pre.driver(OO).inspect().names;
+  await pre.done();
+  const h = harness({ preRunning: [{ name: names.chromiumContainer, labels: L('chromium', 'owner-only'), binds: [], up: false }] });
+  try {
+    h.running.get(names.chromiumContainer).args.mounts = [[h.udd, '/x', 'rw']];
+    h.running.get(names.chromiumContainer).args.labels['demo-webctl.channel-dir'] = h.CH.channelDir; // as base labels it
+    const d = h.driver({});
+    const r = await d.ensureRunning();
+    assert.equal(r.endpoint.transport, 'unix');
+    assert.equal(d.inspect().channels, 'owner-only');
+    assert.ok(h.logs.some((l) => /channels: adopted 'owner-only'/.test(l)));
+  } finally { await h.done(); }
+});
+
+test('⛔ review 2 (low): an IMPLICIT cfg facing ONLY a leftover owner-only RELAY ADOPTS as well', async () => {
+  const pre = harness();
+  const names = pre.driver(OO).inspect().names;
+  await pre.done();
+  const h = harness({ preRunning: [{ name: names.cdpRelayContainer, labels: { 'demo-webctl.role': 'cdp-relay', 'demo-webctl.slug': 'oo', 'demo-webctl.owner.uid': ME, 'demo-webctl.channels': 'owner-only' }, binds: [], up: false }] });
+  try {
+    // a real leftover relay mounts THIS driver's channel dir — what proves it ours
+    h.running.get(names.cdpRelayContainer).args.mounts = [[h.CH.channelDir, '/run/webctl', 'rw']];
+    h.running.get(names.cdpRelayContainer).args.labels['demo-webctl.channel-dir'] = h.CH.channelDir; // as base labels it
+    const d = h.driver({});
+    await d.ensureRunning();
+    assert.equal(d.inspect().channels, 'owner-only');
+  } finally { await h.done(); }
+});
+
+// ── review 3 of v0.34.2: item 2 (adoption judges EVERY container's channel-dir label) and item 4 ──
+
+test('⛔ review 3 item 2: an IMPLICIT cfg facing an owner-only-labelled pair with NO channel-dir label, or labels that DISAGREE, is REFUSED — never adopted', async () => {
+  const pre = harness();
+  const names = pre.driver(OO).inspect().names;
+  await pre.done();
+  const DIR = 'demo-webctl.channel-dir';
+  /** @type {Array<[string, (h: any) => void]>} */
+  const shapes = [
+    ['xpra labelled owner-only, no channel-dir label', (h) => { delete h.running.get(names.xpraContainer).args.labels[DIR]; delete h.running.get(names.chromiumContainer).args.labels[DIR]; }],
+    ['chromium names ours, xpra names none', (h) => { delete h.running.get(names.xpraContainer).args.labels[DIR]; }],
+    ['xpra names ours, chromium names another', (h) => { h.running.get(names.chromiumContainer).args.labels[DIR] = path.join(h.stateRoot, 'run', 'other'); }],
+    ['xpra names another, chromium names ours', (h) => { h.running.get(names.xpraContainer).args.labels[DIR] = path.join(h.stateRoot, 'run', 'other'); }],
+  ];
+  for (const [what, shape] of shapes) {
+    const h = harness({ preRunning: [
+      { name: names.xpraContainer, labels: L('xpra', 'owner-only'), binds: [] },
+      { name: names.chromiumContainer, labels: L('chromium', 'owner-only'), binds: [] },
+    ] });
+    try {
+      h.running.get(names.chromiumContainer).args.mounts = [[h.udd, '/x', 'rw']];
+      h.running.get(names.xpraContainer).args.labels[DIR] = h.CH.channelDir;
+      h.running.get(names.chromiumContainer).args.labels[DIR] = h.CH.channelDir;
+      shape(h);
+      await assert.rejects(h.driver({}).ensureRunning(), (/** @type {any} */ e) => {
+        assert.equal(e.exitCode, 4, what);
+        assert.match(e.message, /channel.dir label/, what);
+        assert.match(e.message, /Nothing was stopped, removed or started/, what);
+        return true;
+      }, what);
+      assert.deepEqual(h.calls, [], what); assert.deepEqual(h.stops, [], what); assert.deepEqual(h.removed, [], what);
+      assert.ok(!h.logs.some((l) => /channels: adopted/.test(l)), `${what}: adopted`);
+    } finally { await h.done(); }
+  }
+});
+
+test('⛔ review 3 nit 6b: a relay recreated ALONE whose CDP still does not answer is REMOVED — only it; the running browser and xpra survive, and the message says so', async () => {
+  let silent = false;
+  const h = harness({ relayNoCdp: () => silent });
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    const names = d.inspect().names;
+    h.running.delete(names.cdpRelayContainer); // the relay is gone …
+    await h.relayFakes[h.relayFakes.length - 1].close(); // … with its CDP
+    silent = true; // and the relay this call starts serves none
+    await assert.rejects(h.driver(OO).ensureRunning(), (/** @type {any} */ e) => {
+      assert.equal(e.exitCode, 3);
+      assert.match(e.message, /was recreated, but CDP still does not answer/);
+      assert.match(e.message, /Only the relay this call started was removed/);
+      assert.doesNotMatch(e.message, /Nothing else was stopped, removed or started/);
+      return true;
+    });
+    assert.ok(!h.running.has(names.cdpRelayContainer), 'the relay this call started was left running');
+    assert.deepEqual(h.removed, [names.cdpRelayContainer], `removed: ${h.removed.join(', ')}`);
+    assert.ok(h.running.get(names.chromiumContainer)?.up, 'the running BROWSER was touched');
+    assert.ok(h.running.get(names.xpraContainer)?.up, 'the running xpra was touched');
+    assert.deepEqual(h.stops, []);
+  } finally { await h.done(); }
+});
+
+test('⛔ review 3 F2: a recreated relay that is ALREADY GONE when CDP stays silent is not reported as "removed" — the message says it was gone', async () => {
+  let silent = false;
+  /** @type {string} */ let relayName = '';
+  /** @type {any} */ let hh = null;
+  // the relay this call starts serves no CDP AND exits at once (socat dying on its own): docker has nothing to remove
+  const h = harness({ relayNoCdp: () => { if (silent) hh.running.delete(relayName); return silent; } });
+  hh = h;
+  try {
+    const d = h.driver(OO);
+    await d.ensureRunning();
+    const names = d.inspect().names;
+    relayName = names.cdpRelayContainer;
+    h.running.delete(names.cdpRelayContainer);
+    await h.relayFakes[h.relayFakes.length - 1].close();
+    silent = true;
+    await assert.rejects(h.driver(OO).ensureRunning(), (/** @type {any} */ e) => {
+      assert.equal(e.exitCode, 3);
+      assert.doesNotMatch(e.message, /Only the relay this call started was removed/, 'a removal that did not happen is claimed');
+      assert.match(e.message, /had already exited and is gone/);
+      assert.match(e.message, /nothing else was stopped, removed or started/);
+      return true;
+    });
+    assert.deepEqual(h.removed, [], `removed: ${h.removed.join(', ')}`);
+    assert.ok(h.running.get(names.chromiumContainer)?.up, 'the running BROWSER was touched');
+  } finally { await h.done(); }
+});

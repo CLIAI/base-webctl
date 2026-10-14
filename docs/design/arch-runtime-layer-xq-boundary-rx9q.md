@@ -3,13 +3,13 @@ id: rx9q
 title: "The runtime layer is xq — base speaks the protocol, xq runs the app"
 category: arch
 created: "2026-10-03"
-updated: "2026-10-03"
+updated: "2026-10-13"
 status: review
 tags: [xq, runtime, dependency, boundary, containers, remote, firefox, bidi, capabilities]
 tech:
   - name: "xq"
     version: "capability-pinned (no semver yet)"
-relates_to: [rb7s, rm7t, nl0c, lg1n, ow9k, btg4, v8p3, sb7q, k3wn]
+relates_to: [rb7s, rm7t, nl0c, lg1n, ow9k, btg4, v8p3, sb7q, k3wn, gvlx]
 depends_on: [nl0c]
 expands: [rm7t]
 similar_to: []
@@ -107,6 +107,15 @@ controlEndpoint(...)  -> {name, kind: "tcp", adapter: "cdp"|"bidi", host: "127.0
 ownedForward(...)     -> a tunnel with a handle: started, reported, torn down by its owner
 appVersion(...)       -> the existing schema-1 contract
 ```
+
+⚠ **`controlEndpoint` gained a unix transport — shipped by xq at `0a4fab6` (2026-10-13), additive
+to schema 1.** `kind` stays the IMAGE's declared control (what the app listens on inside),
+and the new `transport` says how THIS host reaches it:
+`{name, kind:"tcp", adapter, transport:"unix", host:null, port:null, path, host_header}`,
+where TCP endpoints only gain `transport:"tcp"`. `host_header` is the Host a client must
+send through the socket (Firefox BiDi answers 400 to any other). Base consumes this shape
+exactly and its own driver produces it; the owned unix → unix forward that carries it
+across machines is specified in `gvlx` §6.3–§6.5.
 
 ⛔ **Three seam rules from xq's landed work (2026-10-03):**
 
