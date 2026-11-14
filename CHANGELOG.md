@@ -452,7 +452,8 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
   A missing image is refused, naming `node <base>/scripts/contract-harness.mjs isolated-image build`. The
   run never builds and never pulls.
 * **The image:** `docker/isolated/Dockerfile`. It is node 22.23.3 on Debian trixie slim, pinned by
-  digest, plus `git` and `procps`, tagged `webctl-iso/node22:<recipe hash>` (332 MB). It is built only by
+  digest, plus `git`, `procps` and `python3` (Debian's, no pip; named by ccew's acceptance, webctl:mgr's
+  ruling), tagged `webctl-iso/node22:<recipe hash>` (365 MB; 332 MB before python3). It is built only by
   `isolated-image build`.
 * **The container:**
   * `--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user <uid>:<gid>

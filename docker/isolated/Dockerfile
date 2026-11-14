@@ -11,6 +11,7 @@ FROM node:22.23.3-trixie-slim@sha256:b26b04c123d9ff8ab646ceb18b9d75a1173acf64b9a
 
 # git: the consumers' pin check (ls-tree, rev-parse), downgrade arms (checkout), PASS line (describe)
 # procps: ps, for diagnostics in a shared harness
+# python3: named by ccew (allowrelay.py, owner arms); Debian's interpreter only: no pip, no venv tooling (webctl:mgr)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git procps \
+ && apt-get install -y --no-install-recommends git procps python3 \
  && rm -rf /var/lib/apt/lists/*

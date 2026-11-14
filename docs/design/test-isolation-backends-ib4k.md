@@ -794,7 +794,8 @@ marker (the env set, plus a plain file) is refused, both on the host and inside 
   | `ps` (procps) | none of A and B; base's own arms read `/proc` | no | **added**: diagnostics in a shared harness, small |
   | `hostname`, `diff`, `sed`, `awk`, `grep`, `sort`, `mktemp`, `timeout`, `id`, `env` | A, B | yes | (base) |
   | `xq` | A, B: the no-host-literals step lists machine names with `xq machine ls --json` | no | **REFUSED**: a host-specific tool whose checkout lives under the hidden home, and it needs uv and python. **(ruling) The DATA goes in instead:** see "Machine names" below, on every backend |
-  | `uv`, `python3`, `curl`, `jq` | none of A and B | no | not added until a lane names one |
+  | `python3` | named by ccew (allowrelay.py, owner arms): its acceptance on the docker backend failed 5 tests with `spawn python3 ENOENT` (measured 2026-11-14) | no | **added** (webctl:mgr's ruling): Debian's `python3` from apt, `--no-install-recommends`; no pip, no venv tooling |
+  | `uv`, `curl`, `jq` | none of A and B | no | not added until a lane names one |
 * **(ruling) Acceptance on the real target.** Before the merge, each consumer on the policy-blocked
   host that waits on docker passes its OWN `./test-against-base.sh` there, under the docker
   backend. It runs in a SCRATCH clone (never the lane's live tree), by the method of
