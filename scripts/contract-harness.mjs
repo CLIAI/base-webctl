@@ -3726,6 +3726,11 @@ function dockerCommand() {
  * @param {string[]} a @returns {number}
  */
 function runIsolatedImage(a) {
+  // ⛔ usage FIRST: a malformed builder name is refused before anything is looked up, let alone built
+  const builder = a[1] === '--builder' && a.length === 3 ? a[2] : '';
+  if (a.length > 0 && (a[0] !== 'build' || (a.length > 1 && !builder) || (builder && !BUILDER_NAME.test(builder)))) {
+    process.stderr.write('usage: contract-harness.mjs isolated-image [build [--builder <buildx builder>]]\n'); return EXIT.usage;
+  }
   const cli = dockerCli();
   if (cli.why) return report('isolated-image', EXIT.fail, cli.why);
   const ep = dockerEndpointRefusal(process.env);
@@ -3738,12 +3743,28 @@ function runIsolatedImage(a) {
     const [id, size] = img.stdout.trim().split(/\s+/);
     return report('isolated-image', EXIT.pass, `${r.tag} is built (${id.slice(0, 19)}, ${Math.round(Number(size) / 1e6)} MB)`);
   }
-  if (a[0] !== 'build' || a.length > 1) { process.stderr.write('usage: contract-harness.mjs isolated-image [build]\n'); return EXIT.usage; }
   const uid = typeof process.getuid === 'function' ? process.getuid() : -1;
-  const b = spawnSync(cli.bin, ['-H', DOCKER_ENDPOINT, 'build', '--tag', r.tag, '--label', `${DOCKER_LABEL}.recipe=${r.hash}`,
-    '--label', `${DOCKER_LABEL}.owner=u${uid}`, '--file', DOCKERFILE, path.dirname(DOCKERFILE)], { stdio: ['ignore', 'inherit', 'inherit'], env: dockerEnv() });
-  if (b.status !== 0) return report('isolated-image', EXIT.fail, `docker build exited ${b.status ?? b.signal}`);
-  return report('isolated-image', EXIT.pass, `built ${r.tag}`);
+  const b = spawnSync(cli.bin, imageBuildArgv(r, uid, builder), { stdio: ['ignore', 'inherit', 'inherit'], env: dockerEnv() });
+  if (b.status !== 0) return report('isolated-image', EXIT.fail, `docker ${builder ? 'buildx build' : 'build'} exited ${b.status ?? b.signal}`);
+  return report('isolated-image', EXIT.pass, `built ${r.tag}${builder ? ` on builder ${builder}` : ''}`);
+}
+
+/** A buildx builder name, as docker accepts it: never an option, never a path. */
+const BUILDER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/;
+
+/**
+ * The image build's argv. ⛔ With `builder`, `buildx build --builder <it> --load`: a host's per-job CAPPED builder
+ * (a docker-container driver with cpu and memory limits). The plain `build` runs its steps in the daemon, where the
+ * caller's `nice` and limits never reach (measured on a shared host, 2026-11-14). `--load` puts the image into the
+ * local store, where a run resolves it by tag. The env scrub (dockerEnv) drops BUILDX_BUILDER, so the name is an argument.
+ * @param {{tag: string, hash: string}} r @param {number} uid @param {string} builder ('' = the daemon's own build)
+ * @returns {string[]}
+ */
+export function imageBuildArgv(r, uid, builder) {
+  const tail = ['--tag', r.tag, '--label', `${DOCKER_LABEL}.recipe=${r.hash}`, '--label', `${DOCKER_LABEL}.owner=u${uid}`,
+    '--file', DOCKERFILE, path.dirname(DOCKERFILE)];
+  return builder ? ['-H', DOCKER_ENDPOINT, 'buildx', 'build', '--builder', builder, '--load', ...tail]
+    : ['-H', DOCKER_ENDPOINT, 'build', ...tail];
 }
 
 /** `1`: the verdict line lists EVERY re-bound path (as `~/…`), implicit ones included. */

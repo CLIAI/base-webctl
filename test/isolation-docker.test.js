@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as harness from '../scripts/contract-harness.mjs';
 
@@ -397,4 +397,25 @@ test('⛔ final review 2: a comma (or quote, control char) in a mount path is RE
     for (const p of ['/a"b', '/a\nb', "/a'b"]) assert.match(harness.dockerMountPathsUnsafe([{ p, label: 'x' }]), /^x has/, JSON.stringify(p));
     assert.equal(harness.dockerMountPathsUnsafe([{ p: '/a b/c-d_e.f', label: 'x' }]), '', 'CONTROL: spaces and the usual characters pass');
   } finally { fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+// ── the image build on a CAPPED builder (a shared host's rule, 2026-11-14) ─────────────────────────────────────────
+test('⛔ isolated-image build --builder <name>: `buildx build --builder <name> --load`, tag and labels kept — CONTROL: no builder is the plain build', () => {
+  const r = { tag: 'webctl-iso/node22:0123456789ab', hash: 'f'.repeat(64) };
+  const capped = harness.imageBuildArgv(r, 1000, 'owner-job');
+  assert.deepEqual(capped.slice(2, 7), ['buildx', 'build', '--builder', 'owner-job', '--load']);
+  const plain = harness.imageBuildArgv(r, 1000, '');
+  assert.equal(plain[2], 'build');
+  assert.ok(!plain.includes('--builder') && !plain.includes('buildx'));
+  // everything after the verb is the same build: tag, both labels, the recipe file and its dir
+  assert.deepEqual(capped.slice(7), plain.slice(3));
+  assert.ok(plain.includes(r.tag) && plain.includes(`org.cliai.webctl-iso.recipe=${r.hash}`) && plain.includes('org.cliai.webctl-iso.owner=u1000'));
+});
+
+test('⛔ isolated-image build: a builder name that is an option or a path, or a missing one, is a USAGE refusal (exit 3) — nothing built', () => {
+  for (const extra of [['--builder'], ['--builder', '--load'], ['--builder', '../x'], ['--builder', 'a b'], ['--other', 'x']]) {
+    const r = spawnSync(process.execPath, [TOOL, 'isolated-image', 'build', ...extra], { encoding: 'utf8' });
+    assert.equal(r.status, 3, `${extra.join(' ')}: ${r.stderr}`);
+    assert.match(r.stderr, /usage: contract-harness\.mjs isolated-image \[build \[--builder <buildx builder>\]\]/);
+  }
 });

@@ -454,7 +454,9 @@ world mounts under a SHARED dir after each path starts is never listed inside. C
 * **The image:** `docker/isolated/Dockerfile`. It is node 22.23.3 on Debian trixie slim, pinned by
   digest, plus `git`, `procps` and `python3` (Debian's, no pip; named by ccew's acceptance, webctl:mgr's
   ruling), tagged `webctl-iso/node22:<recipe hash>` (365 MB; 332 MB before python3). It is built only by
-  `isolated-image build`.
+  `isolated-image build`. `isolated-image build --builder <name>` builds on a buildx builder the operator
+  made with cpu and memory caps (`buildx build --builder <name> --load`): a plain `docker build` runs its steps
+  in the daemon, where the caller's `nice` never reaches.
 * **The container:**
   * `--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user <uid>:<gid>
     --hostname webctl-isolated`;

@@ -807,6 +807,11 @@ marker (the env set, plus a plain file) is refused, both on the host and inside 
   and the owner `u<uid>`. The run resolves the tag to an image ID once, checks the label, and
   runs by ID, so a retag mid-run cannot swap it. ⚠ Any user of a shared daemon is root-equivalent
   and could build a same-tagged image. The label check catches an accident, not an attacker.
+* ⛔ **A capped builder on a shared host:** `isolated-image build --builder <name>` builds with
+  `docker buildx build --builder <name> --load`. The plain `build` runs its steps in the daemon, so the
+  caller's `nice` and limits never reach them (measured 2026-11-14). The host operator makes a per-job
+  builder with cpu and memory limits (a `docker-container` driver), names it, and removes it after.
+  `--load` puts the image in the local store; the tag and labels are the same either way.
 * Size: the base is 231 MB. The image adds well under 1 GB.
 
 #### Machine names for a no-host-literals check (every backend) — (ruling, 2026-10-13)
