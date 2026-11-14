@@ -950,6 +950,28 @@ backend is not allowed either: a check that skips there is a check that cannot f
 * AppArmor fallback: on EPERM with the sysctl at 1, the refusal (when no backend works)
   names the sysctl and both remedies: a host sysctl, or a profile for `WEBCTL_UNSHARE_BIN`.
 
+### 4a. What a lane asserts (the family standard, adopted 2026-11-14)
+
+A lane's isolation proof is BACKEND-NEUTRAL: it asserts base's verdict, never one backend's mechanism.
+*Measured on the v0.35.0 acceptance (docker backend, a host without user namespaces):* four lanes failed for
+their OWN proofs, not for missing isolation. They read `/proc/self/uid_map` (identity under docker), probed a
+fixed host pid number (the container's own pid namespace has one), ran `unshare -r` as a control, or wrapped
+base in an outer `unshare -rm` of their own. Each names one backend, so each fails on the backend a host has.
+
+1. **A lane's isolation precondition IS `isolation-check <its real default port(s)>` under `isolated`.** It
+   asserts exit 0 and nothing else. `isolation-check` picks the proof itself: the kernel proof on unshare and
+   bwrap, the channel bind plus every §3b property read back under docker (both nested and with stripped
+   markers), and on every backend each named port answers exactly `ECONNREFUSED` beside a reachable control
+   listener.
+2. **A lane does not read kernel internals for the proof:** no `/proc/self/uid_map`, no fixed host pid, no
+   `unshare -r` of its own as a control, no outer namespace layer around base.
+3. **A lane that needs more masking than base gives asks base for an `isolated` option, through webctl:mgr.**
+   It does not wrap base in a namespace of its own.
+4. **Mutation arms stay the lane's.** "With isolation disabled the arm DOES reach the port" is still the lane's
+   control; only the precondition half becomes base's verdict.
+
+No new harness verb, so the generation stays 9. Lanes adopt it at their v0.35 bump.
+
 ## 5. Order
 
 After v0.33.0 (hidden home, env allowlist, `--keep-ro`, `WEBCTL_UNSHARE_BIN`):

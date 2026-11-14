@@ -277,6 +277,13 @@ export MYLANE_PORT="$(node "$H" sandbox-port --bare)" || exit 1
 node "$H" isolated -- node test/my-mutation-arm.js
 ```
 
+⭐ **Assert the VERDICT, not a backend's mechanism** (ib4k §4a, the family standard since 2026-11-14).
+Step 2 is the whole isolation precondition: exit 0 from `isolation-check`. It works on every backend
+(unshare, bwrap, docker), because it picks the proof itself. Do NOT read `/proc/self/uid_map`, probe a
+fixed host pid, run `unshare -r` as a control, or wrap `isolated` in a namespace of your own: each of these
+names one backend, and on a host that has only docker each one fails although the run IS isolated.
+Need more masking than `isolated` gives? Ask base for an option (through webctl:mgr).
+
 ⛔ **A lane that falls back to the HOST network when unshare is unavailable is NOT
 COMPLIANT.** `isolated` fails closed; a contract must not wrap it in "warn and run
 anyway" (`isolated … || run-it-anyway`). `guard-live-port` is the **only** sanctioned

@@ -594,6 +594,11 @@ The changes that can show:
 
 ### For lanes
 
+* ⛔ **Assert base's verdict, not a backend's mechanism** (ib4k §4a, the family standard). Your isolation
+  precondition is exit 0 from `isolation-check <your real port(s)>` under `isolated`, on every backend. Drop any
+  read of `/proc/self/uid_map`, any fixed host pid probe, any `unshare -r` control and any outer namespace layer
+  around `isolated`: on a host with only docker each of these FAILS although the run is isolated (measured on
+  four lanes in the v0.35.0 acceptance). Need more masking? Ask base for an `isolated` option.
 * **On a host whose policy blocks user namespaces** (the AppArmor sysctl at 1): build the docker
   backend's image ONCE — `node vendor/base-webctl/scripts/contract-harness.mjs isolated-image build`
   (a pull of the digest-pinned base, then local) — and `isolated` runs there, on the local daemon.
