@@ -92,7 +92,7 @@ BASE_DESC="$(git -C "$BASE_ROOT" describe --tags --always 2>/dev/null || echo un
 if [ "$AGAINST_HEAD" = "1" ]; then
   VALIDATED_AGAINST="base HEAD $BASE_DESC ($BASE_HEAD)"
   [ "$SCRATCH" = "1" ] && [ "$FROM_ARCHIVE" != "1" ] && VALIDATED_AGAINST="$VALIDATED_AGAINST, in SCRATCH clones of each consumer's committed HEAD"
-  [ "$FROM_ARCHIVE" = "1" ] && VALIDATED_AGAINST="$VALIDATED_AGAINST, in SCRATCH copies built by git archive of each consumer's committed HEAD (trees asserted equal; no clone)"
+  [ "$FROM_ARCHIVE" = "1" ] && VALIDATED_AGAINST="$VALIDATED_AGAINST, in SCRATCH copies built by git archive of each consumer's committed HEAD (trees asserted equal; no consumer clone; base cloned, with its tags)"
   if [ -n "$(git -C "$BASE_ROOT" status --porcelain)" ]; then
     echo "REFUSING --against-head: base working tree is dirty." >&2
     echo "  Consumers would be tested against a commit that does not exist," >&2
@@ -120,6 +120,13 @@ swap_marker() { printf '%s/%s' "$SWAP_MARKER_DIR" "$(printf '%s' "$1" | tr -c 'A
 
 # Point a consumer's submodule at base HEAD, run $2, restore. Never leaves the
 # submodule moved: restore is registered as a trap before the checkout.
+# 0 when $1 is the top of its OWN git work tree (a checked-out submodule), not a dir inside its parent's.
+sub_is_own_repo() {
+  local top
+  [ -d "$1" ] || return 1
+  top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [ "$(cd "$1" && pwd -P)" = "$(cd "$top" && pwd -P)" ]
+}
 swap_to_base_head() {
   sub_abs="$1"
   orig_sha="$(git -C "$sub_abs" rev-parse HEAD)"
@@ -234,12 +241,28 @@ scratch_from_archive() {
     SCRATCH_ERR="building the archive copy of ${head:0:7} failed: $(tail -n 2 "$log" | tr '\n' ' ')"; return
   fi
   git -C "$dst" remote add origin "no-push://scratch-archive-of-a-live-tree" 2>/dev/null || true
-  mkdir -p "$dst/$sub"
-  if ! { git -C "$BASE_ROOT" archive "$BASE_HEAD" | tar -x -C "$dst/$sub" && git -C "$dst/$sub" init -q \
-         && git -C "$dst/$sub" "${id[@]}" add -A -f && git -C "$dst/$sub" "${id[@]}" commit -q -m "scratch: archive of base ${BASE_HEAD:0:7}"; } >"$log" 2>&1; then
-    SCRATCH_ERR="building the archive copy of base ${BASE_HEAD:0:7} into '$sub' failed: $(tail -n 2 "$log" | tr '\n' ' ')"; return
+  # ⛔ BASE IS CLONED, NOT ARCHIVED. The archive rule protects the LIVE CONSUMER trees; base's own repo is the
+  # candidate, and a clone of it writes nothing into it. An archived base had NO TAGS, so a lane whose contract
+  # tests its pin against a tag (`git rev-parse v0.22.0^{commit}`, `describe --tags --exact-match`) failed for the
+  # gate's reason, not its own (measured 2026-11-14: gemini 6, ccew and fetlife likewise; all green with tags).
+  scratch_base_clone "$dst/$sub" "$log"
+}
+
+# $1 where base's copy goes, $2 a log. Clones BASE_ROOT (with its tags) and checks out BASE_HEAD; sets SCRATCH_ERR.
+scratch_base_clone() {
+  local d="$1" log="$2"
+  rm -rf "${d:?}"
+  mkdir -p "$(dirname "$d")"
+  if ! git clone -q --no-hardlinks --no-checkout -- "$BASE_ROOT" "$d" >"$log" 2>&1; then
+    SCRATCH_ERR="git clone of base into '${d##*/}' failed: $(tail -n 2 "$log" | tr '\n' ' ')"
+  elif ! git -C "$d" cat-file -e "$BASE_HEAD^{commit}" 2>/dev/null \
+       && ! git -C "$d" fetch -q --no-tags -- "$BASE_ROOT" HEAD >"$log" 2>&1; then
+    SCRATCH_ERR="base HEAD ${BASE_HEAD:0:7} could not be fetched into '${d##*/}': $(tail -n 2 "$log" | tr '\n' ' ')"
+  elif ! git -C "$d" checkout -q --detach "$BASE_HEAD" >"$log" 2>&1; then
+    SCRATCH_ERR="checkout of base ${BASE_HEAD:0:7} in '${d##*/}' failed: $(tail -n 2 "$log" | tr '\n' ' ')"
+  else
+    git -C "$d" remote set-url --push origin "no-push://scratch-clone-of-base" 2>/dev/null || true
   fi
-  git -C "$dst/$sub" remote add origin "no-push://scratch-archive-of-base" 2>/dev/null || true
 }
 
 # $1 live repo dir, $2 the live HEAD commit, $3 submodule path.
@@ -295,18 +318,7 @@ scratch_begin() {
   else
     git -C "$dst" remote set-url --push origin "no-push://scratch-clone-of-a-live-tree" 2>/dev/null || true
     # The gitlink checks out as an empty dir; replace it with base's candidate.
-    rm -rf "${dst:?}/${sub:?}"
-    mkdir -p "$(dirname "$dst/$sub")"
-    if ! git clone -q --no-hardlinks --no-checkout -- "$BASE_ROOT" "$dst/$sub" >"$log" 2>&1; then
-      SCRATCH_ERR="git clone of base into '$sub' failed: $(tail -n 2 "$log" | tr '\n' ' ')"
-    elif ! git -C "$dst/$sub" cat-file -e "$BASE_HEAD^{commit}" 2>/dev/null \
-         && ! git -C "$dst/$sub" fetch -q --no-tags -- "$BASE_ROOT" HEAD >"$log" 2>&1; then
-      SCRATCH_ERR="base HEAD ${BASE_HEAD:0:7} could not be fetched into '$sub': $(tail -n 2 "$log" | tr '\n' ' ')"
-    elif ! git -C "$dst/$sub" checkout -q --detach "$BASE_HEAD" >"$log" 2>&1; then
-      SCRATCH_ERR="checkout of base ${BASE_HEAD:0:7} in '$sub' failed: $(tail -n 2 "$log" | tr '\n' ' ')"
-    else
-      git -C "$dst/$sub" remote set-url --push origin "no-push://scratch-clone-of-base" 2>/dev/null || true
-    fi
+    scratch_base_clone "$dst/$sub" "$log"
   fi
   rm -f "$log"
   # ⛔ DEPENDENCIES. A clone has no node_modules (it is gitignored), and the contract
@@ -692,6 +704,17 @@ while IFS=$'\t' read -r -u 3 name submodulePath testCmd tier dockerOptIn wired l
       echo "SWAP  $name (in the scratch clone): $submodulePath declared ${declared_at_swap:0:7} -> ${BASE_HEAD:0:7} (base HEAD)" >&2
       swapped_now=1
     fi
+  elif [ "$AGAINST_HEAD" = "1" ] && ! sub_is_own_repo "$sub_abs"; then
+    # ⛔ NEVER SWAP THROUGH AN UNCHECKED-OUT SUBMODULE. Its dir is empty (or missing), so `git -C` resolves to
+    # the CONSUMER's repo: the swap fetched base into the consumer and checked base out over the consumer's own
+    # worktree (measured 2026-11-14 on a throwaway clone made without `submodule update --init`).
+    envelope "$name" "$tier" "fail" "SUBMODULE NOT CHECKED OUT: '$submodulePath' is not a git repo of its own, so nothing can be swapped"
+    {
+      echo "FAIL  $name ($tier) — SUBMODULE NOT CHECKED OUT: '$submodulePath' is not a git repo of its own."
+      echo "        A swap there would act on $name's own repo. Nothing was moved."
+      echo "        Fix: git -C $repo_dir submodule update --init --recursive"
+    } >&2
+    fail=$((fail + 1)); fails+=("$name"); continue
   elif [ "$AGAINST_HEAD" = "1" ]; then
     orig_sha="$(git -C "$sub_abs" rev-parse HEAD)"
     if [ "$orig_sha" = "$BASE_HEAD" ]; then

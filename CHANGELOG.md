@@ -624,8 +624,9 @@ The changes that can show:
 
 `scripts/test-all-consumers.sh --against-head --scratch-from-archive` builds each scratch copy with `git
 archive` + `git init` instead of `git clone`, for a host whose disk rule forbids clones (webctl:mgr's ruling).
-The copy's TREE is asserted equal to the live HEAD's, the declared gitlink is kept, and base goes in the same
-way. The copy has one commit. Arms (`test/gate-scratch.test.js`, under the docker backend where user namespaces
+The copy's TREE is asserted equal to the live HEAD's, the declared gitlink is kept, and the copy has one commit.
+Base is CLONED from base's own repo (with its tags) and checked out at the candidate: an archived base had no tags,
+which failed three lanes' pin tests for the gate's reason (measured 2026-11-14, acceptance on the docker backend). Arms (`test/gate-scratch.test.js`, under the docker backend where user namespaces
 are refused): the copy is one commit with the right tree and the live tree unchanged; an `export-ignore` is a
 named error. Each is red with the mode sabotaged (a clone instead; the tree check off).
 

@@ -11,15 +11,18 @@ the release if **any** consumer reports FAIL.
 ./scripts/test-all-consumers.sh                            # each consumer vs ITS OWN pin
 ./scripts/test-all-consumers.sh --against-head --scratch   # ⭐ pre-release arm (recommended)
 ./scripts/test-all-consumers.sh --against-head             # pre-release arm, IN PLACE (legacy)
-./scripts/test-all-consumers.sh --against-head --scratch-from-archive   # scratch, built WITHOUT a clone
+./scripts/test-all-consumers.sh --against-head --scratch-from-archive   # scratch, consumers copied WITHOUT a clone
 ```
 
 `--scratch-from-archive` (v0.35.0) is `--scratch` with each copy built by `git archive <commit>` + `git init`,
 never `git clone`: for a host whose disk rule forbids clones. `git archive` reads git OBJECTS only, so the live
 work tree, index and locks are untouched. The copy keeps the DECLARED gitlink. Its TREE is asserted equal to the
 live HEAD's, so a file `git archive` drops (`export-ignore`) is a named setup error, never a quietly different run.
-Base's candidate goes in the same way, and its tree is asserted equal to `BASE_HEAD`'s. ⚠ The copy has ONE commit:
-a contract that reads history beyond HEAD (`git log`, `git describe` on older tags) sees only that commit.
+Base's candidate is CLONED from base's own repo (a few MB; a clone writes nothing into it) and checked out at
+`BASE_HEAD`, so base's TAGS are there: a contract that tests its pin against a tag (`git rev-parse v0.22.0^{commit}`,
+`describe --tags --exact-match`) resolves it. ⚠ Measured 2026-11-14: an ARCHIVED base had no tags, and three lanes
+failed for the gate's reason, not their own. ⚠ The CONSUMER's copy has ONE commit: a contract that reads its own
+history beyond HEAD (`git log`, `git show <older sha>`) sees only that commit; use `--scratch` for such a lane.
 
 ### Which pre-release arm
 

@@ -684,6 +684,35 @@ test('CONTROL: in-place --against-head is unchanged — it runs IN the live tree
   } finally { w.cleanup(); }
 });
 
+test('⛔ in-place --against-head on a submodule that was never CHECKED OUT is a named FAIL — the swap never reaches the consumer\'s own repo (G2)', () => {
+  const w = world();
+  try {
+    // an uninitialised submodule is an EMPTY dir: `git -C <it>` resolves to the CONSUMER's repo, so a swap there
+    // fetched base into the consumer and checked it out over the consumer's own worktree (measured 2026-11-14)
+    fs.rmSync(w.sub, { recursive: true, force: true });
+    fs.mkdirSync(w.sub);
+    // CONTENTS, not mtimes: the in-place dirty check's `git status` refreshes the index to identical bytes
+    /** @param {Record<string,string>} snap */
+    const contents = (snap) => Object.fromEntries(Object.entries(snap).map(([k, v]) => [k, v.split(' ').at(-1)]));
+    const before = contents(snapshot(w.repo));
+    const r = w.gate(['--against-head']);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /FAIL {2}fake-webctl \(full\) — SUBMODULE NOT CHECKED OUT/);
+    assert.doesNotMatch(r.out, /^SWAP /m, 'the gate swapped anyway');
+    assert.equal(git(['rev-parse', 'HEAD'], w.repo), w.consumerHead);
+    assert.deepEqual(contents(snapshot(w.repo)), before, 'the consumer\'s repo changed');
+  } finally { w.cleanup(); }
+});
+
+test('CONTROL (G2): the same consumer with its submodule checked out swaps in place as before', () => {
+  const w = world();
+  try {
+    const r = w.gate(['--against-head']);
+    assert.doesNotMatch(r.out, /SUBMODULE NOT CHECKED OUT/);
+    assert.match(r.out, /^SWAP {2}fake-webctl: vendor\/base-webctl /m);
+  } finally { w.cleanup(); }
+});
+
 test('⛔ the per-consumer backend is the verdict\'s OWN `; backend:` clause (review F8): a keep path containing "; backend: docker" does not win — CONTROL: a plain verdict', () => {
   const src = fs.readFileSync(path.join(ROOT, 'scripts', 'test-all-consumers.sh'), 'utf8');
   const fn = src.match(/^isolation_backend_of\(\) \{\n[\s\S]*?\n\}\n/m);
@@ -733,18 +762,38 @@ function archiveWorld() {
   return { ...w, baseHead: git(['rev-parse', 'HEAD'], w.base), consumerHead: git(['rev-parse', 'HEAD'], w.repo), extra };
 }
 
-test('⛔ --scratch-from-archive: the copy is ONE commit (no clone), its tree is the live HEAD\'s, the gitlink stays declared, base is the candidate — live tree unchanged', { skip: NEEDS_ISOLATION, timeout: 180_000 }, () => {
+test('⛔ --scratch-from-archive: the consumer\'s copy is ONE commit (no clone), its tree is the live HEAD\'s, the gitlink stays declared, base is the candidate — live tree unchanged', { skip: NEEDS_ISOLATION, timeout: 180_000 }, () => {
   const w = archiveWorld();
   try {
     const before = git(['status', '--porcelain'], w.repo);
     const r = w.gate(['--against-head', '--scratch-from-archive'], w.extra);
     assert.equal(r.status, 0, r.out);
-    assert.match(r.out, /SCRATCH copies built by git archive .* \(trees asserted equal; no clone\)/);
+    assert.match(r.out, /SCRATCH copies built by git archive .* \(trees asserted equal; no consumer clone; base cloned, with its tags\)/);
     assert.match(r.out, /^COUNT=1$/m, `the copy is not a one-commit archive repo:\n${r.out}`);
     assert.match(r.out, /^DECLARED_TREE=160000$/m, 'the declared gitlink is gone from the copy');
     assert.match(r.out, /^SWAPPED=1$/m);
     assert.match(r.out, /PASS {2}fake-webctl/);
     assert.equal(git(['status', '--porcelain'], w.repo), before, 'the live tree changed');
+    assert.deepEqual(w.scratchDirs(), [], 'a scratch copy was left behind');
+  } finally { w.cleanup(); }
+});
+
+test('⛔ --scratch-from-archive: base\'s copy carries base\'s TAGS — a lane that tests its pin against a tag can resolve it (G1)', { skip: NEEDS_ISOLATION, timeout: 180_000 }, () => {
+  const w = archiveWorld();
+  try {
+    const first = git(['rev-list', '--max-parents=0', 'HEAD'], w.base);
+    git(['tag', 'v9.9.9', first], w.base);
+    git([...GIT_ID, 'tag', '-a', '-m', 'annotated', 'v9.9.10', w.baseHead], w.base);
+    fs.appendFileSync(path.join(w.repo, 'local-override.sh'),
+      'echo "TAG_OLD=$(git -C vendor/base-webctl rev-parse -q --verify \'v9.9.9^{commit}\' || echo none)"\n'
+      + 'echo "TAG_HEAD=$(git -C vendor/base-webctl describe --tags --exact-match HEAD 2>/dev/null || echo none)"\n');
+    git(['add', 'local-override.sh'], w.repo); git([...GIT_ID, 'commit', '-qm', 'tags probe'], w.repo);
+    const r = w.gate(['--against-head', '--scratch-from-archive'], w.extra);
+    assert.equal(r.status, 0, r.out);
+    assert.equal(reported(r.out, 'TAG_OLD'), first, `base's older tag is missing from the copy:\n${r.out}`);
+    assert.equal(reported(r.out, 'TAG_HEAD'), 'v9.9.10', 'the candidate commit is not base HEAD itself');
+    assert.equal(reported(r.out, 'SUB_HEAD'), w.baseHead, 'base in the copy is not the candidate commit');
+    assert.match(r.out, /^COUNT=1$/m, 'the CONSUMER copy must stay a one-commit archive');
     assert.deepEqual(w.scratchDirs(), [], 'a scratch copy was left behind');
   } finally { w.cleanup(); }
 });
